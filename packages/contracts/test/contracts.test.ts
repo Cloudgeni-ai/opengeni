@@ -495,6 +495,14 @@ describe("contracts", () => {
     expect(Session.shape.policyRole.parse(undefined)).toBeNull();
   });
 
+  test("accepts an explicit rig-less session", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      rigId: null,
+    });
+    expect(payload.rigId).toBeNull();
+  });
+
   test("accepts validated inline session skills", () => {
     const parsed = CreateSessionRequest.parse({
       initialMessage: "prepare release",

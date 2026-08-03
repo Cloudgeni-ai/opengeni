@@ -1,10 +1,15 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  hasOpenGeniSlackReactionScope,
+  resolveWorkspaceSlackReactionSummonSettings,
+  SlackReactionChannelListResponse,
   type AccessGrant,
   type FirstPartyMcpToolName,
   type HumanInputQuestion,
   type SessionEvent,
+  type WorkspaceSlackReactionSummonSettings,
+  workspaceSlackReactionChannelAllowed,
 } from "@opengeni/contracts";
 import {
   acceptSessionHumanInputResponse,
@@ -17,10 +22,12 @@ import {
   deferSlackInteractionDelivery,
   deleteSlackBotUserLink,
   enqueueSlackInteractionInbox,
+  getConnectionMetadata,
   getOrCreateSlackInteraction,
   getLatestSessionModelForSubject,
   getSlackBotUserLink,
   getSlackInteractionByRoute,
+  getWorkspace,
   getWorkspaceGrant,
   listSessionEventPage,
   listSessionHumanInputRequests,
@@ -30,6 +37,7 @@ import {
   releaseSlackInteractionInbox,
   resolveSlackInstallationRoute,
   saveSlackBotUserLink,
+  saveSlackInteractionInboxReactionCheckpoint,
   settleSlackInteractionInbox,
   type SlackInstallationRoute,
   type SlackInteraction,
@@ -47,7 +55,11 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { createOpenGeniSlackBotInteractionClient, SlackBotProviderError } from "./slack-bot";
+import {
+  createOpenGeniSlackBotInteractionClient,
+  type OpenGeniSlackBotClient,
+  SlackBotProviderError,
+} from "./slack-bot";
 
 export const SLACK_INTERACTION_MAX_BODY_BYTES = 256 * 1024;
 export const SLACK_SIGNATURE_REPLAY_WINDOW_SECONDS = 300;
@@ -62,6 +74,8 @@ export const SLACK_DELIVERY_EVENT_TYPES = [
 
 const MAX_SLACK_TEXT_CHARS = 3_500;
 const MAX_SLACK_INPUT_CHARS = 8_000;
+const MAX_SLACK_REACTION_CONTEXT_MESSAGES = 15;
+const MAX_SLACK_REACTION_FILE_SUMMARY_CHARS = 1_500;
 const MAX_PROGRESS_MESSAGES = 3;
 const SLACK_USER_LINK_TTL_MS = 15 * 60_000;
 const INBOX_LEASE_MS = 30_000;
@@ -176,6 +190,56 @@ export function slackEventInboxEntry(
   };
 }
 
+export function slackReactionInboxEntry(
+  payload: unknown,
+  bot: Pick<SlackInstallationRoute, "botUserId">,
+  settings: WorkspaceSlackReactionSummonSettings,
+): NormalizedSlackInteraction | null {
+  const envelope = record(payload);
+  if (!envelope || envelope.type !== "event_callback") return null;
+  const event = record(envelope.event);
+  const item = record(event?.item);
+  const teamId = boundedString(envelope.team_id, 64);
+  const eventId = boundedString(envelope.event_id, 256);
+  const userId = boundedString(event?.user, 64);
+  const reaction = boundedString(event?.reaction, 64);
+  const channelId = boundedString(item?.channel, 64);
+  const timestamp = boundedString(item?.ts, 64);
+  if (
+    !settings.enabled ||
+    !event ||
+    event.type !== "reaction_added" ||
+    item?.type !== "message" ||
+    !teamId ||
+    !eventId ||
+    !userId ||
+    userId === bot.botUserId ||
+    !reaction ||
+    reaction !== settings.emoji ||
+    !channelId ||
+    !workspaceSlackReactionChannelAllowed(settings, channelId) ||
+    !timestamp
+  ) {
+    return null;
+  }
+  const stableReactionIdentity = createHash("sha256")
+    .update([teamId, userId, channelId, timestamp, reaction].join("\n"))
+    .digest("hex");
+  return {
+    providerEventId: eventId,
+    providerMessageId: `reaction:${stableReactionIdentity}`,
+    slackTeamId: teamId,
+    slackUserId: userId,
+    slackChannelId: channelId,
+    slackMessageTs: timestamp,
+    slackThreadTs: null,
+    triggerKind: "reaction",
+    // Store only the exact emoji name before authorization/content fetch. The
+    // provider message and bounded thread are projected at durable claim time.
+    text: reaction,
+  };
+}
+
 export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/integrations/slack/events", async (c) => {
     const signed = await readSignedSlackRequest(c, deps);
@@ -192,6 +256,25 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
+    const event = record(payload.event);
+    if (event?.type === "reaction_added") {
+      const [workspace, connection] = await Promise.all([
+        getWorkspace(deps.db, installation.workspaceId),
+        getConnectionMetadata(deps.db, installation.workspaceId, installation.connectionId, null),
+      ]);
+      if (!workspace || !connection || !hasOpenGeniSlackReactionScope(connection.grantedScopes)) {
+        return c.json({ ok: true });
+      }
+      const reactionEntry = slackReactionInboxEntry(
+        payload,
+        installation,
+        resolveWorkspaceSlackReactionSummonSettings(workspace.settings),
+      );
+      if (reactionEntry) {
+        await enqueueNormalizedSlackInteraction(deps, installation, reactionEntry);
+      }
+      return c.json({ ok: true });
+    }
     const entry = slackEventInboxEntry(payload, installation);
     if (entry) await enqueueNormalizedSlackInteraction(deps, installation, entry);
     return c.json({ ok: true });
@@ -330,6 +413,43 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       });
     },
   );
+
+  app.get("/v1/workspaces/:workspaceId/integrations/slack/reaction-channels", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const connectionId = boundedString(c.req.query("connectionId"), 64);
+    if (!connectionId) throw new HTTPException(400, { message: "connectionId is required" });
+    const cursor = boundedString(c.req.query("cursor"), 1_024);
+    const client = await createOpenGeniSlackBotInteractionClient(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      connectionId,
+      subjectId: grant.subjectId,
+    });
+    const result = await client.listChannels({
+      limit: 200,
+      ...(cursor ? { cursor } : {}),
+    });
+    return c.json(
+      SlackReactionChannelListResponse.parse({
+        channels: result.channels
+          .filter(
+            (channel) =>
+              channel.isMember &&
+              !channel.isArchived &&
+              !channel.isShared &&
+              !channel.isExternallyShared &&
+              !channel.isOrgShared,
+          )
+          .map((channel) => ({
+            id: channel.id,
+            name: channel.name,
+            isPrivate: channel.isPrivate,
+          })),
+        nextCursor: result.nextCursor || null,
+      }),
+    );
+  });
 }
 
 export async function drainSlackInteractionsOnce(deps: ApiRouteDeps): Promise<boolean> {
@@ -440,6 +560,10 @@ export function startSlackInteractionPump(
 }
 
 async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
+  if (entry.triggerKind === "reaction") {
+    await processSlackReactionInboxEntry(deps, entry);
+    return;
+  }
   const routeKey = slackRouteKey(entry.slackChannelId, entry.slackThreadTs ?? entry.slackMessageTs);
   const existing = await getSlackInteractionByRoute(
     deps.db,
@@ -552,6 +676,240 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       ackSlackMessageTs: ack.timestamp,
     });
   }
+}
+
+async function processSlackReactionInboxEntry(
+  deps: ApiRouteDeps,
+  entry: SlackInteractionInboxEntry,
+) {
+  const [workspace, connection, link] = await Promise.all([
+    getWorkspace(deps.db, entry.workspaceId),
+    getConnectionMetadata(deps.db, entry.workspaceId, entry.connectionId, null),
+    getSlackBotUserLink(deps.db, entry.workspaceId, entry.connectionId, entry.slackUserId),
+  ]);
+  const settings = resolveWorkspaceSlackReactionSummonSettings(workspace?.settings);
+  if (
+    !workspace ||
+    !connection ||
+    !settings.enabled ||
+    entry.text !== settings.emoji ||
+    !workspaceSlackReactionChannelAllowed(settings, entry.slackChannelId) ||
+    !hasOpenGeniSlackReactionScope(connection.grantedScopes) ||
+    !link
+  ) {
+    return;
+  }
+  const grant = await getWorkspaceGrant(deps.db, link.subjectId, entry.workspaceId, {
+    principalKind: "human_session",
+  });
+  if (!grant || grant.accountId !== entry.accountId) {
+    throw new SlackInteractionPermanentError("identity_access_revoked");
+  }
+  if (
+    !hasPermission(grant.permissions, "sessions:create") ||
+    !hasPermission(grant.permissions, "sessions:control")
+  ) {
+    throw new SlackInteractionPermanentError("reaction_session_permissions_denied");
+  }
+
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: entry.accountId,
+    workspaceId: entry.workspaceId,
+    connectionId: entry.connectionId,
+    subjectId: grant.subjectId,
+  });
+  const context = await client.reactionMessageContext({
+    channelId: entry.slackChannelId,
+    messageTimestamp: entry.slackMessageTs,
+    checkpoint: entry.reactionContextCheckpoint,
+    checkpointBinding: {
+      inboxId: entry.id,
+      accountId: entry.accountId,
+      workspaceId: entry.workspaceId,
+      connectionId: entry.connectionId,
+      providerEventId: entry.providerEventId,
+      providerMessageId: entry.providerMessageId,
+      slackTeamId: entry.slackTeamId,
+      slackChannelId: entry.slackChannelId,
+      slackMessageTs: entry.slackMessageTs,
+    },
+    saveCheckpoint: async (checkpoint) => {
+      if (!entry.claimHolderId) {
+        throw new Error("Slack reaction inbox checkpoint requires an active claim");
+      }
+      const saved = await saveSlackInteractionInboxReactionCheckpoint(deps.db, {
+        entry,
+        claimHolderId: entry.claimHolderId,
+        checkpoint,
+      });
+      if (!saved) throw new Error("Slack reaction inbox checkpoint claim was lost");
+    },
+  });
+  const preparedEntry: SlackInteractionInboxEntry = {
+    ...entry,
+    slackThreadTs: context.threadTimestamp,
+    text: slackReactionTaskText(context),
+  };
+  const routeKey = slackRouteKey(entry.slackChannelId, context.threadTimestamp);
+  const existing = await getSlackInteractionByRoute(
+    deps.db,
+    entry.workspaceId,
+    entry.connectionId,
+    routeKey,
+  );
+  if (existing?.sessionId) {
+    await continueSlackReactionSession(deps, grant, existing, preparedEntry);
+    return;
+  }
+  const { interaction } = await getOrCreateSlackInteraction(deps.db, {
+    accountId: entry.accountId,
+    workspaceId: entry.workspaceId,
+    connectionId: entry.connectionId,
+    slackTeamId: entry.slackTeamId,
+    slackChannelId: entry.slackChannelId,
+    slackThreadTs: context.threadTimestamp,
+    routeKey,
+    triggeringProviderEventId: entry.providerEventId,
+    owningSubjectId: grant.subjectId,
+    visibility: "workspace",
+  });
+  if (interaction.sessionId) {
+    await continueSlackReactionSession(deps, grant, interaction, preparedEntry);
+    return;
+  }
+  if (interaction.owningSubjectId !== grant.subjectId) {
+    // The route insert freezes the causal owner. Another linked user may race
+    // the same previously-unmapped Slack thread on a different API replica,
+    // but must not create the reserved session under their own authority.
+    // Retry until the owner binds the session; the later user can then
+    // continue the workspace-visible interaction through the normal path.
+    throw new SlackInteractionRetryableError("slack_route_creation_pending");
+  }
+  const preferredModel = await getLatestSessionModelForSubject(
+    deps.db,
+    entry.workspaceId,
+    grant.subjectId,
+  );
+  let session: Awaited<ReturnType<typeof createSessionForRequest>>;
+  try {
+    session = await createSessionForRequest(deps, grant, entry.workspaceId, {
+      requestedSessionId: interaction.sessionReservationId,
+      initialMessage: preparedEntry.text,
+      turnInstructions: SLACK_TASK_INSTRUCTIONS,
+      // The exact reacted message and bounded containing thread are already in
+      // the prompt; do not expose general Slack history tools for this trigger.
+      firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      ...(preferredModel ? { model: preferredModel } : {}),
+      // Every reaction entry converging on this route must use the same create
+      // key. This closes the same-owner multi-event race while the owner check
+      // above prevents a different subject from winning creation authority.
+      idempotencyKey: `slack-interaction:${interaction.id}`,
+      clientEventId: `slack:${entry.providerEventId}`,
+    });
+  } catch (error) {
+    if (error instanceof HTTPException) {
+      await client.postMessage({
+        operationId: deterministicUuid(`slack-reaction-admission-failed:${interaction.id}`),
+        channelId: entry.slackChannelId,
+        threadTimestamp: context.threadTimestamp,
+        text: slackAdmissionFailureText(error),
+      });
+    }
+    throw error;
+  }
+  const bound = await bindSlackInteractionSession(deps.db, {
+    ...interaction,
+    owningSubjectId: grant.subjectId,
+    sessionId: session.id,
+  });
+  if (!bound) throw new Error("Slack reaction route could not bind its durable session");
+  await client.postMessage({
+    operationId: deterministicUuid(`slack-reaction-ack:${interaction.id}`),
+    channelId: entry.slackChannelId,
+    threadTimestamp: context.threadTimestamp,
+    text: `OpenGeni started from the :${settings.emoji}: reaction. ${openSessionText(deps, entry.workspaceId, session.id)} If the intended action is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`,
+  });
+}
+
+type SlackReactionMessageContext = Awaited<
+  ReturnType<OpenGeniSlackBotClient["reactionMessageContext"]>
+>;
+
+export function slackReactionTaskText(context: SlackReactionMessageContext) {
+  const reactedLine = slackReactionMessageLine(context.reactedMessage, true);
+  const surroundingLines = context.messages
+    .slice(0, MAX_SLACK_REACTION_CONTEXT_MESSAGES)
+    .filter((message) => message.timestamp !== context.reactedMessage.timestamp)
+    .map((message) => slackReactionMessageLine(message, false));
+  const truncationNotice =
+    "The containing thread was truncated at the bounded Slack context limit.";
+  let prompt = [
+    "A linked, authorized Slack user explicitly summoned OpenGeni by reacting to one message.",
+    "Use only the exact reacted message and bounded containing-thread context below.",
+    "If the intended action is ambiguous, ask a concise clarifying question in the originating thread before taking action.",
+    "Do not infer permission to ingest or persist this Slack content into Knowledge, Memory, preferences, policy, instructions, or the Workspace Charter.",
+    "",
+    "Exact reacted message:",
+    reactedLine,
+    "",
+    "Bounded surrounding thread context:",
+  ].join("\n");
+  let truncated = context.truncated;
+  for (const line of surroundingLines) {
+    const candidate = `${prompt}\n${line}`;
+    if (candidate.length + 1 + truncationNotice.length > MAX_SLACK_INPUT_CHARS) {
+      truncated = true;
+      break;
+    }
+    prompt = candidate;
+  }
+  return truncated ? `${prompt}\n${truncationNotice}` : prompt;
+}
+
+function slackReactionMessageLine(
+  message: SlackReactionMessageContext["reactedMessage"],
+  reacted: boolean,
+) {
+  const actor = message.userId || (message.botId ? `bot:${message.botId}` : "unknown");
+  const text = message.text.trim() || "(no text)";
+  const fileLabels: string[] = [];
+  let fileChars = 0;
+  let filesTruncated = false;
+  for (const file of message.files) {
+    const label = file.title || file.name || file.id;
+    if (!label) continue;
+    const addedChars = label.length + (fileLabels.length > 0 ? 2 : 0);
+    if (fileChars + addedChars > MAX_SLACK_REACTION_FILE_SUMMARY_CHARS) {
+      filesTruncated = true;
+      break;
+    }
+    fileLabels.push(label);
+    fileChars += addedChars;
+  }
+  const fileSummary = fileLabels.length
+    ? ` Files: ${fileLabels.join(", ")}${filesTruncated ? ", …" : ""}.`
+    : "";
+  return `- ${message.timestamp || "unknown"} ${actor}${reacted ? " [reacted message]" : ""}: ${text}${fileSummary}`;
+}
+
+async function continueSlackReactionSession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  interaction: SlackInteraction,
+  entry: SlackInteractionInboxEntry,
+) {
+  if (
+    !interaction.sessionId ||
+    (interaction.visibility === "private" && interaction.owningSubjectId !== grant.subjectId)
+  ) {
+    throw new SlackInteractionPermanentError("session_owner_mismatch");
+  }
+  await reopenSlackInteractionDelivery(deps.db, interaction);
+  await acceptSessionUserMessage(deps, grant, entry.workspaceId, interaction.sessionId, {
+    text: entry.text,
+    turnInstructions: SLACK_TASK_INSTRUCTIONS,
+    clientEventId: `slack:${entry.providerEventId}`,
+  });
 }
 
 async function continueSlackSession(
@@ -1012,6 +1370,8 @@ function safePayloadText(payload: unknown, field: string) {
 
 function safeErrorCode(error: unknown) {
   if (error instanceof SlackBotProviderError) return error.code.slice(0, 128);
+  if (error instanceof SlackInteractionPermanentError) return error.code.slice(0, 128);
+  if (error instanceof SlackInteractionRetryableError) return error.code.slice(0, 128);
   if (error instanceof HTTPException) return `http_${error.status}`;
   const raw = error instanceof Error ? error.name : "slack_interaction_error";
   return (
@@ -1032,7 +1392,19 @@ function slackAdmissionFailureText(error: HTTPException) {
   return "OpenGeni could not start this task because the workspace rejected the session settings. Open OpenGeni, select an available model, and try again.";
 }
 
-class SlackInteractionPermanentError extends Error {}
+class SlackInteractionPermanentError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "SlackInteractionPermanentError";
+  }
+}
+
+class SlackInteractionRetryableError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "SlackInteractionRetryableError";
+  }
+}
 
 function permanentSlackInteractionError(error: unknown) {
   return error instanceof SlackInteractionPermanentError || error instanceof HTTPException;
@@ -1048,6 +1420,11 @@ const PERMANENT_SLACK_DELIVERY_CODES = new Set([
   "message_not_found",
   "not_authed",
   "not_in_channel",
+  "reaction_checkpoint_invalid",
+  "reaction_checkpoint_too_large",
+  "reaction_pagination_exhausted",
+  "reaction_pagination_invalid",
+  "slack_connect_unsupported",
   "token_expired",
   "token_revoked",
 ]);

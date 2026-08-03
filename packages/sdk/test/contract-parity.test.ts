@@ -461,6 +461,16 @@ describe("SDK / contracts parity", () => {
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    const slackReactionSummon: UpdateWorkspaceSettingsRequest = {
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: ["C123"] },
+      },
+    };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse(slackReactionSummon).success).toBe(
+      true,
+    );
     const transcription: WorkspaceTranscriptionPolicy = {
       enabled: true,
       acceptanceId: "11111111-1111-4111-8111-111111111111",

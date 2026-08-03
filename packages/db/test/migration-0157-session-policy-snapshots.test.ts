@@ -25,7 +25,7 @@ import * as schema from "../src/schema";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0156_session_policy_role_snapshots.sql",
+  "../drizzle/0157_session_policy_role_snapshots.sql",
 );
 
 let shared: SharedTestDatabase | null = null;
@@ -64,7 +64,7 @@ beforeAll(async () => {
     if (requireRealDatabase) {
       throw new Error("real PostgreSQL is required for migration 0156 proof");
     }
-    console.warn("[migration-0156] PostgreSQL unavailable, skipping FORCE-RLS assertions");
+    console.warn("[migration-0157] PostgreSQL unavailable, skipping FORCE-RLS assertions");
     return;
   }
   client = createDb(shared.appUrl, { max: 4 });
@@ -209,7 +209,7 @@ async function expectSqlState(operation: () => Promise<unknown>, expectedCode: s
   expect(caught).toMatchObject({ code: expectedCode });
 }
 
-describe("migration 0156 session policy role and exact-attempt snapshots", () => {
+describe("migration 0157 session policy role and exact-attempt snapshots", () => {
   test("declares the bounded rolling boundary without membership, document, or knowledge authority", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");

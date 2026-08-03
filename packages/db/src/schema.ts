@@ -826,7 +826,9 @@ export const slackInteractionInbox = pgTable(
     slackMessageTs: text("slack_message_ts").notNull(),
     slackThreadTs: text("slack_thread_ts"),
     triggerKind: text("trigger_kind")
-      .$type<"app_mention" | "dm" | "slash_command" | "message_shortcut" | "thread_reply">()
+      .$type<
+        "app_mention" | "dm" | "reaction" | "slash_command" | "message_shortcut" | "thread_reply"
+      >()
       .notNull(),
     text: text("text").notNull(),
     status: text("status")
@@ -838,6 +840,7 @@ export const slackInteractionInbox = pgTable(
     attemptCount: integer("attempt_count").notNull().default(0),
     retryAt: timestamp("retry_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),
+    reactionContextCheckpoint: jsonb("reaction_context_checkpoint").$type<unknown>(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

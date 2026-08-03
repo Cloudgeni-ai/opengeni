@@ -172,7 +172,7 @@ describe("M3 rig binding: freeze at create", () => {
     expect(s1Reloaded?.rigVersionId).toBe(v1);
   }, 60_000);
 
-  test("falls back to the workspace default rig when no rigId is given; explicit rigId overrides the default", async () => {
+  test("omission inherits the workspace default while an explicit rig or null overrides it", async () => {
     if (!available) return;
     const bus = new MemoryEventBus();
     const { accountId, workspaceId } = await freshWorkspace();
@@ -201,6 +201,18 @@ describe("M3 rig binding: freeze at create", () => {
       },
     );
     expect(overridden.rigId).toBe(other.rigId);
+
+    const rigless = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "no rig",
+        rigId: null,
+      },
+    );
+    expect(rigless.rigId).toBeNull();
+    expect(rigless.rigVersionId).toBeNull();
   }, 60_000);
 
   test("a session with no rig and no workspace default is rig-less (both null)", async () => {

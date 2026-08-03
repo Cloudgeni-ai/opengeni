@@ -6,7 +6,7 @@ separate from `workspace_model_policies`: instruction governance does not choose
 models, providers, tools, integrations, or Linear behavior.
 
 The backend remains the sole charter/policy authority. Migration
-`0156_session_policy_role_snapshots.sql` adds the runtime delivery layer: an
+`0157_session_policy_role_snapshots.sql` adds the runtime delivery layer: an
 immutable session policy-role binding, accepted-turn policy snapshots, and
 deterministic composition with the existing structured preference registry.
 It does not create another policy, preference, memory, document, or skills
@@ -200,7 +200,7 @@ Canonical implementation: `packages/contracts/src/workspace-instruction-policies
 `packages/db/src/workspace-instruction-policies-schema.ts`,
 `packages/db/src/workspace-instruction-policies.ts`,
 `packages/db/drizzle/0130_workspace_instruction_policies.sql`,
-`packages/db/drizzle/0156_session_policy_role_snapshots.sql`,
+`packages/db/drizzle/0157_session_policy_role_snapshots.sql`,
 `apps/api/src/routes/workspace-instruction-policies.ts`, and
 `packages/sdk/src/workspace-instruction-policies.ts`, plus runtime composition in
 `packages/runtime/src/workspace-governance.ts` and

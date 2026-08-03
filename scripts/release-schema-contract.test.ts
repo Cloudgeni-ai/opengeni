@@ -170,14 +170,19 @@ describe("release schema contract", () => {
         (migrations.has("0153_mcp_personal_connection_delegations.sql") ? 1 : 0) +
         (migrations.has("0154_scoped_knowledge_foundation.sql") ? 1 : 0) +
         (migrations.has("0155_connector_action_policies.sql") ? 1 : 0) +
-        (migrations.has("0156_session_policy_role_snapshots.sql") ? 1 : 0),
+        (migrations.has("0156_slack_reaction_trigger.sql") ? 1 : 0) +
+        (migrations.has("0157_session_policy_role_snapshots.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "3c96184128a8c732883bff586fa58e4ceebc313a22ceec90ad5025fbc77db420",
+      "322176e39b715700642106cdf2c92dda060b522e8fad90e6e8df4dbe924adf31",
     );
-    expect(contract.latestMigration).toBe("0156_session_policy_role_snapshots.sql");
-    expect(migrations.get("0156_session_policy_role_snapshots.sql")).toMatchObject({
+    expect(contract.latestMigration).toBe("0157_session_policy_role_snapshots.sql");
+    expect(migrations.get("0157_session_policy_role_snapshots.sql")).toMatchObject({
       sha256: "d7c112c47d256cd92ab8661e43c8706e693b336fa17f43eb7f48b510aa0acec5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0156_slack_reaction_trigger.sql")).toMatchObject({
+      sha256: "080cd2840c3fd4c6c81b838cf7b0a4f1fa7e48ab4ced18c05e76da895934a945",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0155_connector_action_policies.sql")).toMatchObject({
@@ -245,7 +250,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-6])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-7])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -290,7 +295,8 @@ describe("release schema contract", () => {
       "0153_mcp_personal_connection_delegations.sql",
       "0154_scoped_knowledge_foundation.sql",
       "0155_connector_action_policies.sql",
-      "0156_session_policy_role_snapshots.sql",
+      "0156_slack_reaction_trigger.sql",
+      "0157_session_policy_role_snapshots.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",

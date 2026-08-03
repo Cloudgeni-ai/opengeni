@@ -12,7 +12,7 @@ deliberately separate from:
 
 The registry provides storage, service operations, HTTP and first-party MCP
 retrieval, SDK types, and isolation guarantees. Migration
-`0156_session_policy_role_snapshots.sql` now invokes its exact-attempt snapshot
+`0157_session_policy_role_snapshots.sql` now invokes its exact-attempt snapshot
 at runtime and composes only bounded descriptors with workspace policy. Full
 content remains on-demand. This adds no UI, connector, source/fact schema, or
 parallel preference authority.
@@ -200,7 +200,7 @@ Canonical implementation:
 - `packages/db/src/preference-registry-schema.ts`;
 - `packages/db/src/preference-registry.ts`;
 - `packages/db/drizzle/0137_preference_registry.sql`;
-- `packages/db/drizzle/0156_session_policy_role_snapshots.sql`;
+- `packages/db/drizzle/0157_session_policy_role_snapshots.sql`;
 - `apps/api/src/routes/preference-registry.ts`;
 - `apps/api/src/mcp/server.ts`;
 - `packages/sdk/src/preference-registry.ts`;

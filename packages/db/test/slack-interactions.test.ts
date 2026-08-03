@@ -20,6 +20,7 @@ import {
   listSessionsForSubject,
   releaseSlackInteractionInbox,
   resolveSlackInstallationRoute,
+  saveSlackInteractionInboxReactionCheckpoint,
   settleSlackInteractionInbox,
   type Database,
   type DbClient,
@@ -27,6 +28,8 @@ import {
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationPath = new URL("../drizzle/0150_slack_task_interactions.sql", import.meta.url)
+  .pathname;
+const reactionMigrationPath = new URL("../drizzle/0156_slack_reaction_trigger.sql", import.meta.url)
   .pathname;
 
 let available = true;
@@ -109,6 +112,7 @@ function inboxInput(input: {
   connectionId: string;
   eventId: string;
   messageId: string;
+  triggerKind?: "dm" | "reaction";
 }) {
   return {
     accountId: input.accountId,
@@ -121,8 +125,8 @@ function inboxInput(input: {
     slackChannelId: "D_DB_TEST",
     slackMessageTs: "1710000000.000001",
     slackThreadTs: null,
-    triggerKind: "dm" as const,
-    text: "Start a private task",
+    triggerKind: input.triggerKind ?? ("dm" as const),
+    text: input.triggerKind === "reaction" ? "genie" : "Start a private task",
   };
 }
 
@@ -139,6 +143,20 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(sql.match(/\n\s+SECURITY DEFINER\n\s+SET search_path = pg_catalog/g)).toHaveLength(3);
     expect(sql.match(/SET search_path = pg_catalog/g)).toHaveLength(3);
     expect(sql).toContain("credentialRole' = 'opengeni_slack_bot'");
+  });
+
+  test("expands the inbox trigger constraint for reactions as a rolling migration", async () => {
+    const sql = await readFile(reactionMigrationPath, "utf8");
+    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(sql).toContain('DROP CONSTRAINT "slack_interaction_inbox_trigger_check"');
+    expect(sql).toContain("'reaction'");
+    expect(sql).toContain(") NOT VALID;");
+    expect(sql).toContain('VALIDATE CONSTRAINT "slack_interaction_inbox_trigger_check"');
+    expect(sql).toContain('ADD COLUMN "reaction_context_checkpoint" jsonb');
+    expect(sql).toContain('"slack_interaction_inbox_reaction_checkpoint_check"');
+    expect(sql).toContain('octet_length("reaction_context_checkpoint"::text) <= 131072');
+    expect(sql).not.toContain("CREATE TABLE");
+    expect(sql).not.toContain("ALTER TYPE");
   });
 
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {
@@ -210,7 +228,7 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(await resolveSlackInstallationRoute(db, "T_RESOLVER")).toBeNull();
   });
 
-  test("deduplicates event and message identities, reclaims expired leases, and scopes settlement", async () => {
+  test("deduplicates reaction event and remove-readd identities, reclaims expired leases, and scopes settlement", async () => {
     if (!available) return;
     const target = await workspace("inbox");
     const connection = await botConnection(target, "T_INBOX", {
@@ -219,16 +237,34 @@ describe("Slack interaction migration and durable database boundary", () => {
     });
     const first = await enqueueSlackInteractionInbox(
       db,
-      inboxInput({ ...target, connectionId: connection.id, eventId: "E1", messageId: "M1" }),
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E1",
+        messageId: "M1",
+        triggerKind: "reaction",
+      }),
     );
     expect(first.inserted).toBe(true);
     const eventRetry = await enqueueSlackInteractionInbox(
       db,
-      inboxInput({ ...target, connectionId: connection.id, eventId: "E1", messageId: "M2" }),
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E1",
+        messageId: "M2",
+        triggerKind: "reaction",
+      }),
     );
     const reconnectRetry = await enqueueSlackInteractionInbox(
       db,
-      inboxInput({ ...target, connectionId: connection.id, eventId: "E2", messageId: "M1" }),
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E2",
+        messageId: "M1",
+        triggerKind: "reaction",
+      }),
     );
     expect(eventRetry).toMatchObject({ inserted: false, entry: { id: first.entry.id } });
     expect(reconnectRetry).toMatchObject({ inserted: false, entry: { id: first.entry.id } });
@@ -242,9 +278,33 @@ describe("Slack interaction migration and durable database boundary", () => {
       where id = ${first.entry.id}`;
     const holderB = crypto.randomUUID();
     const reclaimed = await claimSlackInteractionInbox(db, holderB, 1_000);
-    expect(reclaimed).toMatchObject({ id: first.entry.id, attemptCount: 2 });
+    expect(reclaimed).toMatchObject({
+      id: first.entry.id,
+      attemptCount: 2,
+      reactionContextCheckpoint: null,
+    });
 
     const other = await workspace("inbox-other");
+    const checkpoint = {
+      version: 1,
+      binding: { inboxId: first.entry.id },
+      state: { nextCursor: "page-2" },
+      signature: "a".repeat(64),
+    };
+    expect(
+      await saveSlackInteractionInboxReactionCheckpoint(db, {
+        entry: { ...reclaimed!, ...other },
+        claimHolderId: holderB,
+        checkpoint,
+      }),
+    ).toBe(false);
+    expect(
+      await saveSlackInteractionInboxReactionCheckpoint(db, {
+        entry: reclaimed!,
+        claimHolderId: holderB,
+        checkpoint,
+      }),
+    ).toBe(true);
     expect(
       await settleSlackInteractionInbox(db, {
         entry: { id: first.entry.id, ...other },
@@ -260,15 +320,105 @@ describe("Slack interaction migration and durable database boundary", () => {
         retryAt: new Date(Date.now() + 1_000),
       }),
     ).toBe(true);
+    const [released] = await admin<{ reaction_context_checkpoint: unknown }[]>`
+      select reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${first.entry.id}`;
+    expect(released!.reaction_context_checkpoint).toEqual(checkpoint);
     expect(await claimSlackInteractionInbox(db, crypto.randomUUID(), 1_000)).toBeNull();
     await admin`
       update slack_interaction_inbox
       set retry_at = now() - interval '1 second'
       where id = ${first.entry.id}`;
-    expect(await claimSlackInteractionInbox(db, crypto.randomUUID(), 1_000)).toMatchObject({
+    const holderC = crypto.randomUUID();
+    const finalClaim = await claimSlackInteractionInbox(db, holderC, 1_000);
+    expect(finalClaim).toMatchObject({
       id: first.entry.id,
       attemptCount: 3,
+      reactionContextCheckpoint: checkpoint,
     });
+    expect(
+      await settleSlackInteractionInbox(db, {
+        entry: finalClaim!,
+        claimHolderId: holderC,
+        outcome: "failed",
+        errorCode: "terminal_test",
+      }),
+    ).toBe(true);
+    const [settled] = await admin<
+      {
+        status: string;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${first.entry.id}`;
+    expect(settled).toEqual({ status: "failed", reaction_context_checkpoint: null });
+  });
+
+  test("bounds reaction checkpoints and rejects them on non-reaction or terminal inbox rows", async () => {
+    if (!available) return;
+    const target = await workspace("checkpoint-bounds");
+    const connection = await botConnection(target, "T_CHECKPOINT_BOUNDS", {
+      botId: "B_CHECKPOINT_BOUNDS",
+      botUserId: "U_CHECKPOINT_BOUNDS",
+    });
+    const reaction = await enqueueSlackInteractionInbox(
+      db,
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E_CHECKPOINT_BOUNDS",
+        messageId: "M_CHECKPOINT_BOUNDS",
+        triggerKind: "reaction",
+      }),
+    );
+    let oversizedCheckpointError: unknown;
+    try {
+      await admin`
+        update slack_interaction_inbox
+        set reaction_context_checkpoint = jsonb_build_object('payload', repeat('x', 131073))
+        where id = ${reaction.entry.id}`;
+    } catch (error) {
+      oversizedCheckpointError = error;
+    }
+    expect((oversizedCheckpointError as { code?: string } | undefined)?.code).toBe("23514");
+
+    const ordinary = await enqueueSlackInteractionInbox(
+      db,
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E_CHECKPOINT_ORDINARY",
+        messageId: "M_CHECKPOINT_ORDINARY",
+      }),
+    );
+    let nonReactionCheckpointError: unknown;
+    try {
+      await admin`
+        update slack_interaction_inbox
+        set reaction_context_checkpoint = '{}'::jsonb
+        where id = ${ordinary.entry.id}`;
+    } catch (error) {
+      nonReactionCheckpointError = error;
+    }
+    expect((nonReactionCheckpointError as { code?: string } | undefined)?.code).toBe("23514");
+
+    await admin`
+      update slack_interaction_inbox
+      set status = 'failed', processed_at = now()
+      where id = ${reaction.entry.id}`;
+    let terminalCheckpointError: unknown;
+    try {
+      await admin`
+        update slack_interaction_inbox
+        set reaction_context_checkpoint = '{}'::jsonb
+        where id = ${reaction.entry.id}`;
+    } catch (error) {
+      terminalCheckpointError = error;
+    }
+    expect((terminalCheckpointError as { code?: string } | undefined)?.code).toBe("23514");
   });
 
   test("binds one route to one session and keeps a private root lineage owner-only", async () => {
