@@ -269,14 +269,7 @@ export function HumanInputForm({
             {resolvedTitle}
           </h2>
           {metaBits.length > 0 ? (
-            <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">
-              {metaBits.map((bit, index) => (
-                <span key={index}>
-                  {index > 0 ? " · " : null}
-                  {bit}
-                </span>
-              ))}
-            </p>
+            <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">{metaBits.join(" · ")}</p>
           ) : null}
         </div>
         <button

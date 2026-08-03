@@ -4666,12 +4666,12 @@ function modelInputFileMediaType(value: unknown): string | null {
       return candidate.toLowerCase().split(";", 1)[0]!.trim();
     }
   }
-  const file = record.file;
-  if (typeof file === "string") {
-    const match = /^data:([^;,]+)[;,]/i.exec(file);
+  const fileValue = record.file;
+  if (typeof fileValue === "string") {
+    const match = /^data:([^;,]+)[;,]/i.exec(fileValue);
     if (match?.[1]) return match[1].toLowerCase();
   }
-  if (file && typeof file === "object") return modelInputFileMediaType(file);
+  if (fileValue && typeof fileValue === "object") return modelInputFileMediaType(fileValue);
   return null;
 }
 
