@@ -9,7 +9,7 @@ import {
 function member(
   kind: MachineInputMember["kind"],
   summary = "",
-  id = kind,
+  id: string = kind,
 ): MachineInputMember {
   return {
     id,

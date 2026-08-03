@@ -116,7 +116,9 @@ describe("durable machine-input timeline", () => {
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(r.container.textContent).not.toContain("Input batch");
     expect(r.container.textContent).not.toContain('"sourceId"');
-    const details = r.container.querySelector("details[data-og-machine-input-batch]");
+    const details = r.container.querySelector(
+      "details[data-og-machine-input-batch]",
+    ) as HTMLDetailsElement | null;
     expect(details).not.toBeNull();
     expect(details?.open).toBe(false);
     // Detail rows stay in the DOM for expand-on-demand audit.
@@ -149,7 +151,10 @@ describe("durable machine-input timeline", () => {
     await flush();
     expect(r.container.textContent).toContain("15 agents finished");
     expect(r.container.textContent).not.toContain("updates joined this turn");
-    expect(r.container.querySelector("details[data-og-machine-input-batch]")?.open).toBe(false);
+    expect(
+      (r.container.querySelector("details[data-og-machine-input-batch]") as HTMLDetailsElement | null)
+        ?.open,
+    ).toBe(false);
     await r.unmount();
   });
 });
