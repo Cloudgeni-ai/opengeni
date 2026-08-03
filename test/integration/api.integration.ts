@@ -5086,7 +5086,9 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const workspaceId = await defaultWorkspaceId(app);
+    const access = await defaultAccessContext(app);
+    const workspaceId = access.defaultWorkspaceId!;
+    const accountId = access.defaultAccountId!;
     const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
       method: "POST",
       body: JSON.stringify({
@@ -5230,6 +5232,7 @@ describe("API component integration", () => {
       const fallbackResults = await searchDocuments(
         dbClient.db,
         {
+          accountId,
           workspaceId,
           query: "network policy",
           baseIds: [base.id],
@@ -5740,7 +5743,9 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const workspaceId = await defaultWorkspaceId(app);
+    const access = await defaultAccessContext(app);
+    const workspaceId = access.defaultWorkspaceId!;
+    const accountId = access.defaultAccountId!;
 
     // Private, agent-blocked text drop: no base, no metadata — the server
     // creates the Default base, and heuristic curation names + summarizes it.
@@ -5798,6 +5803,7 @@ describe("API component integration", () => {
 
     // The agent retrieval surface never sees it: private AND agent-blocked.
     const agentBlocked = await searchDocuments(dbClient.db, {
+      accountId,
       workspaceId,
       query: "contract renews",
       mode: "keyword",
@@ -5822,6 +5828,7 @@ describe("API component integration", () => {
     expect(publicDrop.visibility).toBe("workspace");
     expect(publicDrop.agentAccess).toBe(true);
     const agentVisible = await searchDocuments(dbClient.db, {
+      accountId,
       workspaceId,
       query: "onboarding checklist",
       mode: "keyword",
@@ -5954,6 +5961,71 @@ describe("API component integration", () => {
     };
     const path = (suffix: string) => workspacePath(ownerGrant.workspaceId, suffix);
 
+    const deniedOrganizationDrop = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "Workspace authority cannot publish this account-wide.",
+        authorityKind: "organization",
+      }),
+    });
+    expect(deniedOrganizationDrop.status).toBe(403);
+    expect(await deniedOrganizationDrop.text()).toContain("missing permission: account:admin");
+
+    const accountAdminToken = await signDelegatedAccessToken(delegationSecret, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      subjectId: ownerGrant.subjectId,
+      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+    const organizationDrop = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accountAdminToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        text: "Account administrators can publish this organization runbook.",
+        authorityKind: "organization",
+      }),
+    });
+    expect(organizationDrop.status).toBe(201);
+    const organizationDocument = (await organizationDrop.json()) as {
+      id: string;
+      baseId: string;
+      fileId: string;
+      authorityKind: string;
+      authorityWorkspaceId: string | null;
+      authoritySubjectId: string | null;
+    };
+    expect(organizationDocument).toMatchObject({
+      authorityKind: "organization",
+      authorityWorkspaceId: null,
+      authoritySubjectId: null,
+    });
+
+    const deniedOrganizationReadd = await app.request(
+      path(`/document-bases/${organizationDocument.baseId}/documents`),
+      {
+        method: "POST",
+        headers: { ...otherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({
+          fileId: organizationDocument.fileId,
+          title: "Workspace authority must not rewrite organization metadata",
+        }),
+      },
+    );
+    expect(deniedOrganizationReadd.status).toBe(403);
+    expect(await deniedOrganizationReadd.text()).toContain("missing permission: account:admin");
+    const deniedOrganizationDelete = await app.request(
+      path(`/document-bases/${organizationDocument.baseId}/documents/${organizationDocument.id}`),
+      { method: "DELETE", headers: otherHeaders },
+    );
+    expect(deniedOrganizationDelete.status).toBe(403);
+    expect(await deniedOrganizationDelete.text()).toContain("missing permission: account:admin");
+
     const dropResponse = await app.request(path("/knowledge/drops"), {
       method: "POST",
       headers: { ...ownerHeaders, "content-type": "application/json" },
@@ -5979,14 +6051,16 @@ describe("API component integration", () => {
       headers: ownerHeaders,
     });
     expect(ownerList.status).toBe(200);
-    expect((await ownerList.json()) as Array<{ id: string }>).toEqual([
-      expect.objectContaining({ id: drop.id }),
-    ]);
+    expect(
+      ((await ownerList.json()) as Array<{ id: string }>).map((document) => document.id).sort(),
+    ).toEqual([organizationDocument.id, drop.id].sort());
     const otherList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
       headers: otherHeaders,
     });
     expect(otherList.status).toBe(200);
-    expect(await otherList.json()).toEqual([]);
+    expect((await otherList.json()) as Array<{ id: string }>).toEqual([
+      expect.objectContaining({ id: organizationDocument.id }),
+    ]);
 
     const ownerSearch = await app.request(path("/knowledge/search"), {
       method: "POST",
@@ -6007,6 +6081,7 @@ describe("API component integration", () => {
     expect(await otherSearch.json()).toEqual({ results: [] });
 
     const ownerAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
       workspaceId: ownerGrant.workspaceId,
       query: "contract details",
       mode: "keyword",
@@ -6014,6 +6089,7 @@ describe("API component integration", () => {
     });
     expect(ownerAgentResults.map((result) => result.documentId)).toContain(drop.id);
     const otherAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
       workspaceId: ownerGrant.workspaceId,
       query: "contract details",
       mode: "keyword",
@@ -6021,6 +6097,7 @@ describe("API component integration", () => {
     });
     expect(otherAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
     const anonymousAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
       workspaceId: ownerGrant.workspaceId,
       query: "contract details",
       mode: "keyword",
@@ -6030,13 +6107,13 @@ describe("API component integration", () => {
     const chunkId = ownerAgentResults.find((result) => result.documentId === drop.id)?.chunkId;
     expect(chunkId).toBeTruthy();
     await expect(
-      getDocumentChunk(dbClient.db, ownerGrant.workspaceId, chunkId!, {
+      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
         agentOnly: true,
         viewerSubjectId: ownerGrant.subjectId,
       }),
     ).resolves.toMatchObject({ documentId: drop.id });
     await expect(
-      getDocumentChunk(dbClient.db, ownerGrant.workspaceId, chunkId!, {
+      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
         agentOnly: true,
         viewerSubjectId: otherSubject,
       }),
@@ -9463,6 +9540,11 @@ async function signDelegatedBearer(
     executionGeneration?: number;
   },
 ): Promise<string> {
+  const hasExactAgentAuthority =
+    input.sessionId !== undefined &&
+    input.turnId !== undefined &&
+    input.attemptId !== undefined &&
+    input.executionGeneration !== undefined;
   return `Bearer ${await signDelegatedAccessToken(secret, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -9473,7 +9555,7 @@ async function signDelegatedBearer(
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.attemptId ? { attemptId: input.attemptId } : {}),
     ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
-    principalKind: "agent_attempt",
+    principalKind: hasExactAgentAuthority ? "agent_attempt" : "human_session",
     exp: Math.floor(Date.now() / 1000) + 300,
   })}`;
 }

@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import type {
   ConnectionCredentialsPort,
   Document,
+  DocumentAuthorityKind,
   GitHubAppApiPort,
   ScheduledTask,
   SessionAuthorizationPort,
@@ -73,6 +74,9 @@ export type DocumentIndexClient = {
     accountId: string;
     workspaceId: string;
     documentId: string;
+    authorityKind: DocumentAuthorityKind;
+    authorityWorkspaceId: string | null;
+    authoritySubjectId: string | null;
   }) => Promise<Document | void>;
 };
 

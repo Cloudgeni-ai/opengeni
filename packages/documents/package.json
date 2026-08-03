@@ -44,6 +44,7 @@
     "openai": "6.36.0"
   },
   "devDependencies": {
+    "@opengeni/testing": "workspace:*",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

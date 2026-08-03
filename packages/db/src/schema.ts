@@ -2150,6 +2150,11 @@ export const documents = pgTable(
     sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
     sourceVersion: text("source_version"),
     aclTags: jsonb("acl_tags").$type<string[]>().notNull().default([]),
+    // Durable authorization tuple. The workspace_id above remains ingestion
+    // provenance; organization authority deliberately has no workspace owner.
+    authorityKind: text("authority_kind").notNull().default("workspace"),
+    authorityWorkspaceId: uuid("authority_workspace_id"),
+    authoritySubjectId: text("authority_subject_id"),
     // Per-document access controls. visibility 'private' restricts human reads to
     // created_by (a grant subject id, not a uuid); agent_access=false hides the
     // document from agent retrieval surfaces (docs MCP) while humans keep REST.
@@ -2186,6 +2191,28 @@ export const documents = pgTable(
     curationStatus: index("documents_workspace_curation_status_idx").on(
       table.workspaceId,
       table.curationStatus,
+    ),
+    authority: index("documents_authority_idx").on(
+      table.accountId,
+      table.authorityKind,
+      table.authorityWorkspaceId,
+      table.authoritySubjectId,
+      table.status,
+    ),
+    authorityWorkspaceAccount: foreignKey({
+      name: "documents_authority_workspace_fk",
+      columns: [table.authorityWorkspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("restrict"),
+    authorityState: check(
+      "documents_authority_chk",
+      sql`(${table.authorityKind} = 'organization' and ${table.authorityWorkspaceId} is null and ${table.authoritySubjectId} is null)
+        or (${table.authorityKind} = 'workspace' and ${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authoritySubjectId} is null)
+        or (${table.authorityKind} = 'personal' and ${table.authorityWorkspaceId} = ${table.workspaceId} and nullif(btrim(${table.authoritySubjectId}), '') is not null and octet_length(convert_to(${table.authoritySubjectId}, 'UTF8')) <= 1024 and ${table.authoritySubjectId} = ${table.createdBy})`,
+    ),
+    authorityVisibility: check(
+      "documents_authority_visibility_chk",
+      sql`(${table.authorityKind} = 'personal') = (${table.visibility} = 'private')`,
     ),
     visibilityState: check(
       "documents_visibility_chk",
@@ -2229,6 +2256,9 @@ export const documentChunks = pgTable(
     chunkIndex: integer("chunk_index").notNull(),
     text: text("text").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    authorityKind: text("authority_kind").notNull().default("workspace"),
+    authorityWorkspaceId: uuid("authority_workspace_id"),
+    authoritySubjectId: text("authority_subject_id"),
     embedding: vector("embedding").notNull(),
     embeddingModel: text("embedding_model").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2240,6 +2270,23 @@ export const documentChunks = pgTable(
       table.chunkIndex,
     ),
     base: index("document_chunks_workspace_base_idx").on(table.workspaceId, table.baseId),
+    authority: index("document_chunks_authority_idx").on(
+      table.accountId,
+      table.authorityKind,
+      table.authorityWorkspaceId,
+      table.authoritySubjectId,
+    ),
+    authorityWorkspaceAccount: foreignKey({
+      name: "document_chunks_authority_workspace_fk",
+      columns: [table.authorityWorkspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("restrict"),
+    authorityState: check(
+      "document_chunks_authority_chk",
+      sql`(${table.authorityKind} = 'organization' and ${table.authorityWorkspaceId} is null and ${table.authoritySubjectId} is null)
+        or (${table.authorityKind} = 'workspace' and ${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authoritySubjectId} is null)
+        or (${table.authorityKind} = 'personal' and ${table.authorityWorkspaceId} = ${table.workspaceId} and nullif(btrim(${table.authoritySubjectId}), '') is not null and octet_length(convert_to(${table.authoritySubjectId}, 'UTF8')) <= 1024)`,
+    ),
   }),
 );
 

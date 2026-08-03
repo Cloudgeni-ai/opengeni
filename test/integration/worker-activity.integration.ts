@@ -2296,6 +2296,7 @@ describe("worker activities integration", () => {
       baseId: base.id,
       fileId: file.id,
     });
+    let parserCalled = false;
     let embedderCalled = false;
     const activities = createWorkerActivities({
       settings: testSettings({
@@ -2315,13 +2316,16 @@ describe("worker activities integration", () => {
       documentServices: {
         parser: {
           name: "test-text",
-          parse: async (bytes, inputFile) => ({
-            text: new TextDecoder().decode(bytes),
-            metadata: {
-              filename: inputFile.filename,
-              contentType: inputFile.contentType,
-            },
-          }),
+          parse: async (bytes, inputFile) => {
+            parserCalled = true;
+            return {
+              text: new TextDecoder().decode(bytes),
+              metadata: {
+                filename: inputFile.filename,
+                contentType: inputFile.contentType,
+              },
+            };
+          },
         },
         chunker: {
           chunk: (parsed, inputFile) => [
@@ -2343,14 +2347,31 @@ describe("worker activities integration", () => {
       } satisfies DocumentServices,
     });
 
+    await expect(
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: document.id,
+        authorityKind: "organization",
+        authorityWorkspaceId: null,
+        authoritySubjectId: null,
+      }),
+    ).rejects.toThrow("document authority changed before indexing");
+    expect(parserCalled).toBe(false);
+    expect(embedderCalled).toBe(false);
+
     const indexed = await activities.indexDocument({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       documentId: document.id,
+      authorityKind: document.authorityKind,
+      authorityWorkspaceId: document.authorityWorkspaceId,
+      authoritySubjectId: document.authoritySubjectId,
     });
 
     expect(indexed.status).toBe("failed");
     expect(indexed.error).toContain("insufficient OpenGeni credits");
+    expect(parserCalled).toBe(true);
     expect(embedderCalled).toBe(false);
     const usage = await listUsageEvents(dbClient.db, {
       accountId: grant.accountId,
@@ -2452,11 +2473,17 @@ describe("worker activities integration", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         documentId: documentOne.id,
+        authorityKind: documentOne.authorityKind,
+        authorityWorkspaceId: documentOne.authorityWorkspaceId,
+        authoritySubjectId: documentOne.authoritySubjectId,
       }),
       activities.indexDocument({
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         documentId: documentTwo.id,
+        authorityKind: documentTwo.authorityKind,
+        authorityWorkspaceId: documentTwo.authorityWorkspaceId,
+        authoritySubjectId: documentTwo.authoritySubjectId,
       }),
     ]);
 

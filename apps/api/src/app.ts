@@ -18,10 +18,11 @@ import {
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
+  getDocument,
   indexDocumentNow,
   type DocumentServices,
 } from "@opengeni/documents";
-import { dbSql, getWorkspace } from "@opengeni/db";
+import { dbSql, getWorkspace, rlsContextForWorkspace } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -127,17 +128,38 @@ export function createAppComposition(deps: AppDependencies): {
       accountId,
       workspaceId,
       documentId,
+      authorityKind,
+      authorityWorkspaceId,
+      authoritySubjectId,
     }: {
       accountId: string;
       workspaceId: string;
       documentId: string;
+      authorityKind: import("@opengeni/contracts").DocumentAuthorityKind;
+      authorityWorkspaceId: string | null;
+      authoritySubjectId: string | null;
     }) => {
       if (!objectStorage) {
         throw new HTTPException(503, {
           message: "object storage is not configured",
         });
       }
-      return await indexDocumentNow(
+      const context = await rlsContextForWorkspace(deps.db, workspaceId);
+      if (context.accountId !== accountId) {
+        throw new Error("document account/workspace authority mismatch");
+      }
+      const claimedDocument = await getDocument(deps.db, workspaceId, documentId, {
+        viewerSubjectId: authoritySubjectId,
+      });
+      if (
+        !claimedDocument ||
+        claimedDocument.authorityKind !== authorityKind ||
+        claimedDocument.authorityWorkspaceId !== authorityWorkspaceId ||
+        claimedDocument.authoritySubjectId !== authoritySubjectId
+      ) {
+        throw new Error("document authority changed before indexing");
+      }
+      const document = await indexDocumentNow(
         deps.db,
         objectStorage,
         workspaceId,
@@ -153,7 +175,16 @@ export function createAppComposition(deps: AppDependencies): {
             });
           },
         },
+        { viewerSubjectId: authoritySubjectId },
       );
+      if (
+        document.authorityKind !== authorityKind ||
+        document.authorityWorkspaceId !== authorityWorkspaceId ||
+        document.authoritySubjectId !== authoritySubjectId
+      ) {
+        throw new Error("document authority changed before indexing");
+      }
+      return document;
     },
   };
   // The API process's own agent-loop-free sandbox client — the API-direct

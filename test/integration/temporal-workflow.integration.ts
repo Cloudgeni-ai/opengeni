@@ -1210,6 +1210,9 @@ describe("Temporal workflow integration", () => {
               accountId: scope.accountId,
               workspaceId: scope.workspaceId,
               documentId: "document-1",
+              authorityKind: "workspace",
+              authorityWorkspaceId: scope.workspaceId,
+              authoritySubjectId: null,
             },
           ],
         });
@@ -1219,6 +1222,9 @@ describe("Temporal workflow integration", () => {
             accountId: scope.accountId,
             workspaceId: scope.workspaceId,
             documentId: "document-1",
+            authorityKind: "workspace",
+            authorityWorkspaceId: scope.workspaceId,
+            authoritySubjectId: null,
           },
         ]);
         expect(result).toMatchObject({ id: "document-1", status: "ready" });

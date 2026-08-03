@@ -39,11 +39,26 @@ prevent cross-organization workspace anchors even for malformed direct SQL.
 `documents.acl_tags` remain caller-supplied retrieval filters. They are not read
 or stored by this foundation and confer no authorization.
 
-Existing Documents are not reclassified by this migration. Legacy workspace
-documents remain workspace-scoped. Legacy private documents retain their
-existing workspace plus creator boundary until an explicit authorized
-migration/reclassification; ambiguous rows never widen to organization or
-cross-workspace personal access.
+Migration 0165 projects this same authority tuple onto `documents` and
+`document_chunks`. Legacy workspace documents deterministically remain
+workspace authority. Legacy private documents become personal authority bound
+to their original workspace and existing creator; migration 0126 already
+rejects an empty private creator, so ambiguous rows never widen. New document
+and chunk authority is immutable, chunks copy the exact parent tuple, and the
+runtime-role FORCE-RLS policy calls the same
+`scoped_knowledge_scope_visible` predicate before any document search ranking.
+The older `visibility` field remains only as a compatibility projection
+(`personal` → `private`, organization/workspace → `workspace`).
+
+Migration 0165 is a drained maintenance cutover, not a legacy-payload fallback.
+Stop every API and worker, close all `document-index-*` Temporal workflows, and
+settle every queued/indexing document before applying it; the migration rejects
+both live `opengeni_app` sessions and an undrained document queue. After commit,
+only the new image may run and every direct
+or Temporal indexing input must carry the exact six-field document and authority
+identity. Publishing an organization-authority document requires an exact
+`account:admin` account grant; workspace-admin permission expansion is not
+account-wide publication authority.
 
 ## Source and lifecycle ledgers
 
