@@ -82,6 +82,7 @@ test("authenticated knowledge search rejects 51 with a typed envelope and accept
   expect(await maximum.json()).toEqual({ results: [] });
   expect(searchInputs).toEqual([
     {
+      accountId: ACCOUNT_ID,
       workspaceId: WORKSPACE_ID,
       query: "boundary",
       baseIds: undefined,
