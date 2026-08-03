@@ -4,10 +4,17 @@ import {
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
   startupRetryOptions,
+  temporalConnectionOptions,
   type Settings,
 } from "@opengeni/config";
-import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
-import { createNatsEventBus } from "@opengeni/events";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  markSessionWorkflowWakeDelivered,
+  type Database,
+  type RuntimeDatabasePostureOptions,
+} from "@opengeni/db";
+import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import {
   createObservability,
   logStartupDependencyRetry,
@@ -19,7 +26,9 @@ import {
   ScheduleOverlapPolicy,
   Client as TemporalClient,
 } from "@temporalio/client";
-import { NativeConnection, Worker } from "@temporalio/worker";
+import { NativeConnection, Worker, type WorkflowBundleOption } from "@temporalio/worker";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ensureModalRegistryImage } from "@opengeni/runtime";
 import {
   createControlActivities,
@@ -27,15 +36,22 @@ import {
   type ActivityDependencies,
 } from "./activities";
 import type {
+  InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
   SignalSessionAttemptQuiesced,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
-import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
 import {
-  observabilityEventLogger,
+  dbReadyCheck,
+  natsReadyCheck,
+  startWorkerHttpServer,
+  temporalReadyCheck,
+  type WorkerLifecycleState,
+} from "./http";
+import {
   normalizeTurnTaskQueueStats,
+  observabilityEventLogger,
   startTurnCapacityMonitor,
   type TurnTaskQueueStats,
 } from "./observability-metrics";
@@ -47,9 +63,27 @@ import {
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
-  createTurnWorkerTuner,
+  createTurnWorkerConcurrencyPlan,
+  turnWorkerConcurrencyLogFields,
 } from "./concurrency";
+import {
+  constructWithOwnedConnection,
+  createWorkerServiceLifecycle,
+  type WorkerServiceLifecycle,
+} from "./worker-service-lifecycle";
+
+export {
+  createHostExportPump,
+  type HostExportDrainResult,
+  type HostExportPump,
+  type HostExportPumpOptions,
+  type HostEventExport,
+  type HostEventExportBatch,
+  type HostEventSink,
+  type HostUsageExport,
+  type HostUsageExportBatch,
+  type HostUsageSink,
+} from "./host-export";
 
 // The deterministic id of the ONE global reaper Schedule. A single id means
 // create() is idempotent across every worker in the pool: the first worker to
@@ -66,12 +100,63 @@ export type WorkerOptions = {
   settings?: Settings;
   activities?: ReturnType<typeof createControlActivities> | ReturnType<typeof createTurnActivities>;
   activityDependencies?: ActivityDependencies;
-  // Embedded hosts install @opengeni/worker-bundle under node_modules, where
-  // Temporal's workflow webpack refuses to transpile TS. They relocate
-  // src/workflows.ts to a host-owned path and point the worker at it here.
-  // Unset (standalone) keeps today's in-package path byte-for-byte.
-  workflowsPath?: string;
+  /** Override the release-coherent workflow artifact. Most hosts should omit this. */
+  workflowBundle?: WorkflowBundleOption;
 };
+
+type TemporalActivityLease = {
+  lastHeartbeatTime?: { seconds?: unknown; nanos?: number | null } | null;
+  lastStartedTime?: { seconds?: unknown; nanos?: number | null } | null;
+  activityOptions?: {
+    heartbeatTimeout?: { seconds?: unknown; nanos?: number | null } | null;
+  } | null;
+};
+
+function temporalTimeMs(
+  value: { seconds?: unknown; nanos?: number | null } | null | undefined,
+): number | null {
+  if (value?.seconds === undefined || value.seconds === null) return null;
+  return Number(String(value.seconds)) * 1_000 + Math.floor((value.nanos ?? 0) / 1_000_000);
+}
+
+export function temporalActivityLeaseSettled(
+  pending: TemporalActivityLease | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (!pending) return true;
+  const heartbeatAt =
+    temporalTimeMs(pending.lastHeartbeatTime) ?? temporalTimeMs(pending.lastStartedTime);
+  const heartbeatTimeoutMs = temporalTimeMs(pending.activityOptions?.heartbeatTimeout);
+  return (
+    heartbeatAt !== null && heartbeatTimeoutMs !== null && nowMs >= heartbeatAt + heartbeatTimeoutMs
+  );
+}
+
+type WorkerWorkflowDefinition =
+  | { workflowBundle: WorkflowBundleOption }
+  | { workflowsPath: string };
+
+/**
+ * Resolve the deterministic workflow graph without asking installed hosts to
+ * transpile or relocate package TypeScript. Monorepo source execution retains
+ * the source path for the local development loop; published dist execution
+ * fails closed unless the build-generated sibling artifact is present.
+ */
+export function resolveOpenGeniWorkflowDefinition(
+  moduleUrl: string = import.meta.url,
+): WorkerWorkflowDefinition {
+  const modulePath = fileURLToPath(moduleUrl).replaceAll("\\", "/");
+  if (modulePath.endsWith("/src/index.ts")) {
+    return { workflowsPath: fileURLToPath(new URL("./workflows.ts", moduleUrl)) };
+  }
+  const codePath = fileURLToPath(new URL("./workflow-bundle.js", moduleUrl));
+  if (!existsSync(codePath)) {
+    throw new Error(
+      `OpenGeni workflow bundle is missing at ${codePath}; rebuild or reinstall @opengeni/worker-bundle`,
+    );
+  }
+  return { workflowBundle: { codePath } };
+}
 
 export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   worker: Worker;
@@ -81,10 +166,14 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   const observability =
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
+  if (options.role === "turn" && options.workflowBundle) {
+    throw new Error("workflowBundle is valid only for the control worker role");
+  }
   // Pre-resolve a PRIVATE-registry sandbox image before any turn creates a box.
-  // No-op unless OPENGENI_MODAL_IMAGE_REGISTRY_SECRET + OPENGENI_MODAL_IMAGE_REF are
-  // both set (so non-modal / public-image deployments are byte-unchanged and never
-  // load the modal SDK here). Memoized in the provider, so this runs once per process.
+  // A provider-native OPENGENI_MODAL_IMAGE_ID intentionally bypasses this
+  // registry path and is resolved by ModalImageSelector.fromId at create time.
+  // Otherwise this is a no-op unless the registry secret + logical ref are both
+  // set. Memoized in the provider, so it runs once per process.
   if (options.role === "turn") {
     await retryStartupDependency(
       "Modal private-registry image",
@@ -95,61 +184,69 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       },
     );
   }
-  const connection = await retryStartupDependency(
-    "Temporal",
-    () => NativeConnection.connect({ address: settings.temporalHost }),
-    {
-      ...startupRetryOptions(settings),
-      onRetry: (event) => logStartupDependencyRetry(observability, event),
+  return constructWithOwnedConnection(
+    () =>
+      retryStartupDependency(
+        "Temporal",
+        () => NativeConnection.connect(temporalConnectionOptions(settings)),
+        {
+          ...startupRetryOptions(settings),
+          onRetry: (event) => logStartupDependencyRetry(observability, event),
+        },
+      ),
+    async (connection) => {
+      const activities =
+        options.activities ??
+        (options.role === "control" ? createControlActivities : createTurnActivities)({
+          ...options.activityDependencies,
+          settings,
+          observability,
+        });
+      const turnConcurrency =
+        options.role === "turn"
+          ? createTurnWorkerConcurrencyPlan(settings, { observability })
+          : null;
+      const worker = await Worker.create({
+        connection,
+        namespace: settings.temporalNamespace,
+        taskQueue:
+          options.role === "control"
+            ? settings.temporalTaskQueue
+            : turnTaskQueue(settings.temporalTaskQueue),
+        ...(options.role === "control"
+          ? {
+              ...(options.workflowBundle
+                ? { workflowBundle: options.workflowBundle }
+                : resolveOpenGeniWorkflowDefinition()),
+              maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+              maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+            }
+          : turnConcurrency!.options),
+        activities,
+        // Cancellation is delivered through an activity heartbeat. The SDK would
+        // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
+        // making Pause/Steer take roughly a minute even though runAgentTurn emits a
+        // heartbeat every ten seconds. Keep delivery bounded independently of the
+        // heartbeat timeout and local timer cadence.
+        maxHeartbeatThrottleInterval: "5s",
+        defaultHeartbeatThrottleInterval: "5s",
+        // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
+        // after shutdown() stops polling, in-flight activities get this long to
+        // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
+        // which triggers agent-turn's same-turn recovery checkpoint instead of a
+        // heartbeat-timeout worker_death. Short on purpose: a long grace here
+        // only delays the checkpoint window long turns actually need.
+        shutdownGraceTime: "5s",
+        // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
+        // wedged checkpoint force-stops here, on our terms, rather than riding
+        // into the kubelet's SIGKILL mid-DB-write.
+        shutdownForceTime: "100s",
+      });
+      turnConcurrency?.admission?.finalizeStartupBaseline();
+      return { worker, connection };
     },
+    (connection) => connection.close(),
   );
-  const activities =
-    options.activities ??
-    (options.role === "control" ? createControlActivities : createTurnActivities)({
-      ...options.activityDependencies,
-      settings,
-      observability,
-    });
-  const turnTuner = options.role === "turn" ? createTurnWorkerTuner({ observability }) : null;
-  try {
-    const worker = await Worker.create({
-      connection,
-      namespace: settings.temporalNamespace,
-      taskQueue:
-        options.role === "control"
-          ? settings.temporalTaskQueue
-          : turnTaskQueue(settings.temporalTaskQueue),
-      ...(options.role === "control"
-        ? {
-            workflowsPath:
-              options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
-            maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-          }
-        : {}),
-      activities,
-      ...(turnTuner
-        ? { tuner: turnTuner.tuner }
-        : { maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES }),
-      maxHeartbeatThrottleInterval: "5s",
-      defaultHeartbeatThrottleInterval: "5s",
-      // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
-      // after shutdown() stops polling, in-flight activities get this long to
-      // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
-      // which triggers agent-turn's same-turn recovery checkpoint instead of a
-      // heartbeat-timeout worker_death. Short on purpose: a long grace here
-      // only delays the checkpoint window long turns actually need.
-      shutdownGraceTime: "5s",
-      // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
-      // wedged checkpoint force-stops here, on our terms, rather than riding
-      // into the kubelet's SIGKILL mid-DB-write.
-      shutdownForceTime: "100s",
-    });
-    turnTuner?.admission.finalizeStartupBaseline();
-    return { worker, connection };
-  } catch (error) {
-    await connection.close().catch(() => undefined);
-    throw error;
-  }
 }
 
 // A signalWithStart capability so a worker activity can wake a PARENT
@@ -163,12 +260,13 @@ export async function createWorkerWorkflowSignaler(
 ): Promise<{
   wakeSessionWorkflow: WakeSessionWorkflowSignal;
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
+  inspectSessionAttemptActivity: InspectSessionAttemptActivity;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
   getTurnTaskQueueStats: () => Promise<TurnTaskQueueStats>;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   return {
     wakeSessionWorkflow: async ({
@@ -224,6 +322,16 @@ export async function createWorkerWorkflowSignaler(
       // The signalled workflow's DB-only control activity owns committing the
       // receipt and its exact wake revision atomically.
     },
+    inspectSessionAttemptActivity: async ({ workflowId, workflowRunId, activityId }) => {
+      const description = await connection.workflowService.describeWorkflowExecution({
+        namespace: settings.temporalNamespace,
+        execution: { workflowId, runId: workflowRunId },
+      });
+      const pending = description.pendingActivities?.find(
+        (activity) => activity.activityId === activityId,
+      );
+      return temporalActivityLeaseSettled(pending) ? "settled" : "pending";
+    },
     signalCodexCapacityWorkflow: async ({
       accountId,
       workspaceId,
@@ -267,8 +375,8 @@ export async function createWorkerWorkflowSignaler(
 /**
  * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
  * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
- * sandbox ownership off the activity performs only bounded DB outbox repair;
- * it never reads/terminates sandbox leases.
+ * sandbox ownership off the activity performs bounded DB outbox repair and
+ * read-only observability projections; it never mutates or terminates sandbox leases.
  *
  * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
@@ -285,7 +393,7 @@ export async function registerSandboxReaperSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
     await temporal.schedule.create({
@@ -350,7 +458,7 @@ export async function registerFileUploadReaperSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
     await temporal.schedule.create({
@@ -394,7 +502,7 @@ export async function registerSessionWorkflowWakeDispatcherSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
     await temporal.schedule.create({
@@ -429,6 +537,248 @@ export async function registerSessionWorkflowWakeDispatcherSchedule(
   }
 }
 
+export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependencies"> & {
+  activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
+  /**
+   * Exact catalog posture required by the standalone runtime. Embedded hosts
+   * may omit this when they own an equivalent database isolation contract.
+   */
+  databasePosture?: RuntimeDatabasePostureOptions;
+  /**
+   * `role-default` registers OpenGeni's internal maintenance schedules on a
+   * control worker only. These are engine maintenance schedules, not a host's
+   * product-level scheduled-agent jobs. Use `none` when another control worker
+   * in the same deployment owns them.
+   */
+  internalSchedules?: "role-default" | "none";
+  /** Set false only when the host exposes equivalent lifecycle endpoints itself. */
+  http?: false | { readinessTimeoutMs?: number };
+};
+
+export type OpenGeniWorkerService = {
+  readonly role: OpenGeniWorkerRole;
+  readonly worker: Worker;
+  readonly connection: NativeConnection;
+  state(): WorkerLifecycleState;
+  run(): Promise<void>;
+  drain(reason?: string): void;
+  close(): Promise<void>;
+};
+
+export function workerOwnsInternalSchedules(
+  role: OpenGeniWorkerRole,
+  policy: OpenGeniWorkerServiceOptions["internalSchedules"] = "role-default",
+): boolean {
+  return role === "control" && policy !== "none";
+}
+
+/**
+ * Construct one role-specific worker process around the lower-level Temporal
+ * worker factory. The service owns every Temporal client and HTTP listener it
+ * creates. The embedding host retains ownership of its injected DB and EventBus
+ * handles and closes those only after this service has drained.
+ */
+export async function createOpenGeniWorkerService(
+  options: OpenGeniWorkerServiceOptions,
+): Promise<OpenGeniWorkerService> {
+  const settings = options.settings ?? getSettings();
+  const observability =
+    options.activityDependencies.observability ??
+    createObservability(settings, { component: `worker-${options.role}` });
+  const retryOptions = startupRetryOptions(settings);
+  const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
+    logStartupDependencyRetry(observability, event);
+  let lifecycle: WorkerServiceLifecycle | undefined;
+  let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
+  let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
+  let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
+  const schedules: Array<{ close: () => Promise<void> }> = [];
+  let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
+
+  try {
+    const needsSignaler =
+      options.role === "turn" ||
+      !options.activityDependencies.wakeSessionWorkflow ||
+      !options.activityDependencies.signalSessionAttemptQuiesced ||
+      !options.activityDependencies.inspectSessionAttemptActivity ||
+      !options.activityDependencies.signalCodexCapacityWorkflow;
+    if (needsSignaler) {
+      signaler = await retryStartupDependency(
+        "Temporal client",
+        () => createWorkerWorkflowSignaler(settings, options.activityDependencies.db),
+        { ...retryOptions, onRetry },
+      );
+    }
+    const wakeSessionWorkflow =
+      options.activityDependencies.wakeSessionWorkflow ?? signaler?.wakeSessionWorkflow;
+    const signalSessionAttemptQuiesced =
+      options.activityDependencies.signalSessionAttemptQuiesced ??
+      signaler?.signalSessionAttemptQuiesced;
+    const inspectSessionAttemptActivity =
+      options.activityDependencies.inspectSessionAttemptActivity ??
+      signaler?.inspectSessionAttemptActivity;
+    const signalCodexCapacityWorkflow =
+      options.activityDependencies.signalCodexCapacityWorkflow ??
+      signaler?.signalCodexCapacityWorkflow;
+    if (
+      !wakeSessionWorkflow ||
+      !signalSessionAttemptQuiesced ||
+      !inspectSessionAttemptActivity ||
+      !signalCodexCapacityWorkflow
+    ) {
+      throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
+    }
+    workerBundle = await createOpenGeniWorker({
+      role: options.role,
+      settings,
+      ...(options.activities ? { activities: options.activities } : {}),
+      ...(options.workflowBundle ? { workflowBundle: options.workflowBundle } : {}),
+      activityDependencies: {
+        ...options.activityDependencies,
+        settings,
+        observability,
+        wakeSessionWorkflow,
+        signalSessionAttemptQuiesced,
+        inspectSessionAttemptActivity,
+        signalCodexCapacityWorkflow,
+      },
+    });
+
+    if (options.role === "turn") {
+      if (!signaler) {
+        throw new Error("Turn worker capacity monitor could not resolve its Temporal stats client");
+      }
+      turnCapacityMonitor = startTurnCapacityMonitor({
+        observability,
+        read: signaler.getTurnTaskQueueStats,
+      });
+    }
+
+    if (workerOwnsInternalSchedules(options.role, options.internalSchedules)) {
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (sandbox reaper)",
+          () => registerSandboxReaperSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (file upload reaper)",
+          () => registerFileUploadReaperSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (session-workflow wake dispatcher)",
+          () => registerSessionWorkflowWakeDispatcherSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+    }
+
+    if (options.http !== false) {
+      httpServer = startWorkerHttpServer({
+        settings,
+        observability,
+        checks: {
+          db: dbReadyCheck(options.activityDependencies.db, options.databasePosture),
+          nats: natsReadyCheck(options.activityDependencies.bus),
+          temporal: temporalReadyCheck(workerBundle.connection),
+        },
+        ...(options.http?.readinessTimeoutMs ? { timeoutMs: options.http.readinessTimeoutMs } : {}),
+        lifecycle: { role: options.role, state: () => lifecycle?.state() ?? "starting" },
+      });
+    }
+  } catch (error) {
+    httpServer?.stop(true);
+    await Promise.allSettled([
+      turnCapacityMonitor?.close(),
+      workerBundle?.connection.close(),
+      signaler?.close(),
+      ...schedules.map((schedule) => schedule.close()),
+    ]);
+    throw error;
+  }
+
+  const activeWorkerBundle = workerBundle;
+  const activeSignaler = signaler;
+  if (!activeWorkerBundle) {
+    throw new Error("OpenGeni worker service initialization did not complete");
+  }
+
+  lifecycle = createWorkerServiceLifecycle({
+    role: options.role,
+    worker: activeWorkerBundle.worker,
+    observability,
+    closeOwnedResources: async () => {
+      httpServer?.stop(true);
+      await Promise.allSettled([
+        turnCapacityMonitor?.close(),
+        activeWorkerBundle.connection.close(),
+        activeSignaler?.close(),
+        ...schedules.map((schedule) => schedule.close()),
+      ]);
+    },
+    onReady: () => {
+      observability.info("OpenGeni worker listening", {
+        role: options.role,
+        temporalTaskQueue:
+          options.role === "control"
+            ? settings.temporalTaskQueue
+            : turnTaskQueue(settings.temporalTaskQueue),
+        ...(options.role === "turn"
+          ? turnWorkerConcurrencyLogFields(settings)
+          : {
+              concurrencyMode: "fixed",
+              maxConcurrentTurns: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+              targetCpuUsage: null,
+              targetMemoryUsage: null,
+            }),
+        maxConcurrentWorkflowTaskExecutions:
+          options.role === "control" ? CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS : 0,
+        httpPort: options.http === false ? null : settings.workerHttpPort,
+      });
+    },
+  });
+
+  return {
+    role: options.role,
+    worker: activeWorkerBundle.worker,
+    connection: activeWorkerBundle.connection,
+    state: lifecycle.state,
+    run: lifecycle.run,
+    drain: lifecycle.drain,
+    close: lifecycle.close,
+  };
+}
+
+export type RunOpenGeniWorkerOptions = OpenGeniWorkerServiceOptions & {
+  /** Defaults to SIGTERM and SIGINT. Pass false when the host owns process signals. */
+  shutdownSignals?: false | ReadonlyArray<"SIGTERM" | "SIGINT">;
+};
+
+/** Start, drain, and close one embedded worker process. */
+export async function runOpenGeniWorker(options: RunOpenGeniWorkerOptions): Promise<void> {
+  const service = await createOpenGeniWorkerService(options);
+  const signals =
+    options.shutdownSignals === false ? [] : (options.shutdownSignals ?? ["SIGTERM", "SIGINT"]);
+  const handlers = signals.map((signal) => {
+    const handler = () => service.drain(signal);
+    process.on(signal, handler);
+    return { signal, handler };
+  });
+  try {
+    await service.run();
+  } finally {
+    for (const { signal, handler } of handlers) {
+      process.off(signal, handler);
+    }
+    await service.close();
+  }
+}
+
 export async function startWorker() {
   const role = process.env.OPENGENI_WORKER_ROLE;
   if (role !== "control" && role !== "turn") {
@@ -444,20 +794,19 @@ export async function startWorker() {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
+  const databasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.runtimeDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+  } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
-  let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
-  let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
-  let reaperSchedule: Awaited<ReturnType<typeof registerSandboxReaperSchedule>> | undefined;
-  let fileUploadReaperSchedule:
-    | Awaited<ReturnType<typeof registerFileUploadReaperSchedule>>
-    | undefined;
-  let workflowWakeDispatcherSchedule:
-    | Awaited<ReturnType<typeof registerSessionWorkflowWakeDispatcherSchedule>>
-    | undefined;
-  let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
-  let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   try {
+    await retryStartupDependency(
+      "PostgreSQL runtime posture",
+      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      { ...retryOptions, onRetry },
+    );
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -470,111 +819,18 @@ export async function startWorker() {
         ),
       { ...retryOptions, onRetry },
     );
-    signaler = await retryStartupDependency(
-      "Temporal client",
-      () => createWorkerWorkflowSignaler(settings, dbClient.db),
-      { ...retryOptions, onRetry },
-    );
-    workerBundle = await createOpenGeniWorker({
+    await runOpenGeniWorker({
       role,
       settings,
+      databasePosture,
       activityDependencies: {
         observability,
-        wakeSessionWorkflow: signaler.wakeSessionWorkflow,
-        signalSessionAttemptQuiesced: signaler.signalSessionAttemptQuiesced,
-        signalCodexCapacityWorkflow: signaler.signalCodexCapacityWorkflow,
         db: dbClient.db,
         bus,
       },
     });
-    if (role === "turn") {
-      turnCapacityMonitor = startTurnCapacityMonitor({
-        observability,
-        read: signaler.getTurnTaskQueueStats,
-      });
-    }
-    httpServer = startWorkerHttpServer({
-      settings,
-      observability,
-      checks: {
-        db: dbReadyCheck(dbClient.db),
-        nats: natsReadyCheck(bus),
-        temporal: signaler.check,
-      },
-    });
-    // Control workers alone own global schedules. Turn workers poll only the
-    // bounded inference activity queue and can never duplicate schedule setup.
-    if (role === "control") {
-      reaperSchedule = await retryStartupDependency(
-        "Temporal schedule (sandbox reaper)",
-        () => registerSandboxReaperSchedule(settings, observability),
-        { ...retryOptions, onRetry },
-      );
-      fileUploadReaperSchedule = await retryStartupDependency(
-        "Temporal schedule (file upload reaper)",
-        () => registerFileUploadReaperSchedule(settings, observability),
-        { ...retryOptions, onRetry },
-      );
-      workflowWakeDispatcherSchedule = await retryStartupDependency(
-        "Temporal schedule (session-workflow wake dispatcher)",
-        () => registerSessionWorkflowWakeDispatcherSchedule(settings, observability),
-        { ...retryOptions, onRetry },
-      );
-    }
-    observability.info("OpenGeni worker listening", {
-      role,
-      temporalTaskQueue:
-        role === "control" ? settings.temporalTaskQueue : turnTaskQueue(settings.temporalTaskQueue),
-      maxConcurrentActivityTaskExecutions:
-        role === "turn"
-          ? TURN_WORKER_MAX_CONCURRENT_TURNS
-          : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-      maxConcurrentWorkflowTaskExecutions:
-        role === "control" ? CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS : 0,
-      httpPort: settings.workerHttpPort,
-    });
-    // GRACEFUL DEPLOY SHUTDOWN — the missing link that made every deploy a
-    // worker_death. The worker is the container's MAIN process (PID 1), and a
-    // PID-1 process with no explicit handler IGNORES SIGTERM: the pod sat
-    // through the entire terminationGracePeriodSeconds doing nothing, then the
-    // kubelet SIGKILLed it — so agent-turn's worker-shutdown checkpoint path
-    // (same-turn recovery + run-state save) never once ran in production
-    // (forensics 2026-07-06: every observed recovery was
-    // reason=worker_death). This handler starts the drain the moment k8s asks:
-    // shutdown() stops polling, then (per shutdownGraceTime/ForceTime above)
-    // cancels in-flight activities with WORKER_SHUTDOWN so long turns
-    // checkpoint INSIDE the grace window. run() resolves once
-    // drained and the finally below closes connections cleanly.
-    let shutdownRequested = false;
-    const requestShutdown = (signal: string) => {
-      if (shutdownRequested) {
-        return;
-      }
-      shutdownRequested = true;
-      observability.info("OpenGeni worker draining (graceful shutdown)", { signal });
-      try {
-        workerBundle!.worker.shutdown();
-      } catch (error) {
-        observability.warn("worker shutdown request failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    };
-    process.on("SIGTERM", () => requestShutdown("SIGTERM"));
-    process.on("SIGINT", () => requestShutdown("SIGINT"));
-    await workerBundle.worker.run();
   } finally {
-    httpServer?.stop(true);
-    await Promise.allSettled([
-      workerBundle?.connection.close(),
-      signaler?.close(),
-      reaperSchedule?.close(),
-      fileUploadReaperSchedule?.close(),
-      workflowWakeDispatcherSchedule?.close(),
-      turnCapacityMonitor?.close(),
-      bus?.close(),
-      dbClient.close(),
-    ]);
+    await Promise.allSettled([bus?.close(), dbClient.close()]);
   }
 }
 

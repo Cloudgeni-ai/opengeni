@@ -1,6 +1,6 @@
 # OpenGeni Grafana dashboards
 
-Dashboards-as-code for the OpenGeni control plane. Three boards, each answering a
+Dashboards-as-code for the OpenGeni control plane. Four boards, each answering a
 different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
@@ -8,8 +8,9 @@ different "manage and fix problems as soon as they arise" question:
 | `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model (TTFT + inter-delta gaps), the durable write path (append latency), or delivery (publish latency + batcher shape)? |
 | `connected-machines.json` | **OpenGeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
 | `worker-fleet.json` | **OpenGeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
+| `sandbox-health.json` | **OpenGeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
 
-All three are theme-agnostic, tagged `opengeni` + `observability`, and carry a
+All four are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
 is hardcoded.
 
@@ -60,6 +61,10 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_session_event_append_seconds`, `opengeni_session_event_publish_seconds`,
 `opengeni_model_input_tokens`, `opengeni_context_compactions_total`,
 `opengeni_machine_op_*`, `opengeni_turns_*`, `opengeni_sandbox_leases`,
+`opengeni_sandbox_operations_total`, `opengeni_sandbox_operation_duration_seconds`,
+`opengeni_sandbox_inventory_refresh_timestamp_seconds`,
+`opengeni_sandbox_checkpoint_artifacts`, `opengeni_sandbox_rotation_backlog`,
+`opengeni_sandbox_leases_expired_draining`, `opengeni_retained_processes_*`,
 `opengeni_model_call_duration_seconds`, and the prom-client defaults
 (`opengeni_process_resident_memory_bytes`).
 
@@ -69,6 +74,16 @@ A few Worker Fleet panels read **cluster-infra** series from other exporters —
 (kube-state-metrics). If those exporters aren't present, only those panels are
 empty; every app-series panel still works, and the memory board falls back to the
 app-emitted RSS panel.
+
+Sandbox inventory metrics are complete database projections emitted by whichever
+control replica executes the global reaper activity. Never sum those replicated/stale
+samples directly. The chart's `opengeni:*:fresh_max` recording rules first require the
+matching projection domain to have refreshed on the same scrape target within the
+configured freshness window (five minutes by default), then take the authoritative
+maximum. Helm rejects a freshness window shorter than three configured sandbox-reaper
+periods. A blank recorded series is an inventory
+telemetry failure, not a healthy zero; `OpenGeniSandboxInventoryProjectionStale`
+alerts on that condition.
 
 > `machine.link.*` and `machine.op.*` are session-scoped **timeline events**, not
 > Prometheus series — a machine's link history lives in the session timeline (which

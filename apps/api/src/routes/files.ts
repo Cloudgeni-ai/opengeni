@@ -4,6 +4,13 @@ import {
   CreateFileUploadResponse,
   FileAsset,
   FileDownloadUrlResponse,
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  RetainedArtifactMetadataSchema,
+  retainedArtifactReferenceFromFile,
+  resolveRetainedOutputRange,
+  type RetainedArtifactMetadata,
+  type RetainedOutputUnavailableReason,
 } from "@opengeni/contracts";
 import {
   claimFileUploadCleanup,
@@ -11,16 +18,29 @@ import {
   completeFileUpload,
   createFileUpload,
   getFileUpload,
+  getRetainedFileArtifact,
   requireFile,
+  type RetainedFileArtifact,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { buildFilesMcpServer } from "../mcp/files";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
+
+  app.all("/v1/workspaces/:workspaceId/mcp/files", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const server = buildFilesMcpServer(deps, grant);
+    await server.connect(transport);
+    return await transport.handleRequest(c.req.raw);
+  });
 
   app.post("/v1/workspaces/:workspaceId/files/uploads", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -235,6 +255,90 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(FileAsset.parse(file));
   });
 
+  app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const artifactId = retainedArtifactId(c.req.param("artifactId"));
+    const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+    if (!artifact) {
+      return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
+    }
+    return c.json(retainedArtifactMetadata(artifact));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId/content", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const artifactId = retainedArtifactId(c.req.param("artifactId"));
+    const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+    if (!artifact) {
+      return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
+    }
+
+    const metadata = retainedArtifactMetadata(artifact);
+    if (!metadata.available) {
+      return c.json(metadata, retainedArtifactUnavailableStatus(metadata.reason));
+    }
+    if (!objectStorage) {
+      return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 503);
+    }
+
+    const rangeHeader = c.req.header("range");
+    const range = resolveRetainedOutputRange(
+      rangeHeader,
+      metadata.originalBytes,
+      rangeHeader ? RETAINED_OUTPUT_MAX_PAGE_BYTES : RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+    );
+    if (range.kind === "invalid") {
+      return c.json(
+        {
+          message: "invalid retained artifact byte range",
+          reason: range.reason,
+          maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+        },
+        400,
+      );
+    }
+    if (range.kind === "unsatisfiable") {
+      return c.json(
+        { message: "retained artifact byte range is not satisfiable", reason: range.reason },
+        416,
+        {
+          "Accept-Ranges": "bytes",
+          "Content-Range": range.contentRange,
+          "Cache-Control": "private, no-store",
+        },
+      );
+    }
+
+    const headers = {
+      "Accept-Ranges": range.acceptRanges,
+      "Cache-Control": "private, no-store",
+      "Content-Length": String(range.length),
+      "Content-Type": metadata.contentType,
+      "X-Content-Type-Options": "nosniff",
+      ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
+    };
+    if (range.kind === "empty") {
+      if (!(await objectStorage.fileExists(artifact.file))) {
+        return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
+      }
+      return c.body(null, 200, headers);
+    }
+
+    const bytes = await objectStorage.getFileRange(artifact.file, {
+      start: range.start,
+      end: range.end,
+    });
+    if (!bytes) {
+      return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
+    }
+    if (bytes.byteLength !== range.length) {
+      throw new HTTPException(502, { message: "object storage returned an invalid byte range" });
+    }
+    return c.body(new Uint8Array(bytes), range.status, headers);
+  });
+
   app.post("/v1/workspaces/:workspaceId/files/:fileId/download-url", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "files:read");
@@ -258,7 +362,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-function sanitizeFilename(filename: string): string {
+export function sanitizeFilename(filename: string): string {
   const trimmed = filename.trim().replace(/[/\\]/g, "_");
   const safe = trimmed
     .replace(/[^A-Za-z0-9._ -]+/g, "_")
@@ -270,4 +374,64 @@ function sanitizeFilename(filename: string): string {
 /** Keep the cleanup lease internal; clients only consume terminal upload states. */
 function publicFileUploadStatus(status: string): string {
   return status === "cleanup_pending" ? "failed" : status;
+}
+
+function retainedArtifactId(value: string): string {
+  const parsed = FileAsset.shape.id.safeParse(value);
+  if (!parsed.success) {
+    throw new HTTPException(404, { message: "artifact not found" });
+  }
+  return parsed.data;
+}
+
+function retainedArtifactUnavailable(
+  artifactId: string,
+  reason: RetainedOutputUnavailableReason,
+): RetainedArtifactMetadata {
+  return RetainedArtifactMetadataSchema.parse({ available: false, artifactId, reason });
+}
+
+function retainedArtifactMetadata(artifact: RetainedFileArtifact): RetainedArtifactMetadata {
+  const reference = retainedArtifactReferenceFromFile(artifact.file);
+  if (reference) return reference;
+
+  const { file, uploadStatus, uploadExpiresAt } = artifact;
+  if (file.status === "deleted") {
+    return retainedArtifactUnavailable(file.id, "deleted");
+  }
+  if (
+    file.status === "expired" ||
+    uploadStatus === "expired" ||
+    (uploadStatus === "pending" &&
+      uploadExpiresAt !== null &&
+      uploadExpiresAt.getTime() < Date.now())
+  ) {
+    return retainedArtifactUnavailable(file.id, "expired");
+  }
+  if (file.status === "failed" || uploadStatus === "failed" || uploadStatus === "cleanup_pending") {
+    return retainedArtifactUnavailable(file.id, "failed");
+  }
+  if (file.status === "pending_upload" || uploadStatus === "pending") {
+    return retainedArtifactUnavailable(file.id, "pending");
+  }
+  return retainedArtifactUnavailable(file.id, "unsupported");
+}
+
+function retainedArtifactUnavailableStatus(
+  reason: RetainedOutputUnavailableReason,
+): 404 | 409 | 410 | 422 {
+  switch (reason) {
+    case "deleted":
+      return 404;
+    case "expired":
+    case "missing_storage":
+      return 410;
+    case "unsupported":
+    case "not_retained":
+    case "storage_write_failed":
+      return 422;
+    case "pending":
+    case "failed":
+      return 409;
+  }
 }

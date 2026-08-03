@@ -44,6 +44,7 @@
 
   --color-og-accent: var(--og-color-accent);
   --color-og-accent-strong: var(--og-color-accent-strong);
+  --color-og-accent-deep: var(--og-color-accent-deep);
   --color-og-accent-fg: var(--og-color-accent-fg);
   --color-og-accent-soft: var(--og-color-accent-soft);
 
@@ -75,8 +76,19 @@
   --animate-og-blink: og-blink 1s steps(2, start) infinite;
   --animate-og-shimmer: og-shimmer 2.2s linear infinite;
   --animate-og-spin: og-spin 0.9s linear infinite;
-  --animate-og-expand: og-expand var(--og-duration-fast) var(--og-ease-in-out);
-  --animate-og-collapse: og-collapse var(--og-duration-fast) var(--og-ease-in-out);
+  --animate-og-waveform: og-waveform 1.15s var(--og-ease-in-out) infinite;
+  /* Manual disclose — snappy. Auto settle-collapse is the slow path below. */
+  --animate-og-expand: og-expand var(--og-duration-disclose) var(--og-ease-in-out);
+  --animate-og-collapse: og-collapse var(--og-duration-disclose) var(--og-ease-in-out);
+  /* Auto-fold the reader did not ask for: ~7× manual so it reads as choreography. */
+  --animate-og-settle-chip: og-settle-chip var(--og-duration-slow) var(--og-ease-out) both;
+  /* Ease-out: settle lands softly (slow tail), not a symmetric ease-in-out stop. */
+  --animate-og-settle-collapse: og-collapse var(--og-duration-disclose-settle) var(--og-ease-out);
+  /* Live tool rows arriving mid-turn — soft, not tied to manual disclose speed. */
+  --animate-og-row-enter: og-row-enter var(--og-duration-slow) var(--og-ease-stream) both;
+  /* Stream end fallback breath when View Transitions are unavailable. */
+  --animate-og-markdown-settle: og-markdown-settle var(--og-duration-markdown-crystallize)
+    var(--og-ease-stream) both;
 }
 
 /* Radix Collapsible disclosure: height auto-animates via the content var. Used
@@ -92,7 +104,10 @@
     height: 0;
     opacity: 0;
   }
-  60% {
+  40% {
+    opacity: 0.25;
+  }
+  85% {
     opacity: 1;
   }
   to {
@@ -106,7 +121,10 @@
     height: var(--radix-collapsible-content-height);
     opacity: 1;
   }
-  40% {
+  35% {
+    opacity: 0.7;
+  }
+  70% {
     opacity: 0;
   }
   to {
@@ -115,16 +133,74 @@
   }
 }
 
-/* Entry: messages and timeline rows slide in just enough to feel placed. */
-@keyframes og-enter {
+/* Settle chip emphasis — never opacity 0. The live shell already shows this
+   row; fading it out→in was the "steps flash" when settle armed or when
+   activity→turn remounted and duration/facets caught up. */
+@keyframes og-settle-chip {
   from {
-    opacity: 0;
-    transform: translateY(4px);
+    background-color: color-mix(in oklch, var(--color-og-surface-1, transparent) 55%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+/* Streaming tip ink: short age-window wash. Fast arrival still keeps a soft
+   band (many young batches); slow arrival is only a tight tip breath — a long
+   linear fade read as 2–3× too much wash on sparse tokens. Inline, no transform. */
+@keyframes og-stream-ink {
+  from {
+    opacity: 0.3;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
+}
+.og-stream-ink {
+  display: inline;
+  animation: og-stream-ink var(--og-duration-stream) var(--og-ease-out) both;
+}
+
+/* Stream-end remount fallback when View Transitions are unavailable.
+   No blur — blur read as a slow blink on the whole assistant message. */
+@keyframes og-markdown-settle {
+  from {
+    opacity: 0.92;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.og-markdown-settle {
+  animation: var(--animate-og-markdown-settle);
+}
+
+/* Markdown crystallize no longer uses View Transitions — styling `*` faded the
+   document root and read as a full-page blink at stream end. Local
+   `.og-markdown-settle` on the body is enough. */
+
+/* Entry: opacity only — translateY fought the tip-follow camera and ticked. */
+@keyframes og-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Live activity rows: opacity only. translateY stacked with tip stick and
+   read as a second one-line tick on every tool/message append. */
+@keyframes og-row-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-og-row-enter {
+  animation: var(--animate-og-row-enter);
 }
 
 /* Live/running indicators breathe; they do not flash. */
@@ -162,6 +238,19 @@
 @keyframes og-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Composer voice waveform — calm bar motion when AnalyserNode levels are unavailable. */
+@keyframes og-waveform {
+  0%,
+  100% {
+    transform: scaleY(0.28);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 0.95;
   }
 }
 
@@ -236,6 +325,10 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+  /* Age-window delays would otherwise hold tip ink invisible (fill: both). */
+  .og-root .og-stream-ink {
+    animation-delay: 0ms !important;
   }
 }
 

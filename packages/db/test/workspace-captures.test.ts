@@ -11,6 +11,7 @@ import {
   insertWorkspaceCapture,
   listSessionEvents,
   latestWorkspaceCapture,
+  sessionLatestWorkspaceCapture,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -112,11 +113,12 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       insert into session_turn_attempts
         (id, account_id, workspace_id, session_id, turn_id, execution_generation,
          state, outcome, temporal_workflow_id, temporal_workflow_run_id,
-         temporal_activity_id, verified_control_revision, closed_at)
+         temporal_activity_id, verified_control_revision, mcp_approval_policies, closed_at)
       values
         (${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id},
          ${turn!.id}, ${turn!.execution_generation}, 'closed', 'completed',
-         ${`session-${session.id}`}, 'capture-test-run', 'capture-test-activity', 0, now())`;
+         ${`session-${session.id}`}, 'capture-test-run', 'capture-test-activity', 0,
+         '{}'::jsonb, now())`;
 
     const input = {
       ...workspace,
@@ -169,6 +171,20 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       blobKeys: [],
       sizeBytes: 0,
       stats: input.stats,
+    });
+    expect(
+      await sessionLatestWorkspaceCapture(db, workspace.workspaceId, session.id),
+    ).toMatchObject({
+      sessionExists: true,
+      capture: {
+        revision: 0,
+        state: "failed",
+        stats: input.stats,
+      },
+    });
+    expect(await sessionLatestWorkspaceCapture(db, workspace.workspaceId, randomUUID())).toEqual({
+      sessionExists: false,
+      capture: null,
     });
     const [count] = await admin<{ count: number }[]>`
       select count(*)::int as count from workspace_captures where session_id = ${session.id}`;

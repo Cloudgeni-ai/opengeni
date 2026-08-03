@@ -1,5 +1,13 @@
 {{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
+{{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
+{{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
+{{- if le $inventoryFreshnessSeconds 0 }}
+{{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
+{{- end }}
+{{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
+{{- fail "observability.prometheusRule.inventoryFreshnessSeconds must cover at least three sandbox reaper periods" }}
+{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -17,9 +25,52 @@ spec:
   groups:
     - name: opengeni.rules
       rules:
-        {{- if ((.Values.observability).prometheusRule).rules }}
-        {{- toYaml ((.Values.observability).prometheusRule).rules | nindent 8 }}
-        {{- else }}
+        # These recording rules admit only a complete inventory projection whose
+        # matching domain refreshed on the same scrape target within the configured
+        # window. A global reaper activity can hop between control replicas, so
+        # an unfiltered max would retain a stale high value on the former winner.
+        - record: opengeni:sandbox_leases:fresh_max
+          expr: |
+            max by (liveness) (
+              opengeni_sandbox_leases
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="leases"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:sandbox_checkpoint_artifacts:fresh_max
+          expr: |
+            max by (state) (
+              opengeni_sandbox_checkpoint_artifacts
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:sandbox_rotation_backlog:fresh_max
+          expr: |
+            max by (kind) (
+              opengeni_sandbox_rotation_backlog
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="rotation_backlog"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:retained_processes_active:fresh_max
+          expr: |
+            max by (owner_state) (
+              opengeni_retained_processes_active
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="retained_processes"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:retained_processes_terminal_owner_backlog:fresh_max
+          expr: |
+            max by (owner_state) (
+              opengeni_retained_processes_terminal_owner_backlog
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="retained_processes"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:sandbox_leases_expired_draining:fresh_max
+          expr: |
+            max by (backend, age_bucket) (
+              opengeni_sandbox_leases_expired_draining
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="expired_drains"} < {{ $inventoryFreshnessSeconds }})
+            )
         - alert: OpenGeniTurnStuck
           expr: opengeni_turn_oldest_inflight_age_seconds > 900
           for: 5m
@@ -28,18 +79,93 @@ spec:
           annotations:
             summary: OpenGeni has an agent turn stuck for more than 15 minutes
         - alert: OpenGeniSandboxCreateFailureRatio
-          expr: sum(rate(opengeni_sandbox_creates_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_sandbox_creates_total[10m])), 1) > 0.2
+          expr: |
+            (
+              sum(increase(opengeni_sandbox_creates_total{outcome="failed"}[10m]))
+              /
+              clamp_min(sum(increase(opengeni_sandbox_creates_total[10m])), 1)
+            ) > 0.2
+            and on()
+            sum(increase(opengeni_sandbox_creates_total[10m])) >= 5
           for: 10m
           labels:
             severity: warning
           annotations:
             summary: OpenGeni sandbox create failures exceed 20%
+        - alert: OpenGeniSandboxWarmingTimeout
+          expr: sum(increase(opengeni_sandbox_warming_timeouts_total[15m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni observed a sandbox warming timeout
+        - alert: OpenGeniSandboxOperationFailureRatio
+          expr: |
+            (
+              sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome="failed"}[10m]))
+              /
+              clamp_min(sum by (backend, op) (increase(opengeni_sandbox_operations_total[10m])), 1)
+            ) > 0.2
+            and
+            sum by (backend, op) (increase(opengeni_sandbox_operations_total[10m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni routed sandbox operation failures exceed 20%
         - alert: OpenGeniSandboxOrphansTerminatedGrowing
-          expr: increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0
+          expr: sum(increase(opengeni_sandbox_orphans_terminated_total[30m])) > 0
           labels:
             severity: warning
           annotations:
             summary: OpenGeni reaper terminated provider-side orphan sandboxes
+        - alert: OpenGeniSandboxRotationOverdue
+          expr: opengeni:sandbox_rotation_backlog:fresh_max{kind="overdue"} > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni has a sandbox past its provider deadline
+            description: A finite-lifetime sandbox has remained past its precomputed provider deadline for 10m. Check turn, direct-operation, and retained-process blockers, checkpoint capture, reaper health, and Modal API errors before the provider kills it.
+        - alert: OpenGeniSandboxCheckpointDeletionFailed
+          expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{state="delete_failed"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni cannot garbage-collect a provider checkpoint
+            description: A provider-bound checkpoint deletion has failed for 15m. Credential/workspace rotation is a common intentional fence; inspect the artifact binding and deletion error instead of deleting under ambient credentials.
+        - alert: OpenGeniRetainedProcessTerminalOwnerBacklog
+          expr: sum(opengeni:retained_processes_terminal_owner_backlog:fresh_max) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni has retained sandbox processes whose logical owners are terminal
+            description: A completed/failed/cancelled owner still has a physical sandbox process after 15m. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
+        - alert: OpenGeniSandboxDrainExpired
+          expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{age_bucket=~"5m_1h|1h_1d|gte_1d"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni has a sandbox stuck in draining
+            description: A refcount-zero sandbox has exceeded its drain deadline. Check archive capture, provider termination, checkpoint publication, and reaper errors.
+        - alert: OpenGeniSandboxInventoryProjectionStale
+          expr: |
+            min by (domain) (
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds
+            ) > {{ $inventoryFreshnessSeconds }}
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="leases"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="rotation_backlog"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="retained_processes"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="expired_drains"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni sandbox inventory telemetry is stale or absent
+            description: No control replica has completed a fresh database projection for at least one sandbox inventory domain. Threshold alerts for that domain intentionally fail closed until projection health returns.
         - alert: OpenGeniCodexCredentialPoolEmpty
           expr: increase(opengeni_codex_pool_low_total{depth="zero"}[5m]) > 0
           for: 1m
@@ -126,9 +252,36 @@ spec:
           annotations:
             summary: OpenGeni codex prompt-cache hit ratio p50 below 40% over 30m
             description: The codex-subscription prompt cache is serving under 40% of prompt tokens from cache (median call) for 30m. Suspect prompt-cache thrash — an account rotation cold-starts the provider's per-account cache. Cross-check the per-call usage logs' accountChangedFromPrevCall against cachedTokens.
+        - alert: OpenGeniCodexPromptCacheTelemetryMissing
+          # A missing cached-token field is unknown, not a truthful 0% hit. Keep
+          # that semantics while separately alerting whenever Codex calls are
+          # flowing with unavailable cache-read telemetry.
+          expr: |
+            (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
+            or
+            (
+              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) > 0
+              and on()
+              (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0))
+              <
+              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m]))
+            )
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni Codex prompt-cache telemetry is missing on active calls
+            description: Codex-subscription model calls have omitted cached-token telemetry for 15m. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility and worker rejected-field diagnostics.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
-          expr: sum(rate(opengeni_machine_op_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_machine_op_total[10m])), 1) > 0.1
+          expr: |
+            (
+              sum(increase(opengeni_machine_op_total{outcome="failed"}[10m]))
+              /
+              clamp_min(sum(increase(opengeni_machine_op_total[10m])), 1)
+            ) > 0.1
+            and on()
+            sum(increase(opengeni_machine_op_total[10m])) >= 10
           for: 10m
           labels:
             severity: warning
@@ -145,10 +298,9 @@ spec:
           annotations:
             summary: OpenGeni Connected Machine healed-fault rate is elevated (leading indicator)
         # ── Worker fleet ─────────────────────────────────────────────────────
-        # These two read cluster-infra series (cAdvisor + kube-state-metrics); if
-        # those exporters are absent the alerts simply never fire (no data). Pod/
-        # HPA matchers assume the default "opengeni" release name — override
-        # observability.prometheusRule.rules for a custom name.
+        # Eligible backlog and slot saturation are correlated on one exact
+        # scrape identity before fleet aggregation. Paused human prompts never
+        # enter these Temporal activity-queue signals.
         - alert: OpenGeniTurnEligibleBacklogOld
           expr: |
             max(
@@ -201,6 +353,10 @@ spec:
           annotations:
             summary: OpenGeni eligible-turn backlog monitoring is stale
             description: At least one expected turn-worker scrape is down, missing its monitor series, or has not produced a fresh Temporal DescribeTaskQueue sample for this exact namespace, release, and environment. Backlog values are diagnostic only until freshness recovers.
+        # The remaining rules read cluster-infra series (cAdvisor and
+        # kube-state-metrics); without those exporters they remain absent.
+        # Additional environment-specific alerts may be appended with
+        # observability.prometheusRule.rules.
         - alert: OpenGeniWorkerMemoryNearLimit
           expr: |
             max by (namespace, pod, container) (
@@ -226,5 +382,7 @@ spec:
           annotations:
             summary: An OpenGeni HPA has been pinned at maxReplicas (capacity saturation)
             description: The autoscaler cannot add more pods; sustained saturation means turns queue. Raise maxReplicas or investigate the load source.
+        {{- with ((.Values.observability).prometheusRule).rules }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
 {{- end }}

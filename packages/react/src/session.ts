@@ -1,0 +1,114 @@
+// @opengeni/react/session — session state and pure timeline projection.
+//
+// This entry deliberately excludes styled components, workbench surfaces, CSS,
+// and their optional peers. Hosts keep OpenGeni's session semantics while
+// rendering their own product UI.
+
+export type {
+  EmbeddedFileAttachmentClientLike as FileAttachmentClientLike,
+  EmbeddedGoalClientLike as GoalClientLike,
+  EmbeddedHumanInputSessionClientLike as HumanInputSessionClientLike,
+  EmbeddedSessionLineageClientLike as SessionLineageClientLike,
+  EmbeddedSessionMcpApprovalPolicyClientLike as SessionMcpApprovalPolicyClientLike,
+  EmbeddedSessionReadClientLike as SessionReadClientLike,
+  EmbeddedSessionClientLike as SessionClientLike,
+} from "./client";
+export type {
+  EmbeddedFileAttachmentClientOverride as FileAttachmentClientOverride,
+  EmbeddedGoalClientOverride as GoalClientOverride,
+  EmbeddedHumanInputClientOverride as HumanInputClientOverride,
+  EmbeddedSessionLineageClientOverride as SessionLineageClientOverride,
+  EmbeddedSessionMcpApprovalPolicyClientOverride as SessionMcpApprovalPolicyClientOverride,
+  EmbeddedSessionReadClientOverride as SessionReadClientOverride,
+  EmbeddedSessionClientOverride as ClientOverride,
+} from "./session-context";
+
+export { useSession, isTitleEvent } from "./hooks/use-session";
+export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
+export { useSessionEvents } from "./hooks/use-session-events";
+export type {
+  SessionEventsConnectionState,
+  UseSessionEventsOptions,
+  UseSessionEventsResult,
+} from "./hooks/use-session-events";
+export {
+  useComposer,
+  composeSendInput,
+  shouldSteerOnKey,
+  shouldSubmitOnKey,
+  FILE_ONLY_MESSAGE_TEXT,
+} from "./hooks/use-composer";
+export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { useFileAttachments } from "./hooks/use-file-attachments";
+export type {
+  FileAttachment,
+  UseFileAttachmentsOptions,
+  UseFileAttachmentsResult,
+} from "./hooks/use-file-attachments";
+export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
+export type {
+  QueueMutationKind,
+  UseTurnQueueOptions,
+  UseTurnQueueResult,
+} from "./hooks/use-turn-queue";
+export { useGoal, isGoalEvent } from "./hooks/use-goal";
+export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
+export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-lineage";
+export type {
+  UseSessionLineageOptions,
+  UseSessionLineageResult,
+} from "./hooks/use-session-lineage";
+export { useSessionControl } from "./hooks/use-session-control";
+export type {
+  UseSessionControlOptions,
+  UseSessionControlResult,
+} from "./hooks/use-session-control";
+export {
+  isSessionMcpApprovalPolicyEvent,
+  useSessionMcpApprovalPolicy,
+} from "./hooks/use-session-mcp-approval-policy";
+export type {
+  UseSessionMcpApprovalPolicyOptions,
+  UseSessionMcpApprovalPolicyResult,
+} from "./hooks/use-session-mcp-approval-policy";
+
+export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export type { PendingApproval } from "./approvals";
+
+export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
+export type { PendingHumanInputRequest } from "./human-input";
+export { isHumanInputEvent, useHumanInputRequests } from "./hooks/use-human-input";
+export type {
+  UseHumanInputRequestsOptions,
+  UseHumanInputRequestsResult,
+} from "./hooks/use-human-input";
+
+export {
+  buildTimeline,
+  creditExhaustedFromEvents,
+  extractSessionRef,
+  groupTimeline,
+  sessionStatusFromEvents,
+  toolDisplayName,
+} from "./timeline/projection";
+export type {
+  ActivityItem,
+  AgentMessageItem,
+  AuthNeededItem,
+  GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
+  MemoryItem,
+  NoticeItem,
+  ReasoningItem,
+  SandboxItem,
+  SessionStatusItem,
+  TimelineGroup,
+  TimelineItem,
+  TurnOutcome,
+  ToolCallItem,
+  TurnEndItem,
+  UserMessageItem,
+  WorkerCompletionItem,
+  WorkerItem,
+} from "./timeline/types";

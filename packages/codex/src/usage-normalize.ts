@@ -11,6 +11,10 @@
 // limit-reached body. The parser is zod over rate_limit.{primary,secondary}_window.
 
 import * as z from "zod/v4";
+import {
+  parseCodexRateLimitResetCreditsSummary,
+  type CodexRateLimitResetCreditsSummary,
+} from "./reset-credits";
 
 /** The 5-hour (primary) window's `limit_window_seconds`. */
 export const CODEX_FIVE_HOUR_WINDOW_SECONDS = 18000;
@@ -46,12 +50,22 @@ export type CodexUsagePayload = {
   weekly: CodexUsageWindow | null; // ← rate_limit.secondary_window (604800)
   limitReached: boolean; // rate_limit.limit_reached || !rate_limit.allowed
   fetchedAt: string; // ISO; server stamp
+  /**
+   * Authoritative count-only reset-credit summary from the usage response.
+   * Detail rows are fetched separately and are never synthesized from this.
+   */
+  rateLimitResetCredits: CodexRateLimitResetCreditsSummary | null;
   /** Present only on a refresh/auth failure path; carries the precise reason. */
   reason?: "needs_relogin" | undefined;
   // forward-compat, populated but unused in P2:
   additionalLimits?: CodexAdditionalLimit[] | undefined;
   credits?:
-    | { hasCredits: boolean; unlimited: boolean; overageLimitReached: boolean; balance: string }
+    | {
+        hasCredits: boolean;
+        unlimited: boolean;
+        overageLimitReached: boolean;
+        balance: string;
+      }
     | undefined;
 };
 
@@ -177,7 +191,10 @@ function pickWindows(
   // Track each unplaced window with the slot it came from, so the positional
   // fallback can place it (re-normalizing produces a fresh object that would
   // never match by reference — the bug this replaces).
-  const unplaced: Array<{ slot: "primary" | "secondary"; window: CodexUsageWindow }> = [];
+  const unplaced: Array<{
+    slot: "primary" | "secondary";
+    window: CodexUsageWindow;
+  }> = [];
   for (const [slot, raw] of [
     ["primary", primary],
     ["secondary", secondary],
@@ -219,6 +236,7 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
     weekly: null,
     limitReached: false,
     fetchedAt,
+    rateLimitResetCredits: parseCodexRateLimitResetCreditsSummary(rawPayload),
   };
 
   // A non-404 HTTP error, or a body we could not parse at all, is an error state.

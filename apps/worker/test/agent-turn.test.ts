@@ -1,64 +1,122 @@
-import { describe, expect, mock, test } from "bun:test";
-import {
-  ActiveSessionHistoryLimitExceededError,
-  ApprovalRunStateLimitExceededError,
-} from "@opengeni/db";
-import { CancelledFailure } from "@temporalio/activity";
+import { describe, expect, mock, spyOn, test } from "bun:test";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
+import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
+import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { createObservability } from "@opengeni/observability";
+import * as opengeniDb from "@opengeni/db";
 import {
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
 } from "@opengeni/codex";
 import {
+  ActiveSessionHistoryLimitExceededError,
+  ApprovalRunStateLimitExceededError,
   interruptedToolCallResult,
   runIdempotentPersistenceTransaction,
   SandboxImageConflictError,
+  SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
   CompactionProviderResponseError,
+  CompactionNeededError,
   EmptyCompactionSummaryError,
+  WorkspaceArchiveIntegrityError,
+  contextRobustnessFilterForSettings,
+  modelResponseUsageFromResponse,
+  safeMcpTransportError,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertModelResponseLatencyMode,
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
+  credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
+  createCompactionModelUsageEventState,
+  createModelResponseUsageEventState,
   createTurnSandboxProvisioner,
+  drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
+  escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
+  headerSecretRedactions,
   historyRowsToAppend,
+  hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
   isWorkerShutdownCancellation,
+  legacyTurnExecutionPolicyInput,
+  modelAttachmentInputPolicyForTurn,
+  modelSupportsImageInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
+  modelResponseUsageContextSignal,
+  managedSandboxOwnershipForTurn,
   pointerReconcileReason,
+  processCompactionModelUsageEvent,
+  processModelResponseUsageEvent,
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
+  requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
+  safeErrorDiagnostic,
+  sandboxDeadlineRotationRecoveryDelayMs,
+  secretRedactionModelInputFilter,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
+  stableHumanInputRequestId,
+  structuredToolTransportForTurn,
+  turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
+  unavailableMcpTurnInstructions,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
+import { createSecretRedactor } from "../src/activities/redaction";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
+import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
+
+const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("disconnected MCP turn instructions", () => {
+  test("warns the model without exposing an unbounded unavailable registry", () => {
+    expect(
+      unavailableMcpTurnInstructions({
+        droppedIds: ["cap-linear", "cap-slack"],
+        droppedCount: 4,
+      }),
+    ).toBe(
+      'MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: "cap-linear", "cap-slack", plus 2 additional unavailable server(s). Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.',
+    );
+  });
+
+  test("is absent when no selected server was dropped", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
+  });
+
+  test("keeps a generic warning when legacy ids cannot be projected safely", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 1 })).toContain(
+      "1 unavailable server(s)",
+    );
+  });
+});
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -82,6 +140,66 @@ function functionResult(callId: string) {
     output: { type: "text", text: "ok" },
   };
 }
+
+function citedAssistantMessage() {
+  return {
+    type: "message",
+    role: "assistant",
+    content: [
+      {
+        type: "output_text",
+        text: "OpenGeni is documented here [1].",
+        providerData: {
+          annotations: [
+            {
+              type: "url_citation",
+              start_index: 28,
+              end_index: 31,
+              url: "https://docs.opengeni.example/search",
+              title: "OpenGeni search documentation",
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
+describe("turn credential subject authority", () => {
+  test("passes only a direct human/API turn to broad personal connection resolution", () => {
+    expect(
+      credentialSubjectIdForTurnInitiator({
+        source: "user",
+        initiator: { kind: "subject", subjectId: "subject-alice" },
+        initiatorContext: {},
+      }),
+    ).toBe("subject-alice");
+    expect(
+      credentialSubjectIdForTurnInitiator({
+        source: "goal",
+        initiator: { kind: "service", subjectId: "goal-continuation" },
+        initiatorContext: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      credentialSubjectIdForTurnInitiator({
+        source: "system",
+        initiator: { kind: "subject", subjectId: "subject-alice" },
+        initiatorContext: { via: [{ sessionId: crypto.randomUUID() }] },
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("structured human-input identity", () => {
+  test("is stable for one logical tool call and distinct across calls or turns", () => {
+    const first = stableHumanInputRequestId("session-1", "turn-1", "call-1");
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-1")).toBe(first);
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-2")).not.toBe(first);
+    expect(stableHumanInputRequestId("session-1", "turn-2", "call-1")).not.toBe(first);
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});
 
 async function actualCodexStreamingFailure(event: Record<string, unknown>): Promise<{
   calls: number;
@@ -186,6 +304,243 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
   }
   return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
 }
+
+describe("turn secret-redaction boundaries", () => {
+  const syntheticSecret = "synthetic-turn-secret-value-123456";
+  const redact = createSecretRedactor([{ name: "TURN_SECRET", value: syntheticSecret }]);
+
+  test("redacts current history before durable append", () => {
+    const result = historyRowsToAppend(
+      [userMessage(`tool output ${syntheticSecret}`)],
+      0,
+      0,
+      undefined,
+      redact,
+    );
+
+    expect(JSON.stringify(result.rows)).not.toContain(syntheticSecret);
+    expect(JSON.stringify(result.rows)).toContain("[redacted:TURN_SECRET]");
+  });
+
+  test("preserves provider citations in the structured durable assistant item", () => {
+    const cited = citedAssistantMessage();
+    const result = historyRowsToAppend([cited], 0);
+
+    expect(result.rows).toEqual([{ position: 0, item: cited }]);
+    expect(
+      (
+        (result.rows[0]!.item.content as Array<Record<string, unknown>>)[0]!.providerData as {
+          annotations: Array<Record<string, unknown>>;
+        }
+      ).annotations[0],
+    ).toMatchObject({
+      type: "url_citation",
+      url: "https://docs.opengeni.example/search",
+      title: "OpenGeni search documentation",
+    });
+  });
+
+  test("redacts replayed and current items at the literal model-call seam", async () => {
+    const filter = secretRedactionModelInputFilter(redact);
+    const output = await filter({
+      modelData: {
+        input: [
+          userMessage(`legacy ${syntheticSecret}`),
+          {
+            type: "function_call_result",
+            callId: "call_safe",
+            output: "Authorization: Bearer synthetic-bearer-value-123456",
+          },
+        ],
+      },
+    } as never);
+
+    const serialized = JSON.stringify(output);
+    expect(serialized).not.toContain(syntheticSecret);
+    expect(serialized).not.toContain("synthetic-bearer-value");
+    expect(serialized).toContain("[redacted:TURN_SECRET]");
+    expect(serialized).toContain("Authorization: Bearer [redacted]");
+  });
+
+  test("safe logging diagnostics exclude stack, cause, and synthetic credentials", () => {
+    const error = Object.assign(new Error(`request rejected; token=${syntheticSecret}`), {
+      status: 401,
+      code: "AUTH_REJECTED",
+      cause: { responseBody: syntheticSecret },
+    });
+    const diagnostic = safeErrorDiagnostic(error, (value) => String(redact(value)));
+
+    expect(diagnostic).toEqual({
+      name: "Error",
+      message: "request rejected; token=[redacted:TURN_SECRET]",
+      status: 401,
+      code: "AUTH_REJECTED",
+    });
+    expect(diagnostic).not.toHaveProperty("stack");
+    expect(diagnostic).not.toHaveProperty("cause");
+    expect(JSON.stringify(diagnostic)).not.toContain(syntheticSecret);
+  });
+
+  test("registers only credential-bearing MCP headers", () => {
+    expect(
+      headerSecretRedactions("MCP", {
+        authorization: "Bearer synthetic-mcp-auth-value-123456",
+        cookie: "session=synthetic-mcp-cookie-value-123456",
+        "x-api-key": "synthetic-mcp-api-key-value-123456",
+        "content-type": "application/json",
+        accept: "application/json",
+        "user-agent": "mcp-client/1.0",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      }),
+    ).toEqual([
+      { name: "MCP_AUTHORIZATION", value: "Bearer synthetic-mcp-auth-value-123456" },
+      { name: "MCP_AUTHORIZATION_CREDENTIAL", value: "synthetic-mcp-auth-value-123456" },
+      { name: "MCP_COOKIE", value: "session=synthetic-mcp-cookie-value-123456" },
+      { name: "MCP_X_API_KEY", value: "synthetic-mcp-api-key-value-123456" },
+    ]);
+  });
+
+  test("registers explicit custom static MCP credential headers by provenance", () => {
+    expect(
+      headerSecretRedactions(
+        "MCP_CRM_STATIC",
+        { "Private-Token": "synthetic-static-private-token-123456" },
+        ["Private-Token"],
+      ),
+    ).toEqual([
+      {
+        name: "MCP_CRM_STATIC_PRIVATE_TOKEN",
+        value: "synthetic-static-private-token-123456",
+      },
+    ]);
+  });
+
+  test("registers every renewed MCP header returned by the credential broker", () => {
+    expect(
+      headerSecretRedactions("MCP", { "Private-Token": "synthetic-renewed-private-token-123456" }, [
+        "Private-Token",
+      ]),
+    ).toEqual([
+      {
+        name: "MCP_PRIVATE_TOKEN",
+        value: "synthetic-renewed-private-token-123456",
+      },
+    ]);
+  });
+
+  test("pairs renewed custom MCP values with current names, not stale session metadata", () => {
+    const currentValue = "synthetic-current-private-token-123456";
+    const currentResolvedServer = {
+      id: "crm",
+      headers: { "Private-Token": currentValue, "X-Page-Token": "page-2" },
+      headerNames: ["Private-Token"],
+    };
+    const staleSessionProjection = {
+      id: currentResolvedServer.id,
+      headerNames: ["Old-Private-Token"],
+    };
+    const staleRegistration = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentResolvedServer.headers,
+      staleSessionProjection.headerNames,
+    );
+    const currentHeaderNamesById = new Map([
+      [currentResolvedServer.id, currentResolvedServer.headerNames],
+    ]);
+    const currentRegistration = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentResolvedServer.headers,
+      currentHeaderNamesById.get(currentResolvedServer.id),
+    );
+    const redacted = createSecretRedactor(currentRegistration)(currentResolvedServer.headers);
+
+    expect(staleRegistration).toHaveLength(0);
+    expect(currentRegistration).toEqual([
+      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
+    ]);
+    expect(redacted).toMatchObject({
+      "Private-Token": "[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]",
+      "X-Page-Token": "page-2",
+    });
+    expect(JSON.stringify(redacted)).not.toContain(currentValue);
+  });
+});
+
+describe("accepted turn execution identity", () => {
+  test("separates external billing from the exact Codex allocator identity", () => {
+    const base = TurnExecutionPolicyV1.parse({
+      schemaVersion: 1,
+      productModelId: "xai/grok-4.5",
+      requestedModelId: null,
+      modelSource: "session",
+      reasoningEffort: "high",
+      reasoningSource: "session",
+      providerId: "xai",
+      upstreamModelId: "grok-4.5",
+      wireApi: "responses",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "workspace", metering: "external" },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
+    expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
+      externallyBilled: true,
+      codexSubscription: false,
+    });
+    expect(
+      turnExecutionPolicyBillingIdentity({
+        ...base,
+        productModelId: "codex/gpt-5.6-sol",
+        providerId: "codex-subscription",
+        upstreamModelId: "gpt-5.6-sol",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ).toEqual({ externallyBilled: true, codexSubscription: true });
+    expect(
+      turnExecutionPolicyBillingIdentity({
+        ...base,
+        credentialSource: { kind: "deployment", mechanism: "api_key" },
+        billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      }),
+    ).toEqual({ externallyBilled: false, codexSubscription: false });
+  });
+
+  test("classifies only legacy user/API turns as explicit policy requests", () => {
+    for (const source of ["user", "api"] as const) {
+      expect(
+        legacyTurnExecutionPolicyInput({
+          source,
+          model: "xai/grok-4.5",
+          reasoningEffort: "high",
+          latencyMode: "fast",
+        }),
+      ).toMatchObject({
+        requestedModelId: "xai/grok-4.5",
+        modelSource: "explicit",
+        reasoningSource: "explicit",
+        latencyMode: "fast",
+        latencyModeSource: "explicit",
+      });
+    }
+    for (const source of ["goal", "system", "compaction"] as const) {
+      expect(
+        legacyTurnExecutionPolicyInput({
+          source,
+          model: "codex/gpt-5.6-sol",
+          reasoningEffort: "xhigh",
+          latencyMode: "fast",
+        }),
+      ).toMatchObject({
+        requestedModelId: null,
+        modelSource: "continuation",
+        reasoningSource: "continuation",
+        latencyMode: "fast",
+        latencyModeSource: "continuation",
+      });
+    }
+  });
+});
 
 describe("conversation-truth reconcile (orphaned tool output guard)", () => {
   test("does not treat a reverse-completing parallel call batch as an append-only history", () => {
@@ -391,6 +746,34 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     const result = historyRowsToAppend(sanitized, 1);
     expect(result.rows.map((row) => row.position)).toEqual([1, 2]);
     expect(result.nextPosition).toBe(3);
+  });
+
+  test("keeps a pre-persisted machine batch while excluding attempt-local system notices", () => {
+    const durableMachineBatch = {
+      type: "message",
+      role: "system",
+      content: [{ type: "input_text", text: "Durable machine input batch" }],
+    };
+    const attemptLocalNotice = {
+      type: "message",
+      role: "system",
+      content: [{ type: "input_text", text: "Recovery diagnostic for this attempt only" }],
+    };
+    const assistant = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Handled the durable input." }],
+    };
+
+    const result = historyRowsToAppend(
+      [durableMachineBatch, attemptLocalNotice, assistant],
+      /* persistedHistoryCount */ 1,
+      /* nextPosition */ 1,
+    );
+
+    expect(result.rows).toEqual([{ position: 1, item: assistant }]);
+    expect(result.nextWatermark).toBe(3);
+    expect(result.nextPosition).toBe(2);
   });
 });
 
@@ -668,6 +1051,468 @@ describe("completed model-call metering at ownership fences", () => {
   });
 });
 
+describe("production model-response usage callback authority", () => {
+  test("fails Fast turns when the raw provider response omits or downgrades service_tier", () => {
+    const terminal = (serviceTier?: string) =>
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: {
+          type: "response.completed",
+          response: {
+            id: "resp-fast",
+            ...(serviceTier ? { service_tier: serviceTier } : {}),
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        },
+      } as any);
+
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("priority"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal(),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=missing/);
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=default/);
+    // Codex ChatGPT auth: response service_tier is not an end-to-end honor signal.
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "codex/gpt-5.6-luna",
+        providerId: "codex-subscription",
+      }),
+    ).not.toThrow();
+  });
+
+  test("claims the pinned SDK terminal pair once and cannot bind stale usage after restart", async () => {
+    const response = {
+      id: "resp-sdk-terminal-pair",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        // The provider total is internally inconsistent. The callback must use
+        // the canonical input+output total for both context and billing.
+        total_tokens: 0,
+        input_tokens_details: { cached_tokens: 80, cache_write_tokens: 5 },
+      },
+    };
+    // These are the exact two terminal event shapes emitted, in order, by the
+    // repository-pinned @openai/agents-openai 0.13.3 stream implementation.
+    const normalizedTerminal = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: response.id,
+        output: [],
+        usage: {
+          inputTokens: 100,
+          outputTokens: 20,
+          totalTokens: 0,
+          inputTokensDetails: { cached_tokens: 80, cache_write_tokens: 5 },
+        },
+      },
+    } as any);
+    const rawTerminal = new RunRawModelStreamEvent({
+      type: "model",
+      providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+      event: { type: "response.completed", response },
+    } as any);
+
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const billingRows = new Map<string, Record<string, unknown>>();
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        if (!billingRows.has(input.idempotencyKey)) {
+          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
+        }
+      },
+    );
+    try {
+      const durableUsageSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => {
+          const sourceKey = event.payload?.sourceKey as string;
+          const duplicate = durableUsageSourceKeys.has(sourceKey);
+          durableUsageSourceKeys.add(sourceKey);
+          return {
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+            ...(duplicate
+              ? {
+                  duplicateOfEventId: crypto.randomUUID(),
+                  duplicateReason: "duplicate_provider_response_usage",
+                }
+              : {}),
+          };
+        }),
+      });
+      const fencedInputs: number[] = [];
+      const state = createModelResponseUsageEventState();
+      const emittedSourceKeys = new Set<string>();
+      const process = (event: any, targetState = state, dispatchId = "activity-A") =>
+        processModelResponseUsageEvent({
+          event,
+          state: targetState,
+          dispatchId,
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          turnAttemptId: "attempt-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          metricProvider: "codex-subscription",
+          externallyBilled: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys,
+          renewLease: async () => undefined,
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+          setLastInputTokens: async (tokens) => {
+            fencedInputs.push(tokens);
+          },
+        });
+
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () => modelResponseUsageContextSignal(state),
+        },
+      );
+      const first = [{ type: "message", role: "user", content: "start" }] as any;
+      await filter({ modelData: { input: first, instructions: "system" }, agent: {} as any });
+      const second = [
+        ...first,
+        { type: "message", role: "assistant", content: "first response" },
+        { type: "message", role: "user", content: "continue" },
+      ] as any;
+      await filter({ modelData: { input: second, instructions: "system" }, agent: {} as any });
+
+      expect((await process(normalizedTerminal)).status).toBe("processed");
+      expect((await process(rawTerminal)).status).toBe("duplicate");
+      expect(state.responseUsageCount).toBe(1);
+      expect(state.providerContextRevision).toBe(1);
+      expect(state.lastProviderContextTokensObserved).toBe(120);
+      expect(fencedInputs).toEqual([100]);
+      expect(durableUsageSourceKeys).toEqual(new Set([response.id]));
+      expect([...billingRows.values()]).toEqual([
+        expect.objectContaining({
+          eventType: "model.cost",
+          quantity: 0,
+          idempotencyKey: `usage:model.cost:turn-1:${response.id}`,
+        }),
+      ]);
+
+      const metricsAfterPair = await observability.prometheusMetrics();
+      expect(metricsAfterPair).toMatch(
+        /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+      );
+      expect(metricsAfterPair).toMatch(
+        /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 80\b/,
+      );
+      expect(metricsAfterPair).toMatch(
+        /opengeni_model_cache_write_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 5\b/,
+      );
+
+      // The duplicate terminal callback must not advance the old response to
+      // revision 2. Revision 1 cannot bind to request 2, so the complete estimate
+      // (including the large new assistant output) still triggers compaction.
+      const third = [
+        ...second,
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "x".repeat(48_000) }],
+        },
+        { type: "message", role: "user", content: "continue again" },
+      ] as any;
+      await expect(
+        filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
+      ).rejects.toBeInstanceOf(CompactionNeededError);
+
+      // A worker restart/re-dispatch rebuilds local state. The stable provider
+      // response id reaches the durable fences again, but duplicate authority
+      // prevents every local metric/context/fenced-input effect and the DB-level
+      // idempotency key keeps one billing row.
+      const restartedState = createModelResponseUsageEventState();
+      const restartedInputsBefore = fencedInputs.length;
+      const restartedEmittedSourceKeys = new Set<string>();
+      const restarted = await processModelResponseUsageEvent({
+        event: normalizedTerminal as any,
+        state: restartedState,
+        dispatchId: "activity-B",
+        settings: testSettings(),
+        db: {} as any,
+        observability,
+        publish: publish as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-2",
+        provider: "codex-subscription",
+        providerApi: "responses",
+        model: "codex/gpt-5.6-sol",
+        metricProvider: "codex-subscription",
+        externallyBilled: true,
+        servingCredentialId: "credential-1",
+        priorSessionCredentialId: "credential-1",
+        emittedSourceKeys: restartedEmittedSourceKeys,
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async (tokens) => {
+          fencedInputs.push(tokens);
+        },
+      });
+      expect(restarted).toMatchObject({
+        status: "processed",
+        authoritative: false,
+        sourceKey: response.id,
+      });
+      expect(restartedState.responseUsageCount).toBe(1);
+      expect(restartedState.providerContextRevision).toBe(0);
+      expect(restartedState.lastProviderContextTokensObserved).toBeNull();
+      expect(fencedInputs).toHaveLength(restartedInputsBefore);
+      expect(billingRows).toHaveLength(1);
+      const metricsAfterRestart = await observability.prometheusMetrics();
+      expect(metricsAfterRestart).toMatch(
+        /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+      );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("keeps no-id response ordinals unique across an in-activity compaction retry", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const billingRows = new Map<string, Record<string, unknown>>();
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        if (!billingRows.has(input.idempotencyKey)) {
+          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
+        }
+      },
+    );
+    try {
+      const durableUsageSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => {
+          const sourceKey = event.payload?.sourceKey as string;
+          const duplicate = durableUsageSourceKeys.has(sourceKey);
+          durableUsageSourceKeys.add(sourceKey);
+          return {
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+          };
+        }),
+      });
+      const terminal = (inputTokens: number, outputTokens: number) =>
+        new RunRawModelStreamEvent({
+          type: "response_done",
+          response: {
+            output: [],
+            usage: {
+              inputTokens,
+              outputTokens,
+              totalTokens: inputTokens + outputTokens,
+            },
+          },
+        } as any);
+      const state = createModelResponseUsageEventState();
+      const emittedSourceKeys = new Set<string>();
+      const process = (event: RunRawModelStreamEvent) =>
+        processModelResponseUsageEvent({
+          event,
+          state,
+          dispatchId: "activity-A",
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          turnAttemptId: "attempt-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          metricProvider: "codex-subscription",
+          externallyBilled: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys,
+          renewLease: async () => undefined,
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+          setLastInputTokens: async () => undefined,
+        });
+
+      const beforeCompaction = await process(terminal(100, 20));
+      // The compaction retry re-enters the stream callback with this same
+      // activity-wide state rather than resetting responseUsageCount.
+      const afterCompaction = await process(terminal(200, 30));
+
+      expect(beforeCompaction).toMatchObject({
+        status: "processed",
+        sourceKey: "activity-A:response-1",
+        authoritative: true,
+      });
+      expect(afterCompaction).toMatchObject({
+        status: "processed",
+        sourceKey: "activity-A:response-2",
+        authoritative: true,
+      });
+      expect(state.responseUsageCount).toBe(2);
+      expect(durableUsageSourceKeys).toEqual(
+        new Set(["activity-A:response-1", "activity-A:response-2"]),
+      );
+      expect([...billingRows.values()]).toEqual([
+        expect.objectContaining({
+          eventType: "model.cost",
+          quantity: 0,
+          idempotencyKey: "usage:model.cost:turn-1:activity-A:response-1",
+        }),
+        expect.objectContaining({
+          eventType: "model.cost",
+          quantity: 0,
+          idempotencyKey: "usage:model.cost:turn-1:activity-A:response-2",
+        }),
+      ]);
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("claims compaction usage before retry side effects and defers restart authority to durable usage", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const billingRows = new Map<string, Record<string, unknown>>();
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        if (!billingRows.has(input.idempotencyKey)) {
+          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
+        }
+      },
+    );
+    try {
+      const durableUsageSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => {
+          const sourceKey = event.payload?.sourceKey as string;
+          const duplicate = durableUsageSourceKeys.has(sourceKey);
+          durableUsageSourceKeys.add(sourceKey);
+          return {
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+          };
+        }),
+      });
+      const usage = {
+        responseId: "resp-compaction-retry",
+        usage: {
+          inputTokens: 200,
+          outputTokens: 10,
+          totalTokens: 210,
+          inputTokensDetails: { cached_tokens: 150 },
+        },
+      };
+      let leaseRenewals = 0;
+      const state = createCompactionModelUsageEventState();
+      const emittedSourceKeys = new Set<string>();
+      const process = (
+        targetState = state,
+        targetEmittedSourceKeys = emittedSourceKeys,
+        dispatchId = "activity-A",
+      ) =>
+        processCompactionModelUsageEvent({
+          usage,
+          state: targetState,
+          dispatchId,
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          turnAttemptId: "attempt-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          externallyBilled: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys: targetEmittedSourceKeys,
+          renewLease: async () => {
+            leaseRenewals += 1;
+          },
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+        });
+
+      expect(await process()).toMatchObject({
+        status: "processed",
+        sourceKey: usage.responseId,
+        authoritative: true,
+      });
+      expect(await process()).toEqual({ status: "duplicate", sourceKey: usage.responseId });
+      expect(state.usageCount).toBe(1);
+      expect(leaseRenewals).toBe(1);
+      expect(billingRows.size).toBe(1);
+
+      const restartedState = createCompactionModelUsageEventState();
+      expect(await process(restartedState, new Set<string>(), "activity-B")).toMatchObject({
+        status: "processed",
+        sourceKey: usage.responseId,
+        authoritative: false,
+      });
+      expect(restartedState.usageCount).toBe(1);
+      expect(leaseRenewals).toBe(2);
+      expect(billingRows.size).toBe(1);
+      expect(durableUsageSourceKeys).toEqual(new Set([usage.responseId]));
+
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 150\b/,
+      );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+});
+
 describe("model call usage observability", () => {
   test("logs and emits normalized cache/reasoning usage fields", async () => {
     const infos: Array<Record<string, unknown>> = [];
@@ -709,7 +1554,7 @@ describe("model call usage observability", () => {
           inputTokens: 1200,
           outputTokens: 100,
           totalTokens: 1300,
-          inputTokensDetails: { cached_tokens: 1024 },
+          inputTokensDetails: { cached_tokens: 1024, cache_write_tokens: 256 },
           outputTokensDetails: { reasoning_tokens: 12 },
         },
       },
@@ -723,6 +1568,7 @@ describe("model call usage observability", () => {
       inputTokens: 1200,
       outputTokens: 100,
       cachedTokens: 1024,
+      cacheWriteTokens: 256,
       reasoningTokens: 12,
     });
     expect(events).toEqual([
@@ -736,6 +1582,7 @@ describe("model call usage observability", () => {
           inputTokens: 1200,
           outputTokens: 100,
           cachedTokens: 1024,
+          cacheWriteTokens: 256,
           reasoningTokens: 12,
         }),
       },
@@ -794,11 +1641,12 @@ describe("model call usage observability", () => {
 
   test("does not log a duplicate usage observation as authoritative", async () => {
     const infos: Array<Record<string, unknown>> = [];
+    const observability = createObservability(testSettings(), { component: "worker" });
+    observability.info = (_message: string, attributes: Record<string, unknown>) =>
+      infos.push(attributes);
+    observability.warn = mock();
     await emitModelCallUsage({
-      observability: {
-        info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
-        warn: mock(),
-      } as any,
+      observability,
       publish: async (batch) => ({
         accepted: true,
         events: batch.map((event) => ({
@@ -821,6 +1669,203 @@ describe("model call usage observability", () => {
     });
 
     expect(infos).toEqual([]);
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toMatch(/opengeni_model_cache_read_telemetry_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+  });
+
+  test("wires raw response cache writes through the authoritative production metric path", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const responseUsage = modelResponseUsageFromResponse({
+      id: "resp-write",
+      usage: {
+        input_tokens: 1200,
+        output_tokens: 100,
+        total_tokens: 1300,
+        input_tokens_details: { cached_tokens: 800, cache_write_tokens: 250 },
+      },
+    });
+    expect(responseUsage).not.toBeNull();
+
+    await emitModelCallUsage({
+      observability,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      }),
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-write",
+      usage: responseUsage,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cached_tokens_total\{[^}]*provider="openai"[^}]*\} 800\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="openai"[^}]*\} 250\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="reported"[^}]*\} 1\b/,
+    );
+  });
+
+  test("sums SDK aggregate retries once and dedupes an authoritative source key", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const aggregate = new Usage();
+    aggregate.add(
+      new Usage({
+        inputTokens: 1000,
+        outputTokens: 10,
+        totalTokens: 1010,
+        inputTokensDetails: { cached_tokens: 100, cache_write_tokens: 200 },
+        outputTokensDetails: { reasoning_tokens: 5 },
+      }),
+    );
+    aggregate.add(
+      new Usage({
+        inputTokens: 2000,
+        outputTokens: 20,
+        totalTokens: 2020,
+        inputTokensDetails: { cached_tokens: 300, cacheWriteTokens: 400 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    );
+    const sourceKeys = new Set<string>();
+    const payloads: Array<Record<string, unknown>> = [];
+    let publishCount = 0;
+    const publish = async (batch: any[]) => {
+      publishCount += 1;
+      payloads.push(batch[0]?.payload as Record<string, unknown>);
+      return {
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      };
+    };
+    const input = {
+      observability,
+      publish,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "codex-subscription",
+      providerApi: "responses" as const,
+      model: "codex/gpt-5.6-sol",
+      sourceKey: "aggregate-1",
+      usage: { usage: aggregate },
+      emittedSourceKeys: sourceKeys,
+    };
+
+    await emitModelCallUsage(input);
+    await emitModelCallUsage(input);
+
+    expect(publishCount).toBe(1);
+    expect(payloads[0]).toMatchObject({
+      inputTokens: 3000,
+      outputTokens: 30,
+      cachedTokens: 400,
+      cacheWriteTokens: 600,
+      reasoningTokens: 12,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 400\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 600\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="reported"[^}]*\} 1\b/,
+    );
+  });
+
+  test("keeps malformed provider usage out of durable payloads and emits bounded diagnostics", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const info = mock();
+    const warn = mock();
+    observability.info = info;
+    observability.warn = warn;
+    const payloads: Array<Record<string, unknown>> = [];
+    const responseUsage = modelResponseUsageFromResponse({
+      id: "resp-malformed",
+      usage: {
+        input_tokens: 1.5,
+        output_tokens: Number.POSITIVE_INFINITY,
+        input_tokens_details: {
+          cached_tokens: Number.NaN,
+          cache_write_tokens: Number.MAX_SAFE_INTEGER,
+        },
+      },
+    });
+    expect(responseUsage).not.toBeNull();
+
+    await emitModelCallUsage({
+      observability,
+      publish: async (batch) => {
+        payloads.push(batch[0]?.payload as Record<string, unknown>);
+        return {
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })) as any,
+        };
+      },
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-malformed",
+      usage: responseUsage,
+    });
+
+    expect(payloads[0]).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    expect(Object.values(payloads[0] ?? {})).not.toContain(Number.POSITIVE_INFINITY);
+    expect(info).toHaveBeenCalledWith(
+      "model call usage",
+      expect.objectContaining({ cacheWriteTokens: null }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "model call usage fields rejected",
+      expect.objectContaining({
+        rejectedFields: expect.stringContaining("inputTokensDetails.cache_write_tokens"),
+      }),
+    );
+    const rejectedFields = (warn.mock.calls[0]?.[1] as Record<string, unknown>)
+      ?.rejectedFields as string;
+    expect(rejectedFields).not.toContain("9007199254740991");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cache_write_tokens_total/);
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="missing"[^}]*\} 1\b/,
+    );
   });
 });
 
@@ -917,6 +1962,19 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
   });
 });
 
+describe("machine-primary sandbox ownership isolation", () => {
+  test("does not acquire the managed-home lease for a Connected Machine turn", () => {
+    expect(managedSandboxOwnershipForTurn(true, "attempt-1", "cloud-home-group")).toBeNull();
+  });
+
+  test("keeps managed sandbox turns on their exact attempt-derived holder", () => {
+    expect(managedSandboxOwnershipForTurn(false, "attempt-1", "cloud-home-group")).toEqual({
+      holderId: sandboxLeaseHolderIdForAttempt("attempt-1"),
+      sandboxGroupId: "cloud-home-group",
+    });
+  });
+});
+
 describe("turn-start pointer reconcile classification (issue #341 invariant B)", () => {
   test("an absent sandbox row (deleted target) → stale_pointer", () => {
     expect(pointerReconcileReason(null)).toBe("stale_pointer");
@@ -989,6 +2047,17 @@ describe("turn-time Modal private-registry warm", () => {
       "modal",
       ensureRegistryImage,
     );
+    await ensureTurnModalRegistryImage(
+      testSettings({
+        sandboxBackend: "modal",
+        modalImageRef:
+          "acr.example.com/[redacted:MODAL_PROFILE]/f4c-gecko@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        modalImageId: "im-1234567890123456789012",
+        modalImageRegistrySecret: "acr-credentials-gecko",
+      }),
+      "modal",
+      ensureRegistryImage,
+    );
     expect(ensureRegistryImage).not.toHaveBeenCalled();
   });
 });
@@ -1052,6 +2121,15 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("deadline rotation paces recovery for one capture and two reaper periods", () => {
+    expect(
+      sandboxDeadlineRotationRecoveryDelayMs({
+        sandboxLeaseReaperPeriodMs: 30_000,
+        sandboxSnapshotTimeoutMs: 60_000,
+      }),
+    ).toBe(120_000);
+  });
+
   test("concurrent callers share one establish promise", async () => {
     let establishes = 0;
     const provisioner = createTurnSandboxProvisioner(async () => {
@@ -1067,19 +2145,51 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(results[0]).toEqual({ ok: true, attempt: 1 });
   });
 
-  test("final failure rejects all waiters and resets the memo for the next op", async () => {
+  test("terminal failure rejects all waiters once and remains memoized for the turn", async () => {
     let establishes = 0;
-    const provisioner = createTurnSandboxProvisioner(async () => {
-      establishes += 1;
-      throw new SandboxImageConflictError("group-1", "old", "new");
-    });
+    let failures = 0;
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw new SandboxImageConflictError("group-1", "old", "new");
+      },
+      {
+        onFailed: () => {
+          failures += 1;
+        },
+      },
+    );
 
     const first = await Promise.allSettled(Array.from({ length: 5 }, () => provisioner.get()));
     expect(first.every((result) => result.status === "rejected")).toBe(true);
     expect(establishes).toBe(1);
+    expect(failures).toBe(1);
 
     await expect(provisioner.get()).rejects.toThrow(SandboxImageConflictError);
+    expect(establishes).toBe(1);
+    expect(failures).toBe(1);
+  });
+
+  test("exhausted retryable failure releases the memo for a later operation", async () => {
+    let establishes = 0;
+    let failures = 0;
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw new SandboxLeaseSupersededError("group-1", establishes);
+      },
+      {
+        maxRetries: 0,
+        onFailed: () => {
+          failures += 1;
+        },
+      },
+    );
+
+    await expect(provisioner.get()).rejects.toThrow(SandboxLeaseSupersededError);
+    await expect(provisioner.get()).rejects.toThrow(SandboxLeaseSupersededError);
     expect(establishes).toBe(2);
+    expect(failures).toBe(2);
   });
 
   test("transient supersession retries inside the single-flight", async () => {
@@ -1103,9 +2213,36 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(
       isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new")),
     ).toBe(false);
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxLeaseRecoveryBlockedError(
+          "group-1",
+          1,
+          "restore_degraded",
+          {} as ConstructorParameters<typeof SandboxLeaseRecoveryBlockedError>[3],
+        ),
+      ),
+    ).toBe(false);
     expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(
       true,
     );
+    expect(
+      isLazySandboxProvisionRetryable(
+        new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_unavailable",
+          "fingerprint unavailable",
+          { retryable: true },
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isLazySandboxProvisionRetryable(
+        new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_mismatch",
+          "fingerprint mismatch",
+        ),
+      ),
+    ).toBe(false);
   });
 
   test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {
@@ -1278,6 +2415,100 @@ describe("worker shutdown preemption", () => {
     ).not.toThrow();
   });
 
+  test("does not publish quiescence until tool and credential writers physically drain", async () => {
+    const steps: string[] = [];
+    let releaseTools!: () => void;
+    let releaseGitWrite!: () => void;
+    let releaseToolspaceWrite!: () => void;
+    let releaseRunCredentialWrite!: () => void;
+    const toolsDrained = new Promise<void>((resolve) => {
+      releaseTools = resolve;
+    });
+    const gitWriteDrained = new Promise<void>((resolve) => {
+      releaseGitWrite = resolve;
+    });
+    const toolspaceWriteDrained = new Promise<void>((resolve) => {
+      releaseToolspaceWrite = resolve;
+    });
+    const runCredentialWriteDrained = new Promise<void>((resolve) => {
+      releaseRunCredentialWrite = resolve;
+    });
+    const gitRenewal = startGitCredentialRenewalLoop({
+      expectedProviders: ["github"],
+      mint: async () => ({ gitTokens: { github: "test-token" }, expiresAt: {} }),
+      write: async () => {
+        steps.push("git-write-started");
+        await gitWriteDrained;
+        steps.push("git-write-drained");
+      },
+      schedule: () => ({ testTimer: true }),
+      clearSchedule: () => undefined,
+    });
+    const gitRefresh = gitRenewal.refreshNow();
+    await Bun.sleep(0);
+    expect(steps).toEqual(["git-write-started"]);
+
+    let receipts = 0;
+    const boundary = drainAttemptOwnedSandboxWriters({
+      toolCancellationFence: {
+        cancel: () => steps.push("tools-cancelled"),
+        waitForQuiescence: async () => {
+          steps.push("tools-draining");
+          await toolsDrained;
+          steps.push("tools-drained");
+        },
+      },
+      cancellationReason: new Error("STEER"),
+      gitCredentialRenewals: [gitRenewal],
+      toolspaceTokenRenewal: {
+        stop: async () => {
+          steps.push("toolspace-draining");
+          await toolspaceWriteDrained;
+          steps.push("toolspace-drained");
+        },
+      },
+      runCredentialRenewal: {
+        stop: async () => {
+          steps.push("run-credentials-draining");
+          await runCredentialWriteDrained;
+          steps.push("run-credentials-drained");
+        },
+      },
+    }).then(() => {
+      receipts += 1;
+      steps.push("receipt");
+    });
+
+    await Bun.sleep(0);
+    expect(steps).toEqual(["git-write-started", "tools-cancelled", "tools-draining"]);
+    expect(receipts).toBe(0);
+
+    releaseTools();
+    await Bun.sleep(0);
+    expect(steps).toEqual([
+      "git-write-started",
+      "tools-cancelled",
+      "tools-draining",
+      "tools-drained",
+    ]);
+    expect(receipts).toBe(0);
+
+    releaseGitWrite();
+    await Bun.sleep(0);
+    expect(steps.at(-1)).toBe("toolspace-draining");
+    expect(receipts).toBe(0);
+
+    releaseToolspaceWrite();
+    await Bun.sleep(0);
+    expect(steps.at(-1)).toBe("run-credentials-draining");
+    expect(receipts).toBe(0);
+
+    releaseRunCredentialWrite();
+    await Promise.all([boundary, gitRefresh]);
+    expect(steps.at(-1)).toBe("receipt");
+    expect(receipts).toBe(1);
+  });
+
   test("retries one immutable quiescence proof after receipt exhaustion", async () => {
     const proof = {
       accountId: "account-1",
@@ -1421,6 +2652,17 @@ describe("Codex credential lease deadline fence", () => {
 });
 
 describe("sandbox file materialization note", () => {
+  test("uses the active backend when deciding whether attachments need signed delivery", () => {
+    const modalHome = testSettings({
+      sandboxBackend: "modal",
+      objectStorageBackend: "s3-compatible",
+    });
+    expect(requiresSignedFileResourceDownloads(modalHome, "modal")).toBe(false);
+    expect(requiresSignedFileResourceDownloads(modalHome, "selfhosted")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "docker")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "none")).toBe(false);
+  });
+
   test("filters downloads already materialized on the current box", () => {
     const downloads = [
       {
@@ -1497,6 +2739,29 @@ describe("escaped MCP transport timeout classifier", () => {
     const exact = new Error("MCP error -32001: Request timed out");
     expect(classifyMcpTransportTimeoutError(exact)?.message).toBe(exact.message);
 
+    const sdkTimeoutMessages = [
+      "Request timed out",
+      "MCP error -32001: Request timed out",
+      "Maximum total timeout exceeded",
+      "MCP error -32001: Maximum total timeout exceeded",
+    ];
+    for (const message of sdkTimeoutMessages) {
+      const sanitized = safeMcpTransportError(
+        Object.assign(new Error(message), {
+          name: "McpError",
+          code: -32_001,
+        }),
+      );
+      expect(classifyMcpTransportTimeoutError(sanitized)?.message).toBe(sanitized.message);
+      expect(agentRunFailurePayload(sanitized)).toEqual({
+        error:
+          "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+        code: "mcp_transport_timeout",
+        retryable: true,
+        detail: sanitized.message,
+      });
+    }
+
     const nested = {
       error: { message: "MCP transport request timeout while listing tools" },
     };
@@ -1509,6 +2774,19 @@ describe("escaped MCP transport timeout classifier", () => {
       retryable: true,
       detail: exact.message,
     });
+
+    for (const message of [
+      "MCP error -32001: Session not found",
+      "MCP error -32001: operator cancelled this request",
+    ]) {
+      const ambiguous = safeMcpTransportError(
+        Object.assign(new Error(message), {
+          name: "McpError",
+          code: -32_001,
+        }),
+      );
+      expect(classifyMcpTransportTimeoutError(ambiguous)).toBeNull();
+    }
   });
 
   test("does not absorb auth-needed or unrelated timeout failures", () => {
@@ -1519,6 +2797,98 @@ describe("escaped MCP transport timeout classifier", () => {
     ).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
+  });
+
+  test("emits a typed workflow recovery obligation only before a generation-2 model request", () => {
+    const detail = {
+      turnId: "turn-2",
+      triggerEventId: "trigger-1",
+      executionGeneration: 2,
+    };
+    const escaped = escapedMcpTimeoutRecoveryFailure({
+      failureCode: "mcp_transport_timeout",
+      modelRequestStarted: false,
+      detail,
+    });
+    expect(escaped).toBeInstanceOf(ApplicationFailure);
+    expect(escaped).toMatchObject({
+      type: "EscapedMcpTimeoutRecoveryFailure",
+      nonRetryable: true,
+      details: [detail],
+    });
+
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: true,
+        detail,
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "provider_unavailable",
+        modelRequestStarted: false,
+        detail,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("Codex response timeout fail-closed settlement", () => {
+  test("recognizes the production OpenAI timeout only inside a confirmed Codex turn", () => {
+    const legacy = Object.assign(new Error("Request timed out."), {
+      name: "APIConnectionTimeoutError",
+    });
+    expect(agentRunFailurePayload(legacy).retryable).toBeUndefined();
+    expect(agentRunFailurePayload(legacy, { isCodexTurn: true })).toMatchObject({
+      code: "codex_response_timeout",
+      retryable: false,
+      timeoutClass: "headers",
+      responseObserved: false,
+    });
+  });
+
+  test("preserves structured partial-stream timeout evidence without same-turn replay", () => {
+    const structured = Object.assign(new Error("Codex response idle stream timed out"), {
+      name: "CodexResponseTimeoutError",
+      type: "opengeni_codex_response_timeout",
+      timeoutClass: "idle_stream",
+      requestId: "dispatch-7:3",
+      responseObserved: true,
+    });
+    expect(agentRunFailurePayload(structured)).toMatchObject({
+      code: "codex_response_timeout",
+      retryable: false,
+      timeoutClass: "idle_stream",
+      responseObserved: true,
+      requestId: "dispatch-7:3",
+    });
+  });
+
+  test("recovers timeout metadata from the buffered OpenAI APIError body shape", () => {
+    const apiError = Object.assign(new Error("504 Codex response timed out"), {
+      status: 504,
+      error: {
+        type: "opengeni_codex_response_timeout",
+        timeout_class: "whole_request",
+        response_observed: false,
+        request_id: "dispatch-9:2",
+      },
+    });
+    expect(agentRunFailurePayload(apiError)).toMatchObject({
+      code: "codex_response_timeout",
+      retryable: false,
+      timeoutClass: "whole_request",
+      responseObserved: false,
+      requestId: "dispatch-9:2",
+    });
   });
 });
 
@@ -1743,6 +3113,36 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
   });
 
+  test("classifies the exact fresh no-rig pre-model connectivity failure as typed recovery", () => {
+    const observed = new Error("Unable to connect. Is the computer able to access the url?");
+
+    expect(isTransientProviderError(observed)).toBe(true);
+    expect(agentRunFailurePayload(observed)).toEqual({
+      error:
+        "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+      code: "upstream_connectivity_unavailable",
+      retryable: true,
+    });
+    expect(providerRecoveryResult()).toEqual({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+
+    // HTTP status remains authoritative: a request-owned 4xx with the same body
+    // must not be mistaken for platform connectivity and retried forever.
+    const rejectedRequest = Object.assign(new Error(observed.message), { status: 400 });
+    expect(isTransientProviderError(rejectedRequest)).toBe(false);
+    expect(agentRunFailurePayload(rejectedRequest)).toEqual({ error: observed.message });
+
+    for (const nearMatch of [
+      `Authentication failed: ${observed.message}`,
+      `${observed.message} Unexpected suffix`,
+    ]) {
+      expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
+      expect(agentRunFailurePayload(new Error(nearMatch))).toEqual({ error: nearMatch });
+    }
+  });
+
   test("classifies node/undici network fault codes as transient", () => {
     for (const code of ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE"]) {
       expect(isTransientProviderError(Object.assign(new Error("socket"), { code }))).toBe(true);
@@ -1906,8 +3306,11 @@ describe("transient provider error classifier", () => {
 // EXPLICIT computer-use tool transport there instead of letting the runtime string-sniff
 // the model instance's constructor name. This seam pins the provider→mode mapping.
 describe("computerToolModeForTurn (explicit computer-use transport derivation)", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi) =>
-    ({ provider: { kind, api } }) as Parameters<typeof computerToolModeForTurn>[0];
+  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, image = true) =>
+    ({
+      provider: { kind, api },
+      configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
+    }) as Parameters<typeof computerToolModeForTurn>[0];
 
   test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
     // api is irrelevant once kind is codex-subscription — codex wins.
@@ -1917,16 +3320,108 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
   });
 
-  test("a chat-wire (OpenAIChatCompletionsModel) provider → function-text", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("function-text");
+  test("a chat-wire provider without proven visual image transport → disabled", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
   });
 
   test("a registry responses provider → hosted", () => {
     expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
   });
 
+  test("any text-only model → disabled before provider transport selection", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "responses", false))).toBe("disabled");
+    expect(computerToolModeForTurn(resolved("codex-subscription", "responses", false))).toBe(
+      "disabled",
+    );
+  });
+
+  test("Gateway Responses models do not inherit OpenAI hosted computer tools", () => {
+    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
+      "disabled",
+    );
+    expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
+      "disabled",
+    );
+  });
+
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("structuredToolTransportForTurn", () => {
+  const resolved = (kind: RegistryProviderKind) =>
+    ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+
+  test("keeps hosted tool types off Codex and both Gateway credential paths", () => {
+    expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-managed"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
+  });
+
+  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+    expect(structuredToolTransportForTurn(null)).toBe(true);
+  });
+});
+
+describe("hostedWebSearchForTurn (provider support)", () => {
+  const resolved = (hostedWebSearch: boolean) =>
+    ({ configured: { hostedWebSearch } }) as Parameters<typeof hostedWebSearchForTurn>[0];
+
+  test("enables a supported provider without consulting the session MCP policy", () => {
+    expect(hostedWebSearchForTurn(resolved(true), true)).toBe(true);
+  });
+
+  test("does not invent a fallback for an unsupported resolved provider", () => {
+    expect(hostedWebSearchForTurn(resolved(false), true)).toBe(false);
+  });
+
+  test("applies the deployment capability gate to the legacy built-in path", () => {
+    expect(hostedWebSearchForTurn(null, true)).toBe(true);
+    expect(hostedWebSearchForTurn(null, false)).toBe(false);
+  });
+});
+
+describe("modelAttachmentInputPolicyForTurn", () => {
+  const resolved = (api: ModelProviderApi, image: boolean, files: string[] = []) =>
+    ({
+      provider: { api },
+      configured: {
+        capabilities: {
+          inputModalities: image ? ["text", "image"] : ["text"],
+          inputFileMediaTypes: files,
+        },
+      },
+    }) as Parameters<typeof modelAttachmentInputPolicyForTurn>[0];
+
+  test("keeps image and file capabilities independent on Responses", () => {
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", true, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: ["application/pdf"] });
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", false, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: ["application/pdf"] });
+  });
+
+  test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
+    expect(modelAttachmentInputPolicyForTurn(resolved("chat", true, ["application/pdf"]))).toEqual({
+      supportsImageInput: false,
+      inputFileMediaTypes: [],
+    });
+  });
+});
+
+describe("modelSupportsImageInputForTurn", () => {
+  const resolved = (inputModalities: string[]) =>
+    ({ configured: { capabilities: { inputModalities } } }) as Parameters<
+      typeof modelSupportsImageInputForTurn
+    >[0];
+
+  test("derives image support only from the model capability contract", () => {
+    expect(modelSupportsImageInputForTurn(null)).toBe(true);
+    expect(modelSupportsImageInputForTurn(resolved(["text", "image"]))).toBe(true);
+    expect(modelSupportsImageInputForTurn(resolved(["text"]))).toBe(false);
   });
 });
 
@@ -1949,5 +3444,9 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   });
 });
 
-type RegistryProviderKind = "api-key" | "codex-subscription";
+type RegistryProviderKind =
+  | "api-key"
+  | "codex-subscription"
+  | "vercel-gateway-managed"
+  | "vercel-gateway-workspace";
 type ModelProviderApi = "responses" | "chat";

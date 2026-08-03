@@ -1,5 +1,419 @@
 # @opengeni/storage
 
+## 0.2.57
+
+### Patch Changes
+
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [74bd3a5]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/config@0.10.4
+
+## 0.2.56
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/config@0.10.3
+
+## 0.2.55
+
+### Patch Changes
+
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/config@0.10.2
+
+## 0.2.54
+
+### Patch Changes
+
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+
+## 0.2.53
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+
+## 0.2.52
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+  - @opengeni/config@0.9.3
+
+## 0.2.51
+
+### Patch Changes
+
+- Updated dependencies [dd71248]
+  - @opengeni/contracts@0.29.0
+  - @opengeni/config@0.9.2
+
+## 0.2.50
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/config@0.9.1
+
+## 0.2.49
+
+### Patch Changes
+
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/config@0.9.0
+
+## 0.2.48
+
+### Patch Changes
+
+- Updated dependencies [8243ffe]
+  - @opengeni/config@0.8.1
+
+## 0.2.47
+
+### Patch Changes
+
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/config@0.8.0
+  - @opengeni/contracts@0.27.0
+
+## 0.2.46
+
+### Patch Changes
+
+- Updated dependencies [c52acc0]
+  - @opengeni/config@0.7.22
+  - @opengeni/contracts@0.26.1
+
+## 0.2.45
+
+### Patch Changes
+
+- Updated dependencies [f413e6c]
+  - @opengeni/contracts@0.26.0
+  - @opengeni/config@0.7.21
+
+## 0.2.44
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/config@0.7.20
+
+## 0.2.43
+
+### Patch Changes
+
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+
+## 0.2.42
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+
+## 0.2.41
+
+### Patch Changes
+
+- 0a9a6eb: Keep browser-facing S3-compatible signed URLs on the public endpoint while routing authenticated API and worker object operations through an optional internal endpoint.
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/config@0.7.17
+
+## 0.2.40
+
+### Patch Changes
+
+- @opengeni/config@0.7.16
+
+## 0.2.39
+
+### Patch Changes
+
+- Updated dependencies [a19971e]
+- Updated dependencies [1f6f13f]
+  - @opengeni/config@0.7.15
+  - @opengeni/contracts@0.24.0
+
+## 0.2.38
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/config@0.7.14
+
+## 0.2.37
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+- Updated dependencies [36451c6]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/config@0.7.13
+
+## 0.2.36
+
+### Patch Changes
+
+- Updated dependencies [1c4018e]
+  - @opengeni/config@0.7.12
+  - @opengeni/contracts@0.22.1
+
+## 0.2.35
+
+### Patch Changes
+
+- Updated dependencies [29ad09b]
+- Updated dependencies [b2e23f3]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/config@0.7.11
+
+## 0.2.34
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/config@0.7.10
+
+## 0.2.33
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+
+## 0.2.32
+
+### Patch Changes
+
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+  - @opengeni/config@0.7.8
+
+## 0.2.31
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [9326255]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/config@0.7.7
+
+## 0.2.30
+
+### Patch Changes
+
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/config@0.7.6
+
+## 0.2.29
+
+### Patch Changes
+
+- Updated dependencies [a0f2442]
+  - @opengeni/contracts@0.19.3
+  - @opengeni/config@0.7.5
+
+## 0.2.28
+
+### Patch Changes
+
+- Updated dependencies [85cb323]
+  - @opengeni/config@0.7.4
+  - @opengeni/contracts@0.19.2
+
+## 0.2.27
+
+### Patch Changes
+
+- Updated dependencies [5685f32]
+- Updated dependencies [de20184]
+  - @opengeni/config@0.7.3
+  - @opengeni/contracts@0.19.1
+
+## 0.2.26
+
+### Patch Changes
+
+- Updated dependencies [7c6aa7c]
+  - @opengeni/config@0.7.2
+
+## 0.2.25
+
+### Patch Changes
+
+- Updated dependencies [55c6559]
+  - @opengeni/config@0.7.1
+
+## 0.2.24
+
+### Patch Changes
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+  - @opengeni/config@0.7.0
+
+## 0.2.23
+
+### Patch Changes
+
+- Updated dependencies [744a93d]
+  - @opengeni/config@0.6.10
+  - @opengeni/contracts@0.18.1
+
+## 0.2.22
+
+### Patch Changes
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+  - @opengeni/config@0.6.9
+  - @opengeni/contracts@0.18.0
+
+## 0.2.21
+
+### Patch Changes
+
+- Updated dependencies [524599e]
+  - @opengeni/config@0.6.8
+  - @opengeni/contracts@0.17.3
+
+## 0.2.20
+
+### Patch Changes
+
+- @opengeni/config@0.6.7
+
+## 0.2.19
+
+### Patch Changes
+
+- Updated dependencies [4966649]
+- Updated dependencies [cb188f9]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/config@0.6.6
+
+## 0.2.18
+
+### Patch Changes
+
+- ff23da5: Keep oversized event previews bounded while optionally linking them to integrity-addressed workspace-file evidence, and expose access-controlled metadata plus capped provider-native range retrieval through the API and SDK.
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+  - @opengeni/config@0.6.5
+
+## 0.2.17
+
+### Patch Changes
+
+- Updated dependencies [d1dee7a]
+  - @opengeni/contracts@0.17.0
+  - @opengeni/config@0.6.4
+
+## 0.2.16
+
+### Patch Changes
+
+- Updated dependencies [b9cec61]
+- Updated dependencies [c978676]
+  - @opengeni/contracts@0.16.0
+  - @opengeni/config@0.6.3
+
+## 0.2.15
+
+### Patch Changes
+
+- Updated dependencies [9f84cc9]
+  - @opengeni/contracts@0.15.0
+  - @opengeni/config@0.6.2
+
+## 0.2.14
+
+### Patch Changes
+
+- Updated dependencies [136227e]
+- Updated dependencies [3aee519]
+  - @opengeni/contracts@0.14.0
+  - @opengeni/config@0.6.1
+
+## 0.2.13
+
+### Patch Changes
+
+- Updated dependencies [1fcd83d]
+- Updated dependencies [32011f1]
+- Updated dependencies [3983021]
+- Updated dependencies [4401ce7]
+- Updated dependencies [c389adc]
+- Updated dependencies [1f9305b]
+- Updated dependencies [8c66185]
+- Updated dependencies [334b63f]
+- Updated dependencies [d249403]
+- Updated dependencies [a11a7fc]
+- Updated dependencies [44ff327]
+- Updated dependencies [dda6398]
+- Updated dependencies [5529945]
+- Updated dependencies [e8ca4f6]
+- Updated dependencies [736f4fe]
+  - @opengeni/contracts@0.13.0
+  - @opengeni/config@0.6.0
+
+## 0.2.12
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [dbb6232]
+- Updated dependencies [3e65c23]
+  - @opengeni/config@0.5.3
+  - @opengeni/contracts@0.12.0
+
 ## 0.2.11
 
 ### Patch Changes

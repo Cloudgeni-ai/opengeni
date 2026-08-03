@@ -1,10 +1,14 @@
 import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
+  requestSessionTurnRecovery,
   recoverSessionDispatch,
+  reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
+  getSessionAttemptActivityRef,
   getSessionEvent,
   getSessionTurnForAttempt,
+  expireSessionHumanInputRequest,
   markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
@@ -13,22 +17,32 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import type {
   ActivityServices,
+  ExpireSessionHumanInputInput,
+  ExpireSessionHumanInputResult,
   PeekSessionWorkInput,
   FailSessionAttemptInput,
   SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
   PersistSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  RecoverEscapedMcpTimeoutInput,
+  RecoverEscapedMcpTimeoutResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
   settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
+  requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
+  reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
+  getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
+  expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
@@ -51,10 +65,18 @@ export function createSessionStateActivities(
     overrides.settleSessionAttemptInterruptions ?? settleSessionAttemptInterruptions;
   const applySessionTurnSettlementFn =
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
+  const requestSessionTurnRecoveryFn =
+    overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
+  const reconcileSessionAttemptQuiescenceFn =
+    overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const getSessionAttemptActivityRefFn =
+    overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
+  const expireSessionHumanInputRequestFn =
+    overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
@@ -173,6 +195,41 @@ export function createSessionStateActivities(
     }
   }
 
+  async function reconcileSessionAttemptQuiescenceActivity(
+    input: ReconcileSessionAttemptQuiescenceInput,
+  ): Promise<ReconcileSessionAttemptQuiescenceResult> {
+    const { db, bus, inspectSessionAttemptActivity } = await services();
+    const activityRef = await getSessionAttemptActivityRefFn(db, {
+      ...input,
+      temporalWorkflowId: input.workflowId,
+    });
+    if (!activityRef) return { action: "stale" };
+    if (!activityRef.quiesced) {
+      if (!inspectSessionAttemptActivity) return { action: "pending" };
+      const state = await inspectSessionAttemptActivity(activityRef);
+      if (state === "pending") return { action: "pending" };
+    }
+    const result = await reconcileSessionAttemptQuiescenceFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      temporalWorkflowId: input.workflowId,
+      temporalWorkflowRunId: activityRef.workflowRunId,
+      temporalActivityId: activityRef.activityId,
+      activitySettled: true,
+    });
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(
+        bus,
+        input.workspaceId,
+        input.sessionId,
+        result.events,
+      ).catch(() => undefined);
+    }
+    return { action: result.action };
+  }
+
   /**
    * Recover the same current inference when its worker dies without completing
    * a graceful checkpoint (heartbeat timeout, SIGKILL, OOM, or node loss).
@@ -212,9 +269,71 @@ export function createSessionStateActivities(
     };
   }
 
+  /**
+   * Finish a retryable MCP timeout checkpoint that escaped a recovered turn's
+   * activity before any model request. Temporal carries the immutable turn
+   * identity in ApplicationFailure details; this activity re-reads and fences
+   * every field before mutating the exact still-owned attempt. A checkpoint
+   * that committed before event fanout failed is already recovering and
+   * therefore returns stale without another event or child callback.
+   */
+  async function recoverEscapedMcpTimeout(
+    input: RecoverEscapedMcpTimeoutInput,
+  ): Promise<RecoverEscapedMcpTimeoutResult> {
+    const { db, bus } = await services();
+    const turn = await getSessionTurnForAttemptFn(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    );
+    if (!turn) return { action: "stale" };
+    if (
+      turn.id !== input.turnId ||
+      turn.triggerEventId !== input.triggerEventId ||
+      turn.executionGeneration !== input.executionGeneration ||
+      input.executionGeneration <= 1
+    ) {
+      return { action: "ineligible" };
+    }
+    const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      triggerEventId: input.triggerEventId,
+      attemptId: input.attemptId,
+      reason: "mcp_transport_timeout",
+      detail: {
+        code: "mcp_transport_timeout",
+        retryable: true,
+        continueDelayMs: 60_000,
+        recoverySource: "workflow_activity_failure",
+      },
+      fromStatuses: ["running"],
+    });
+    if (recovery.action !== "recovering") {
+      return { action: "stale" };
+    }
+    await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, recovery.events);
+    return { action: "recovering" };
+  }
+
   async function peekSessionWork(input: PeekSessionWorkInput) {
     const { db } = await services();
     return peekSessionWorkFn(db, input.workspaceId, input.sessionId);
+  }
+
+  async function expireSessionHumanInput(
+    input: ExpireSessionHumanInputInput,
+  ): Promise<ExpireSessionHumanInputResult> {
+    const { db, bus } = await services();
+    const result = await expireSessionHumanInputRequestFn(db, input);
+    if (result.action === "not_found") return { action: "not_found" };
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return {
+      action: result.request.status === "expired" ? "expired" : "stale",
+    };
   }
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
@@ -247,8 +366,11 @@ export function createSessionStateActivities(
     failSessionAttempt,
     settleSessionInterruptions,
     persistSessionAttemptQuiescence,
+    reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
     recoverDispatch,
+    recoverEscapedMcpTimeout,
     peekSessionWork,
+    expireSessionHumanInput,
     markSessionIdle,
   };
 }

@@ -5,8 +5,15 @@
 // spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
+import {
+  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+} from "@opengeni/contracts/slack-bot-scopes";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
+  Building2Icon,
+  CheckCircle2Icon,
+  ChevronDownIcon,
   GlobeIcon,
   Loader2Icon,
   PlugIcon,
@@ -14,7 +21,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
@@ -25,13 +32,17 @@ import {
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
+import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
+import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
+  apiKeyConnectionRef,
   capabilityConnectPlan,
   capabilityCounts,
   capabilityErrorToast,
@@ -44,6 +55,8 @@ import {
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
   normalizeProviderDomain,
+  oauthConnectionRef,
+  oauthConnectionOwnership,
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
@@ -53,18 +66,141 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
+import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import {
+  personalSlackAccountState,
+  personalSlackCapability,
+  personalSlackOAuthTarget,
+  preferredPersonalSlackConnection,
+} from "@/lib/personal-slack";
+import {
+  openGeniSlackBotConnections,
+  openGeniSlackBotInstallInput,
+  openGeniSlackBotUiMetadata,
+  preferredOpenGeniSlackBotConnection,
+} from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem, CapabilityPack, ConnectionMetadata } from "@/types";
+import { request } from "@/api";
+
+const GoogleDriveConnectorCard = lazy(async () => {
+  const module = await import("@/components/capabilities/google-drive-connector-card");
+  return { default: module.GoogleDriveConnectorCard };
+});
+import type {
+  AccessContext,
+  CapabilityCatalogItem,
+  CapabilityPack,
+  ConnectionMetadata,
+  ConnectionOwnership,
+} from "@/types";
 
 const PAGE_SIZE = 48;
 const FILTERS: CapabilityFilter[] = ["all", "pack", "mcp", "api", "skill", "plugin"];
 
+export function canWriteWorkspaceConnections(
+  accessContext: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  const grant = accessContext?.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === workspaceId,
+  );
+  return Boolean(
+    grant &&
+    (grant.permissions.includes("connections:write") ||
+      grant.permissions.includes("workspace:admin")),
+  );
+}
+
+export function canInstallOpenGeniSlackBot(
+  accessContext: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return canWriteWorkspaceConnections(accessContext, workspaceId);
+}
+
+export function canManageSlackReactionSummon(
+  accessContext: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  const grant = accessContext?.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === workspaceId,
+  );
+  return grant?.permissions.includes("workspace:admin") === true;
+}
+
+export function WorkspaceSlackBotRequestedScopes() {
+  return (
+    <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+      {OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", ")}
+    </p>
+  );
+}
+
+export function SlackBotInstallControls({
+  canInstall,
+  hasConnection,
+  busy,
+  onInstall,
+}: {
+  canInstall: boolean;
+  hasConnection: boolean;
+  busy: boolean;
+  onInstall: (createNewConnection: boolean) => void;
+}) {
+  if (!canInstall) return null;
+
+  if (hasConnection) {
+    return (
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" disabled={busy} onClick={() => onInstall(false)}>
+          {busy ? <Loader2Icon className="animate-spin" /> : null}
+          Reinstall
+        </Button>
+        <Button type="button" variant="ghost" disabled={busy} onClick={() => onInstall(true)}>
+          Install in another workspace
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4">
+      <button
+        type="button"
+        aria-busy={busy}
+        aria-label="Install OpenGeni in Slack"
+        data-opengeni-slack-install
+        className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={busy}
+        onClick={() => onInstall(false)}
+      >
+        <img
+          src="https://platform.slack-edge.com/img/add_to_slack.png"
+          srcSet="https://platform.slack-edge.com/img/add_to_slack@2x.png 2x"
+          alt=""
+          aria-hidden="true"
+          width={139}
+          height={40}
+          className="h-10 w-[139px]"
+        />
+        {busy ? (
+          <span className="absolute inset-0 grid place-items-center bg-bg/75" aria-hidden="true">
+            <Loader2Icon className="animate-spin" />
+          </span>
+        ) : null}
+      </button>
+    </div>
+  );
+}
+
 export function CapabilitiesRoute({
   workspaceId,
   initialSection,
+  slackLinkToken,
 }: {
   workspaceId: string;
   initialSection?: "packs";
+  slackLinkToken?: string;
 }) {
   const context = useAppContext();
   const client = context.client;
@@ -81,6 +217,9 @@ export function CapabilitiesRoute({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [personalSlackBusy, setPersonalSlackBusy] = useState(false);
+  const [personalSlackDisconnectOpen, setPersonalSlackDisconnectOpen] = useState(false);
+  const [slackBotBusy, setSlackBotBusy] = useState(false);
 
   const [filter, setFilter] = useState<CapabilityFilter>(
     initialSection === "packs" ? "pack" : "all",
@@ -94,6 +233,8 @@ export function CapabilitiesRoute({
   // (strip disable, pack disable, background reload) re-derives the sheet instead
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   const [selected, setSelected] = useState<SheetSelection | null>(null);
+  const sheetOpenerRef = useRef<HTMLElement | null>(null);
+  const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -117,6 +258,13 @@ export function CapabilitiesRoute({
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
   const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
   const visibleBrowse = browseItems.slice(0, visibleCount);
+  const slackBotConnections = openGeniSlackBotConnections(connections ?? []);
+  const slackBotConnection = preferredOpenGeniSlackBotConnection(slackBotConnections);
+  const slackBotMetadata = slackBotConnection
+    ? openGeniSlackBotUiMetadata(slackBotConnection)
+    : null;
+  const canInstallSlackBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
+  const canManageSlackReaction = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
   const showPacks = filter === "all" || filter === "pack";
   const showCatalog = filter !== "pack";
@@ -126,6 +274,10 @@ export function CapabilitiesRoute({
     [client],
   );
   const connectionsLoaded = connections !== null;
+  const personalSlackItem = personalSlackCapability(items);
+  const personalSlackConnection = preferredPersonalSlackConnection(connections ?? []);
+  const personalSlackStatus = personalSlackAccountState(personalSlackConnection, connectionsLoaded);
+  const canManagePersonalSlack = canWriteWorkspaceConnections(context.accessContext, workspaceId);
   // The item the sheet renders, always from the live catalog. Registry items
   // aren't in `items` until persisted, so they fall back to their snapshot; a
   // non-registry selection with no live row resolves to null and the effect
@@ -142,6 +294,49 @@ export function CapabilitiesRoute({
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  const slackInstallHandled = useRef(false);
+  useEffect(() => {
+    if (slackInstallHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("slack");
+    if (!outcome) return;
+    slackInstallHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    if (outcome === "connected") {
+      void refresh();
+      toast.success("OpenGeni installed in Slack");
+    } else {
+      toast.error("Couldn't install OpenGeni in Slack", {
+        description: "Try again, or install another Slack workspace/bot as a new connection.",
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  const slackUserLinkHandled = useRef(false);
+  useEffect(() => {
+    if (!slackLinkToken || slackUserLinkHandled.current) return;
+    slackUserLinkHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    void request(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations/slack/user-links`,
+      {
+        method: "POST",
+        body: JSON.stringify({ linkToken: slackLinkToken }),
+      },
+    )
+      .then(() => {
+        toast.success("Slack identity linked", {
+          description: "You can return to Slack and invoke OpenGeni again.",
+        });
+      })
+      .catch((error) => {
+        toast.error("Couldn't link your Slack identity", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, [slackLinkToken, workspaceId]);
 
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
@@ -198,10 +393,92 @@ export function CapabilitiesRoute({
     void packs.refresh();
   }
 
+  async function startPersonalSlackOAuth() {
+    const target = personalSlackOAuthTarget(personalSlackItem);
+    if (!personalSlackItem || !target) {
+      toast.error("Personal Slack is unavailable", {
+        description: "The official hosted Slack integration is not present in this catalog.",
+      });
+      return;
+    }
+    setPersonalSlackBusy(true);
+    try {
+      const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(personalSlackItem.id)}`;
+      const response = await startMcpOAuthWithTimeout(client, workspaceId, {
+        ...target,
+        ...(personalSlackConnection ? { connectionId: personalSlackConnection.id } : {}),
+        returnPath,
+      });
+      if (!response.authorizationUrl) {
+        throw new Error("Slack did not return an authorization link.");
+      }
+      window.location.assign(response.authorizationUrl);
+    } catch (error) {
+      toast.error("Couldn't connect your Slack account", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setPersonalSlackBusy(false);
+    }
+  }
+
+  async function disconnectPersonalSlack(): Promise<boolean> {
+    if (!personalSlackConnection) return true;
+    setPersonalSlackBusy(true);
+    try {
+      await client.deleteConnection(workspaceId, personalSlackConnection.id);
+      await refresh();
+      onRuntimeChanged();
+      toast.success("Personal Slack account disconnected");
+      return true;
+    } catch (error) {
+      toast.error("Couldn't disconnect your Slack account", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      setPersonalSlackBusy(false);
+    }
+  }
+
+  async function installSlackBot(createNewConnection = false) {
+    setSlackBotBusy(true);
+    try {
+      const installation = await client.startOpenGeniSlackBotInstall(
+        workspaceId,
+        openGeniSlackBotInstallInput(slackBotConnection, createNewConnection),
+      );
+      window.location.assign(installation.authorizationUrl);
+    } catch (error) {
+      toast.error("Couldn't start the OpenGeni Slack installation", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setSlackBotBusy(false);
+    }
+  }
+
+  async function disconnectSlackBot() {
+    if (!slackBotConnection) return;
+    setSlackBotBusy(true);
+    try {
+      await client.deleteConnection(workspaceId, slackBotConnection.id);
+      await refresh();
+      toast.success("OpenGeni Slack bot disconnected");
+    } catch (error) {
+      toast.error("Couldn't disconnect the OpenGeni Slack bot", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSlackBotBusy(false);
+    }
+  }
+
   // `snapshotFallback` defaults to `registry` (a registry result renders from its
   // snapshot until persisted); the add-custom flow passes it explicitly for a
   // just-created item whose row may not be in `items` yet.
   function openItem(item: CapabilityCatalogItem, registry = false, snapshotFallback = registry) {
+    const active = document.activeElement;
+    sheetOpenerRef.current =
+      active instanceof HTMLElement && active !== document.body ? active : null;
     setSheetError(null);
     setSelected({ id: item.id, registry, snapshotFallback, snapshot: item });
   }
@@ -256,13 +533,14 @@ export function CapabilitiesRoute({
         const mcpUrl =
           plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await client.startConnectionOAuth(workspaceId, {
+        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
           ...(mcpUrl ? { mcpUrl } : {}),
           ...(providerDomain ? { providerDomain } : {}),
           // Reuse the existing row when it survives; a null id means the row was
           // deleted, so OAuth mints a fresh connection and the return handler
           // re-enables against it.
           ...(action.connectionId ? { connectionId: action.connectionId } : {}),
+          ownership: action.ownership,
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -291,14 +569,15 @@ export function CapabilitiesRoute({
           const connection = await client.createConnection(workspaceId, {
             providerDomain,
             kind: "api_key",
+            ownership: action.ownership,
             credential: { headers: action.headers },
           });
           await client.enableCapability(workspaceId, item.id, {
-            connectionRef: {
-              connectionId: connection.id,
-              providerDomain: connection.providerDomain,
-              kind: "api_key",
-            },
+            connectionRef: apiKeyConnectionRef(
+              action.ownership,
+              connection.id,
+              connection.providerDomain,
+            ),
           });
         }
         await refresh();
@@ -312,10 +591,10 @@ export function CapabilitiesRoute({
 
       if (action.type === "oauth" && plan.mode === "oauth") {
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
-        const response = await client.startConnectionOAuth(workspaceId, {
+        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
           ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
           ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
-          ...(action.oauthClient ? { oauthClient: action.oauthClient } : {}),
+          ownership: action.ownership,
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -328,9 +607,14 @@ export function CapabilitiesRoute({
       }
 
       if (action.type === "api_key" && plan.mode === "api_key") {
-        // Reuse an existing workspace connection rather than creating a duplicate
-        // on a retry; only mint a new one when none exists.
-        const reuseId = connectionToReuseForApiKey(item, connections ?? [], plan.providerDomain);
+        // Reuse only a connection with the selected ownership rather than creating
+        // a duplicate on retry; workspace and personal rows never cross-reuse.
+        const reuseId = connectionToReuseForApiKey(
+          item,
+          connections ?? [],
+          plan.providerDomain,
+          action.ownership,
+        );
         const connection = reuseId
           ? await client.updateConnection(workspaceId, reuseId, {
               credential: { headers: action.headers },
@@ -339,17 +623,18 @@ export function CapabilitiesRoute({
           : await client.createConnection(workspaceId, {
               providerDomain: plan.providerDomain,
               kind: "api_key",
+              ownership: action.ownership,
               credential: { headers: action.headers },
             });
         // Build the enable ref from the connection row the API returns, never the
         // catalog domain — the API may canonicalize providerDomain, and the row
         // is the authoritative match the enable path validates against.
         await client.enableCapability(workspaceId, persisted.id, {
-          connectionRef: {
-            connectionId: connection.id,
-            providerDomain: connection.providerDomain,
-            kind: "api_key",
-          },
+          connectionRef: apiKeyConnectionRef(
+            action.ownership,
+            connection.id,
+            connection.providerDomain,
+          ),
         });
         await refresh();
         onRuntimeChanged();
@@ -358,13 +643,11 @@ export function CapabilitiesRoute({
         return;
       }
 
-      // Plain enable / track (no credentials).
+      // Plain enable (no credentials).
       await client.enableCapability(workspaceId, persisted.id);
       await refresh();
       if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(
-        persisted.kind === "mcp" ? `Enabled ${persisted.name}` : `Tracking ${persisted.name}`,
-      );
+      toast.success(`Enabled ${persisted.name}`);
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Something went wrong");
@@ -398,7 +681,12 @@ export function CapabilitiesRoute({
     window.history.replaceState(null, "", window.location.pathname);
 
     if (outcome === "success") {
-      void resumeOAuthConnect(itemId, params.get("connectionId"), params.get("providerDomain"));
+      void resumeOAuthConnect(
+        itemId,
+        params.get("connectionId"),
+        params.get("providerDomain"),
+        oauthConnectionOwnership(params.get("ownership")),
+      );
     } else {
       const reason = params.get("reason");
       const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
@@ -446,6 +734,7 @@ export function CapabilitiesRoute({
     itemId: string | null,
     connectionId: string | null,
     providerDomain: string | null,
+    ownership: ConnectionOwnership | null,
   ) {
     setBusyId(itemId ?? "oauth-return");
     // Hoisted above the try so the catch can reopen the sheet from the freshly
@@ -501,8 +790,11 @@ export function CapabilitiesRoute({
         toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
         return;
       }
+      const returnedConnection = conns?.find((candidate) => candidate.id === connectionId) ?? null;
+      const resolvedOwnership =
+        ownership ?? (returnedConnection?.subjectId === null ? "workspace" : "personal");
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: { connectionId: connectionId!, providerDomain: refDomain, kind: "oauth2" },
+        connectionRef: oauthConnectionRef(resolvedOwnership, connectionId!, refDomain),
       });
       await refresh();
       onRuntimeChanged();
@@ -560,7 +852,7 @@ export function CapabilitiesRoute({
           toast.success(
             created.kind === "mcp"
               ? `Added and enabled ${created.name}`
-              : `Added and tracking ${created.name}`,
+              : `Added and enabled ${created.name}`,
           );
         } else {
           toast.success(`Added ${created.name}`);
@@ -687,7 +979,13 @@ export function CapabilitiesRoute({
     // vertical scroll. This root IS that scroll viewport (min-h-0 so it can
     // shrink inside the flex parent, overflow-y-auto so the tall catalog grid
     // scrolls); the centered max-width column lives inside it.
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div
+      ref={capabilityFocusFallbackRef}
+      role="region"
+      aria-label="Capabilities"
+      tabIndex={-1}
+      className="min-h-0 flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset"
+    >
       <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeader
           icon={<PlugIcon className="size-4" />}
@@ -711,6 +1009,161 @@ export function CapabilitiesRoute({
               </Button>
             </>
           }
+        />
+
+        <Suspense fallback={<Skeleton className="mt-6 h-40 w-full rounded-xl" />}>
+          <GoogleDriveConnectorCard workspaceId={workspaceId} />
+        </Suspense>
+
+        <section className="mt-6" aria-labelledby="slack-connections-heading">
+          <div>
+            <h2 id="slack-connections-heading" className="text-sm font-semibold text-fg">
+              Slack connections
+            </h2>
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
+              Personal account linking and workspace bot installation are separate principals.
+              Connecting one never exposes, replaces, or reuses the other's credentials.
+            </p>
+          </div>
+
+          <div className="mt-3 grid gap-4 xl:grid-cols-2">
+            <PersonalSlackAccountCard
+              available={personalSlackItem !== null}
+              canManage={canManagePersonalSlack}
+              busy={personalSlackBusy}
+              accountState={personalSlackStatus}
+              onConnect={() => void startPersonalSlackOAuth()}
+              onReconnect={() => void startPersonalSlackOAuth()}
+              onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
+            />
+
+            <section
+              className="rounded-xl border border-border bg-surface p-4"
+              aria-labelledby="workspace-slack-bot-heading"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-3">
+                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
+                    <Building2Icon className="size-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3
+                        id="workspace-slack-bot-heading"
+                        className="text-sm font-semibold text-fg"
+                      >
+                        OpenGeni workspace bot
+                      </h3>
+                      <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-2xs font-medium text-fg-muted">
+                        Workspace shared · bot identity
+                      </span>
+                    </div>
+                    <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
+                      Install a separate bot principal for first-party Slack tools and explicitly
+                      bound scheduled tasks. It never uses a person's Slack OAuth grant.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {slackBotConnection && slackBotMetadata ? (
+                <>
+                  <div className="mt-4 flex items-start gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
+                    <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-brand" />
+                    <div>
+                      <p className="text-sm font-semibold text-fg">
+                        {slackBotConnection.status === "active"
+                          ? `Installed in ${slackBotMetadata.slackTeamName}`
+                          : `Reinstall needed for ${slackBotMetadata.slackTeamName}`}
+                      </p>
+                      <p className="mt-0.5 text-xs text-fg-muted">
+                        {slackBotConnection.status === "active"
+                          ? "The workspace bot is ready to use in this Slack workspace."
+                          : "Reinstall the workspace bot to restore its Slack access."}
+                      </p>
+                    </div>
+                  </div>
+
+                  <SlackReactionSummonCard
+                    workspaceId={workspaceId}
+                    connection={slackBotConnection}
+                    canManage={canManageSlackReaction}
+                    installBusy={slackBotBusy}
+                    onReinstall={() => void installSlackBot(false)}
+                  />
+
+                  <details className="group mt-3 border-t border-border/70 pt-3">
+                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                      <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                      <span>Workspace bot permissions and installation details</span>
+                    </summary>
+                    <div className="mt-3 rounded-md bg-bg/50 p-3">
+                      <p className="text-2xs font-medium text-fg-muted">Required bot scopes</p>
+                      <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+                        {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
+                      </p>
+                      <p className="mt-2 text-2xs text-fg-subtle">
+                        Bot connection ID:{" "}
+                        <span className="font-mono">{slackBotConnection.id}</span>
+                        {slackBotConnections.length > 1
+                          ? ` · ${slackBotConnections.length} Slack installations`
+                          : ""}
+                      </p>
+                      <SlackBotInstallControls
+                        canInstall={canInstallSlackBot}
+                        hasConnection
+                        busy={slackBotBusy}
+                        onInstall={(createNewConnection) =>
+                          void installSlackBot(createNewConnection)
+                        }
+                      />
+                      {slackBotConnection.status === "active" ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="mt-1"
+                          disabled={slackBotBusy}
+                          onClick={() => void disconnectSlackBot()}
+                        >
+                          Disconnect workspace bot
+                        </Button>
+                      ) : null}
+                    </div>
+                  </details>
+                </>
+              ) : (
+                <>
+                  <p className="mt-4 max-w-2xl text-xs text-fg-muted">
+                    Install the OpenGeni bot in a Slack workspace to get started.
+                  </p>
+                  <SlackBotInstallControls
+                    canInstall={canInstallSlackBot}
+                    hasConnection={false}
+                    busy={slackBotBusy}
+                    onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+                  />
+                  <details className="group mt-3">
+                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                      <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                      <span>Workspace bot permissions requested</span>
+                    </summary>
+                    <WorkspaceSlackBotRequestedScopes />
+                  </details>
+                </>
+              )}
+            </section>
+          </div>
+        </section>
+
+        <ConfirmDialog
+          open={personalSlackDisconnectOpen}
+          onOpenChange={setPersonalSlackDisconnectOpen}
+          title="Disconnect your Slack account?"
+          description="OpenGeni will stop using this subject-owned grant. This does not disconnect the workspace bot or revoke provider-side access in Slack."
+          confirmLabel="Disconnect my Slack account"
+          cancelAutoFocus
+          onConfirm={disconnectPersonalSlack}
         />
 
         {/* Primary search — front and center. */}
@@ -861,6 +1314,8 @@ export function CapabilitiesRoute({
         health={selectedHealth}
         logoSrc={selectedItem ? logoUrl(selectedItem) : null}
         open={selectedItem !== null}
+        restoreFocusRef={sheetOpenerRef}
+        restoreFocusFallbackRef={capabilityFocusFallbackRef}
         onOpenChange={(open) => {
           if (!open) {
             setSelected(null);
@@ -921,7 +1376,9 @@ function EnabledCard({
       <button
         type="button"
         onClick={onOpen}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        data-capability-focus-target
+        data-capability-id={item.id}
+        className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
         <div className="min-w-0">

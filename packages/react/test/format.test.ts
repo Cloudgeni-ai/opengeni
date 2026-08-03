@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  COMPOSER_PAYMENT_REQUIRED_MESSAGE,
   CREDIT_EXHAUSTION_MESSAGE,
+  composerSubmissionErrorMessage,
+  formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
   isCreditExhaustion,
@@ -8,6 +11,17 @@ import {
   truncate,
   tryParseJson,
 } from "../src/lib/format";
+import { OpenGeniApiError } from "@opengeni/sdk";
+
+describe("formatClockTime", () => {
+  test("formats date + time and rejects invalid input", () => {
+    expect(formatClockTime("not-a-date")).toBe("");
+    const formatted = formatClockTime("2026-07-15T08:04:00");
+    expect(formatted.toLowerCase()).toMatch(/jul/);
+    expect(formatted).toMatch(/15/);
+    expect(formatted).toMatch(/\d/);
+  });
+});
 
 describe("formatRelativeTime", () => {
   const now = new Date("2026-06-12T12:00:00Z");
@@ -77,6 +91,33 @@ describe("isCreditExhaustion", () => {
     expect(isCreditExhaustion({ error: "connection reset by peer" })).toBe(false);
     expect(isCreditExhaustion({ segmentLimit: "max_turns" })).toBe(false);
     expect(isCreditExhaustion({ error: null, detail: null, segmentLimit: null })).toBe(false);
+  });
+});
+
+describe("composerSubmissionErrorMessage", () => {
+  test("explains managed-credit admission and preserves typed API identity", () => {
+    const error = new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: {
+          status: 402,
+          code: "payment_required",
+          message: "insufficient OpenGeni credits",
+          retryable: false,
+        },
+      }),
+    );
+
+    expect(error.code).toBe("payment_required");
+    expect(composerSubmissionErrorMessage(error)).toBe(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).toContain("connected Codex subscription model");
+    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).toContain("draft and attachments are preserved");
+  });
+
+  test("passes unrelated submission errors through", () => {
+    expect(composerSubmissionErrorMessage(new Error("network unavailable"))).toBe(
+      "network unavailable",
+    );
   });
 });
 

@@ -1,5 +1,13 @@
 import type { Settings } from "@opengeni/config";
-import type { Document, GitHubAppApiPort, ScheduledTask } from "@opengeni/contracts";
+import type {
+  ConnectionCredentialsPort,
+  Document,
+  DocumentAuthorityKind,
+  GitHubAppApiPort,
+  ScheduledTask,
+  SessionAuthorizationPort,
+  TurnInitiator,
+} from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
@@ -7,6 +15,7 @@ import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
+import type { TranscriptionService } from "./transcription";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: {
@@ -47,8 +56,9 @@ export type SessionWorkflowClient = {
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;
-    agentRunUsageIdempotencyKey?: string;
-    triggerWorkflowId?: string;
+    agentRunUsageIdempotencyKey: string;
+    triggerWorkflowId: string;
+    initiator: TurnInitiator;
   }) => Promise<void>;
   startRigVerification: (input: {
     workspaceId: string;
@@ -64,6 +74,9 @@ export type DocumentIndexClient = {
     accountId: string;
     workspaceId: string;
     documentId: string;
+    authorityKind: DocumentAuthorityKind;
+    authorityWorkspaceId: string | null;
+    authoritySubjectId: string | null;
   }) => Promise<Document | void>;
 };
 
@@ -85,7 +98,27 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
+  /**
+   * Optional host-owned connection credential seam. API-side consumers use
+   * the MCP leg for Toolspace/Code Mode; worker consumers bind the same port
+   * for model MCP, Git, and sandbox-secret resolution.
+   */
+  connectionCredentials?: ConnectionCredentialsPort | null;
+  /**
+   * Optional embedding-host session ACL. Unset preserves standalone workspace
+   * authorization; once bound, every session-addressed surface fails closed on
+   * an unavailable or invalid host decision.
+   */
+  sessionAuthorization?: SessionAuthorizationPort | null;
   managedAuth?: ManagedAuth | null;
+  /** Injectable Codex HTTP transport for deterministic API/provider tests. */
+  codexFetch?: typeof fetch;
+  /** Injectable Slack Web API transport for deterministic bot-connection tests. */
+  slackFetch?: typeof fetch;
+  /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
+  googleDriveFetch?: typeof fetch;
+  /** Optional host-owned voice-input transcription service. */
+  transcription?: TranscriptionService | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes
@@ -124,7 +157,7 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus"
+  "settings" | "db" | "bus" | "sessionAuthorization"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

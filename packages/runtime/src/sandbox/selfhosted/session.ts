@@ -187,6 +187,7 @@ const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRA
 const SELFHOSTED_EXEC_ENV_ALLOWLIST = [
   "OPENGENI_TOOLSPACE_URL",
   "OPENGENI_TOOLSPACE_TOKEN_FILE",
+  "OPENGENI_OGTOOL_PACKAGE_SPEC",
 ] as const;
 
 function selfhostedExecEnv(environment: Record<string, string>): Record<string, string> {
@@ -568,10 +569,11 @@ export class SelfhostedSession {
     }
   }
 
-  /** The clamped exec process deadline (ms): the exec-specific budget when threaded,
-   *  else the control timeout. Shared by `exec()` (the wire deadline) and
-   *  `execCommand()` (the timed-out hint's "N-second limit"), so the two never drift. */
-  private execDeadlineMs(): number {
+  /** The effective clamped exec process deadline (ms): the exec-specific budget
+   *  when threaded, else the control timeout. Public so adapters that project a
+   *  structured command receipt can report the exact deadline the agent enforces
+   *  instead of repeating (and potentially drifting from) this normalization. */
+  get effectiveExecDeadlineMs(): number {
     // exec gets its OWN (much larger) deadline distinct from the short control
     // timeout — a real command routinely outlives 30s. Falls back to `timeoutMs`
     // when no exec deadline is threaded (unchanged for those callers).
@@ -586,7 +588,7 @@ export class SelfhostedSession {
     // Keep the process deadline inside the request/reply deadline. Previously the
     // wire carried timeoutMs=0 (unbounded) while the caller stopped waiting after
     // ~30s, leaving accepted work invisible and able to starve control liveness.
-    const executionTimeoutMs = this.execDeadlineMs();
+    const executionTimeoutMs = this.effectiveExecDeadlineMs;
     const execReq: ExecRequest = {
       // The agent does NOT shell-interpret unless `shell` — Channel-A passes a
       // single shell command string, so run it through the platform shell.
@@ -735,7 +737,7 @@ export class SelfhostedSession {
   async execCommand(args: { cmd: string; workdir?: string; runAs?: string }): Promise<string> {
     const result = await this.exec({ cmd: args.cmd, workdir: args.workdir, runAs: args.runAs });
     if (result.timedOut) {
-      const hint = execDeadlineHint(Math.round(this.execDeadlineMs() / 1000));
+      const hint = execDeadlineHint(Math.round(this.effectiveExecDeadlineMs / 1000));
       return result.output ? `${result.output}\n${hint}` : hint;
     }
     return result.output;
@@ -805,8 +807,9 @@ export class SelfhostedSession {
    *  filesystem and is prepared by the agent itself, so there is nothing to stage.
    *  Present (not absent) so the SDK's provided-session manifest apply path — which
    *  requires `applyManifest()` OR `materializeEntry()` when the agent declares
-   *  entries — is satisfied without error. The selfhosted manifest declares no
-   *  entries, so in practice this is never invoked with a real entry. */
+   *  entries — is satisfied without error. A session swapped from a managed
+   *  sandbox can still present managed-only manifest entries here; they remain
+   *  intentionally unstaged on the user-owned machine. */
   async materializeEntry(_args: { path: string; entry: unknown; runAs?: string }): Promise<void> {
     return;
   }

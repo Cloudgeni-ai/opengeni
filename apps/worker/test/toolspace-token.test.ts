@@ -1,13 +1,50 @@
 import { describe, expect, test } from "bun:test";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
-import { sandboxEnvironmentForRun } from "../src/activities/environment";
+import { mintSandboxToolspaceToken, sandboxEnvironmentForRun } from "../src/activities/environment";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
+const authority = {
+  sessionId,
+};
 
 describe("toolspace token mint and sandbox delivery pointers", () => {
+  test("renewal preserves session authority while advancing the signed expiry", async () => {
+    const settings = testSettings({
+      delegationSecret: "toolspace-secret",
+      toolspaceEnabled: true,
+    });
+    const firstNow = Date.now();
+    const secondNow = firstNow + 10 * 60_000;
+    const first = await mintSandboxToolspaceToken(
+      settings,
+      { accountId, workspaceId },
+      authority,
+      firstNow,
+    );
+    const second = await mintSandboxToolspaceToken(
+      settings,
+      { accountId, workspaceId },
+      authority,
+      secondNow,
+    );
+
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(second!.token).not.toBe(first!.token);
+    const firstPayload = await verifyDelegatedAccessToken(settings.delegationSecret!, first!.token);
+    const secondPayload = await verifyDelegatedAccessToken(
+      settings.delegationSecret!,
+      second!.token,
+    );
+    expect({ ...secondPayload, exp: firstPayload.exp }).toEqual(firstPayload);
+    expect(first!.expiresAt.getTime()).toBe(firstPayload.exp! * 1000);
+    expect(second!.expiresAt.getTime()).toBe(secondPayload.exp! * 1000);
+    expect(secondPayload.exp! - firstPayload.exp!).toBe(10 * 60);
+  });
+
   test("feature off leaves the sandbox env byte-identical: no token, file path, or URL", async () => {
     const result = await sandboxEnvironmentForRun(
       testSettings({
@@ -20,8 +57,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 
@@ -43,8 +79,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 
@@ -64,11 +99,14 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
     expect(payload).toMatchObject({
       accountId,
       workspaceId,
-      subjectId: "sandbox:run-1",
+      subjectId: `sandbox:${sessionId}`,
       subjectLabel: "sandbox toolspace",
       permissions: ["toolspace:call"],
       sessionId,
     });
+    expect(payload.turnId).toBeUndefined();
+    expect(payload.attemptId).toBeUndefined();
+    expect(payload.executionGeneration).toBeUndefined();
   });
 
   test("connected-machine (selfhosted) turns mint the token too — there is no skip path", async () => {
@@ -90,8 +128,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 
@@ -121,8 +158,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 

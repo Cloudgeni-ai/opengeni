@@ -6,8 +6,8 @@ import {
   FileJsonIcon,
   GitBranchIcon,
   ImageIcon,
+  AudioLinesIcon,
   TerminalIcon,
-  WrenchIcon,
 } from "lucide-react";
 import { useLightboxOptional, type UserMessageItem } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
@@ -17,7 +17,6 @@ import { toast } from "sonner";
 import { MarkdownText } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
-import { capabilityChipLabel } from "@/lib/capabilities";
 import type { SessionFailureSummary } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { repositoryDisplayName } from "@/lib/session-tools";
@@ -210,16 +209,13 @@ function isImageAsset(asset: FileAsset | null | undefined): boolean {
   return Boolean(asset?.contentType.startsWith("image/"));
 }
 
-/** Attachment previews/chips + repository/tool chips + markdown body inside the user bubble. */
+/** Attachment previews/chips + repository chips + markdown body inside the user bubble. */
 export function UserMessageBody({
   workspaceId,
   item,
-  resolveCapabilityName,
 }: {
   workspaceId: string;
   item: UserMessageItem;
-  /** Real capability name for a tool chip (from the workspace catalog), or null. */
-  resolveCapabilityName?: (mcpServerId: string) => string | null;
 }) {
   const fileResources = item.resources.filter(
     (resource): resource is FileResource => resource.kind === "file",
@@ -240,11 +236,16 @@ export function UserMessageBody({
   const otherFileResources = filesPending
     ? []
     : fileResources.filter((resource) => !isImageAsset(assets.get(resource.fileId)));
-  const hasChips =
-    otherFileResources.length > 0 || repositoryResources.length > 0 || item.tools.length > 0;
+  const hasChips = otherFileResources.length > 0 || repositoryResources.length > 0;
 
   return (
     <div data-testid="timeline-user">
+      {item.presentation ? (
+        <div className="mb-1.5 inline-flex items-center gap-1 text-xs font-medium text-fg-muted">
+          <AudioLinesIcon className="size-3.5" />
+          {item.presentation.kind === "realtime_voice_handoff" ? "Voice handoff" : "Voice request"}
+        </div>
+      ) : null}
       {filesPending ? (
         <div className="mb-2 flex flex-wrap gap-1.5">
           {fileResources.map((resource) => (
@@ -294,21 +295,21 @@ export function UserMessageBody({
               <span className="truncate">{repositoryDisplayName(resource)}</span>
             </span>
           ))}
-          {item.tools.map((tool) => (
-            <span
-              key={`${tool.kind}:${tool.id}`}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted"
-            >
-              <WrenchIcon className="size-3.5 shrink-0" />
-              <span className="truncate">
-                {resolveCapabilityName?.(tool.id) ?? capabilityChipLabel(tool.id)}
-              </span>
-            </span>
-          ))}
         </div>
       ) : null}
 
       <MarkdownText text={item.text} compact />
+
+      {item.presentation ? (
+        <details className="group mt-2 border-t border-border/60 pt-1.5 text-xs text-fg-muted">
+          <summary className="cursor-pointer select-none list-none hover:text-fg [&::-webkit-details-marker]:hidden">
+            Context sent to agent
+          </summary>
+          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-2 p-2 font-mono text-[11px] leading-relaxed text-fg-muted">
+            {item.presentation.context}
+          </pre>
+        </details>
+      ) : null}
     </div>
   );
 }

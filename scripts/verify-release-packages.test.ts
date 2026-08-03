@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  deriveExpectedReleasePackages,
   loadPublishablePackages,
   parseExpectedPackages,
   reconcileReleasePackages,
+  resolveExpectedReleasePackages,
   type PublishablePackage,
   type RegistryPackage,
 } from "./verify-release-packages";
@@ -30,6 +32,7 @@ describe("release package evidence", () => {
   });
 
   test("parses a bounded comma/newline package set and rejects duplicates", () => {
+    expect(parseExpectedPackages("")).toEqual([]);
     expect(parseExpectedPackages("@opengeni/react@0.14.0,\n@opengeni/sdk@0.13.0")).toEqual([
       react,
       sdk,
@@ -38,6 +41,38 @@ describe("release package evidence", () => {
       "duplicate expected package",
     );
     expect(() => parseExpectedPackages("react@latest")).toThrow("invalid expected package spec");
+  });
+
+  test("supports an application-only release with a complete published package BOM", () => {
+    const result = reconcileReleasePackages({
+      sourceSha: sha,
+      phase: "verify",
+      publishable: [react, sdk],
+      expected: [],
+      registry: new Map([
+        [react.name, published(react, "b".repeat(40))],
+        [sdk.name, published(sdk, "c".repeat(40))],
+      ]),
+    });
+    expect(result).toEqual({
+      needsPublish: false,
+      releaseReady: true,
+      packages: [],
+      bomPackages: [
+        {
+          ...react,
+          state: "published",
+          gitHead: "b".repeat(40),
+          integrity: "sha512-release-integrity",
+        },
+        {
+          ...sdk,
+          state: "published",
+          gitHead: "c".repeat(40),
+          integrity: "sha512-release-integrity",
+        },
+      ],
+    });
   });
 
   test("plans exactly the declared missing package and ignores unchanged published packages", () => {
@@ -55,6 +90,97 @@ describe("release package evidence", () => {
     expect(result.releaseReady).toBe(false);
     expect(result.packages).toEqual([
       { ...react, state: "pending", gitHead: null, integrity: null },
+    ]);
+    expect(result.bomPackages).toEqual([
+      { ...react, state: "pending", gitHead: null, integrity: null },
+      {
+        ...sdk,
+        state: "published",
+        gitHead: "b".repeat(40),
+        integrity: "sha512-release-integrity",
+      },
+    ]);
+  });
+
+  test("derives the complete unpublished package set without caller-maintained input", () => {
+    expect(
+      deriveExpectedReleasePackages(
+        [react, sdk],
+        new Map([
+          [react.name, null],
+          [sdk.name, published(sdk, "b".repeat(40))],
+        ]),
+      ),
+    ).toEqual([react]);
+  });
+
+  test("derivation fails closed when registry coverage is incomplete", () => {
+    expect(() => deriveExpectedReleasePackages([react], new Map())).toThrow(
+      "registry state was not loaded",
+    );
+  });
+
+  test("automatic derivation is explicit and cannot change other empty-input callers", () => {
+    const registry = new Map<string, RegistryPackage | null>([[react.name, null]]);
+    expect(
+      resolveExpectedReleasePackages({
+        phase: "plan",
+        deriveExpected: false,
+        declaredExpected: [],
+        publishable: [react],
+        registry,
+      }),
+    ).toEqual([]);
+    expect(
+      resolveExpectedReleasePackages({
+        phase: "plan",
+        deriveExpected: true,
+        declaredExpected: [],
+        publishable: [react],
+        registry,
+      }),
+    ).toEqual([react]);
+    expect(() =>
+      resolveExpectedReleasePackages({
+        phase: "verify",
+        deriveExpected: true,
+        declaredExpected: [],
+        publishable: [react],
+        registry,
+      }),
+    ).toThrow("only during planning");
+    expect(() =>
+      resolveExpectedReleasePackages({
+        phase: "plan",
+        deriveExpected: true,
+        declaredExpected: [react],
+        publishable: [react],
+        registry,
+      }),
+    ).toThrow("cannot be combined");
+  });
+
+  test("a frozen candidate package set makes partial-publication retries idempotent", () => {
+    const result = reconcileReleasePackages({
+      sourceSha: sha,
+      phase: "plan",
+      publishable: [react, sdk],
+      expected: [react, sdk],
+      registry: new Map([
+        [react.name, published(react)],
+        [sdk.name, null],
+      ]),
+    });
+
+    expect(result.needsPublish).toBe(true);
+    expect(result.packages).toEqual([
+      {
+        ...react,
+        state: "published",
+        gitHead: sha,
+        integrity: "sha512-release-integrity",
+      },
+      { ...sdk, state: "pending", gitHead: null, integrity: null },
     ]);
   });
 
@@ -108,7 +234,28 @@ describe("release package evidence", () => {
     });
     expect(result.needsPublish).toBe(false);
     expect(result.releaseReady).toBe(true);
-    expect(result.packages[0]).toMatchObject({ ...react, state: "published", gitHead: sha });
+    expect(result.packages[0]).toMatchObject({
+      ...react,
+      state: "published",
+      gitHead: sha,
+    });
+    expect(result.bomPackages).toHaveLength(2);
+    expect(result.bomPackages.every((pkg) => pkg.state === "published")).toBe(true);
+  });
+
+  test("fails closed when an unchanged BOM member lacks immutable registry identity", () => {
+    expect(() =>
+      reconcileReleasePackages({
+        sourceSha: sha,
+        phase: "plan",
+        publishable: [react, sdk],
+        expected: [react],
+        registry: new Map([
+          [react.name, null],
+          [sdk.name, { ...sdk, gitHead: null, integrity: "sha512-release-integrity" }],
+        ]),
+      }),
+    ).toThrow("registry gitHead is missing or invalid");
   });
 
   test("verify fails closed while an expected package is still missing", () => {

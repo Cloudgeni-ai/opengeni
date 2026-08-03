@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "0.16.1",
+  "version": "0.38.1",
   "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -27,9 +27,22 @@
       "types": "./src/composer.ts",
       "default": "./src/composer.ts"
     },
+    "./session": {
+      "types": "./src/session.ts",
+      "default": "./src/session.ts"
+    },
+    "./session-ui": {
+      "types": "./src/session-ui.ts",
+      "default": "./src/session-ui.ts"
+    },
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
+    },
+    "./model-policy": {
+      "types": "./src/model-policy.ts",
+      "import": "./src/model-policy.ts",
+      "default": "./src/model-policy.ts"
     },
     "./styles.css": {
       "types": "./styles/index.d.ts",
@@ -45,8 +58,8 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
     "demo": "vite dev demo --port 3100",
     "demo:build": "vite build demo",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
@@ -81,6 +94,7 @@
     "@happy-dom/global-registrator": "^20.10.2",
     "@novnc/novnc": "^1.7.0",
     "@opengeni/agent-proto": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
     "@pierre/diffs": "^1.2.11",
     "@tailwindcss/vite": "^4.2.4",
     "@types/react": "^19.2.14",
@@ -95,7 +109,7 @@
     "react-dom": "^19.2.5",
     "tailwindcss": "^4.2.4",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3",
+    "typescript": "7.0.2",
     "vite": "^8.0.9"
   },
   "peerDependencies": {

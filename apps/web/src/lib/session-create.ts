@@ -13,17 +13,33 @@
 // the gating change.
 import {
   CAPABILITY_DESCRIPTORS,
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  mergeResourceRefs,
+  Permission,
+  stableJson,
   type CapabilityDescriptor,
+  type FirstPartyMcpToolName,
   type MachineView,
 } from "@opengeni/contracts";
+import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk";
 
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
-import type { GoalSpec, SandboxBackend, TurnSubmission } from "@/types";
+import type {
+  GoalSpec,
+  LatencyMode,
+  ReasoningEffort,
+  ResourceRef,
+  SandboxBackend,
+  ToolRef,
+  TurnSubmission,
+} from "@/types";
+import { buildTools } from "./session-tools";
 
 // ── Compute target — the promoted top-level "Where should this run?" choice ──
 
 /** A platform-owned ephemeral sandbox. `backend === ""` is the deployment
- *  default; a specific managed backend is an Advanced override. */
+ *  default. The composer no longer exposes a managed-backend override; keep the
+ *  field so drafts/API mapping stay stable if we re-enable it later. */
 export type ManagedSandboxTarget = {
   kind: "sandbox";
   backend: SandboxBackend | "";
@@ -59,6 +75,7 @@ export type SessionDraft = {
   goalMaxAutoContinuations: string;
   customMcpPermissions: boolean;
   mcpPermissions: Set<string>;
+  firstPartyMcpTools: Set<FirstPartyMcpToolName>;
 };
 
 export function emptySessionDraft(): SessionDraft {
@@ -71,7 +88,18 @@ export function emptySessionDraft(): SessionDraft {
     goalMaxAutoContinuations: "",
     customMcpPermissions: false,
     mcpPermissions: new Set(sessionMcpPermissionGroups.flatMap((group) => group.permissions)),
+    firstPartyMcpTools: new Set(FIRST_PARTY_MCP_TOOL_NAMES),
   };
+}
+
+function explicitFirstPartyTools(draft: SessionDraft): {
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
+} {
+  const selected = [...draft.firstPartyMcpTools];
+  return selected.length === FIRST_PARTY_MCP_TOOL_NAMES.length &&
+    FIRST_PARTY_MCP_TOOL_NAMES.every((tool) => draft.firstPartyMcpTools.has(tool))
+    ? {}
+    : { firstPartyMcpTools: selected };
 }
 
 /** True once the draft can be submitted: a connected machine needs a picked
@@ -92,6 +120,137 @@ export type SessionDraftSubmission = {
   omitWorkspaceResources: boolean;
 };
 
+export type BuildCreateSessionRequestInput = {
+  currentResources: ResourceRef[];
+  submission: TurnSubmission;
+  /** Session-scoped system guidance that is not rendered in the chat timeline. */
+  instructions?: string;
+  startMode?: "realtime";
+  omitWorkspaceResources?: boolean;
+  selectedTools: ToolRef[];
+  defaultModel: string;
+  defaultReasoningEffort: ReasoningEffort;
+  defaultLatencyMode: LatencyMode;
+  clientEventId: string;
+  idempotencyKey: string;
+  targetSandboxId?: string | null;
+  workingDir?: string | null;
+  expectedNewSessionDraftRevision?: number;
+  /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
+  workspaceDefaultMcpServerIds?: string[];
+  /** Prevent a partially hydrated capability catalog from becoming a pin. */
+  workspaceMcpCatalogReady?: boolean;
+};
+
+export type PendingCreateAttempt = {
+  client: object;
+  workspaceId: string;
+  signature: string;
+  idempotencyKey: string;
+};
+
+/**
+ * Build the one canonical create payload without mutating UI state. Resource
+ * identity and mount conflicts are resolved by the shared contract helper;
+ * exact duplicates collapse while order remains first-seen stable.
+ */
+export function buildCreateSessionRequest(
+  input: BuildCreateSessionRequestInput,
+): CreateSessionRequest {
+  const baseResources = input.omitWorkspaceResources ? [] : input.currentResources;
+  const resources = mergeResourceRefs(
+    [],
+    [...baseResources, ...(input.submission.resources ?? [])],
+    { rejectConflicts: true },
+  );
+  const selectedToolIds = [
+    ...new Set(
+      buildTools(
+        [],
+        input.selectedTools.map((tool) => tool.id),
+      ).map((tool) => tool.id),
+    ),
+  ].sort();
+  const defaultToolIds = input.workspaceDefaultMcpServerIds
+    ? [...new Set(input.workspaceDefaultMcpServerIds)].sort()
+    : null;
+  const tools =
+    input.workspaceMcpCatalogReady === true &&
+    defaultToolIds &&
+    selectedToolIds.join("\u0000") ===
+      [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))].sort().join("\u0000")
+      ? undefined
+      : [...input.selectedTools];
+  return {
+    ...(input.startMode === "realtime"
+      ? { startMode: "realtime" as const }
+      : { initialMessage: input.submission.text }),
+    instructions: input.instructions || undefined,
+    resources,
+    ...(tools === undefined ? {} : { tools }),
+    model: input.submission.model ?? input.defaultModel,
+    reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
+    latencyMode: input.submission.latencyMode ?? input.defaultLatencyMode,
+    clientEventId: input.clientEventId,
+    idempotencyKey: input.idempotencyKey,
+    ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
+    ...(input.submission.variableSetId ? { variableSetId: input.submission.variableSetId } : {}),
+    ...(input.submission.rigId ? { rigId: input.submission.rigId } : {}),
+    ...(input.submission.goal ? { goal: input.submission.goal } : {}),
+    ...(input.submission.firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: input.submission.firstPartyMcpPermissions }
+      : {}),
+    ...(input.submission.firstPartyMcpTools
+      ? { firstPartyMcpTools: input.submission.firstPartyMcpTools }
+      : {}),
+    ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
+    ...(input.workingDir ? { workingDir: input.workingDir } : {}),
+    ...(input.expectedNewSessionDraftRevision !== undefined
+      ? {
+          expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
+        }
+      : {}),
+  };
+}
+
+/**
+ * Bind a create idempotency key to the exact logical session request. Retry-only
+ * fields do not define session identity: the event id is fresh per call, and a
+ * draft may acquire a new OCC revision while retaining the same create value.
+ * A changed value, workspace, or authenticated client starts a new logical
+ * create instead of reviving a partially initialized session with stale input.
+ */
+export function prepareCreateSessionAttempt(input: {
+  pending: PendingCreateAttempt | null;
+  client: object;
+  workspaceId: string;
+  request: CreateSessionRequest;
+  freshIdempotencyKey: string;
+}): { pending: PendingCreateAttempt; request: CreateSessionRequest } {
+  const {
+    clientEventId: _clientEventId,
+    idempotencyKey: _idempotencyKey,
+    expectedNewSessionDraftRevision: _expectedNewSessionDraftRevision,
+    ...logicalRequest
+  } = input.request;
+  const signature = stableJson(logicalRequest);
+  const idempotencyKey =
+    input.pending?.client === input.client &&
+    input.pending.workspaceId === input.workspaceId &&
+    input.pending.signature === signature
+      ? input.pending.idempotencyKey
+      : input.freshIdempotencyKey;
+  return {
+    pending: {
+      client: input.client,
+      workspaceId: input.workspaceId,
+      signature,
+      idempotencyKey,
+    },
+    request: { ...input.request, idempotencyKey },
+  };
+}
+
 /** The single submit mapper: turns a `SessionDraft` into the create payload,
  *  branching on the compute kind (the one discriminant). */
 export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSubmission {
@@ -99,6 +258,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
   const mcp = draft.customMcpPermissions
     ? { firstPartyMcpPermissions: [...draft.mcpPermissions] }
     : {};
+  const visibleTools = explicitFirstPartyTools(draft);
 
   if (draft.compute.kind === "machine") {
     return {
@@ -107,6 +267,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
       extras: {
         ...(goal ? { goal } : {}),
         ...mcp,
+        ...visibleTools,
       },
       options: {
         targetSandboxId: draft.compute.sandboxId,
@@ -123,9 +284,93 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(goal ? { goal } : {}),
       ...mcp,
+      ...visibleTools,
     },
     options: { targetSandboxId: null, workingDir: null },
     omitWorkspaceResources: false,
+  };
+}
+
+/**
+ * Project the editable create form into the deliberately narrow set of options
+ * that may survive before a session exists. Attempt-scoped ids and credential
+ * material have no representation here by construction.
+ */
+export function newSessionDraftOptionsFromSessionDraft(
+  draft: SessionDraft,
+): NewSessionDraftOptions {
+  const goal = goalFromDraft(draft);
+  const permissions = draft.customMcpPermissions
+    ? {
+        firstPartyMcpPermissions: [...draft.mcpPermissions].map((permission) =>
+          Permission.parse(permission),
+        ),
+      }
+    : {};
+  const visibleTools = explicitFirstPartyTools(draft);
+
+  if (draft.compute.kind === "machine") {
+    const workingDir = workingDirFromFolder(draft.compute.folder);
+    return {
+      ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
+      ...(workingDir ? { workingDir } : {}),
+      ...(goal ? { goal } : {}),
+      ...permissions,
+      ...visibleTools,
+    };
+  }
+
+  return {
+    ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
+    ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
+    ...(draft.rigId ? { rigId: draft.rigId } : {}),
+    ...(goal ? { goal } : {}),
+    ...permissions,
+    ...visibleTools,
+  };
+}
+
+/** Restore server-authoritative create options into the single UI draft form. */
+export function sessionDraftFromNewSessionDraftOptions(
+  options: NewSessionDraftOptions,
+): SessionDraft {
+  const base = emptySessionDraft();
+  const machine = Boolean(
+    options.targetSandboxId || options.workingDir || options.sandboxBackend === "selfhosted",
+  );
+  return {
+    ...base,
+    compute: machine
+      ? {
+          kind: "machine",
+          sandboxId: options.targetSandboxId ?? null,
+          folder: options.workingDir
+            ? { kind: "path", path: options.workingDir }
+            : { kind: "root" },
+        }
+      : {
+          kind: "sandbox",
+          // Ignore persisted managed-backend overrides — the create UI no longer
+          // offers that control; always use the deployment default.
+          backend: "",
+        },
+    variableSetId: options.variableSetId ?? "",
+    rigId: options.rigId ?? "",
+    goalText: options.goal?.text ?? "",
+    goalSuccessCriteria: options.goal?.successCriteria ?? "",
+    goalMaxAutoContinuations:
+      options.goal?.maxAutoContinuations === undefined
+        ? ""
+        : String(options.goal.maxAutoContinuations),
+    customMcpPermissions: options.firstPartyMcpPermissions !== undefined,
+    mcpPermissions:
+      options.firstPartyMcpPermissions === undefined
+        ? base.mcpPermissions
+        : new Set(options.firstPartyMcpPermissions),
+    firstPartyMcpTools:
+      options.firstPartyMcpTools === undefined
+        ? base.firstPartyMcpTools
+        : new Set(options.firstPartyMcpTools),
   };
 }
 
@@ -152,7 +397,7 @@ function goalFromDraft(draft: SessionDraft): GoalSpec | null {
 
 function nonNegativeInteger(value: string): number | null {
   const parsed = Number(value);
-  return value.trim() && Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  return value.trim() && Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 // ── Managed sandbox backend options (descriptor-driven) ──────────────────────
@@ -210,9 +455,9 @@ function formatLifetime(ms: number): string {
   return Number.isInteger(hours) ? `${hours}h` : `${Math.round(hours)}h`;
 }
 
-/** The managed backend options for the Advanced override, descriptor-driven and
- *  led by the deployment default. Excludes `selfhosted` (the Connected Machine
- *  kind). */
+/** Managed backend choices (deployment default first). Excludes `selfhosted`
+ *  (Connected Machine kind). Kept for tests / a possible future override UI —
+ *  the create composer no longer surfaces this control. */
 export function managedBackendOptions(): ManagedBackendOption[] {
   const managed = (
     Object.entries(CAPABILITY_DESCRIPTORS) as Array<[SandboxBackend, CapabilityDescriptor]>

@@ -9,6 +9,7 @@ import {
   preflightChecksFor,
   requiredRuntimeEnvVars,
   SANDBOX_REQUIRED_ENV,
+  SANDBOX_LIFECYCLE_PASSTHROUGH_ENV,
   stackPlanFor,
 } from "../src/index";
 
@@ -86,6 +87,38 @@ describe("deployment contract", () => {
     expect(
       plan.deployCommands.some((command) => command.includes("opengeni-runtime-local-k8s")),
     ).toBe(true);
+  });
+
+  test("models a persistent non-HA single-machine deployment without local image builds", () => {
+    const contract = deploymentProfiles["single-node-kubernetes"];
+    const plan = stackPlanFor(contract);
+
+    expect(contract.runtime.platform).toBe("kubernetes");
+    expect(contract.database.mode).toBe("inCluster");
+    expect(contract.temporal.mode).toBe("inCluster");
+    expect(contract.nats.mode).toBe("inCluster");
+    expect(contract.objectStorage.mode).toBe("inCluster");
+    expect(contract.ingress.enabled).toBe(false);
+    expect(contract.access.mode).toBe("disabled");
+    expect(contract.sandbox.backend).toBe("selfhosted");
+    expect(plan.helmValuesFile).toBe("deploy/helm/opengeni/values.single-node.example.yaml");
+    expect(plan.creates).toContain(
+      "persistent single-node Postgres/Temporal/NATS/MinIO services and local volumes",
+    );
+    expect(plan.deployCommands.filter((command) => command.includes("helm upgrade"))).toHaveLength(
+      2,
+    );
+    expect(plan.deployCommands.some((command) => command.includes("docker build"))).toBe(false);
+    expect(plan.deployCommands.join("\n")).not.toContain("OPENGENI_OPENAI_API_KEY");
+    expect(plan.requiredSecretKeys).toContain("OPENGENI_ENROLLMENT_SIGNING_SECRET");
+    expect(plan.requiredSecretKeys).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED");
+    expect(plan.requiredSecretKeys).toContain("opengeni-postgres/POSTGRES_PASSWORD");
+    expect(plan.requiredSecretKeys).toContain(
+      "opengeni-runtime/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+    );
+    expect(plan.requiredSecretKeys).toContain(
+      "opengeni-migrations/OPENGENI_MIGRATIONS_DATABASE_URL",
+    );
   });
 
   test("models Azure managed profile with external Temporal/NATS and Azure Blob storage", () => {
@@ -414,6 +447,8 @@ describe("deployment contract", () => {
         OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
         OPENGENI_IMAGE_TAG: "test-sha",
         OPENGENI_OPENAI_API_KEY: "openai",
+        OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
+        OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
     );
 
@@ -430,6 +465,11 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OBJECT_STORAGE_BACKEND=gcs");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=configured");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_DEPLOYMENT_REVISION=test-sha");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64=cm9vdC1jYQ==",
+    );
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID=opengeni-example",
     );
@@ -630,6 +670,9 @@ describe("deployment contract", () => {
         OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/",
         OPENGENI_AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
         OPENGENI_AZURE_OPENAI_API_KEY: "azure-openai",
+        OPENGENI_ANALYTICS_ENABLED: "true",
+        OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
+        OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
         OPENGENI_IMAGE_TAG: "release-prod",
         OPENGENI_API_IMAGE_DIGEST: "sha256:api",
         OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
@@ -651,9 +694,13 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_EMAIL_FROM=OpenGeni <auth@mail.opengeni.ai>");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_APP_SLUG=opengeni-ai");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_ANALYTICS_ENABLED=true");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_ANALYTICS_REO_CLIENT_ID=reo_client-1");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_STRIPE_SECRET_KEY=sk_test");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID=prod_test_credits");
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_WEB_ALLOWED_HOSTS: "app.opengeni.ai"');
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:api"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
@@ -734,7 +781,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_AZURE_OPENAI_API_VERSION=");
   });
 
-  test("generates preview managed runtime artifacts without external fixture secrets", () => {
+  test("generates preview runtime artifacts with a restricted DB identity", () => {
     const contract = contractForProfile("preview-pr");
     const artifacts = generateRuntimeArtifacts(
       contract,
@@ -742,6 +789,8 @@ describe("deployment contract", () => {
         helm_set_values: { value: {} },
       },
       {
+        OPENGENI_DATABASE_URL:
+          "postgres://opengeni_app:runtime-password@opengeni-preview-postgres:5432/opengeni",
         OPENGENI_PUBLIC_BASE_URL: "https://preview-123.app.opengeni.ai",
         OPENGENI_DELEGATION_SECRET: "delegation",
         OPENGENI_BETTER_AUTH_SECRET: "better-auth",
@@ -785,7 +834,9 @@ describe("deployment contract", () => {
     // The sandbox workspace HMAC secret is NEVER required (graceful-degrade /
     // delegation-secret fallback) — it must not enter missingEnvVars.
     expect(artifacts.missingEnvVars).not.toContain("OPENGENI_STREAM_TOKEN_SECRET");
-    expect(artifacts.runtimeEnv).not.toContain("OPENGENI_DATABASE_URL=");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_DATABASE_URL=postgres://opengeni_app:runtime-password@opengeni-preview-postgres:5432/opengeni",
+    );
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_ENDPOINT=");
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=");
     expect(artifacts.runtimeEnv).toContain(
@@ -807,6 +858,8 @@ describe("deployment contract", () => {
     );
     expect(artifacts.helmValuesYaml).toContain('tag: "preview-123"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
+    expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-migrations"');
+    expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-runtime"');
   });
 
   test("escapes multiline runtime env values for kubectl env-file secrets", () => {
@@ -908,6 +961,24 @@ describe("deployment contract", () => {
       "OPENGENI_MODAL_TOKEN_SECRET",
       "OPENGENI_MODAL_TIMEOUT_SECONDS",
     ]);
+    expect(SANDBOX_REQUIRED_ENV.modal.optional).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_MODAL_IMAGE_REGISTRY_SECRET",
+        "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
+        "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
+        "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
+        "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
+      ]),
+    );
+    expect(SANDBOX_LIFECYCLE_PASSTHROUGH_ENV).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+        "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
+        "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
+        "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
+        "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
+      ]),
+    );
     expect(SANDBOX_REQUIRED_ENV.daytona.required).toEqual(["OPENGENI_DAYTONA_API_KEY"]);
     expect(SANDBOX_REQUIRED_ENV.docker.required).toEqual([]);
     expect(SANDBOX_REQUIRED_ENV.none.required).toEqual([]);

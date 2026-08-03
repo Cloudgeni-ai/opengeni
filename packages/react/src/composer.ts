@@ -3,6 +3,20 @@
  *
  * `import * as Composer from "@opengeni/react/composer"`.
  */
+export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
+export {
+  BillingClassMark,
+  ModelPolicyPicker,
+  ModelPolicyPickerMenu,
+  PickerAnimatedPage,
+  PickerBackHeader,
+  PickerNavRow,
+  defaultModelPolicyPickerMessages,
+} from "./components/model-policy-picker";
+export type {
+  ModelPolicyPickerMessages,
+  ModelPolicyPickerProps,
+} from "./components/model-policy-picker";
 export {
   Actions,
   AttachButton,
@@ -16,7 +30,6 @@ export {
   Hint,
   Input,
   ModelPicker,
-  OPEN_WORKSTREAM_CONTROL_EVENT,
   PauseButton,
   PausedState,
   RestoredResources,
@@ -53,3 +66,14 @@ export type {
   ComposerSurfaceProps,
   UseChatComposerControllerOptions,
 } from "./components/composer";
+export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
+export type {
+  ComposerTranscriptionControlProps,
+  ComposerTranscriptionMessages,
+} from "./components/composer-transcription-control";
+export { useVoiceInput } from "./hooks/use-voice-input";
+export type {
+  UseVoiceInputOptions,
+  UseVoiceInputResult,
+  VoiceInputStatus,
+} from "./hooks/use-voice-input";

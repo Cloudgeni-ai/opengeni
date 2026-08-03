@@ -32,9 +32,20 @@ import {
   boundModelToolOutputItems,
   DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 } from "@opengeni/codex";
+import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 
 /** A history item is any JSON object; we only inspect a few discriminator fields. */
 export type HistoryItem = Record<string, unknown>;
+
+/**
+ * @deprecated Model-visible history is append-only outside the explicit
+ * durable compaction transition. This compatibility identity function performs
+ * no elision and returns the exact input array with every item untouched and in
+ * its original order.
+ */
+export function elideSupersededViewImagePairs<T extends HistoryItem>(items: readonly T[]): T[] {
+  return items as T[];
+}
 
 /**
  * Tool-call item types and the result-item type that settles them. Kept in
@@ -104,98 +115,6 @@ function callIdOf(item: unknown): string | undefined {
 }
 
 /**
- * Return the normalized local path from a sandbox `view_image` function call.
- * Invalid/partial calls are deliberately ignored: the filter below only
- * removes fully-paired calls whose replacement is known to be valid.
- */
-function viewImagePathOf(item: unknown): string | undefined {
-  if (!item || typeof item !== "object") {
-    return undefined;
-  }
-  const record = item as { type?: unknown; name?: unknown; arguments?: unknown };
-  if (
-    record.type !== "function_call" ||
-    record.name !== "view_image" ||
-    typeof record.arguments !== "string"
-  ) {
-    return undefined;
-  }
-  try {
-    const parsed = JSON.parse(record.arguments) as { path?: unknown };
-    return typeof parsed.path === "string" && parsed.path.length > 0 ? parsed.path : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Remove superseded `view_image` call/result pairs for the SAME local path,
- * retaining the newest fully-paired observation. A `view_image` result can be
- * hundreds of kilobytes of base64. When a model re-opens the same attachment,
- * replaying every older copy on each subsequent model call grows input
- * quadratically and can trap a turn in context-compaction/requeue recovery.
- *
- * This is state-based rather than count-based: every distinct path is kept,
- * and an older observation is removed only after a newer successful pair for
- * that exact path exists. The reasoning items immediately attached to a
- * removed call are removed with it, preserving Responses API item validity.
- */
-export function elideSupersededViewImagePairs<T extends HistoryItem>(items: readonly T[]): T[] {
-  if (items.length === 0) {
-    return [];
-  }
-
-  const callIndexById = new Map<string, number>();
-  const resultIndexById = new Map<string, number>();
-  items.forEach((item, index) => {
-    const callId = callIdOf(item);
-    if (!callId) {
-      return;
-    }
-    if (itemType(item) === "function_call") {
-      callIndexById.set(callId, index);
-    } else if (
-      itemType(item) === "function_call_result" ||
-      itemType(item) === "function_call_output"
-    ) {
-      resultIndexById.set(callId, index);
-    }
-  });
-
-  const pairedByPath = new Map<string, Array<{ callIndex: number; resultIndex: number }>>();
-  for (const [callId, callIndex] of callIndexById) {
-    const path = viewImagePathOf(items[callIndex]);
-    const resultIndex = resultIndexById.get(callId);
-    if (!path || resultIndex === undefined || resultIndex <= callIndex) {
-      continue;
-    }
-    const pairs = pairedByPath.get(path) ?? [];
-    pairs.push({ callIndex, resultIndex });
-    pairedByPath.set(path, pairs);
-  }
-
-  const dropped = new Set<number>();
-  for (const pairs of pairedByPath.values()) {
-    if (pairs.length < 2) {
-      continue;
-    }
-    pairs.sort((left, right) => left.callIndex - right.callIndex);
-    for (const pair of pairs.slice(0, -1)) {
-      dropped.add(pair.callIndex);
-      dropped.add(pair.resultIndex);
-      for (let index = pair.callIndex - 1; index >= 0; index -= 1) {
-        if (itemType(items[index]) !== "reasoning") {
-          break;
-        }
-        dropped.add(index);
-      }
-    }
-  }
-
-  return dropped.size === 0 ? items.slice() : items.filter((_item, index) => !dropped.has(index));
-}
-
-/**
  * Sanitize a replayed history item list into a sequence the Responses API
  * accepts. Pure: returns a new array of the same item references in order,
  * with invalid items omitted. Valid histories come back byte-identical
@@ -228,10 +147,7 @@ export function elideSupersededViewImagePairs<T extends HistoryItem>(items: read
  * types exist with that id, the call appearing before the result. Calls and
  * results that satisfy that survive untouched.
  */
-export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
-  items: readonly T[],
-  toolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
-): T[] {
+export function repairHistoryProtocolItems<T extends HistoryItem>(items: readonly T[]): T[] {
   if (items.length === 0) {
     return [];
   }
@@ -323,10 +239,20 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
 
   const paired =
     dropped.size === 0 ? items.slice() : items.filter((_item, index) => !dropped.has(index));
-  return boundModelToolOutputItems(
-    paired.map(stripInternalResumeMarker),
-    toolOutputTruncationTokens,
-  );
+  return paired.map(stripInternalModelMetadata);
+}
+
+/**
+ * Canonical model-wire boundary: protocol repair plus the configured tool
+ * output bound. Keeping these operations separately callable prevents a later
+ * modality projection from accidentally applying the default output limit a
+ * second time.
+ */
+export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
+  items: readonly T[],
+  toolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): T[] {
+  return boundModelToolOutputItems(repairHistoryProtocolItems(items), toolOutputTruncationTokens);
 }
 
 /**
@@ -337,6 +263,15 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
  * an import cycle; context-compaction re-exports it.
  */
 export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
+
+/** Remove OpenGeni-only durable fields before an SDK/provider sees the item. */
+export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
+  const withoutResume = stripInternalResumeMarker(item);
+  if (!(MODEL_ATTACHMENT_REFS_FIELD in withoutResume)) return withoutResume;
+  const clone = { ...withoutResume } as Record<string, unknown>;
+  delete clone[MODEL_ATTACHMENT_REFS_FIELD];
+  return clone as T;
+}
 
 /**
  * Remove the {@link INTERNAL_RESUME_MESSAGE_MARKER} providerData key from a

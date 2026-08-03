@@ -116,6 +116,31 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         memoryId: item.memoryId,
         replacementMemoryId: item.replacementMemoryId ?? null,
       };
+    case "fleet-decision":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        policyVersion: item.policyVersion,
+        actualOutcome: item.actualOutcome,
+        actualCandidateKey: item.actualCandidateKey,
+        actualReason: item.actualReason,
+        shadowOutcome: item.shadowOutcome,
+        shadowCandidateKey: item.shadowCandidateKey,
+        shadowReason: item.shadowReason,
+        comparison: item.comparison,
+        confidence: item.confidence,
+        admissionOutcome: item.admissionOutcome,
+        admissionReason: item.admissionReason,
+        borrowedIdleCapacity: item.borrowedIdleCapacity,
+        borrowedOverlayCapacity: item.borrowedOverlayCapacity,
+        strandedEligibleCount: item.strandedEligibleCount,
+        candidateCount: item.candidateCount,
+        truncatedCandidateCount: item.truncatedCandidateCount,
+        scoreRowsTruncatedCount: item.scoreRowsTruncatedCount,
+        scores: stableValue(item.scores),
+      };
     case "notice":
       return {
         kind: item.kind,
@@ -123,6 +148,28 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         occurredAt: item.occurredAt,
         tone: item.tone,
         text: item.text,
+        details: stableValue(item.details),
+      };
+    case "context-compaction":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        phase: item.phase,
+        trigger: item.trigger,
+        estimatedTokensBefore: item.estimatedTokensBefore,
+        estimatedTokensAfter: item.estimatedTokensAfter,
+        skipReason: item.skipReason,
+        implementation: item.implementation,
+      };
+    case "machine-input-batch":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        members: stableValue(item.members),
       };
     case "auth-needed":
       return {
@@ -173,6 +220,9 @@ function serializeGroup(group: TimelineGroup): Record<string, unknown> {
         id: group.id,
         outcome: group.outcome,
         ...(group.failureText ? { failureText: group.failureText } : {}),
+        ...(group.contextCompactionCount
+          ? { contextCompactionCount: group.contextCompactionCount }
+          : {}),
         startedAt: group.startedAt,
         endedAt: group.endedAt,
         groupCount: group.groups.length,

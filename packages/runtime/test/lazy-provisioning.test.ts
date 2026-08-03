@@ -110,6 +110,42 @@ describe("lazy provisioning synthetic manifest", () => {
     );
   });
 
+  test("lazy setup seeds the provisioning-time Toolspace bearer instead of the turn-start bearer", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      webSearchEnabled: false,
+      toolspaceEnabled: true,
+      delegationSecret: "toolspace-secret",
+    });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      toolspaceTokenSeed: "ogd_turn_start",
+      toolspaceTokenSessionId: "session-lazy",
+    });
+    const commands: string[] = [];
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async (args: { cmd: string }) => {
+        commands.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+    };
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      toolspaceTokenSeedOverride: "ogd_provisioning_time",
+    });
+
+    const seedCommand = commands.find((command) =>
+      command.includes("OPENGENI_TOOLSPACE_TOKEN_SEED"),
+    );
+    expect(seedCommand).toContain("ogd_provisioning_time");
+    expect(seedCommand).not.toContain("ogd_turn_start");
+  });
+
   // REGRESSION: runOwnedSandboxSetup is the LIVE owned-path hook execution (the
   // provided session skips the client create/resume decoration). A rig-bound turn
   // MUST run its frozen setup script here — a merge with the #315 lazy-provisioning
@@ -145,6 +181,62 @@ describe("lazy provisioning synthetic manifest", () => {
 
     // The rig-setup hook exec'd its marker-guarded program against the box.
     expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
+  });
+
+  test("connected-machine setup delivers verified attachments without running platform hooks", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const resources = [{ kind: "file" as const, fileId: "file-1" }];
+    const downloads = [
+      {
+        fileId: "file-1",
+        mountPath: ".opengeni/files/file-1",
+        filename: "input.txt",
+        url: "https://storage.example/input.txt?sig=secret",
+        sizeBytes: 5,
+        sha256: "a".repeat(64),
+      },
+    ];
+    const agent = buildOpenGeniAgent(settings, resources, {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      activeSandboxBackend: "selfhosted",
+      fileResourceDownloads: downloads,
+      rigSetup: {
+        rigId: "rig-1",
+        rigName: "must-not-run",
+        versionId: "selfhosted-forbidden",
+        script: "echo platform-hook-ran",
+        timeoutMs: 60_000,
+      },
+    });
+    const commands: Array<{ cmd: string; workdir?: string }> = [];
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const backend = {
+      state: { manifest: buildManifest(settings, resources, environment, downloads) },
+      exec: async (args: { cmd: string; workdir?: string }) => {
+        commands.push(args);
+        return { exitCode: 0, output: "" };
+      },
+    };
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      onRuntimeEvent: (event) => {
+        events.push(event as (typeof events)[number]);
+      },
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.workdir).toBe("/workspace");
+    expect(commands[0]?.cmd).toContain(".opengeni/files/file-1/input.txt");
+    expect(commands[0]?.cmd).not.toContain("/workspace/.opengeni/files/file-1/input.txt");
+    expect(commands[0]?.cmd).not.toContain("platform-hook-ran");
+    expect(commands[0]?.cmd).toContain('actual_size=$(wc -c < "$candidate"');
+    expect(commands[0]?.cmd).toContain('actual_sha=$(sha256sum "$candidate"');
+    expect(JSON.stringify(events)).toContain("/workspace/.opengeni/files/file-1/input.txt");
+    expect(JSON.stringify(events)).not.toContain("sig=secret");
   });
 
   test("runOwnedSandboxSetup routes lifecycle commands through the attempt cancellation fence", async () => {

@@ -8,10 +8,13 @@ import {
   type AccessContext,
   type GetWorkspaceCaptureResponse,
   type Session,
+  type SessionEvent,
   type WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
 import { assertScreenshotPainted } from "@opengeni/testing";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+
+import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
 
 const WORKBENCH_CANARY_PERMISSIONS = [
   "workspace:read",
@@ -31,6 +34,16 @@ const OBSERVABILITY_PROBE_PERMISSIONS = [
 ] as const;
 const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
+const CAPTURE_FILE_PATH = /\/sessions\/[^/]+\/workspace\/capture\/file$/;
+const OPTIONAL_ANALYTICS_CHUNK_PATH = /^\/assets\/analytics-consent-[A-Za-z0-9_-]+\.js$/;
+const MANAGED_SESSION_PATH = /^\/v1\/auth\/get-session$/;
+const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
+const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
+const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
+const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
+  "performance.capture-usable-workbench",
+  "p95",
+);
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -275,6 +288,9 @@ async function main(): Promise<void> {
     reasoningEffort: "low",
     sandboxBackend: args.backend,
     sandbox: "new",
+    // Acceptance owns its complete execution fixture and must not inherit a
+    // mutable workspace-default rig with unrelated setup work.
+    rigId: null,
     idempotencyKey: `workbench-acceptance:${args.environment}:${args.sourceSha}:${args.runId}`,
     metadata: {
       origin: "workbench-live-acceptance",
@@ -291,6 +307,8 @@ async function main(): Promise<void> {
   if (settled.status !== "idle") {
     throw new Error(`acceptance fixture turn ended in ${settled.status}`);
   }
+  const fixtureToolOutputs = await listAllToolOutputEvents(cookieClient, workspaceId, session.id);
+  assertFixtureToolOutput(fixtureToolOutputs, marker);
   pass(checks, "functional.real-turn", "A real authenticated Modal turn settled successfully.");
 
   const captureResponse = await waitForCapture(
@@ -324,8 +342,8 @@ async function main(): Promise<void> {
     args.repetitions,
   );
   const captureApiResponse = measurement(captureApiSamples);
-  if (captureApiResponse.p95 > 200) {
-    throw new Error(`capture API p95 ${captureApiResponse.p95}ms exceeds 200ms`);
+  if (captureApiResponse.p95 > CAPTURE_API_P95_MS) {
+    throw new Error(`capture API p95 ${captureApiResponse.p95}ms exceeds ${CAPTURE_API_P95_MS}ms`);
   }
 
   const browser = await chromium.launch();
@@ -345,15 +363,15 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+      await assertChangesDefaultVisible(page);
       navigationSamples.push(performance.now() - started);
       assertNoProblems(problems, true);
       await context.close();
     }
     captureUsableWorkbench = measurement(navigationSamples);
-    if (captureUsableWorkbench.p95 > 500) {
+    if (captureUsableWorkbench.p95 > CAPTURE_USABLE_WORKBENCH_P95_MS) {
       throw new Error(
-        `capture-backed usable workbench p95 ${captureUsableWorkbench.p95}ms exceeds 500ms`,
+        `capture-backed usable workbench p95 ${captureUsableWorkbench.p95}ms exceeds ${CAPTURE_USABLE_WORKBENCH_P95_MS}ms`,
       );
     }
 
@@ -374,7 +392,7 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+      await assertChangesDefaultVisible(page);
       await assertColdReview(page, marker);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
@@ -385,8 +403,7 @@ async function main(): Promise<void> {
       await assertScreenshotPainted(page, filesPng, `${device.name} cold Files`);
       artifacts.push(await artifact(filesScreenshot, args.outputDir));
 
-      await page.getByRole("tab", { name: /Changes/ }).click();
-      await page.locator("[data-workbench-changes-layout]").waitFor();
+      await selectChangesTab(page);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
       assertNoProblems(problems, true);
@@ -454,6 +471,19 @@ async function main(): Promise<void> {
   process.stdout.write(
     `${JSON.stringify({ status: "passed", receipt: receiptPath, sha256: receiptArtifact.sha256 })}\n`,
   );
+}
+
+function maximumMillisecondBudget(requirementId: string, statistic: "p95" | "worst"): number {
+  const budget = NUMERIC_PERFORMANCE_BUDGETS[requirementId];
+  if (
+    !budget ||
+    budget.direction !== "maximum" ||
+    budget.unit !== "ms" ||
+    budget.statistic !== statistic
+  ) {
+    throw new Error(`missing maximum millisecond budget for ${requirementId}`);
+  }
+  return budget.limit;
 }
 
 export function fixturePrompt(marker: string): string {
@@ -614,6 +644,39 @@ async function waitForCapture(
     await Bun.sleep(1_000);
   }
   throw new Error("capture did not become available before timeout");
+}
+
+async function listAllToolOutputEvents(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionEvent[]> {
+  const collected: SessionEvent[] = [];
+  let cursor = 0;
+  while (true) {
+    const page = await client.listEvents(workspaceId, sessionId, {
+      after: cursor,
+      limit: 500,
+      mode: "forensic",
+      payloadMode: "full",
+      includeTypes: ["agent.toolCall.output"],
+    });
+    collected.push(...page);
+    const lastSequence = page.at(-1)?.sequence;
+    if (lastSequence !== undefined) cursor = lastSequence;
+    if (page.length < 500) return collected;
+  }
+}
+
+export function assertFixtureToolOutput(events: readonly SessionEvent[], marker: string): void {
+  const observed = events.some(
+    (event) =>
+      event.type === "agent.toolCall.output" &&
+      JSON.stringify(event.payload ?? {}).includes(marker),
+  );
+  if (!observed) {
+    throw new Error("acceptance fixture command did not emit its exact marker");
+  }
 }
 
 async function loadManifest(
@@ -838,19 +901,46 @@ async function verifySignedFileExpiry(
     throw new Error("refreshed capture bytes failed integrity check");
 }
 
+export async function waitForSandboxLiveness(
+  client: Pick<OpenGeniClient, "getStreamCapabilities">,
+  workspaceId: string,
+  sessionId: string,
+  accepted: ReadonlySet<string>,
+  timeoutMs: number,
+  pollIntervalMs = 2_000,
+  requestTimeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastTransportError: string | undefined;
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    try {
+      const capabilities = await client.getStreamCapabilities(workspaceId, sessionId, {
+        signal: AbortSignal.timeout(Math.max(1, Math.min(requestTimeoutMs, remainingMs))),
+      });
+      lastTransportError = undefined;
+      if (accepted.has(capabilities.liveness)) return;
+    } catch (error) {
+      lastTransportError = sanitizeDiagnostic(
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      );
+    }
+    const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));
+    if (sleepMs > 0) await Bun.sleep(sleepMs);
+  }
+  throw new Error(
+    `sandbox did not reach ${[...accepted].join("/")} before timeout` +
+      (lastTransportError ? ` (last transport error: ${lastTransportError})` : ""),
+  );
+}
+
 async function waitForCold(
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
   timeoutMs: number,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const capabilities = await client.getStreamCapabilities(workspaceId, sessionId);
-    if (capabilities.liveness === "cold") return;
-    await Bun.sleep(2_000);
-  }
-  throw new Error("real sandbox did not drain to cold before timeout");
+  await waitForSandboxLiveness(client, workspaceId, sessionId, new Set(["cold"]), timeoutMs);
 }
 
 async function waitForWarm(
@@ -859,13 +949,14 @@ async function waitForWarm(
   sessionId: string,
   timeoutMs = 90_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const capabilities = await client.getStreamCapabilities(workspaceId, sessionId);
-    if (capabilities.liveness === "warm" || capabilities.liveness === "draining") return;
-    await Bun.sleep(1_000);
-  }
-  throw new Error("explicit live intent did not warm the sandbox before timeout");
+  await waitForSandboxLiveness(
+    client,
+    workspaceId,
+    sessionId,
+    new Set(["warm", "draining"]),
+    timeoutMs,
+    1_000,
+  );
 }
 
 async function runLiveWorkspaceFlow(input: {
@@ -891,7 +982,7 @@ async function runLiveWorkspaceFlow(input: {
       timeout: 45_000,
     });
     await openWorkspaceIfCollapsed(page);
-    await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+    await assertChangesDefaultVisible(page);
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     await selectTreeFile(page, "api", "base.txt");
     await page.getByText("On machine", { exact: true }).waitFor();
@@ -1718,13 +1809,27 @@ function observePage(page: Page): BrowserProblems {
     const path = safePath(request.url());
     if (CHANNEL_A_PATH.test(path)) problems.channelA.push(path);
   });
-  page.on("requestfailed", (request) => problems.failedRequests.push(safePath(request.url())));
+  page.on("requestfailed", (request) => {
+    const path = safePath(request.url());
+    const errorText = request.failure()?.errorText ?? "unknown request failure";
+    if (isExpectedBrowserCancellation(path, errorText)) return;
+    problems.failedRequests.push(`${sanitizeDiagnostic(errorText)} ${path}`);
+  });
   page.on("response", (response) => {
     if (response.status() >= 400) {
       problems.badResponses.push(`${response.status()} ${safePath(response.url())}`);
     }
   });
   return problems;
+}
+
+export function isExpectedBrowserCancellation(path: string, errorText: string): boolean {
+  if (errorText !== "net::ERR_ABORTED") return false;
+  return (
+    CAPTURE_FILE_PATH.test(path) ||
+    OPTIONAL_ANALYTICS_CHUNK_PATH.test(path) ||
+    MANAGED_SESSION_PATH.test(path)
+  );
 }
 
 function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolean): void {
@@ -1737,26 +1842,56 @@ function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolea
   }
 }
 
-async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
-  const open = page.getByTitle("Open workspace");
-  if ((await open.count()) > 0 && (await open.first().isVisible())) await open.first().click();
+export async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
+  const workspace = page.locator(WORKSPACE_SURFACE_SELECTOR);
+  if (await workspace.isVisible()) return;
+
+  // The standalone SDK dock owns an "Open workspace" control. The hosted app
+  // controls the same collapsed state from its session header instead, so the
+  // dock intentionally omits that duplicate button. Acceptance must exercise
+  // whichever public affordance the mounted surface exposes.
+  const open = page
+    .getByRole("button", { name: "Show session panel" })
+    .or(page.getByTitle("Open workspace"))
+    .first();
+  await open.waitFor({ state: "visible", timeout: 20_000 });
+  await open.click();
 }
 
-async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
+export async function assertChangesDefaultVisible(page: Page): Promise<void> {
+  const changes = page.getByRole("tab", { name: /Changes/ });
+  await changes.waitFor({ state: "visible", timeout: 20_000 });
+  await page
+    .locator('[role="tab"][aria-selected="true"]')
+    .filter({ hasText: /Changes/ })
+    .waitFor({ state: "visible", timeout: 20_000 });
+
+  await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
+    state: "visible",
+    timeout: 20_000,
+  });
+}
+
+async function selectChangesTab(page: Page): Promise<void> {
+  await page.getByRole("tab", { name: /Changes/ }).click();
+  await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
+    state: "visible",
+    timeout: 20_000,
+  });
+}
+
+export async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
   const directoryItem = page.getByRole("treeitem").filter({ hasText: directory }).first();
   const directoryButton = directoryItem.getByRole("button").first();
-  if ((await directoryButton.getAttribute("aria-expanded")) !== "true") {
+  if ((await directoryItem.getAttribute("aria-expanded")) !== "true") {
     await directoryButton.click();
   }
   await page.getByRole("treeitem").filter({ hasText: file }).first().getByRole("button").click();
 }
 
 async function assertColdReview(page: Page, marker: string): Promise<void> {
-  const changes = page.getByRole("tab", { name: /Changes/ });
-  if ((await changes.getAttribute("aria-selected")) !== "true") await changes.click();
-  await page.locator("[data-workbench-changes-layout]").waitFor();
-  await page.getByText("api", { exact: true }).first().waitFor();
-  await page.getByText("web", { exact: true }).first().waitFor();
+  await assertChangesDefaultVisible(page);
+  await assertRepositoryChangesVisible(page, ["api", "web"]);
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
   await selectTreeFile(page, "api", "server.ts");
@@ -1765,6 +1900,41 @@ async function assertColdReview(page: Page, marker: string): Promise<void> {
   await selectTreeFile(page, "api", "base.txt");
   await page.getByText("On machine", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Open live file" }).waitFor();
+}
+
+export async function assertRepositoryChangesVisible(
+  page: Page,
+  repositoryRoots: readonly string[],
+): Promise<void> {
+  const layout = page.locator(CHANGES_LAYOUT_SELECTOR);
+  const mode = await layout.getAttribute("data-workbench-changes-layout");
+  if (mode === "rail") {
+    for (const root of repositoryRoots) {
+      await page.getByText(root, { exact: true }).first().waitFor();
+    }
+    return;
+  }
+  if (mode === "compact") {
+    const picker = page.locator("[data-compact-file-picker]");
+    await picker.waitFor({ state: "visible", timeout: 20_000 });
+    assertChangedFileLabelsContainRepositoryRoots(
+      await picker.locator("option").allTextContents(),
+      repositoryRoots,
+    );
+    return;
+  }
+  throw new Error(`unsupported workbench changes layout: ${mode ?? "missing"}`);
+}
+
+export function assertChangedFileLabelsContainRepositoryRoots(
+  labels: readonly string[],
+  repositoryRoots: readonly string[],
+): void {
+  for (const root of repositoryRoots) {
+    if (!labels.some((label) => label.includes(`${root}/`))) {
+      throw new Error(`compact workbench changes omitted repository ${root}`);
+    }
+  }
 }
 
 async function assertAccessibility(page: Page): Promise<void> {

@@ -166,13 +166,30 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelASeam).toContain("@opengeni/runtime/sandbox");
   });
 
-  test("the PTY write route 409s when the backend lacks writeStdin (execSessionId null)", () => {
+  test("Channel-A commands select the session-specific Toolspace token pointer", () => {
+    const credentialAt = channelASeam.indexOf("withRunCredentialsSession(");
+    const deriveAt = channelASeam.indexOf("toolspaceTokenFileFromEnvironment(");
+    const decorateAt = channelASeam.indexOf("withToolspaceTokenSession(");
+    const serviceAt = channelASeam.indexOf("new SandboxChannelAService(");
+
+    expect(credentialAt).toBeGreaterThanOrEqual(0);
+    expect(deriveAt).toBeGreaterThan(credentialAt);
+    expect(decorateAt).toBeGreaterThan(credentialAt);
+    expect(decorateAt).toBeLessThan(serviceAt);
+    expect(channelASeam.slice(decorateAt, serviceAt)).toContain("session.id");
+    expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain("session: scopedSession");
+  });
+
+  test("the PTY write route adopts the exact durable process identity", () => {
     const body = handlerBody(
       sessionsRoute,
       "post",
       "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write",
     );
-    expect(body).toContain("execSessionId === null");
-    expect(body).toContain("interactive terminal unsupported on this backend");
+    expect(body).toContain("getOpenPtySession");
+    expect(body).toContain("adoptPtyProcess");
+    expect(body).toContain("pty.execSessionId");
+    expect(sessionsRoute).toContain("pty retained-process identity is stale; reopen the terminal");
+    expect(body).not.toContain("execSessionId === null");
   });
 });

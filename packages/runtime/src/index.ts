@@ -6,21 +6,39 @@ import type {
 } from "@opengeni/config";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
+  OPENGENI_GATEWAY_MODELS,
   collectSandboxEnvironment,
   firstPartyMcpBaseUrl,
+  gatewayRequestPolicyForUpstreamModel,
+  resolveFirstPartyDelegationSecret,
   resolveModelProvider,
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
 import {
+  approvalIdentifier,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  assertUniqueResourceMountPaths,
+  gitCredentialBindingIdForRepository,
+  gitCredentialProviderForRepository,
   isClearedRunStateBlob,
+  normalizeRepositorySubpath,
+  normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
+  resourceMountPath,
+  redactSensitiveText,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
+  RequestHumanInputToolInput,
   type GitCredentialProvider,
+  type GitCredentialTransport,
+  type HumanInputResponse,
   type McpServerConnectionRef,
   type Permission,
+  type FirstPartyMcpToolName,
+  type LatencyMode,
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
@@ -28,6 +46,19 @@ import {
   type ToolAuthNeededPayload,
   type ToolRef,
 } from "@opengeni/contracts";
+import {
+  MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  MCP_MAX_TOOL_RESULT_BYTES,
+  McpAggregateToolListBudget,
+  assertMcpPayloadWithinBytes,
+  assertMcpServerSelectionWithinBounds,
+  assertMcpToolListWithinBounds,
+  boundedParallelMap,
+  cancelMcpResponseBody,
+  guardedMcpFetch,
+  mcpOuterConnectTimeoutMs,
+  undiciFetch,
+} from "./mcp-network";
 import {
   Agent,
   AgentsError,
@@ -55,6 +86,7 @@ import {
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
   setTracingDisabled,
+  tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index (0.11.6);
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
@@ -67,6 +99,7 @@ import {
   // (below, right after the leaf re-export). This lets a selfhosted active backend
   // apply file edits over its NATS fs ops using the SDK's exact diff semantics.
   applyDiff,
+  RunContext,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -75,6 +108,7 @@ import {
   type ModelRequest,
   type ModelProvider,
   type RunStreamEvent,
+  type SerializedTool,
   type Tool,
 } from "@openai/agents";
 import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
@@ -107,19 +141,21 @@ import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
+  CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   boundModelToolOutputItems,
   codexAppsSanitizingFetch,
   codexRequestStorage,
   codexSubscriptionFetch,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   computerCallNormalizingFetch,
-  elideSupersededViewImagePairs,
   normalizeComputerCallActions,
+  repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
@@ -128,6 +164,8 @@ import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
+  buildRemoteCompactionV2PromptInput,
+  extractRemoteCompactionV2OutputItem,
   compactionThresholdTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
@@ -139,10 +177,18 @@ import {
 import {
   createSandboxClient,
   desktopCapableBackend,
+  repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
+  toolspaceTokenFileFromEnvironment,
+  withToolspaceTokenClient,
+  withToolspaceTokenSession,
+  withRunCredentialsClient,
+  withRunCredentialsSession,
+  type RunCredentialSessionReady,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import { shellToolspacePath } from "./sandbox/toolspace-token";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -153,9 +199,44 @@ import {
 } from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
+import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+import { appendWorkspaceGovernance } from "./workspace-governance";
+
+// The Agents SDK's debug namespaces can otherwise serialize complete model
+// inputs/outputs and tool arguments/results. These getters read process.env on
+// every log call, so keep the process-global guard permanently enabled rather
+// than toggling it around concurrent turns.
+process.env.OPENAI_AGENTS_DONT_LOG_MODEL_DATA = "1";
+process.env.OPENAI_AGENTS_DONT_LOG_TOOL_DATA = "1";
+
+export {
+  getSkillLibraryEntry,
+  isSkillLibraryEntryId,
+  listSkillLibraryEntries,
+  loadSkillLibrarySkill,
+  type SkillLibraryEntry,
+  type SkillLibraryFile,
+  type SkillLibrarySkill,
+} from "./skill-library";
 
 export type { RuntimeMetricsHooks } from "./metrics";
-export type { TurnToolCancellationFence } from "./sandbox/turn-tool-cancellation";
+export {
+  appendWorkspaceGovernance,
+  hasActiveWorkspaceInstructionPolicy,
+  renderWorkspaceGovernanceContext,
+  WorkspaceGovernancePromptLimitError,
+  type WorkspaceGovernanceContext,
+} from "./workspace-governance";
+export {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./sandbox/turn-tool-cancellation";
+export type {
+  TurnSandboxCommandArgs,
+  TurnSandboxCommandSession,
+  TurnToolCancellationController,
+  TurnToolCancellationFence,
+} from "./sandbox/turn-tool-cancellation";
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -191,7 +272,9 @@ setSelfhostedApplyDiff(
 
 export {
   elideSupersededViewImagePairs,
+  repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
+  stripInternalModelMetadata,
   stripReasoningEncryptedContent,
   stripReasoningIdentityFromSerializedRunState,
   neutralizeToolSearchItemsInSerializedRunState,
@@ -216,13 +299,24 @@ export {
   clampCompactionThresholdRatio,
   decideCompaction,
   buildSummaryItem,
+  buildRemoteCompactionV2PromptInput,
+  buildRemoteV2ReplacementHistory,
+  extractRemoteCompactionV2OutputItem,
   findCompactionNeededError,
   isCompactionSummary,
+  isRemoteCompactionItem,
+  isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
+  estimateTokensBreakdown,
   estimateItemTokens,
+  estimateItemTokenBreakdown,
+  estimateOpaqueEncryptedModelVisibleBytes,
+  estimateOpaqueEncryptedTokens,
+  opaqueEncryptedContentLength,
+  estimateNativeImageTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
@@ -230,21 +324,37 @@ export {
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
+  REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+  REMOTE_COMPACTION_V2_IMPLEMENTATION,
+  REMOTE_COMPACTION_V2_BETA_FEATURE,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
-  isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
+  UNKNOWN_IMAGE_TOKENS,
+  MAX_NATIVE_IMAGE_TOKENS,
 } from "./context-compaction";
 export type {
   CompactionDecision,
+  ModelInputTokenBreakdown,
+  NativeImageEstimateReason,
+  NativeImageTokenEstimate,
   CompactionItem,
   PreparedCompactionPromptInput,
 } from "./context-compaction";
-export { modelCallUsageTelemetry } from "./usage-telemetry";
-export type { ModelCallUsageTelemetry } from "./usage-telemetry";
+export {
+  MAX_MODEL_USAGE_TOKEN_COUNT,
+  modelCallUsageTelemetry,
+  modelUsageTokenCountOrNull,
+  normalizeModelCallUsage,
+} from "./usage-telemetry";
+export type {
+  ModelCallUsageInput,
+  ModelCallUsageNormalization,
+  ModelCallUsageTelemetry,
+} from "./usage-telemetry";
 
 ensureReadableStreamFrom();
 
@@ -257,12 +367,29 @@ export type NormalizedRuntimeEvent = {
 
 export type ModelResponseUsage = {
   responseId?: string;
+  serviceTier?: string;
+  gatewayBilling?: {
+    finalProvider: string;
+    inferenceCostUsd: string;
+  };
   usage: {
     inputTokens?: number;
     outputTokens?: number;
     totalTokens?: number;
     inputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
     outputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
+    requestUsageEntries?: Array<{
+      inputTokens?: number;
+      input_tokens?: number;
+      outputTokens?: number;
+      output_tokens?: number;
+      totalTokens?: number;
+      total_tokens?: number;
+      inputTokensDetails?: Record<string, number>;
+      input_tokens_details?: Record<string, number>;
+      outputTokensDetails?: Record<string, number>;
+      output_tokens_details?: Record<string, number>;
+    }>;
   };
 };
 
@@ -276,6 +403,8 @@ export type ResolveConnectionCredentialInput = {
   serverId: string;
   toolName?: string;
   connectionRef: McpServerConnectionRef;
+  /** Exact MCP destination whose request would receive the resolved headers. */
+  destinationUrl: string;
   forceRefresh?: boolean;
 };
 
@@ -290,9 +419,11 @@ export type ResolveConnectionCredentialResult =
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
       providerDomain: string;
+      provider?: string;
       connectionId?: string;
       scopes?: string[];
       resource?: string;
+      selectedResources?: McpServerConnectionRef["selectedResources"];
       authorizationUrl?: string;
     };
 
@@ -340,6 +471,8 @@ export type AgentSegmentInput =
       // message; ordinary messages never deserialize an SDK RunState.
       historyItems?: AgentInputItem[] | null;
       sandboxEnvelope?: Record<string, unknown> | null;
+      /** Internal proof that the caller projected the durable history clone. */
+      modelInputAlreadyProjected?: boolean;
     }
   | {
       kind: "approval";
@@ -347,6 +480,11 @@ export type AgentSegmentInput =
       approvalId: string;
       decision: "approve" | "reject";
       message?: string;
+    }
+  | {
+      kind: "human_input";
+      serializedRunState: string;
+      toolCallId: string;
     };
 
 export type PreparedAgentInput = {
@@ -358,6 +496,14 @@ export type PreparedAgentInput = {
    */
   historyItemCount: number;
   sandboxSessionState?: SandboxSessionState;
+  modelInputAlreadyProjected?: boolean;
+};
+
+export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
+
+export type SerializedHumanInputInterruption = {
+  toolCallId: string;
+  input: ReturnType<typeof RequestHumanInputToolInput.parse>;
 };
 
 export type SandboxFileDownload = {
@@ -368,6 +514,8 @@ export type SandboxFileDownload = {
   content?: Uint8Array;
   expiresAt?: Date | string;
   sizeBytes?: number;
+  /** Finalized lowercase SHA-256 hex for integrity verification when available. */
+  sha256?: string;
 };
 
 export type SandboxFileDownloadFailure = {
@@ -418,6 +566,7 @@ export type OpenGeniRuntime = {
     options?: RunAgentStreamOptions,
   ) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
   serializeApprovals: (interruptions: unknown[]) => unknown[];
+  serializeHumanInputRequests?: (interruptions: unknown[]) => SerializedHumanInputInterruption[];
 };
 
 export type ProductionRuntimeOverrides = {
@@ -453,6 +602,7 @@ export function createProductionAgentRuntime(
         sandboxClient: overrides.sandboxClient,
       }),
     serializeApprovals,
+    serializeHumanInputRequests,
   };
 }
 
@@ -508,9 +658,14 @@ export function buildOpenAIClientFromSettings(
 const providerClientCache = new Map<string, OpenAI>();
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
-  const cached = providerClientCache.get(provider.id);
+  const workspaceGateway = provider.kind === "vercel-gateway-workspace";
+  const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
+  const cached = workspaceGateway ? undefined : providerClientCache.get(provider.id);
   if (cached) {
     return cached;
+  }
+  if (workspaceGateway && !provider.apiKey) {
+    throw new WorkspaceGatewayUnavailableError();
   }
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
@@ -528,6 +683,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
           // SDK retries on network/5xx/partial streams can replay provider work
           // or external tool side effects without a durable checkpoint.
           maxRetries: 0,
+          // The Codex transport owns finer headers/idle/whole deadlines and
+          // emits typed durable evidence. Keep the SDK's opaque envelope beyond
+          // that whole-response budget so `Request timed out.` cannot win first.
+          timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
           fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
         })
       : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
@@ -536,13 +695,174 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
         new OpenAI({
           ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
           ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          maxRetries: settings.openaiMaxRetries,
+          // Gateway routing is deliberately fail-closed. Avoid SDK replay after
+          // a request may have reached the one pinned endpoint.
+          maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
           ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
           ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-          fetch: instrumentedModelFetch(provider.id, globalThis.fetch),
+          fetch: gatewayProvider
+            ? vercelGatewayRoutingFetch(
+                provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                instrumentedModelFetch(provider.id, globalThis.fetch),
+              )
+            : instrumentedModelFetch(provider.id, globalThis.fetch),
         });
-  providerClientCache.set(provider.id, client);
+  if (!workspaceGateway) {
+    providerClientCache.set(provider.id, client);
+  }
   return client;
+}
+
+export class WorkspaceGatewayUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your Gateway model is unavailable: connect or reconnect the workspace AI Gateway key in Settings, then retry.",
+    );
+    this.name = "WorkspaceGatewayUnavailableError";
+  }
+}
+
+/**
+ * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
+ * continuation (`call A, call B, result A, result B`) even though it accepts
+ * the exact same complete items when each result follows its call. Pair only
+ * complete contiguous batches by `call_id`; preserve every item and field,
+ * parallel execution, model, and provider route. Partial or ambiguous batches
+ * stay untouched and fail closed upstream.
+ */
+function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): void {
+  const input = body.input;
+  if (!Array.isArray(input)) return;
+  let index = 0;
+  while (index < input.length) {
+    const item = input[index];
+    if (
+      !item ||
+      typeof item !== "object" ||
+      (item as Record<string, unknown>).type !== "function_call"
+    ) {
+      index += 1;
+      continue;
+    }
+    let callEnd = index;
+    while (
+      callEnd < input.length &&
+      input[callEnd] &&
+      typeof input[callEnd] === "object" &&
+      (input[callEnd] as Record<string, unknown>).type === "function_call"
+    ) {
+      callEnd += 1;
+    }
+    const calls = input.slice(index, callEnd) as Array<Record<string, unknown>>;
+    if (calls.length < 2) {
+      index = callEnd;
+      continue;
+    }
+    let resultEnd = callEnd;
+    while (
+      resultEnd < input.length &&
+      input[resultEnd] &&
+      typeof input[resultEnd] === "object" &&
+      (input[resultEnd] as Record<string, unknown>).type === "function_call_output"
+    ) {
+      resultEnd += 1;
+    }
+    const results = input.slice(callEnd, resultEnd) as Array<Record<string, unknown>>;
+    if (results.length !== calls.length) {
+      index = resultEnd;
+      continue;
+    }
+    const resultsByCallId = new Map<string, Record<string, unknown>>();
+    for (const result of results) {
+      const callId = result.call_id;
+      if (typeof callId !== "string" || resultsByCallId.has(callId)) {
+        resultsByCallId.clear();
+        break;
+      }
+      resultsByCallId.set(callId, result);
+    }
+    const paired: Array<Record<string, unknown>> = [];
+    for (const call of calls) {
+      const callId = call.call_id;
+      const result = typeof callId === "string" ? resultsByCallId.get(callId) : undefined;
+      if (!result) {
+        paired.length = 0;
+        break;
+      }
+      paired.push(call, result);
+    }
+    if (paired.length === calls.length * 2) {
+      input.splice(index, paired.length, ...paired);
+      index += paired.length;
+    } else {
+      index = resultEnd;
+    }
+  }
+}
+
+/**
+ * Inject the reviewed route after SDK serialization, replacing any caller
+ * gateway options. Only the ordered, reviewed endpoint providers are allowed;
+ * no model fallback list is sent. Unknown models/body shapes fail before I/O.
+ */
+export function vercelGatewayRoutingFetch(
+  kind: Extract<
+    ResolvedModelProvider["kind"],
+    "vercel-gateway-managed" | "vercel-gateway-workspace"
+  >,
+  inner: typeof fetch,
+): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (!isModelCallFetch(input)) {
+      return await inner(input, init);
+    }
+    if (typeof init?.body !== "string") {
+      throw new Error("Model request could not be prepared");
+    }
+    let body: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(init.body) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("invalid body");
+      }
+      body = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error("Model request could not be prepared");
+    }
+    const model = typeof body.model === "string" ? body.model : "";
+    const policy = gatewayRequestPolicyForUpstreamModel(model);
+    if (!policy) {
+      throw new Error("Model request is not in the approved catalogue");
+    }
+    const providerOptions =
+      body.providerOptions &&
+      typeof body.providerOptions === "object" &&
+      !Array.isArray(body.providerOptions)
+        ? { ...(body.providerOptions as Record<string, unknown>) }
+        : {};
+    providerOptions.gateway = {
+      only: [...policy.gateway.only],
+      order: [...policy.gateway.only],
+      ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
+    };
+    body.providerOptions = providerOptions;
+    if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
+      pairKimiParallelFunctionCallResults(body);
+    }
+    const response = await inner(input, { ...init, body: JSON.stringify(body) });
+    if (response.ok) {
+      return response;
+    }
+    const message =
+      kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
+        ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
+        : "The selected model is temporarily unavailable.";
+    return new Response(JSON.stringify({ error: { type: "model_unavailable", message } }), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
 }
 
 /**
@@ -589,7 +909,7 @@ export function resolveTurnModel(
   return {
     provider: resolved.provider,
     client,
-    model: buildModelInstance(resolved.provider, client, resolved.model.id),
+    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId),
     configured: resolved.model,
   };
 }
@@ -905,6 +1225,217 @@ export async function summarizeForCompaction(
   return summary;
 }
 
+/**
+ * Serialize the agent's model-visible tools for a remote_v2 compact request.
+ *
+ * Mirrors SDK `serializeTool` field semantics so the Responses converter emits
+ * the same tools→instructions wire prefix as ordinary turns. Function-tool
+ * namespaces live on non-enumerable Symbols (`functionToolNamespace` /
+ * `functionToolNamespaceDescription`); reading `tool.namespace` as a string
+ * silently drops them and regroups namespaced tools as bare functions.
+ * Computer tools that are not yet initialized are emitted as name-only schemas
+ * so serialize never throws before the run loop has resolved the instance.
+ */
+export async function serializedToolsForRemoteCompaction(agent: {
+  getAllTools: (runContext: RunContext) => Promise<Tool[]>;
+}): Promise<SerializedTool[]> {
+  const tools = await agent.getAllTools(new RunContext());
+  const serialized: SerializedTool[] = [];
+  for (const tool of tools) {
+    const entry = serializeToolForRemoteCompaction(tool);
+    if (entry) serialized.push(entry);
+  }
+  return serialized;
+}
+
+/** Read SDK Symbol-backed function-tool namespace metadata (by Symbol.description). */
+function functionToolNamespaceFields(tool: object): {
+  namespace?: string;
+  namespaceDescription?: string;
+} {
+  let namespace: string | undefined;
+  let namespaceDescription: string | undefined;
+  for (const symbol of Object.getOwnPropertySymbols(tool)) {
+    const value = (tool as Record<symbol, unknown>)[symbol];
+    if (typeof value !== "string" || value.length === 0) continue;
+    if (symbol.description === "functionToolNamespace") {
+      namespace = value;
+    } else if (symbol.description === "functionToolNamespaceDescription") {
+      namespaceDescription = value;
+    }
+  }
+  const record = tool as Record<string, unknown>;
+  if (!namespace && typeof record.namespace === "string" && record.namespace.length > 0) {
+    namespace = record.namespace;
+  }
+  if (
+    !namespaceDescription &&
+    typeof record.namespaceDescription === "string" &&
+    record.namespaceDescription.length > 0
+  ) {
+    namespaceDescription = record.namespaceDescription;
+  }
+  return {
+    ...(namespace ? { namespace } : {}),
+    ...(namespaceDescription ? { namespaceDescription } : {}),
+  };
+}
+
+function serializeToolForRemoteCompaction(tool: Tool): SerializedTool | null {
+  if (!tool || typeof tool !== "object" || typeof tool.type !== "string") {
+    return null;
+  }
+  const record = tool as Tool & Record<string, unknown>;
+  const name = typeof record.name === "string" ? record.name : "";
+  if (tool.type === "function") {
+    const { namespace, namespaceDescription } = functionToolNamespaceFields(record);
+    return {
+      type: "function",
+      name,
+      description: typeof record.description === "string" ? record.description : "",
+      parameters: record.parameters,
+      // Pass through like SDK serializeTool — do not coerce undefined → false
+      // (Responses wire would gain an explicit `"strict": false` and bust cache).
+      strict: record.strict,
+      ...(typeof record.deferLoading === "boolean" ? { deferLoading: record.deferLoading } : {}),
+      ...(namespace
+        ? {
+            namespace,
+            ...(namespaceDescription ? { namespaceDescription } : {}),
+          }
+        : {}),
+    } as SerializedTool;
+  }
+  if (tool.type === "hosted_tool") {
+    return {
+      type: "hosted_tool",
+      name,
+      providerData: record.providerData,
+    } as SerializedTool;
+  }
+  if (tool.type === "apply_patch") {
+    return { type: "apply_patch", name } as SerializedTool;
+  }
+  if (tool.type === "shell") {
+    return {
+      type: "shell",
+      name,
+      environment: record.environment,
+    } as SerializedTool;
+  }
+  if (tool.type === "computer") {
+    // Avoid SDK serializeTool's "computer not initialized" throw before the run.
+    const computer =
+      record.computer && typeof record.computer === "object"
+        ? (record.computer as { environment?: unknown; dimensions?: unknown })
+        : null;
+    if (
+      computer &&
+      typeof computer.environment === "string" &&
+      Array.isArray(computer.dimensions) &&
+      computer.dimensions.length === 2 &&
+      computer.dimensions.every((value) => typeof value === "number")
+    ) {
+      return {
+        type: "computer",
+        name,
+        environment: computer.environment,
+        dimensions: computer.dimensions,
+      } as SerializedTool;
+    }
+    return { type: "computer", name } as SerializedTool;
+  }
+  return null;
+}
+
+/**
+ * Codex remote compaction v2: send active history + `compaction_trigger`, collect
+ * exactly one `{ type: "compaction", encrypted_content }` output item.
+ * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
+ *
+ * Prompt-cache critical: `systemInstructions` and `tools` must match the
+ * ordinary agent turn prefix (Codex CLI sends `base_instructions` +
+ * `model_visible_specs` on the compact call). An empty instructions string
+ * busts the shared tools→instructions prefix and is rejected here.
+ *
+ * Tools are schema context only. This is a single `_fetchResponse` (no tool
+ * loop), and extract still requires exactly one compaction item, so a
+ * tool-call-shaped reply fails closed.
+ */
+export async function requestRemoteCompactionV2(
+  settings: Settings,
+  input: Array<Record<string, unknown>>,
+  options: {
+    client: OpenAI;
+    model: string;
+    /**
+     * Exact agent system instructions for this session/turn. Required and
+     * non-blank — must match the prior ordinary model call for cache prefix.
+     */
+    systemInstructions: string;
+    promptCacheKey?: string;
+    /** Model-visible tool schemas for the compact request (CLI parity). */
+    tools?: readonly SerializedTool[];
+    onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
+  },
+): Promise<Record<string, unknown>> {
+  // Match Agents SDK `normalizeInstructions`: reject blank after trim, but send
+  // the original bytes. Trimming here would diverge from ordinary turns that
+  // keep leading/trailing whitespace and bust the tools→instructions prefix.
+  if (options.systemInstructions.trim() === "") {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_instructions",
+      reason: "empty_system_instructions",
+    });
+  }
+  const systemInstructions = options.systemInstructions;
+  const promptInput = buildRemoteCompactionV2PromptInput(input);
+  const tools = options.tools ? [...options.tools] : [];
+  const request: ModelRequest = {
+    systemInstructions,
+    input: promptInput as AgentInputItem[],
+    modelSettings: {
+      // Azure rejects store:false; Codex transport enforces store:false itself.
+      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+      ...(options.promptCacheKey
+        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
+        : {}),
+    },
+    tools,
+    toolsExplicitlyProvided: true,
+    outputType: "text",
+    handoffs: [],
+    tracing: false,
+  };
+  let response: unknown;
+  try {
+    response = await new CompactionResponsesModel(options.client, options.model).fetchResponse(
+      request,
+    );
+  } catch (error) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
+  const usage = modelResponseUsageFromResponse(response);
+  if (usage) {
+    await options.onUsage?.(usage);
+  }
+  if (isFailedCompactionProviderResponse(response)) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+  }
+  try {
+    return extractRemoteCompactionV2OutputItem(response);
+  } catch (error) {
+    if (error instanceof EmptyCompactionSummaryError) {
+      throw new EmptyCompactionSummaryError({
+        ...compactionResponseDiagnostics(response, ""),
+        ...error.diagnostics,
+        stage: "remote_v2_extract",
+      });
+    }
+    throw error;
+  }
+}
+
 function isFailedCompactionProviderResponse(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
   const record = response as Record<string, unknown>;
@@ -1036,7 +1567,10 @@ export function compactionResponseDiagnostics(
   extractedText = extractResponseOutputText(response).trim(),
 ): Record<string, unknown> {
   if (!response || typeof response !== "object") {
-    return { responseShape: typeof response, extractedTextLength: extractedText.length };
+    return {
+      responseShape: typeof response,
+      extractedTextLength: extractedText.length,
+    };
   }
   const record = response as Record<string, unknown>;
   const output = Array.isArray(record.output) ? record.output : [];
@@ -1148,11 +1682,84 @@ class CompactionResponsesModel extends OpenAIResponsesModel {
 }
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
+export type GitCredentialBindingSeed = {
+  credentialBindingId: string;
+  provider: GitCredentialProvider;
+  token: string;
+  transport?: GitCredentialTransport;
+  expiresAt?: string;
+  /** Total active bindings for this provider, used to suppress unsafe aliases. */
+  providerBindingCount?: number;
+};
 export type GitCredentialTokenWriterSession = SandboxSessionLike;
+export type ToolspaceTokenWriterSession = SandboxSessionLike;
+
+export type EffectiveSkillSelection = Readonly<{
+  id: string;
+  name: string;
+  source: "bundled" | "library" | "pack" | "session";
+  version: string | null;
+  contentSha256: string | null;
+  reason: string;
+}>;
+
+const agentSkillSelections = new WeakMap<object, readonly EffectiveSkillSelection[]>();
+const emptySkillSelections: readonly EffectiveSkillSelection[] = Object.freeze([]);
+
+/**
+ * Read-only, secret-free skill provenance for an already-built agent. This is
+ * intentionally separate from the model instructions and sandbox manifest so
+ * effective configuration inspection cannot accidentally expose credentials or
+ * turn skill activation into an authorization change.
+ */
+export function effectiveSkillSelectionsForAgent(
+  agent: object,
+): readonly EffectiveSkillSelection[] {
+  return agentSkillSelections.get(agent) ?? emptySkillSelections;
+}
+
+export type ConnectorActionToolCall = {
+  approvalId: string;
+  connectionId?: string | null;
+  serverId: string;
+  toolName: string;
+  arguments: unknown;
+};
+
+export type ConnectorActionPolicyPreparation =
+  | { managed: false; decision: "unmanaged" }
+  | { managed: true; decision: "allow" | "ask" | "block" };
+
+export type ConnectorActionExecutionAdmission =
+  | { allowed: true; managed: false }
+  | { allowed: true; managed: true; requestId: string }
+  | {
+      allowed: false;
+      managed: true;
+      requestId: string;
+      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+    };
+
+/** Secret-free persistence boundary supplied by the worker for one attempt. */
+export type ConnectorActionPolicyHooks = {
+  prepare: (call: ConnectorActionToolCall) => Promise<ConnectorActionPolicyPreparation>;
+  begin: (call: ConnectorActionToolCall) => Promise<ConnectorActionExecutionAdmission>;
+  complete: (input: { requestId: string; outcome: "completed" | "uncertain" }) => Promise<void>;
+};
 
 export type BuildAgentOptions = {
   model?: Model;
+  /** Settled response for the one internal human-input interruption resumed by this run. */
+  humanInputResponse?: {
+    requestId: string;
+    toolCallId: string;
+    response: HumanInputResponse;
+  };
   reasoningEffort?: ReasoningEffort;
+  /** Product latency selection frozen onto this turn. */
+  latencyMode?: LatencyMode;
+  /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
+  serviceTier?: "fast" | "priority";
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
   // global-client callers (no model resolution) are byte-for-byte unchanged.
@@ -1180,11 +1787,18 @@ export type BuildAgentOptions = {
   hostedWebSearch?: boolean;
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
+  // Whether this turn's resolved model accepts image input. This is derived
+  // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
+  // False removes image-only sandbox tools and projects images out of each
+  // provider request without mutating OpenGeni's durable history. Omitted keeps
+  // the legacy built-in path image-capable.
+  supportsImageInput?: boolean;
+  /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
+  inputFileMediaTypes?: readonly string[];
   // EXPLICIT computer-use tool transport, decided where provider identity is
   // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
   // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
-  // on the SDK's constructor-name sniff. When omitted, the legacy sniff +
-  // `structuredToolTransport` neutralize path is preserved byte-for-byte.
+  // on the SDK's constructor-name sniff. Omitted means disabled/fail-closed.
   computerToolMode?: ComputerToolMode;
   /**
    * Invoked once, immediately before the first real computer action and after
@@ -1220,10 +1834,18 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  /** Exact broker-resolved connection identity frozen during MCP preparation. */
+  resolvedMcpConnectionIds?: ReadonlyMap<string, string>;
+  /** Attempt-bound connector Allow/Ask/Block enforcement and safe audit hooks. */
+  connectorActionPolicy?: ConnectorActionPolicyHooks;
   // Workspace Memory V1 working-set block, resolved by the worker per turn.
   // Composed after the workspace persona/CORE/toolspace substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
   workspaceMemory?: string;
+  // Exact-attempt active policy and preference descriptor block. When present,
+  // runtime uses the structured governance precedence branch; absent preserves
+  // the historical instruction composition byte-for-byte.
+  workspaceGovernance?: string;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
   // M3 rig runtime binding (all absent ⇒ a rig-less turn, byte-for-byte today).
   //  - `rig`: renders the non-bypassable rig doctrine block in the CORE.
@@ -1247,11 +1869,18 @@ export type BuildAgentOptions = {
   // repository-clone hooks; runStream forwards them into the hook context, which
   // seeds provider token FILES before the clone/setup runs.
   gitTokenSeeds?: GitTokenSeeds;
+  // Provider-neutral, independently mintable credentials. Binding ids remain
+  // off-manifest and are hashed before they influence sandbox paths.
+  gitCredentialBindings?: GitCredentialBindingSeed[];
   // TOOLSPACE: the run-scoped delegated token to seed into
   // $OPENGENI_TOOLSPACE_TOKEN_FILE. Like gitTokenSeed, this stays off the
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
   // hook before the agent starts.
   toolspaceTokenSeed?: string;
+  // Durable OpenGeni session identity used only to derive the off-manifest,
+  // per-session token file. Required together with toolspaceTokenSeed so two
+  // sessions sharing one box never overwrite the same pointer.
+  toolspaceTokenSessionId?: string;
   // Genesis turn only: inject a one-shot instruction into the FIRST model
   // call telling it to title the session via opengeni__set_session_title.
   // Keeping this out of the persistent Agent.instructions prevents every
@@ -1279,10 +1908,23 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
+  // Host context for this exact accepted turn. Composed system-level after the
+  // durable session persona and omitted from all later turns.
+  turnInstructions?: string;
   // Skills delivered by enabled capability packs. They join the bundled
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
   packSkills?: PackSkill[];
+  // Inline skills fixed onto this session at creation. They use the SDK's lazy
+  // skill source and are materialized only when the model loads one.
+  sessionSkills?: PackSkill[];
+  // Explicitly selected, immutable curated-library skill content. These are
+  // separate from packSkills so repository-local/pack compatibility does not
+  // turn a curated entry into a mutable override.
+  skillLibrarySkills?: PackSkill[];
+  // Secret-free provenance for effective-configuration inspection. The worker
+  // resolves exact ids/versions/hashes before constructing the agent.
+  skillLibrarySelections?: EffectiveSkillSelection[];
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -1306,7 +1948,7 @@ export type PackSkillFile = {
 
 export type PackSkill = {
   name: string;
-  description?: string | null;
+  description?: string | null | undefined;
   files: PackSkillFile[];
 };
 
@@ -1422,6 +2064,12 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
+/** Append system instructions that apply to this exact turn only. */
+export function appendTurnInstructions(composed: string, turnInstructions?: string): string {
+  const trimmed = turnInstructions?.trim();
+  return trimmed ? `${composed} ${trimmed}` : composed;
+}
+
 /**
  * Append the durable session metadata the model otherwise cannot observe.
  * This is deliberately declarative and excludes the title text: the title is
@@ -1451,6 +2099,65 @@ export function appendWorkspaceMemory(composed: string, workspaceMemory?: string
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
+function composedPersistentAgentInstructions(
+  settings: Settings,
+  options: BuildAgentOptions,
+): string {
+  const personaAndCore = composeAgentInstructions(
+    options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+    options.workspaceEnvironment,
+    options.rig,
+  );
+  if (!options.workspaceGovernance?.trim()) {
+    // Preserve the legacy path byte-for-byte when no structured governance
+    // authority is active for this exact attempt.
+    return appendPersistentSessionSettings(
+      appendTurnInstructions(
+        appendSessionInstructions(
+          appendWorkspaceMemory(
+            appendGitCredentialBindingInstructions(
+              appendToolspaceInstructions(
+                personaAndCore,
+                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+              ),
+              options.gitCredentialBindings,
+              options.activeSandboxBackend,
+            ),
+            options.workspaceMemory,
+          ),
+          options.sessionInstructions,
+        ),
+        options.turnInstructions,
+      ),
+      options.persistentSessionSettings,
+    );
+  }
+
+  // Structured governance precedence after CORE:
+  // governance (org -> workspace -> initiating user -> matching role), then
+  // session/task state, then tool/repository substrate, then bounded memory.
+  return appendWorkspaceMemory(
+    appendGitCredentialBindingInstructions(
+      appendToolspaceInstructions(
+        appendPersistentSessionSettings(
+          appendTurnInstructions(
+            appendSessionInstructions(
+              appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
+              options.sessionInstructions,
+            ),
+            options.turnInstructions,
+          ),
+          options.persistentSessionSettings,
+        ),
+        settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+      ),
+      options.gitCredentialBindings,
+      options.activeSandboxBackend,
+    ),
+    options.workspaceMemory,
+  );
+}
+
 /**
  * Appends the generic programmatic-tool-calling (toolspace) directive to the
  * composed workspace + CORE instructions, joined by " ". This is GENERIC
@@ -1468,6 +2175,35 @@ export function appendWorkspaceMemory(composed: string, workspaceMemory?: string
  */
 export function appendToolspaceInstructions(composed: string, toolspaceAvailable: boolean): string {
   return toolspaceAvailable ? `${composed} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}` : composed;
+}
+
+const GIT_BINDING_DISCOVERY_DIRECTIVE =
+  "This managed sandbox has multiple credential bindings for at least one Git provider. Native Git selects credentials from the repository remote. For gh, glab, or az, run inside the intended attached repository so its origin selects the binding; when running elsewhere, inspect $HOME/.opengeni/git-bindings.json and set OPENGENI_GIT_BINDING to the listed credentialBindingId. The inventory contains identifiers and repository routes, never credential values. A binding marked git_http_broker is Git-only, so use the configured provider MCP tools for provider API operations on it.";
+
+/**
+ * Make multi-account provider-CLI selection discoverable to the model.
+ *
+ * Binding ids are opaque routing identifiers, not credentials. The detailed,
+ * secret-free repository mapping is materialized in the sandbox by the Git
+ * setup hook so prompts stay compact.
+ */
+export function appendGitCredentialBindingInstructions(
+  composed: string,
+  bindings: GitCredentialBindingSeed[] | undefined,
+  activeSandboxBackend?: Settings["sandboxBackend"],
+): string {
+  if (activeSandboxBackend === "selfhosted" || !bindings?.length) {
+    return composed;
+  }
+  const bindingsByProvider = new Map<GitCredentialProvider, Set<string>>();
+  for (const binding of bindings) {
+    const ids = bindingsByProvider.get(binding.provider) ?? new Set<string>();
+    ids.add(binding.credentialBindingId);
+    bindingsByProvider.set(binding.provider, ids);
+  }
+  return [...bindingsByProvider.values()].some((ids) => ids.size > 1)
+    ? `${composed} ${GIT_BINDING_DISCOVERY_DIRECTIVE}`
+    : composed;
 }
 
 /**
@@ -1490,11 +2226,17 @@ const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // provided-session env; runStream reads them to build the clone hook context.
 // Absent when no brokered repo is attached / on the selfhosted path.
 const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
+const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentToolspaceTokenSeed = new WeakMap<object, string>();
+const agentToolspaceTokenSessionId = new WeakMap<object, string>();
 // A genesis directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
+// Per-turn model modality used by the literal pre-provider input filter. The
+// durable session history remains canonical; only the request clone is shaped.
+const agentSupportsImageInput = new WeakMap<object, boolean>();
+const agentInputFileMediaTypes = new WeakMap<object, readonly string[]>();
 // The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
 // backend). Read by runStream's owned branch to keep platform box-setup hooks off
 // connected machines (a user's real computer).
@@ -1534,7 +2276,7 @@ export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = error instanceof Error ? error.message : String(error);
+  const details = redactSensitiveText(error instanceof Error ? error.message : String(error));
   return {
     isError: true,
     content: [
@@ -1559,15 +2301,23 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  if (Boolean(options.toolspaceTokenSeed) !== Boolean(options.toolspaceTokenSessionId)) {
+    throw new Error("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  }
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
   // resolved provider's api/window/web-search instead.
   const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
+  // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
+  // `priority`). Do not fall back to latencyMode itself — that would send
+  // invalid Azure tiers.
+  const serviceTier = options.serviceTier;
   const providerData = {
     ...(encryptedReasoning ? { include: ["reasoning.encrypted_content"] } : {}),
     ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
   };
   // Native hosted tools attached to every constructed agent. webSearchEnabled
   // is ON by default and provider-unconditional on the built-in path (the live
@@ -1580,6 +2330,31 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
+  const humanInputTool = agentTool({
+    name: HUMAN_INPUT_TOOL_NAME,
+    description:
+      "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
+    parameters: RequestHumanInputToolInput,
+    needsApproval: true,
+    // A missing/mismatched durable response is a protocol integrity failure,
+    // not model-visible tool output the agent may reason past.
+    errorFunction: null,
+    execute: (_input, _context, details) => {
+      const settled = options.humanInputResponse;
+      if (!settled) {
+        throw new Error("Human-input tool resumed without a durable response");
+      }
+      const resumedCallId = details?.toolCall?.callId;
+      if (resumedCallId && resumedCallId !== settled.toolCallId) {
+        throw new Error("Human-input response does not belong to the resumed tool call");
+      }
+      return JSON.stringify({
+        requestId: settled.requestId,
+        ...settled.response,
+      });
+    },
+  });
+  const agentTools = [...hostedTools, humanInputTool];
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -1598,31 +2373,18 @@ export function buildOpenGeniAgent(
     //      when a toolspace token was minted for this turn (feature enabled + a
     //      per-turn seed — the mint gate, which includes selfhosted turns since
     //      they now receive the token too) — appendToolspaceInstructions,
-    //   3. + workspace memory working set, ONLY when the workspace setting is on
+    //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
+    //      multiple credential bindings,
+    //   4. + workspace memory working set, ONLY when the workspace setting is on
     //      and the worker resolved a nonblank block — appendWorkspaceMemory,
-    //   4. + the per-session persona instructions (session-specific, so it
+    //   5. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   5. + durable session-setting state (title present + child notification
+    //   6. + host context for this exact turn, when supplied,
+    //   7. + durable session-setting state (title present + child notification
     //      mode), when supplied by the worker,
     // The genesis title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
-    instructions: appendPersistentSessionSettings(
-      appendSessionInstructions(
-        appendWorkspaceMemory(
-          appendToolspaceInstructions(
-            composeAgentInstructions(
-              options.instructionsTemplate ?? settings.agentInstructionsTemplate,
-              options.workspaceEnvironment,
-              options.rig,
-            ),
-            settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
-          ),
-          options.workspaceMemory,
-        ),
-        options.sessionInstructions,
-      ),
-      options.persistentSessionSettings,
-    ),
+    instructions: composedPersistentAgentInstructions(settings, options),
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
@@ -1642,7 +2404,7 @@ export function buildOpenGeniAgent(
     // `new Agent(baseConfig)` path (sandboxBackend === "none") and the
     // `new SandboxAgent({ ...baseConfig, ... })` path via the shared baseConfig
     // spread; the SDK concatenates these with MCP and sandbox capability tools.
-    ...(hostedTools.length ? { tools: hostedTools } : {}),
+    tools: agentTools,
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
     // Surface FAILED MCP tool calls as `{ isError: true }` tool output (see
     // mcpToolErrorFunction / mcpToolErrorOutput) instead of the SDK's default
@@ -1658,8 +2420,17 @@ export function buildOpenGeniAgent(
     if (options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
+    agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
+    if (options.inputFileMediaTypes) {
+      agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
+    }
     maybeInstallCodexToolSearch(agent, settings, options);
-    applyMcpApprovalPolicy(agent, settings);
+    applyMcpApprovalPolicy(
+      agent,
+      settings,
+      options.connectorActionPolicy,
+      options.resolvedMcpConnectionIds,
+    );
     return agent;
   }
 
@@ -1674,8 +2445,16 @@ export function buildOpenGeniAgent(
     ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], {
+      ...(options.skillLibrarySkills?.length
+        ? { skillLibrarySkills: options.skillLibrarySkills }
+        : {}),
+      ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
+      ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
+        : {}),
+      ...(options.supportsImageInput !== undefined
+        ? { supportsImageInput: options.supportsImageInput }
         : {}),
       ...(options.computerToolMode !== undefined
         ? { computerToolMode: options.computerToolMode }
@@ -1689,8 +2468,23 @@ export function buildOpenGeniAgent(
         : {}),
     }),
   });
+  agentSkillSelections.set(
+    agent,
+    Object.freeze(
+      effectiveSkillSelections(
+        options.skillLibrarySelections ?? [],
+        options.skillLibrarySkills ?? [],
+        options.packSkills ?? [],
+        options.sessionSkills ?? [],
+      ).map((selection) => Object.freeze(selection)),
+    ),
+  );
   if (options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
+  }
+  agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
+  if (options.inputFileMediaTypes) {
+    agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
   }
   agentFileDownloads.set(
     agent,
@@ -1720,8 +2514,12 @@ export function buildOpenGeniAgent(
   if (Object.keys(gitTokenSeeds).length > 0) {
     agentGitTokenSeeds.set(agent, gitTokenSeeds);
   }
+  if (options.gitCredentialBindings && options.gitCredentialBindings.length > 0) {
+    agentGitCredentialBindings.set(agent, options.gitCredentialBindings);
+  }
   if (options.toolspaceTokenSeed) {
     agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
+    agentToolspaceTokenSessionId.set(agent, options.toolspaceTokenSessionId!);
   }
   // M3: stash the rig setup descriptor + RESOLVE the rig credential hooks now.
   // sandboxLifecycleHooksForIds throws on an unknown hook name, so a typo'd rig
@@ -1734,18 +2532,23 @@ export function buildOpenGeniAgent(
     agentRigCredentialHooks.set(agent, sandboxLifecycleHooksForIds(options.rigCredentialHookIds));
   }
   maybeInstallCodexToolSearch(agent, settings, options);
-  applyMcpApprovalPolicy(agent, settings);
+  applyMcpApprovalPolicy(
+    agent,
+    settings,
+    options.connectorActionPolicy,
+    options.resolvedMcpConnectionIds,
+  );
   return agent;
 }
 
 /**
- * Enable Codex-CLI-style progressive connector disclosure on a codex turn when the
+ * Enable Codex-CLI-style progressive MCP disclosure on a Codex turn when the
  * flag is on. Gated on `structuredToolTransport === false` — the same signal that
- * identifies a codex-subscription turn (the ChatGPT backend that rejects hosted
- * tools) — so no non-codex turn is ever touched. On qualifying turns it wraps
+ * identifies a Codex-subscription turn (the ChatGPT backend that rejects hosted
+ * tools) — so no non-Codex turn is ever touched. On qualifying turns it wraps
  * `getAllTools` (clone-survivingly — see {@link installCodexToolSearch}) to defer
- * codex_apps schemas + add the client tool_search tool, whose description renders
- * the live connector namespaces threaded from prepareAgentTools.
+ * selected non-mandatory MCP schemas and add the client tool_search tool. The
+ * description combines live connector namespaces with selected server identities.
  */
 function maybeInstallCodexToolSearch(
   agent: Agent<any, any>,
@@ -1753,22 +2556,42 @@ function maybeInstallCodexToolSearch(
   options: BuildAgentOptions,
 ): void {
   if (settings.codexToolSearchEnabled && options.structuredToolTransport === false) {
+    const mcpServers = options.mcpServers ?? [];
+    // `defer_loading:true` removes these MCP schemas from provider context until
+    // tool_search discloses a bounded match. Keep the compaction estimator on
+    // that same wire truth; otherwise a large deferred catalog can falsely trip
+    // compaction before the first real model request. OpenGeni remains eager.
+    for (const server of mcpServers) {
+      if (server.name === "opengeni") continue;
+      (
+        server as MCPServer & {
+          deferModelToolSchemaAccounting?: () => void;
+        }
+      ).deferModelToolSchemaAccounting?.();
+    }
     installCodexToolSearch(
       agent as unknown as Parameters<typeof installCodexToolSearch>[0],
       options.codexConnectorNamespaces ?? new Set<string>(),
+      new Set(mcpServers.map((server) => server.name)),
     );
   }
 }
 
 /** True when the unprefixed tool `name` requires approval under `policy`. */
-function mcpToolRequiresApproval(policy: boolean | string[], unprefixedName: string): boolean {
-  return policy === true || (Array.isArray(policy) && policy.includes(unprefixedName));
+function mcpToolRequiresApproval(
+  policy: boolean | ReadonlySet<string>,
+  unprefixedName: string,
+): boolean {
+  return policy === true || (policy !== false && policy.has(unprefixedName));
 }
 
 /** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
 type McpApprovalPolicy = {
   prefix: string;
-  requireApproval: boolean | string[];
+  serverId: string;
+  requireApproval: boolean | ReadonlySet<string>;
+  connectorBacked: boolean;
+  connectionId: string | null;
 };
 
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
@@ -1797,10 +2620,11 @@ type ApprovalCapableAgent = {
 function installMcpApprovalPolicy(
   agent: ApprovalCapableAgent,
   policies: McpApprovalPolicy[],
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
 ): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
-  agent.getMcpTools = async (runContext: unknown) => {
-    const tools = await listMcpTools(runContext);
+  agent.getMcpTools = async (resolutionContext: unknown) => {
+    const tools = await listMcpTools(resolutionContext);
     return tools.map((tool) => {
       if (tool.type !== "function") {
         return tool;
@@ -1810,16 +2634,89 @@ function installMcpApprovalPolicy(
         return tool;
       }
       const unprefixed = tool.name.slice(policy.prefix.length);
-      return mcpToolRequiresApproval(policy.requireApproval, unprefixed)
-        ? { ...tool, needsApproval: async () => true }
-        : tool;
+      const originalNeedsApproval = tool.needsApproval.bind(tool);
+      const originalInvoke = tool.invoke.bind(tool);
+      const connectorManaged = Boolean(connectorActionPolicy && policy.connectorBacked);
+      if (!connectorManaged && !mcpToolRequiresApproval(policy.requireApproval, unprefixed)) {
+        return tool;
+      }
+      const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
+        if (!policy.connectionId) {
+          throw new Error("Connector action is missing its resolved connection identity");
+        }
+        return {
+          approvalId,
+          connectionId: policy.connectionId,
+          serverId: policy.serverId,
+          toolName: unprefixed,
+          arguments: args,
+        };
+      };
+      return {
+        ...tool,
+        needsApproval: async (
+          runContext: Parameters<typeof originalNeedsApproval>[0],
+          parsedInput: Parameters<typeof originalNeedsApproval>[1],
+          callId: Parameters<typeof originalNeedsApproval>[2],
+        ) => {
+          if (connectorManaged && !callId) {
+            throw new Error("Connector action is missing its durable approval identity");
+          }
+          const preparation = connectorManaged
+            ? await connectorActionPolicy!.prepare(connectorCall(callId!, parsedInput))
+            : ({ managed: false, decision: "unmanaged" } as const);
+          if (preparation.managed && preparation.decision === "block") {
+            return false;
+          }
+          const legacyApproval =
+            mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+            (await originalNeedsApproval(runContext, parsedInput, callId));
+          return (preparation.managed && preparation.decision === "ask") || legacyApproval;
+        },
+        invoke: async (runContext, input, details) => {
+          if (!connectorManaged) {
+            return await originalInvoke(runContext, input, details);
+          }
+          const callId = details?.toolCall?.callId;
+          if (!callId) {
+            throw new Error("Connector action was not executed: missing durable call identity");
+          }
+          let parsedInput: unknown;
+          try {
+            parsedInput = JSON.parse(input) as unknown;
+          } catch {
+            throw new Error("Connector action was not executed: malformed tool input");
+          }
+          const admission = await connectorActionPolicy!.begin(connectorCall(callId, parsedInput));
+          if (!admission.allowed) {
+            throw new Error(`Connector action was not executed: ${admission.reason}`);
+          }
+          if (!admission.managed) {
+            return await originalInvoke(runContext, input, details);
+          }
+          try {
+            const output = await originalInvoke(runContext, input, details);
+            await connectorActionPolicy!.complete({
+              requestId: admission.requestId,
+              outcome: "completed",
+            });
+            return output;
+          } catch {
+            await connectorActionPolicy!.complete({
+              requestId: admission.requestId,
+              outcome: "uncertain",
+            });
+            throw new Error("Connector action failed after execution began");
+          }
+        },
+      };
     });
   };
   const originalClone = agent.clone?.bind(agent);
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installMcpApprovalPolicy(cloned, policies);
+      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy);
       return cloned;
     };
   }
@@ -1850,22 +2747,47 @@ function installMcpApprovalPolicy(
  *  - CLONE SURVIVAL. The wrap is re-installed onto every clone; see
  *    {@link installMcpApprovalPolicy}.
  */
-function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): void {
+function applyMcpApprovalPolicy(
+  agent: Agent<any, any>,
+  settings: Settings,
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
+  resolvedMcpConnectionIds?: ReadonlyMap<string, string>,
+): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
     .filter(
       (server) =>
+        Boolean(connectorActionPolicy && server.connectionRef) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
-    .map((server) => ({
-      prefix: prefixedMcpToolName(server.id, ""),
-      requireApproval: server.requireApproval as boolean | string[],
-    }))
+    .map((server) => {
+      const staticConnectionId = server.connectionRef?.connectionId ?? null;
+      const resolvedConnectionId = resolvedMcpConnectionIds?.get(server.id) ?? null;
+      if (
+        staticConnectionId &&
+        resolvedConnectionId &&
+        staticConnectionId !== resolvedConnectionId
+      ) {
+        throw new Error("MCP connection identity changed between configuration and preparation");
+      }
+      return {
+        prefix: prefixedMcpToolName(server.id, ""),
+        serverId: server.id,
+        requireApproval:
+          server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
+        connectorBacked: Boolean(server.connectionRef),
+        connectionId: resolvedConnectionId ?? staticConnectionId,
+      };
+    })
     .sort((a, b) => b.prefix.length - a.prefix.length);
   if (policies.length === 0) {
     return;
   }
-  installMcpApprovalPolicy(agent as unknown as ApprovalCapableAgent, policies);
+  installMcpApprovalPolicy(
+    agent as unknown as ApprovalCapableAgent,
+    policies,
+    connectorActionPolicy,
+  );
 }
 
 /**
@@ -1974,15 +2896,24 @@ export function withStructuredViewImageFunctionResults(tools: Tool<unknown>[]): 
   });
 }
 
+/** Remove filesystem tools whose successful output necessarily contains pixels. */
+function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.filter(
+    (capabilityTool) => capabilityTool.type !== "function" || capabilityTool.name !== "view_image",
+  );
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
   options: {
+    skillLibrarySkills?: PackSkill[];
+    sessionSkills?: PackSkill[];
+    workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
-    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode). When
-    // present, computerUse() is handed the mode directly and its tools() obeys it
-    // without the constructor-name sniff. When absent, the legacy neutralize +
-    // imageFunctionResults path (driven by structuredToolTransport) is unchanged.
+    supportsImageInput?: boolean;
+    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode).
+    // Omitted/unproven transport fails closed with no computer tools.
     computerToolMode?: ComputerToolMode;
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     turnCancellationSignal?: AbortSignal;
@@ -2002,9 +2933,18 @@ export function buildAgentCapabilities(
   // `apply_patch` + text `view_image` variants the backend accepts — the SDK
   // handles their function_call round-trip natively, so no reimplementation.
   // Scoped to filesystem: shell() is always a function-tool transport.
+  const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
+    const transportTools =
+      options.structuredToolTransport === false
+        ? withStructuredViewImageFunctionResults(tools)
+        : tools;
+    return options.supportsImageInput === false
+      ? withoutImageInputTools(transportTools)
+      : transportTools;
+  };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false
-      ? { configureTools: withStructuredViewImageFunctionResults }
+    ...(options.structuredToolTransport === false || options.supportsImageInput === false
+      ? { configureTools: configureFilesystemTools }
       : {}),
   });
   if (options.structuredToolTransport === false) {
@@ -2012,9 +2952,33 @@ export function buildAgentCapabilities(
   }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
-    shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
+    shell({
+      ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
+    }),
   ];
-  caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
+  const sessionSkills = sessionSkillsForMaterialization(
+    packSkills,
+    options.skillLibrarySkills ?? [],
+    options.sessionSkills ?? [],
+  );
+  caps.push(
+    skills({
+      lazyFrom: lazySkillSourceWithPackSkills(
+        [...packSkills, ...sessionSkills],
+        options.skillLibrarySkills ?? [],
+      ),
+    }),
+  );
+  if (options.workspaceSkillPaths?.length) {
+    caps.push(
+      workspaceSkills(options.workspaceSkillPaths, [
+        ...bundledSkillDirNames(bundledSkillsDir()),
+        ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
+        ...packSkills.map((skill) => skill.name),
+        ...sessionSkills.map((skill) => skill.name),
+      ]),
+    );
+  }
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
   // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
   // backend is one whose image carries the X stack (descriptorgate — honest about
@@ -2024,6 +2988,7 @@ export function buildAgentCapabilities(
   // run time (the SandboxAgent merge); xdotool drives :0 regardless of whether any
   // viewer is attached, so no pixel-tunnel dependency.
   if (
+    options.supportsImageInput !== false &&
     settings.computerUseEnabled &&
     settings.sandboxDesktopEnabled &&
     desktopCapableBackend(settings.sandboxBackend)
@@ -2033,37 +2998,14 @@ export function buildAgentCapabilities(
     // FUNCTION `computer_*` tools on the text transport. The ChatGPT/Codex backend
     // rejects hosted tool types (only function/custom/web_search accepted).
     //
-    // HARDENING: when the caller declares an EXPLICIT `computerToolMode` (the worker
-    // does, from its authoritative model resolution), thread it straight through —
-    // tool selection then never depends on the SDK's model-instance constructor-name
-    // sniff (which a wrapped/proxied model would defeat, silently 400ing a
-    // chat-completions provider handed the hosted tool). When ABSENT, the legacy path
-    // is preserved byte-for-byte: on the codex path (structuredToolTransport === false)
-    // we set imageFunctionResults and neutralize the capability's model binding — the
-    // SAME trick used for filesystem above — so `tools()` sees no model instance and
-    // emits the function tools the backend can call, instead of suppressing the tier.
-    const explicitMode = options.computerToolMode;
+    // The worker declares an explicit mode from authoritative provider resolution.
+    // Exported/public callers that omit it are unproven and therefore disabled.
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
-      ...(explicitMode
-        ? { toolMode: explicitMode }
-        : // Legacy (no explicit mode): on the codex path the function tools deliver
-          // screenshots as a real image the model can see. The ChatGPT/Codex backend
-          // rejects HOSTED tool types but DOES accept `input_image` content items inside a
-          // `function_call_output` (proven by openai/codex codex-rs, whose view_image tool
-          // ships exactly that shape) — so a structured image tool result is seen, where a
-          // text data-URL would be unreadable.
-          options.structuredToolTransport === false
-          ? { imageFunctionResults: true }
-          : {}),
+      toolMode: options.computerToolMode ?? "disabled",
     });
-    // Neutralize ONLY on the legacy sniff path. With an explicit toolMode the mode
-    // already forces the function tools, so the constructor-name override is moot.
-    if (!explicitMode && options.structuredToolTransport === false) {
-      neutralizeStructuredToolTransport(computerCapability);
-    }
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
   }
   if (toolCancellation) {
@@ -2083,6 +3025,8 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 
 export type PreparedAgentTools = {
   mcpServers: MCPServer[];
+  /** Attempt-frozen successful broker identity for each prepared MCP server. */
+  resolvedMcpConnectionIds: ReadonlyMap<string, string>;
   close: () => Promise<void>;
   // P4 (Part B.1): the live, by-reference Set of ORIGINAL-dotted connector
   // namespaces the codex_apps transport saw across this turn's tools/list calls.
@@ -2107,15 +3051,89 @@ export type PrepareToolsOptions = {
   executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
+  // Immutable human authority used only for subject-owned connection lookup.
+  // This is intentionally separate from the worker's first-party MCP identity.
+  credentialSubjectId?: string;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
   firstPartyPermissions?: Permission[];
+  // Exact model-visible catalog selection for the broad first-party server.
+  // Permissions are signed separately and remain the authorization boundary.
+  firstPartyTools?: FirstPartyMcpToolName[];
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
+  /** Injectable final MCP transport for tests and embedded hosts. */
+  mcpFetchImpl?: FetchLike;
 };
+
+type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
+
+export type ConnectedMcpServerBatches = {
+  active: MCPServer[];
+  failed: MCPServer[];
+  errors: ReadonlyMap<MCPServer, Error>;
+  close: () => Promise<void>;
+};
+
+/**
+ * Connect SDK-managed MCP servers in stable, bounded batches. The SDK cleans a
+ * failing strict batch; this wrapper additionally closes every earlier batch
+ * before rethrowing, so a later-batch failure cannot leak live connections.
+ */
+export async function connectMcpServersInBatches(
+  servers: MCPServer[],
+  options: { strict: boolean; connectTimeoutMs?: number },
+): Promise<ConnectedMcpServerBatches> {
+  assertMcpServerSelectionWithinBounds(servers);
+  const batches: ConnectedMcpServerBatch[] = [];
+  try {
+    for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
+      batches.push(
+        await connectMcpServers(
+          servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS),
+          {
+            ...(options.connectTimeoutMs === undefined
+              ? {}
+              : { connectTimeoutMs: options.connectTimeoutMs }),
+            connectInParallel: true,
+            strict: options.strict,
+          },
+        ),
+      );
+    }
+  } catch (error) {
+    await closeMcpServerBatches(batches).catch(() => undefined);
+    throw error;
+  }
+
+  const errors = new Map<MCPServer, Error>();
+  for (const batch of batches) {
+    for (const [server, error] of batch.errors) errors.set(server, error);
+  }
+  return {
+    active: batches.flatMap((batch) => batch.active),
+    failed: batches.flatMap((batch) => batch.failed),
+    errors,
+    close: async () => {
+      await closeMcpServerBatches(batches);
+    },
+  };
+}
+
+async function closeMcpServerBatches(batches: ConnectedMcpServerBatch[]): Promise<void> {
+  let firstError: unknown;
+  for (const batch of [...batches].reverse()) {
+    try {
+      await batch.close();
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
+}
 
 export async function prepareAgentTools(
   settings: Settings,
@@ -2126,25 +3144,51 @@ export async function prepareAgentTools(
   // codex_apps sanitizing fetch so every tools/list this turn accumulates the
   // account's connector namespaces. Surfaced on PreparedAgentTools for the worker.
   const codexConnectorNamespaces = new Set<string>();
+  const resolvedMcpConnectionIds = new Map<string, string>();
+  assertMcpServerSelectionWithinBounds(tools);
   if (tools.length === 0) {
-    return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
+    return {
+      mcpServers: [],
+      resolvedMcpConnectionIds,
+      close: async () => {},
+      codexConnectorNamespaces,
+    };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
-  const servers = await Promise.all(
-    tools.map(async (tool) => {
+  const aggregateToolBudget = new McpAggregateToolListBudget();
+  // npm Undici's dispatcher transport can hang indefinitely under Bun even
+  // after an AbortSignal fires. Bun's native fetch is the supported runtime
+  // transport there; destination policy validation still runs before every
+  // credential-bearing MCP request.
+  const useBunNativeFetch = options.mcpFetchImpl === undefined && !!process.versions.bun;
+  const mcpFetchImpl =
+    options.mcpFetchImpl ?? (useBunNativeFetch ? globalThis.fetch.bind(globalThis) : undiciFetch);
+  const servers = await boundedParallelMap(
+    tools,
+    MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+    async (tool, index) => {
       const config = registry.get(tool.id);
       if (!config) {
         throw new Error(`Unknown MCP server id: ${tool.id}`);
       }
       const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
+      const firstParty = isFirstPartyMcpServer(settings, config);
       const baseFetch = isCodexAppsMcpServer(config)
-        ? codexAppsSanitizingFetch(globalThis.fetch, codexConnectorNamespaces)
-        : globalThis.fetch;
+        ? codexAppsSanitizingFetch(mcpFetchImpl, codexConnectorNamespaces)
+        : mcpFetchImpl;
+      const guardedFetch = guardedMcpFetch(
+        firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
+        baseFetch,
+        {
+          ...(firstParty ? { requireHttpsOutsideLocalTest: false } : {}),
+          ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
+        },
+      );
       const fetchImpl = config.connectionRef
-        ? connectionBrokerFetch(baseFetch, config, options)
-        : isFirstPartyMcpServer(settings, config)
-          ? firstPartyAuthFetch(baseFetch, settings, options)
-          : baseFetch;
+        ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
+        : firstParty
+          ? firstPartyAuthFetch(guardedFetch, settings, options)
+          : guardedFetch;
       // A server is connected BEST-EFFORT (a connect OR tools-list failure drops
       // it — its tools go unavailable for the turn — instead of failing the turn)
       // in two cases:
@@ -2172,11 +3216,15 @@ export async function prepareAgentTools(
           url,
           name: config.name ?? config.id,
           cacheToolsList: config.cacheToolsList,
+          // The upstream transport logger receives raw thrown errors, whose
+          // messages may contain response bodies, URLs, headers, or echoed
+          // credentials. Keep its diagnostic surface structural only.
+          logger: safeMcpTransportLogger(config.id),
           // codex_apps returns connector tools with empty `outputSchema: {}` that the
           // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
           // sanitize the response on the wire before validation. The namespace Set
           // also captures each tool's original connector namespace (P4 Part B.1).
-          ...(fetchImpl !== globalThis.fetch ? { fetch: fetchImpl } : {}),
+          fetch: fetchImpl,
           ...(await mcpServerRequestInit(settings, config)),
           ...(config.timeoutMs
             ? {
@@ -2188,53 +3236,78 @@ export async function prepareAgentTools(
         config.id,
         config.allowedTools,
         bestEffort,
+        aggregateToolBudget,
+        `${config.id}:${index}`,
       );
       return {
         server,
         bestEffort,
         optional,
+        timeoutMs: config.timeoutMs,
       };
-    }),
+    },
   );
-  const requiredServers = servers.filter((entry) => !entry.bestEffort).map((entry) => entry.server);
-  const bestEffortServers = servers
-    .filter((entry) => entry.bestEffort)
-    .map((entry) => entry.server);
+  const requiredEntries = servers.filter((entry) => !entry.bestEffort);
+  const bestEffortEntries = servers.filter((entry) => entry.bestEffort);
+  const requiredServers = requiredEntries.map((entry) => entry.server);
+  const bestEffortServers = bestEffortEntries.map((entry) => entry.server);
   // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
   // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
   // ChatGPT plan is a normal, non-noteworthy state).
   const optionalServerNames = new Set(
     servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
   );
-  const connectedRequired = await connectMcpServers(requiredServers, {
-    connectInParallel: true,
+  const connectedRequired = await connectMcpServersInBatches(requiredServers, {
     strict: true,
+    connectTimeoutMs: mcpOuterConnectTimeoutMs(requiredEntries.map((entry) => entry.timeoutMs)),
   });
-  const connectedBestEffort = bestEffortServers.length
-    ? await connectMcpServers(bestEffortServers, {
-        connectInParallel: true,
-        strict: false,
-      })
-    : null;
+  let connectedBestEffort: ConnectedMcpServerBatches | null = null;
+  try {
+    connectedBestEffort = bestEffortServers.length
+      ? await connectMcpServersInBatches(bestEffortServers, {
+          strict: false,
+          connectTimeoutMs: mcpOuterConnectTimeoutMs(
+            bestEffortEntries.map((entry) => entry.timeoutMs),
+          ),
+        })
+      : null;
+  } catch (error) {
+    await connectedRequired.close().catch(() => undefined);
+    throw error;
+  }
   if (connectedBestEffort) {
     for (const failed of connectedBestEffort.failed) {
+      if (failed instanceof PrefixedMcpServer) {
+        failed.releaseAggregateBudget();
+      }
       if (!optionalServerNames.has(failed.name)) {
         continue;
       }
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
         `[mcp] optional server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
-        error instanceof Error ? error.message : error,
+        safeMcpErrorFields(error),
       );
     }
   }
   return {
     mcpServers: [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])],
+    resolvedMcpConnectionIds: new Map(resolvedMcpConnectionIds),
     close: async () => {
-      await connectedRequired.close();
+      let firstError: unknown;
       if (connectedBestEffort) {
-        await connectedBestEffort.close();
+        try {
+          await connectedBestEffort.close();
+        } catch (error) {
+          firstError ??= error;
+        }
       }
+      try {
+        await connectedRequired.close();
+      } catch (error) {
+        firstError ??= error;
+      }
+      if (firstError !== undefined) throw firstError;
     },
     codexConnectorNamespaces,
   };
@@ -2244,6 +3317,7 @@ function connectionBrokerFetch(
   baseFetch: FetchLike,
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
+  resolvedMcpConnectionIds: Map<string, string>,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
@@ -2251,42 +3325,51 @@ function connectionBrokerFetch(
   }
   return async (input, init) => {
     const request = await mcpRequestInfo(input, init);
+    const destinationUrl = mcpRequestDestinationUrl(input);
     const first = await resolveConnectionForRequest(
       options,
       config.id,
       connectionRef,
+      destinationUrl,
       request.toolName,
       false,
     );
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
     }
+    recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     const response = await baseFetch(
       fetchInputForAttempt(input),
       withConnectionHeaders(input, init, first.headers),
     );
     if (response.status === 401) {
+      await cancelMcpResponseBody(response);
       const refreshed = await resolveConnectionForRequest(
         options,
         config.id,
         connectionRef,
+        destinationUrl,
         request.toolName,
         true,
       );
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
+      recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       const retry = await baseFetch(
         fetchInputForAttempt(input),
         withConnectionHeaders(input, init, refreshed.headers),
       );
       if (retry.status === 403) {
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
-        return auth
-          ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef)
-          : retry;
+        if (auth) {
+          await cancelMcpResponseBody(retry);
+          return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+        }
+        return retry;
       }
       if (retry.status === 401) {
+        await cancelMcpResponseBody(retry);
         return await authNeededFetchResponse(
           options,
           config.id,
@@ -2295,9 +3378,13 @@ function connectionBrokerFetch(
             status: "auth_needed",
             reason: "expired",
             providerDomain: connectionRef.providerDomain,
+            ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
             connectionId: refreshed.connectionId,
             ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
             ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+            ...(connectionRef.selectedResources
+              ? { selectedResources: connectionRef.selectedResources }
+              : {}),
           },
           connectionRef,
         );
@@ -2306,18 +3393,38 @@ function connectionBrokerFetch(
     }
     if (response.status === 403) {
       const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
-      return auth
-        ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef)
-        : response;
+      if (auth) {
+        await cancelMcpResponseBody(response);
+        return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+      }
+      return response;
     }
     return response;
   };
+}
+
+function recordResolvedMcpConnectionId(
+  resolvedMcpConnectionIds: Map<string, string>,
+  config: Settings["mcpServers"][number],
+  connectionId: string,
+): void {
+  const staticConnectionId = config.connectionRef?.connectionId;
+  const existingConnectionId = resolvedMcpConnectionIds.get(config.id);
+  if (
+    connectionId.length === 0 ||
+    (staticConnectionId !== undefined && staticConnectionId !== connectionId) ||
+    (existingConnectionId !== undefined && existingConnectionId !== connectionId)
+  ) {
+    throw new Error("MCP connection identity changed during attempt preparation");
+  }
+  resolvedMcpConnectionIds.set(config.id, connectionId);
 }
 
 async function resolveConnectionForRequest(
   options: PrepareToolsOptions,
   serverId: string,
   connectionRef: McpServerConnectionRef,
+  destinationUrl: string,
   toolName: string | undefined,
   forceRefresh: boolean,
 ): Promise<ResolveConnectionCredentialResult> {
@@ -2326,18 +3433,23 @@ async function resolveConnectionForRequest(
       status: "auth_needed",
       reason: "missing_connection",
       providerDomain: connectionRef.providerDomain,
+      ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
       ...(connectionRef.connectionId ? { connectionId: connectionRef.connectionId } : {}),
       ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
       ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+      ...(connectionRef.selectedResources
+        ? { selectedResources: connectionRef.selectedResources }
+        : {}),
     };
   }
   const request: ResolveConnectionCredentialInput = {
     workspaceId: options.workspaceId,
     serverId,
     connectionRef,
+    destinationUrl,
     forceRefresh,
     ...(toolName ? { toolName } : {}),
-    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+    ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
   };
   try {
     return await options.resolveCredential(request);
@@ -2346,9 +3458,13 @@ async function resolveConnectionForRequest(
       status: "auth_needed",
       reason: "refresh_failed",
       providerDomain: connectionRef.providerDomain,
+      ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
       ...(connectionRef.connectionId ? { connectionId: connectionRef.connectionId } : {}),
       ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
       ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+      ...(connectionRef.selectedResources
+        ? { selectedResources: connectionRef.selectedResources }
+        : {}),
     };
   }
 }
@@ -2366,6 +3482,7 @@ function insufficientScopeAuth(
     status: "auth_needed",
     reason: "insufficient_scope",
     providerDomain: connectionRef.providerDomain,
+    ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
     connectionId,
     ...(challenge.scope?.length
       ? { scopes: challenge.scope }
@@ -2377,6 +3494,9 @@ function insufficientScopeAuth(
       : connectionRef.resource
         ? { resource: connectionRef.resource }
         : {}),
+    ...(connectionRef.selectedResources
+      ? { selectedResources: connectionRef.selectedResources }
+      : {}),
   };
 }
 
@@ -2392,6 +3512,11 @@ async function authNeededFetchResponse(
     serverId,
     toolName: request.toolName ?? null,
     providerDomain: auth.providerDomain,
+    ...(auth.provider
+      ? { provider: auth.provider }
+      : connectionRef.provider
+        ? { provider: connectionRef.provider }
+        : {}),
     reason: auth.reason,
     ...(connectionId ? { connectionId } : {}),
     ...(auth.scopes
@@ -2403,6 +3528,11 @@ async function authNeededFetchResponse(
       ? { resource: auth.resource }
       : connectionRef.resource
         ? { resource: connectionRef.resource }
+        : {}),
+    ...(auth.selectedResources
+      ? { selectedResources: auth.selectedResources }
+      : connectionRef.selectedResources
+        ? { selectedResources: connectionRef.selectedResources }
         : {}),
     ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
     ...(options.subjectId ? { subjectId: options.subjectId } : {}),
@@ -2432,6 +3562,10 @@ type McpRequestInfo = {
   id?: string | number | null;
   toolName?: string;
 };
+
+function mcpRequestDestinationUrl(input: string | URL | Request): string {
+  return new URL(input instanceof Request ? input.url : input.toString()).toString();
+}
 
 async function mcpRequestInfo(
   input: string | URL | Request,
@@ -2527,9 +3661,12 @@ function parseWwwAuthenticate(header: string | null): {
 // content, erasing the failure. A JSON-RPC error survives the shim as a thrown
 // McpError, which PrefixedMcpServer.callTool converts back into an MCP-shaped
 // `{ isError: true }` output for the model.
-const MCP_AUTH_NEEDED_ERROR_CODE = -32001;
-const MCP_AUTH_NEEDED_MESSAGE =
-  "Authentication required - a connection link was posted to the session.";
+const MCP_AUTH_NEEDED_ERROR = {
+  // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
+  // collide with MCP SDK transport errors such as RequestTimeout (-32001).
+  code: 40_101,
+  message: "Authentication required - a connection link was posted to the session.",
+} as const;
 
 function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
   return new Response(
@@ -2537,8 +3674,8 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
       jsonrpc: "2.0",
       id: id ?? null,
       error: {
-        code: MCP_AUTH_NEEDED_ERROR_CODE,
-        message: MCP_AUTH_NEEDED_MESSAGE,
+        code: MCP_AUTH_NEEDED_ERROR.code,
+        message: MCP_AUTH_NEEDED_ERROR.message,
       },
     }),
     {
@@ -2553,7 +3690,11 @@ function isAuthNeededMcpError(error: unknown): boolean {
     return false;
   }
   const code = (error as { code?: unknown }).code;
-  return code === MCP_AUTH_NEEDED_ERROR_CODE || error.message.includes(MCP_AUTH_NEEDED_MESSAGE);
+  return (
+    code === MCP_AUTH_NEEDED_ERROR.code &&
+    (error.message === MCP_AUTH_NEEDED_ERROR.message ||
+      error.message === `MCP error ${MCP_AUTH_NEEDED_ERROR.code}: ${MCP_AUTH_NEEDED_ERROR.message}`)
+  );
 }
 
 // Model-facing text for a best-effort server whose tool call failed for a
@@ -2585,6 +3726,86 @@ function safeMcpErrorFields(error: unknown): {
     return typeof altRaw === "number" ? { errorClass, status: altRaw } : { errorClass };
   }
   return { errorClass, status };
+}
+
+type SafeMcpTransportError = Error & {
+  status?: number;
+  code?: number;
+  mcpTransportFailureKind?: "request_timeout";
+};
+
+/**
+ * Preserve the MCP SDK's exact request-timeout meaning without retaining or
+ * exposing a raw HTTP response body. The numeric code is not sufficient:
+ * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
+ * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
+ */
+export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if (seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (record.mcpTransportFailureKind === "request_timeout") {
+    return true;
+  }
+  const code = typeof record.code === "number" ? record.code : record.status;
+  const message = typeof record.message === "string" ? record.message : "";
+  const sdkTimeoutMessages = new Set([
+    "Request timed out",
+    "MCP error -32001: Request timed out",
+    "Maximum total timeout exceeded",
+    "MCP error -32001: Maximum total timeout exceeded",
+  ]);
+  if (code === -32_001 && sdkTimeoutMessages.has(message)) {
+    return true;
+  }
+  return ["error", "cause", "response", "data"].some((key) =>
+    isMcpRequestTimeoutError(record[key], seen),
+  );
+}
+
+export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
+  const fields = safeMcpErrorFields(error);
+  const safeError = new Error(
+    `MCP transport operation failed (${mcpErrorReason(fields)})`,
+  ) as SafeMcpTransportError;
+  safeError.name = "McpTransportError";
+  if (fields.status !== undefined) {
+    safeError.status = fields.status;
+    safeError.code = fields.status;
+  }
+  if (isMcpRequestTimeoutError(error)) {
+    safeError.mcpTransportFailureKind = "request_timeout";
+  }
+  return safeError;
+}
+
+function safeMcpTransportLogger(serverId: string) {
+  const logFailure = (_message: string, ...args: unknown[]) => {
+    let error: unknown;
+    for (let index = args.length - 1; index >= 0; index -= 1) {
+      if (args[index] instanceof Error) {
+        error = args[index];
+        break;
+      }
+    }
+    console.warn("[mcp] transport operation failed", {
+      serverId,
+      ...safeMcpErrorFields(error),
+    });
+  };
+  return {
+    namespace: "opengeni:mcp-transport",
+    debug: () => undefined,
+    error: logFailure,
+    warn: logFailure,
+    dontLogModelData: true,
+    dontLogToolData: true,
+  };
 }
 
 // Compose the safe model/log reason string ("StreamableHTTPError 401", or just
@@ -2653,19 +3874,37 @@ async function signFirstPartyDelegatedBearer(
   settings: Settings,
   options: PrepareToolsOptions,
 ): Promise<string | null> {
-  if (!settings.delegationSecret || !options.accountId || !options.workspaceId) {
+  const delegationSecret = resolveFirstPartyDelegationSecret(settings);
+  if (!delegationSecret || !options.accountId || !options.workspaceId) {
     return null;
   }
-  return await signDelegatedAccessToken(settings.delegationSecret, {
+  const attemptClaims = [
+    options.sessionId,
+    options.turnId,
+    options.attemptId,
+    options.executionGeneration,
+  ];
+  const hasAnyAttemptClaim = attemptClaims.some((claim) => claim !== undefined);
+  const hasExactAttemptClaims = attemptClaims.every((claim) => claim !== undefined);
+  if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
+    return null;
+  }
+  return await signDelegatedAccessToken(delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
-    permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
-    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-    ...(options.turnId ? { turnId: options.turnId } : {}),
-    ...(options.attemptId ? { attemptId: options.attemptId } : {}),
-    ...(options.executionGeneration ? { executionGeneration: options.executionGeneration } : {}),
+    permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
+    firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    ...(hasExactAttemptClaims
+      ? {
+          sessionId: options.sessionId!,
+          turnId: options.turnId!,
+          attemptId: options.attemptId!,
+          executionGeneration: options.executionGeneration!,
+        }
+      : {}),
     exp: Math.floor(Date.now() / 1000) + 60 * 60,
   });
 }
@@ -2745,22 +3984,6 @@ async function codexAppsMcpRequestInit(
 // level scopes (billing/account/members/api_keys/workspace:admin) are
 // intentionally excluded: they gate no first-party tool and are not agent
 // capabilities. (A finer-grained capability model comes later.)
-const firstPartyMcpPermissions: Permission[] = [
-  "workspace:read",
-  "files:read",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "goals:manage",
-  "sessions:read",
-  "sessions:create",
-  "sessions:control",
-  "variable-sets:use",
-  "variable-sets:manage",
-  "rigs:use",
-  "github:use",
-];
-
 // codex_apps is third-party-by-trust (the external ChatGPT connectors backend)
 // but needs DYNAMIC auth, so it is its own category — deliberately NOT folded
 // into the first-party allowlist, which would wrongly sign an OpenGeni delegated
@@ -2861,12 +4084,15 @@ class PrefixedMcpServer implements MCPServer {
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
+  private modelToolSchemaAccountingDeferred = false;
 
   constructor(
     private readonly inner: MCPServer,
     registryId: string,
     allowedTools?: string[],
     bestEffort = false,
+    private readonly aggregateToolBudget?: McpAggregateToolListBudget,
+    private readonly aggregateSourceId = registryId,
   ) {
     this.name = registryId;
     this.prefix = prefixedMcpToolName(registryId, "");
@@ -2876,17 +4102,35 @@ class PrefixedMcpServer implements MCPServer {
   }
 
   connect(): Promise<void> {
-    return this.inner.connect();
+    return this.inner.connect().catch((error: unknown) => {
+      // connectMcpServers has its own global logger and logs the thrown Error.
+      // Never let a raw transport response body cross that logging boundary.
+      throw safeMcpTransportError(error);
+    });
   }
 
   close(): Promise<void> {
+    this.releaseAggregateBudget();
     return this.inner.close();
   }
 
+  releaseAggregateBudget(): void {
+    this.aggregateToolBudget?.remove(this.aggregateSourceId);
+  }
+
   async listTools(): Promise<RuntimeMcpTool[]> {
-    let tools: RuntimeMcpTool[];
     try {
-      tools = await this.inner.listTools();
+      const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
+      const exposed = tools
+        .filter((tool) => this.isAllowed(tool.name))
+        .map((tool) => ({
+          ...tool,
+          name: prefixedMcpToolName(this.name, tool.name),
+        }));
+      const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
+        assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
+      this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
+      return bounded;
     } catch (error) {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
@@ -2915,21 +4159,23 @@ class PrefixedMcpServer implements MCPServer {
           { serverId: this.name, ...safeMcpErrorFields(error) },
         );
       }
+      this.releaseAggregateBudget();
       return [];
     }
-    const exposed = tools
-      .filter((tool) => this.isAllowed(tool.name))
-      .map((tool) => ({
-        ...tool,
-        name: prefixedMcpToolName(this.name, tool.name),
-      }));
-    this.listedToolSchemaTokens = estimateSerializedValueTokens(exposed);
-    return exposed;
   }
 
   /** Latest exact tools/list projection used to build the model request. */
   modelToolSchemaTokens(): number {
-    return this.listedToolSchemaTokens;
+    return this.modelToolSchemaAccountingDeferred ? 0 : this.listedToolSchemaTokens;
+  }
+
+  /**
+   * Keep model-input accounting aligned with Codex `defer_loading`: the full
+   * schema is not provider context until a tool_search_output discloses it.
+   * Instances are turn-local, so this cannot leak into a non-Codex turn.
+   */
+  deferModelToolSchemaAccounting(): void {
+    this.modelToolSchemaAccountingDeferred = true;
   }
 
   async callTool(
@@ -2942,7 +4188,9 @@ class PrefixedMcpServer implements MCPServer {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
     }
     try {
-      return await this.inner.callTool(unprefixed, args, meta);
+      const output = await this.inner.callTool(unprefixed, args, meta);
+      assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+      return output;
     } catch (error) {
       // The connection broker's auth-needed short-circuit arrives as a thrown
       // JSON-RPC error (an inline isError result would be stripped by the SDK
@@ -2953,7 +4201,7 @@ class PrefixedMcpServer implements MCPServer {
       if (isAuthNeededMcpError(error)) {
         return {
           isError: true,
-          content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }],
+          content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
         };
       }
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
@@ -3092,24 +4340,32 @@ export async function prepareRunInput(
           : assembled,
       historyItemCount: sanitizedHistory.length,
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
+      ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
   }
-  // An approval can only be resumed against a real saved run state. If the
+  // An interrupted tool can only be resumed against a real saved run state. If the
   // latest blob is the cleared sentinel the awaiting turn was wiped (the API
   // refuses clear in requires_action, so this is a defensive guard) — fail with
   // an honest message instead of the cryptic SDK "missing schema version".
   if (isClearedRunStateBlob(input.serializedRunState)) {
     throw new Error(
-      "Cannot resume an approval: the session context was cleared, so the awaiting run state no longer exists.",
+      "Cannot resume an interrupted tool: the session context was cleared, so the awaiting run state no longer exists.",
     );
   }
-  const state = await RunState.fromString(agent, input.serializedRunState);
-  const interruptions = state.getInterruptions();
-  const target = interruptions.find((item: any) => approvalIdentifier(item) === input.approvalId);
-  if (!target) {
-    throw new Error(`Approval not found in saved run state: ${input.approvalId}`);
+  const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
+  for (const repair of compatibleRunState.repairs) {
+    console.warn("[runtime] repaired incompatible RunState exposedPorts", repair);
   }
-  if (input.decision === "approve") {
+  const state = await RunState.fromString(agent, compatibleRunState.serializedRunState);
+  const interruptions = state.getInterruptions();
+  const interruptionId = input.kind === "human_input" ? input.toolCallId : input.approvalId;
+  const target = interruptions.find((item: any) => approvalIdentifier(item) === interruptionId);
+  if (!target) {
+    throw new Error(`Interrupted tool not found in saved run state: ${interruptionId}`);
+  }
+  if (input.kind === "human_input") {
+    state.approve(target as any);
+  } else if (input.decision === "approve") {
     state.approve(target as any);
   } else {
     state.reject(target as any, input.message ? { message: input.message } : undefined);
@@ -3134,6 +4390,14 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
+  // OpenGeni-minted Toolspace token renewal registration. Called only after the
+  // initial token file reached the real sandbox session.
+  onToolspaceTokenSessionReady?: (session: ToolspaceTokenWriterSession) => Promise<void> | void;
+  // Host-owned run material is seeded off-manifest before setup and every
+  // agent-created process sources the active immutable generation. The worker
+  // owns resolution/renewal/fencing; runtime owns sandbox transport.
+  runCredentialSessionId?: string;
+  onRunCredentialSessionReady?: RunCredentialSessionReady;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
   // runAgentStream does NOT build (or resume, or discard) a client — it threads
@@ -3226,9 +4490,10 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // Generic substrate prompting for programmatic tool calling (toolspace). Same
 // text for every host; gated per-turn by appendToolspaceInstructions on the
 // presence of a minted toolspace token, so it only appears when the sandbox
-// actually exposes the ogtool CLI + $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE.
+// exposes $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE. Stock images carry ogtool;
+// custom environments get only an exact deployment-pinned bootstrap hint.
 export const TOOLSPACE_PROGRAMMATIC_DIRECTIVE =
-  "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. Run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`; equivalently, POST MCP JSON-RPC to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.";
+  "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.";
 
 /**
  * callModelInputFilter that removes provider-assigned item ids (rs_/msg_/fc_…)
@@ -3271,18 +4536,6 @@ export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) 
 export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }) => ({
   ...modelData,
   input: normalizeComputerCallActions(
-    modelData.input as unknown as Array<Record<string, unknown>>,
-  ) as unknown as AgentInputItem[],
-});
-
-/**
- * Per-call state compaction for local image inspection. Re-opening the same
- * path supersedes its prior base64 result; carrying both provides no newer
- * information and can otherwise balloon every following model request.
- */
-export const elideSupersededViewImagesFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: elideSupersededViewImagePairs(
     modelData.input as unknown as Array<Record<string, unknown>>,
   ) as unknown as AgentInputItem[],
 });
@@ -3335,7 +4588,10 @@ export function contextRobustnessFilterForSettings(
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
   const thresholdTokens = compactionThresholdTokens(settings);
-  let previousRequest: { revision: number; footprint: CompleteModelInputFootprint } | null = null;
+  let previousRequest: {
+    revision: number;
+    footprint: CompleteModelInputFootprint;
+  } | null = null;
   let requestRevision = 0;
   return async ({ modelData, agent }) => {
     const input = modelData.input;
@@ -3399,13 +4655,226 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
   };
 }
 
+const IMAGE_CONTENT_TYPES = new Set(["image", "input_image", "image_url", "computer_screenshot"]);
+const FILE_CONTENT_TYPES = new Set(["file", "input_file"]);
+const IMAGE_OMITTED_TEXT =
+  "[Image content omitted because the selected model does not support image input.]";
+const FILE_OMITTED_TEXT =
+  "[File content omitted because the selected model does not support this file type.]";
+
+function modelInputItemType(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = (value as Record<string, unknown>).type;
+  return typeof type === "string" ? type : null;
+}
+
+function modelInputFileMediaType(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const field of ["contentType", "content_type", "mediaType", "media_type", "mimeType"]) {
+    const candidate = record[field];
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.toLowerCase().split(";", 1)[0]!.trim();
+    }
+  }
+  const fileValue = record.file;
+  if (typeof fileValue === "string") {
+    const match = /^data:([^;,]+)[;,]/i.exec(fileValue);
+    if (match?.[1]) return match[1].toLowerCase();
+  }
+  if (fileValue && typeof fileValue === "object") return modelInputFileMediaType(fileValue);
+  return null;
+}
+
+function acceptsModelInputFile(value: unknown, accepted: readonly string[] | undefined): boolean {
+  if (accepted === undefined) return true;
+  const mediaType = modelInputFileMediaType(value);
+  if (!mediaType) return false;
+  return accepted.some(
+    (candidate) =>
+      candidate === mediaType ||
+      (candidate.endsWith("/*") && mediaType.startsWith(candidate.slice(0, -1))),
+  );
+}
+
+export type ModelInputProjectionPolicy = {
+  supportsImageInput: boolean;
+  inputFileMediaTypes?: readonly string[];
+};
+
+function omittedContentTextPart(kind: "image" | "file"): Record<string, string> {
+  return { type: "input_text", text: kind === "image" ? IMAGE_OMITTED_TEXT : FILE_OMITTED_TEXT };
+}
+
+function unsupportedContentKind(
+  value: unknown,
+  policy: ModelInputProjectionPolicy,
+): "image" | "file" | null {
+  const type = modelInputItemType(value) ?? "";
+  if (IMAGE_CONTENT_TYPES.has(type) && !policy.supportsImageInput) return "image";
+  if (FILE_CONTENT_TYPES.has(type) && !acceptsModelInputFile(value, policy.inputFileMediaTypes)) {
+    return "file";
+  }
+  return null;
+}
+
+function stripUnsupportedContentParts(
+  value: unknown,
+  policy: ModelInputProjectionPolicy,
+): { value: unknown; removed: boolean } {
+  if (Array.isArray(value)) {
+    let removed = false;
+    const kept: unknown[] = [];
+    for (const part of value) {
+      const kind = unsupportedContentKind(part, policy);
+      if (kind) {
+        removed = true;
+        kept.push(omittedContentTextPart(kind));
+        continue;
+      }
+      kept.push(part);
+    }
+    return { value: removed ? kept : value, removed };
+  }
+  if (unsupportedContentKind(value, policy)) {
+    return { value: undefined, removed: true };
+  }
+  return { value, removed: false };
+}
+
+function stripUnsupportedContentFromModelInputItem<T extends Record<string, unknown>>(
+  item: T,
+  policy: ModelInputProjectionPolicy,
+): T | null {
+  if (unsupportedContentKind(item, policy)) return null;
+  let clone: Record<string, unknown> | null = null;
+  for (const field of ["content", "output"] as const) {
+    if (!(field in item)) continue;
+    const originalField = item[field];
+    const projected = stripUnsupportedContentParts(originalField, policy);
+    if (!projected.removed) continue;
+    clone ??= { ...item };
+    const omittedKind = unsupportedContentKind(originalField, policy) ?? "file";
+    clone[field] =
+      projected.value === undefined ||
+      (Array.isArray(projected.value) && projected.value.length === 0)
+        ? [omittedContentTextPart(omittedKind)]
+        : projected.value;
+  }
+  return (clone ?? item) as T;
+}
+
+/** Build the non-mutating model-wire view for images and typed files. */
+export function projectModelInputForCapabilities<T extends Record<string, unknown>>(
+  items: readonly T[],
+  policy: ModelInputProjectionPolicy,
+): T[] {
+  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return items as T[];
+
+  let changed = false;
+  const projected: T[] = [];
+  for (const item of items) {
+    const type = modelInputItemType(item);
+    if (!policy.supportsImageInput && type === "computer_call") {
+      while (modelInputItemType(projected.at(-1)) === "reasoning") projected.pop();
+      changed = true;
+      continue;
+    }
+    if (!policy.supportsImageInput && type === "computer_call_result") {
+      changed = true;
+      continue;
+    }
+    const stripped = stripUnsupportedContentFromModelInputItem(item, policy);
+    if (!stripped) {
+      changed = true;
+      continue;
+    }
+    if (stripped !== item) changed = true;
+    projected.push(stripped);
+  }
+  return changed ? (repairHistoryProtocolItems(projected) as T[]) : (items as T[]);
+}
+
+/**
+ * Build the per-request view for a model's input modalities. Image-capable
+ * models receive the exact original array. Text-only models replace ordinary
+ * image parts with a visible text marker. Hosted computer call/result pairs are
+ * removed because `computer_call_result.output` cannot legally carry text.
+ * Durable history is never mutated.
+ */
+export function projectModelInputForImageSupport<T extends Record<string, unknown>>(
+  items: readonly T[],
+  supportsImageInput: boolean,
+): T[] {
+  return projectModelInputForCapabilities(items, { supportsImageInput });
+}
+
+export function incrementalModelInputProjectionFilter(
+  policy: ModelInputProjectionPolicy,
+  initialInputAlreadyProjected: boolean,
+): CallModelInputFilter | undefined {
+  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return undefined;
+  let sourcePrefixLength: number | null = initialInputAlreadyProjected ? null : -1;
+  let cachedProjectedPrefix: Array<Record<string, unknown>> | null = null;
+  return async ({ modelData }) => ({
+    ...modelData,
+    input: (() => {
+      const input = modelData.input as unknown as Array<Record<string, unknown>>;
+      if (sourcePrefixLength === null) {
+        // This exact prefix was projected before SDK state construction. Record
+        // its length; future calls inspect only items generated this turn.
+        sourcePrefixLength = input.length;
+        return modelData.input;
+      }
+      if (sourcePrefixLength < 0 || input.length < sourcePrefixLength) {
+        // Approval/human resumes restore an SDK RunState rather than receiving a
+        // preprojected durable array. Project that request once and retain only
+        // its request-local view; later calls reuse it without mutating RunState.
+        const projected = projectModelInputForCapabilities(input, policy);
+        sourcePrefixLength = input.length;
+        cachedProjectedPrefix = projected === input ? null : projected;
+        return projected as typeof modelData.input;
+      }
+      const tail = input.slice(sourcePrefixLength);
+      if (tail.length === 0) return modelData.input;
+      const projectedTail = projectModelInputForCapabilities(tail, policy);
+      const tailUnchanged =
+        projectedTail.length === tail.length &&
+        projectedTail.every((item, index) => item === tail[index]);
+      if (tailUnchanged && cachedProjectedPrefix === null) {
+        return modelData.input;
+      }
+      return [
+        ...(cachedProjectedPrefix ?? input.slice(0, sourcePrefixLength)),
+        ...projectedTail,
+      ] as typeof modelData.input;
+    })(),
+  });
+}
+
+function modelModalityProjectionFilterForAgent(
+  agent: object,
+  initialInputAlreadyProjected: boolean,
+): CallModelInputFilter | undefined {
+  return incrementalModelInputProjectionFilter(
+    {
+      supportsImageInput: agentSupportsImageInput.get(agent) !== false,
+      ...(agentInputFileMediaTypes.has(agent)
+        ? { inputFileMediaTypes: agentInputFileMediaTypes.get(agent)! }
+        : {}),
+    },
+    initialInputAlreadyProjected,
+  );
+}
+
 /**
  * The model-input filter applied before every model call. The computer_call
  * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
  * the provider-item-id strip is layered on top when the configured policy
  * selects it; the context-robustness guard then raises the proactive durable
- * compaction signal on the client-compaction path. It never trims history from
- * an individual request.
+ * compaction signal on the client-compaction path. Model-specific modality
+ * projection is composed by runAgentStream immediately before that final
+ * accounting guard.
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
@@ -3413,7 +4882,6 @@ export function callModelInputFilterForSettings(
 ): CallModelInputFilter | undefined {
   const filters: CallModelInputFilter[] = [
     normalizeComputerCallsFilter,
-    elideSupersededViewImagesFilter,
     boundModelToolOutputsFilterForSettings(settings),
   ];
   if (settings.openaiProviderItemIds === "strip") {
@@ -3432,7 +4900,11 @@ export async function runAgentStream(
   const prepared: PreparedAgentInput =
     typeof input === "string" || input instanceof RunState ? { input, historyItemCount: 0 } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
+  const toolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
+  if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
+    throw new Error("runCredentialSessionId is required when run credential setup is enabled");
+  }
 
   // OWNED PATH (P1.2 ownership inversion): the per-turn resume path injected a
   // live, externally-owned box. We thread the live `session` straight into
@@ -3451,11 +4923,24 @@ export async function runAgentStream(
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
+    const credentialAgentSession = overrides.runCredentialSessionId
+      ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
+      : (session as SandboxSessionLike);
+    const agentSession = toolspaceTokenFile
+      ? withToolspaceTokenSession(credentialAgentSession, toolspaceTokenFile)
+      : credentialAgentSession;
+    const credentialSetupSession = overrides.runCredentialSessionId
+      ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
+      : setupSession;
+    const decoratedSetupSession = toolspaceTokenFile
+      ? withToolspaceTokenSession(credentialSetupSession, toolspaceTokenFile)
+      : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
     // lazy provisioner. Eager path: runs here, before the run starts (unchanged).
     if (!overrides.ownedSandbox.deferredSetup) {
-      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, setupSession, {
+      await overrides.onRunCredentialSessionReady?.(session as SandboxSessionLike);
+      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, decoratedSetupSession, {
         settings,
         environment,
         preparedInput: prepared,
@@ -3471,6 +4956,9 @@ export async function runAgentStream(
             }
           : {}),
       });
+      if (toolspaceTokenSeedForAgent(agent)) {
+        await overrides.onToolspaceTokenSessionReady?.(agentSession);
+      }
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
     const runAs = sandboxRunAs(settings);
@@ -3492,6 +4980,7 @@ export async function runAgentStream(
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
     // repository-clone hook seeds it to the box's token file before the clone.
     const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
+    const ownedGitCredentialBindings = gitCredentialBindingsForAgent(agent);
     const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
     const ownedRigSetup = rigSetupDescriptorForAgent(agent);
     const ownedHooks = [
@@ -3504,6 +4993,9 @@ export async function runAgentStream(
         rigCredentialHooksForAgent(agent),
       ),
       ...sandboxToolspaceTokenHooksForAgent(agent),
+      ...toolspaceTokenSessionRegistrationHooks(
+        ownedToolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+      ),
       ...sandboxRepositoryCloneHooksForAgent(agent),
       ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
     ];
@@ -3512,12 +5004,29 @@ export async function runAgentStream(
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
+      ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+      ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
-    // Keep the decoration as a safety net for any session the SDK does create/resume
-    // through the client during this run (it is inert for the provided session).
-    const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
+    // Keep both credential seeding and lifecycle decoration as a safety net for
+    // any session the SDK does create/resume during this run. They are inert for
+    // the provided session, which remains the normal ownership-inverted path.
+    const credentialResourceClient = overrides.runCredentialSessionId
+      ? withRunCredentialsClient(
+          resourceClient,
+          overrides.runCredentialSessionId,
+          overrides.onRunCredentialSessionReady,
+        )
+      : resourceClient;
+    const toolspaceResourceClient = toolspaceTokenFile
+      ? withToolspaceTokenClient(credentialResourceClient, toolspaceTokenFile)
+      : credentialResourceClient;
+    const decoratedClient = withSandboxLifecycleHooks(
+      toolspaceResourceClient,
+      ownedHooks,
+      ownedHookContext,
+    );
     const ownedFilter = composeCallModelInputFilters(
       [
         callModelInputFilterForSettings(settings),
@@ -3527,6 +5036,7 @@ export async function runAgentStream(
         // canonical bound at the literal final seam before accounting/provider
         // serialization so no extension can bypass the policy.
         boundModelToolOutputsFilterForSettings(settings),
+        modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
         contextRobustnessFilterForSettings(settings, {
           throwOnCompactionNeeded: Boolean(
             overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -3535,7 +5045,9 @@ export async function runAgentStream(
             ? { contextCompactionSignal: overrides.contextCompactionSignal }
             : {}),
           ...(overrides.contextCompactionRequested
-            ? { contextCompactionRequested: overrides.contextCompactionRequested }
+            ? {
+                contextCompactionRequested: overrides.contextCompactionRequested,
+              }
             : {}),
         }),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
@@ -3548,7 +5060,7 @@ export async function runAgentStream(
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
-      session,
+      session: agentSession,
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
     return await runScopedRunner(settings).run(agent, prepared.input, ownedRunOptions);
@@ -3573,14 +5085,27 @@ export async function runAgentStream(
           ...(runAs ? { runAs } : {}),
         })
       : refreshedClient;
+  const credentialClient =
+    resourceClient && overrides.runCredentialSessionId
+      ? withRunCredentialsClient(
+          resourceClient,
+          overrides.runCredentialSessionId,
+          overrides.onRunCredentialSessionReady,
+        )
+      : resourceClient;
+  const toolspaceClient =
+    credentialClient && toolspaceTokenFile
+      ? withToolspaceTokenClient(credentialClient, toolspaceTokenFile)
+      : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
   const gitTokenSeeds = gitTokenSeedsForAgent(agent);
+  const gitCredentialBindings = gitCredentialBindingsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const client = resourceClient
+  const client = toolspaceClient
     ? withSandboxLifecycleHooks(
-        resourceClient,
+        toolspaceClient,
         [
           // M3: same rig-setup-first ordering + credential-hook union as the owned
           // path (this legacy create/resume decoration path is byte-for-byte today
@@ -3591,6 +5116,9 @@ export async function runAgentStream(
             rigCredentialHooksForAgent(agent),
           ),
           ...sandboxToolspaceTokenHooksForAgent(agent),
+          ...toolspaceTokenSessionRegistrationHooks(
+            toolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+          ),
           ...sandboxRepositoryCloneHooksForAgent(agent),
           ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
         ],
@@ -3599,23 +5127,27 @@ export async function runAgentStream(
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(runAs ? { runAs } : {}),
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
+          ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
           ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
+          ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
         },
       )
     : undefined;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
-  // provider-id stripping, image/budget guard), then any per-turn filter
-  // (genesis title directive). A callModelInputFilter only shapes the per-call
-  // model input; the SDK persists filtered clones into its session view, while
-  // OpenGeni's durable conversation truth is still reconciled explicitly below.
+  // provider-id stripping, output bounds), then any per-turn filter, the model's
+  // modality projection, and finally context accounting over the exact payload
+  // that can reach the provider. The SDK invokes filters on a deep request clone;
+  // OpenGeni does not pass an SDK session here and reconciles durable conversation
+  // truth from the untouched run-state history.
   const callModelInputFilter = composeCallModelInputFilters(
     [
       callModelInputFilterForSettings(settings),
       genesisTitleInputFilter,
       overrides.callModelInputFilter,
       boundModelToolOutputsFilterForSettings(settings),
+      modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
       contextRobustnessFilterForSettings(settings, {
         throwOnCompactionNeeded: Boolean(
           overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -4029,6 +5561,8 @@ export async function runOwnedSandboxSetup(
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
+    gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
+    toolspaceTokenSeedOverride?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
@@ -4051,7 +5585,11 @@ export async function runOwnedSandboxSetup(
     ...(opts.gitTokenSeedOverride ? { github: opts.gitTokenSeedOverride } : {}),
     ...(opts.gitTokenSeedsOverride ?? {}),
   } satisfies GitTokenSeeds;
-  const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
+  const ownedGitCredentialBindings =
+    opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
+  const ownedToolspaceTokenSeed =
+    opts.toolspaceTokenSeedOverride ?? toolspaceTokenSeedForAgent(agent);
+  const ownedToolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedHooks = [
     // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -4073,7 +5611,9 @@ export async function runOwnedSandboxSetup(
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
     ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
+    ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+    ...(ownedToolspaceTokenFile ? { toolspaceTokenFile: ownedToolspaceTokenFile } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
@@ -4087,30 +5627,30 @@ export async function runOwnedSandboxSetup(
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
     await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
-    // FILE RESOURCES: withSandboxFileDownloads has the IDENTICAL provided-session
-    // blind spot (it too wraps only create/resume), so signed-URL file
-    // materialization must also run directly against the pinned box. The download
-    // command is idempotent (skips an existing file) and atomic (tmp + rename).
-    if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
-      const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
-        ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
-        ...(runAs ? { runAs } : {}),
-        ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
-      });
-      if (opts.preparedInput) {
-        appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
-      }
-    }
   } else {
-    // SELFHOSTED TOOLSPACE (parity): the platform setup hooks and file
-    // materialization stay OFF the user's real machine — but the toolspace token
-    // seed is the ONE piece of per-turn material that must reach it (a scoped,
+    // SELFHOSTED TOOLSPACE (parity): platform setup hooks stay OFF the user's
+    // real machine. The toolspace token is one narrowly-scoped per-turn input
+    // that must reach it (a scoped,
     // own-session-bound token written to $OPENGENI_TOOLSPACE_TOKEN_FILE over the
     // same off-manifest exec channel the clone-seed uses; the machine's only path
     // to programmatic tool calling). Seed it (only) here.
     const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
     if (toolspaceHooks.length > 0) {
       await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
+    }
+  }
+  // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
+  // Deliver them on every backend, including connected machines. The command is
+  // workspace-relative, integrity-verified, read-only, and atomic; repository,
+  // rig, credential, and Azure setup remain excluded above on selfhosted.
+  if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
+    const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+      ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
+      ...(runAs ? { runAs } : {}),
+      ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
+    });
+    if (opts.preparedInput) {
+      appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
     }
   }
 }
@@ -4203,7 +5743,8 @@ export async function materializeSandboxFileDownloads(
   }
   const failures: SandboxFileDownloadFailure[] = [];
   for (const download of normalizedDownloads) {
-    const targetPath = sandboxDownloadTargetPath(download);
+    const targetRelativePath = sandboxDownloadRelativePath(download);
+    const targetPath = sandboxDownloadLogicalPath(download);
     const payload = {
       fileId: download.fileId,
       path: targetPath,
@@ -4236,7 +5777,7 @@ export async function materializeSandboxFileDownloads(
       result = await runSandboxLifecycleCommand(
         session,
         {
-          cmd: sandboxFileDownloadCommand(download, targetPath),
+          cmd: sandboxFileDownloadCommand(download, targetRelativePath),
           workdir: "/workspace",
           ...(context.runAs ? { runAs: context.runAs } : {}),
           yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
@@ -4415,6 +5956,72 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
   return output;
 }
 
+/**
+ * Hosted web_search progresses on the raw Responses stream
+ * (`response.output_item.added/done` with `web_search_call`) long before the SDK
+ * materializes a `RunToolCallItem` at `response_done`. Without this mapping the
+ * timeline only sees search cards after the whole model round finishes — or
+ * never mid-turn — while assistant prose ("Search 1/5") streams live.
+ */
+function hostedWebSearchToolCallFromResponsesEvent(raw: unknown): NormalizedRuntimeEvent | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const event = raw as {
+    type?: unknown;
+    item?: {
+      id?: unknown;
+      type?: unknown;
+      status?: unknown;
+      action?: unknown;
+      [key: string]: unknown;
+    };
+  };
+  const eventType = typeof event.type === "string" ? event.type : "";
+  if (
+    !(
+      (eventType === "response.output_item.added" || eventType === "response.output_item.done") &&
+      event.item?.type === "web_search_call"
+    )
+  ) {
+    // Progress-only `response.web_search_call.*` events lack the action
+    // payload; added/done are enough for a live, query-bearing card.
+    return null;
+  }
+  const item = event.item;
+  const itemId = typeof item.id === "string" ? item.id : null;
+  if (!itemId) {
+    return null;
+  }
+  const status =
+    typeof item.status === "string"
+      ? item.status
+      : eventType === "response.output_item.done"
+        ? "completed"
+        : "in_progress";
+  const action = item.action ?? null;
+  // Codex frequently emits `output_item.added` for web_search_call before the
+  // action payload exists. Persist that so the timeline can show "Searching…",
+  // then the matching `done` (same id) fills in query/queries via merge.
+  const { status: _status, ...providerData } = item;
+
+  return {
+    type: "agent.toolCall.created",
+    payload: {
+      id: itemId,
+      name: "web_search_call",
+      arguments: action,
+      raw: {
+        type: "hosted_tool_call",
+        id: itemId,
+        name: "web_search_call",
+        status,
+        providerData,
+      },
+    },
+  };
+}
+
 export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent[] {
   const out: NormalizedRuntimeEvent[] = [];
   if (event.type === "raw_model_stream_event") {
@@ -4431,6 +6038,10 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     const raw = (event as any).data?.event;
     if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
       out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
+    }
+    const webSearch = hostedWebSearchToolCallFromResponsesEvent(raw);
+    if (webSearch) {
+      out.push(webSearch);
     }
     return out;
   }
@@ -4530,10 +6141,115 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
       : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
         ? (response as { responseId: string }).responseId
         : undefined;
+  const serviceTier = modelResponseServiceTierFromResponse(response);
+  const gatewayBilling = gatewayBillingFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
+    ...(gatewayBilling ? { gatewayBilling } : {}),
     usage,
   };
+}
+
+/** Extract only the bounded, non-secret Gateway billing facts we consume. */
+function gatewayBillingFromResponse(
+  response: unknown,
+): ModelResponseUsage["gatewayBilling"] | null {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    return null;
+  }
+  const record = response as Record<string, unknown>;
+  const providerData =
+    record.providerData &&
+    typeof record.providerData === "object" &&
+    !Array.isArray(record.providerData)
+      ? (record.providerData as Record<string, unknown>)
+      : null;
+  const metadataCandidate =
+    record.provider_metadata ??
+    record.providerMetadata ??
+    providerData?.provider_metadata ??
+    providerData?.providerMetadata;
+  if (
+    !metadataCandidate ||
+    typeof metadataCandidate !== "object" ||
+    Array.isArray(metadataCandidate)
+  ) {
+    return null;
+  }
+  const gateway = (metadataCandidate as Record<string, unknown>).gateway;
+  if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)) {
+    return null;
+  }
+  const gatewayRecord = gateway as Record<string, unknown>;
+  const routing = gatewayRecord.routing;
+  const routingRecord =
+    routing && typeof routing === "object" && !Array.isArray(routing)
+      ? (routing as Record<string, unknown>)
+      : null;
+  const finalProvider = routingRecord?.finalProvider ?? routingRecord?.final_provider;
+  const inferenceCostUsd =
+    gatewayRecord.inferenceCost ?? gatewayRecord.inference_cost ?? gatewayRecord.cost;
+  if (
+    typeof finalProvider !== "string" ||
+    !/^[a-z0-9][a-z0-9-]{0,63}$/.test(finalProvider) ||
+    typeof inferenceCostUsd !== "string" ||
+    !/^(0|[1-9]\d*)(?:\.\d{1,18})?$/.test(inferenceCostUsd)
+  ) {
+    return null;
+  }
+  return { finalProvider, inferenceCostUsd };
+}
+
+export type ModelResponseServiceTierEvent = {
+  source: "normalized" | "provider";
+  serviceTier: string | null;
+};
+
+/**
+ * Read the provider's terminal service tier without depending on usage being
+ * present. The normalized terminal can omit provider-only fields, so callers
+ * should treat the raw provider response as the fail-closed authority.
+ */
+export function modelResponseServiceTierFromSdkEvent(
+  event: RunStreamEvent,
+): ModelResponseServiceTierEvent | null {
+  if (event.type === "raw_model_stream_event") {
+    const data = (event as any).data;
+    if (data?.type === "response_done") {
+      return {
+        source: "normalized",
+        serviceTier: modelResponseServiceTierFromResponse(data.response),
+      };
+    }
+  }
+  if (isOpenAIResponsesRawModelStreamEvent(event)) {
+    const raw = (event as any).data?.event;
+    if (raw?.type === "response.completed") {
+      return {
+        source: "provider",
+        serviceTier: modelResponseServiceTierFromResponse(raw.response),
+      };
+    }
+  }
+  return null;
+}
+
+function modelResponseServiceTierFromResponse(response: unknown): string | null {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+  const record = response as Record<string, unknown>;
+  const direct = record.service_tier ?? record.serviceTier;
+  if (typeof direct === "string" && direct.length > 0) {
+    return direct;
+  }
+  const providerData =
+    record.providerData && typeof record.providerData === "object"
+      ? (record.providerData as Record<string, unknown>)
+      : null;
+  const nested = providerData?.service_tier ?? providerData?.serviceTier;
+  return typeof nested === "string" && nested.length > 0 ? nested : null;
 }
 
 function modelResponseFromSdkEvent(event: RunStreamEvent): any {
@@ -4578,6 +6294,7 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
     ...numberProp(record, "totalTokens", "totalTokens", "total_tokens"),
     ...inputTokenDetailsProp(record),
     ...outputTokenDetailsProp(record),
+    ...requestUsageEntriesProp(record),
   };
   return Object.keys(usage).length > 0 ? usage : null;
 }
@@ -4588,7 +6305,11 @@ function numberProp(
   ...keys: string[]
 ): Partial<ModelResponseUsage["usage"]> {
   const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
-  return typeof value === "number" && Number.isFinite(value) ? { [outputKey]: value } : {};
+  // Preserve numeric provider values verbatim here, including malformed ones.
+  // The shared usage normalizer is the single bounded validation boundary and
+  // needs to see NaN/infinite/fractional/oversized values so it can emit safe
+  // field-path diagnostics rather than silently erasing the evidence.
+  return typeof value === "number" ? { [outputKey]: value } : {};
 }
 
 function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
@@ -4597,7 +6318,7 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
     raw.input_tokens_details ??
     raw.promptTokensDetails ??
     raw.prompt_tokens_details;
-  if (!details || typeof details !== "object") {
+  if (details === undefined || details === null) {
     return {};
   }
   return {
@@ -4610,7 +6331,7 @@ function outputTokenDetailsProp(
 ): Partial<ModelResponseUsage["usage"]> {
   const details = raw.outputTokensDetails ?? raw.output_tokens_details;
   const normalized = details ?? raw.completionTokensDetails ?? raw.completion_tokens_details;
-  if (!normalized || typeof normalized !== "object") {
+  if (normalized === undefined || normalized === null) {
     return {};
   }
   return {
@@ -4618,18 +6339,61 @@ function outputTokenDetailsProp(
   };
 }
 
+function requestUsageEntriesProp(
+  raw: Record<string, unknown>,
+): Partial<ModelResponseUsage["usage"]> {
+  const entries = raw.requestUsageEntries ?? raw.request_usage_entries;
+  if (entries === undefined || entries === null) {
+    return {};
+  }
+  return {
+    // The normalizer validates every entry and all supported field aliases.
+    // Preserve the SDK objects rather than rebuilding them and accidentally
+    // dropping provider detail fields such as cache_write_tokens.
+    requestUsageEntries: entries as NonNullable<ModelResponseUsage["usage"]["requestUsageEntries"]>,
+  };
+}
+
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
-  return interruptions.map((item: any) => {
-    if (typeof item?.toJSON === "function") {
-      return item.toJSON();
-    }
-    return {
-      id: approvalIdentifier(item),
-      name: item?.name ?? item?.rawItem?.name ?? "tool",
-      arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
-      raw: item,
-    };
-  });
+  return interruptions
+    .filter((item) => interruptionToolName(item) !== HUMAN_INPUT_TOOL_NAME)
+    .map((item: any) => {
+      if (typeof item?.toJSON === "function") {
+        return item.toJSON();
+      }
+      return {
+        id: approvalIdentifier(item) ?? "approval",
+        name: item?.name ?? item?.rawItem?.name ?? "tool",
+        arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
+        raw: item,
+      };
+    });
+}
+
+export function serializeHumanInputRequests(
+  interruptions: unknown[],
+): SerializedHumanInputInterruption[] {
+  return interruptions
+    .filter((item) => interruptionToolName(item) === HUMAN_INPUT_TOOL_NAME)
+    .map((item: any) => {
+      const rawArguments = item?.arguments ?? item?.rawItem?.arguments;
+      let parsedArguments: unknown = rawArguments;
+      if (typeof rawArguments === "string") {
+        try {
+          parsedArguments = JSON.parse(rawArguments);
+        } catch {
+          throw new Error("Human-input interruption contains invalid JSON arguments");
+        }
+      }
+      const toolCallId = approvalIdentifier(item);
+      if (!toolCallId) {
+        throw new Error("Human-input interruption is missing a stable tool-call identity");
+      }
+      return {
+        toolCallId,
+        input: RequestHumanInputToolInput.parse(parsedArguments),
+      };
+    });
 }
 
 export function buildManifest(
@@ -4638,6 +6402,7 @@ export function buildManifest(
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
 ): Manifest {
+  assertUniqueResourceMountPaths(resources);
   const entries: Record<string, any> = {};
   const downloadsByFileId = new Map(
     normalizeSandboxFileDownloads(fileResourceDownloads).map((download) => [
@@ -4648,9 +6413,9 @@ export function buildManifest(
   for (const resource of resources) {
     if (resource.kind === "repository") {
       const url = new URL(resource.uri);
-      const host = url.hostname.toLowerCase();
+      const host = url.host.toLowerCase();
       const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-      const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
+      const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
         entries[mountPath] = dir();
         continue;
@@ -4659,12 +6424,12 @@ export function buildManifest(
         host,
         repo,
         ref: resource.ref,
-        ...(resource.subpath ? { subpath: normalizeManifestPath(resource.subpath) } : {}),
+        ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
       });
       continue;
     }
     if (resource.kind === "file") {
-      const mountPath = normalizeManifestPath(resource.mountPath ?? `files/${resource.fileId}`);
+      const mountPath = resourceMountPath(resource);
       const download = downloadsByFileId.get(resource.fileId);
       entries[mountPath] = download
         ? sandboxDownloadDirectory(download, mountPath)
@@ -4681,6 +6446,32 @@ export function buildManifest(
     entries,
     environment,
   });
+}
+
+export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
+  workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+} {
+  const repositories = resources.filter(
+    (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
+      resource.kind === "repository",
+  );
+  if (repositories.length === 0) return {};
+
+  const paths = new Map<string, WorkspaceSkillSearchPath>();
+  const add = (path: string, source: string): void => {
+    if (!paths.has(path)) paths.set(path, { path, source });
+  };
+  // A Connected Machine maps /workspace to its configured working directory,
+  // which may itself be the selected repository. Managed sandboxes normally use
+  // the repository mount paths below. Checking both keeps the rule portable.
+  add(".agents/skills", "workspace .agents/skills");
+  add(".claude/skills", "workspace .claude/skills");
+  for (const repository of repositories) {
+    const mountPath = resourceMountPath(repository);
+    add(`${mountPath}/.agents/skills`, `${mountPath}/.agents/skills`);
+    add(`${mountPath}/.claude/skills`, `${mountPath}/.claude/skills`);
+  }
+  return { workspaceSkillPaths: [...paths.values()] };
 }
 
 function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: string): any {
@@ -4824,11 +6615,7 @@ function parseAzureConnectionString(value: string): Record<string, string> {
 }
 
 function normalizeManifestPath(path: string): string {
-  const normalized = path.replace(/^\/+|\/+$/g, "");
-  if (!normalized || normalized.includes("..")) {
-    throw new Error(`Invalid sandbox resource path: ${path}`);
-  }
-  return normalized;
+  return normalizeResourceMountPath(path);
 }
 
 function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): SandboxFileDownload[] {
@@ -4840,9 +6627,20 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
         `File download materialization requires content or a URL for ${download.fileId}`,
       );
     }
+    if (
+      download.sizeBytes !== undefined &&
+      (!Number.isSafeInteger(download.sizeBytes) || download.sizeBytes < 0)
+    ) {
+      throw new Error(`Invalid sandbox file size for ${download.fileId}: ${download.sizeBytes}`);
+    }
+    const sha256 = download.sha256?.trim().toLowerCase();
+    if (sha256 !== undefined && !/^[a-f0-9]{64}$/.test(sha256)) {
+      throw new Error(`Invalid sandbox file SHA-256 for ${download.fileId}`);
+    }
     return {
       ...download,
       mountPath,
+      ...(sha256 ? { sha256 } : {}),
     };
   });
 }
@@ -4860,8 +6658,12 @@ function assertSafeSandboxFilename(filename: string, fileId: string): void {
   }
 }
 
-function sandboxDownloadTargetPath(download: SandboxFileDownload): string {
-  return posixPath.join("/workspace", download.mountPath, download.filename);
+function sandboxDownloadRelativePath(download: SandboxFileDownload): string {
+  return posixPath.join(download.mountPath, download.filename);
+}
+
+function sandboxDownloadLogicalPath(download: SandboxFileDownload): string {
+  return posixPath.join("/workspace", sandboxDownloadRelativePath(download));
 }
 
 function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: string): string {
@@ -4869,16 +6671,58 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
     throw new Error(`File download materialization URL is empty for ${download.fileId}`);
   }
   const targetDir = posixPath.dirname(targetPath);
-  const tmpPath = `${targetPath}.opengeni-download-$$`;
+  const canVerifyExisting = download.sizeBytes !== undefined || download.sha256 !== undefined;
+  const directoryCommands: string[] = [];
+  let directory = "";
+  for (const segment of targetDir.split("/")) {
+    directory = directory ? `${directory}/${segment}` : segment;
+    directoryCommands.push(
+      `if [ -L ${shellQuote(directory)} ]; then echo ${shellQuote(`Refusing symlinked attachment directory: ${directory}`)} >&2; exit 73; fi`,
+      `mkdir -p -- ${shellQuote(directory)}`,
+    );
+  }
+  const verificationCommands = [
+    "verify_attachment() {",
+    '  candidate="$1"',
+    '  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1',
+    ...(download.sizeBytes !== undefined
+      ? [
+          "  actual_size=$(wc -c < \"$candidate\" | tr -d '[:space:]')",
+          `  [ "$actual_size" = ${shellQuote(String(download.sizeBytes))} ] || return 1`,
+        ]
+      : []),
+    ...(download.sha256
+      ? [
+          "  if command -v sha256sum >/dev/null 2>&1; then",
+          "    actual_sha=$(sha256sum \"$candidate\" | awk '{print $1}')",
+          "  elif command -v shasum >/dev/null 2>&1; then",
+          "    actual_sha=$(shasum -a 256 \"$candidate\" | awk '{print $1}')",
+          "  else",
+          '    echo "No SHA-256 verifier is available for attachment delivery" >&2',
+          "    return 2",
+          "  fi",
+          `  [ "$actual_sha" = ${shellQuote(download.sha256)} ] || return 1`,
+        ]
+      : []),
+    "  return 0",
+    "}",
+  ];
   return [
+    "set +x",
     "set -eu",
-    `mkdir -p -- ${shellQuote(targetDir)}`,
-    `if [ ! -f ${shellQuote(targetPath)} ]; then`,
-    `  tmp=${shellQuote(tmpPath)}`,
+    ...directoryCommands,
+    ...verificationCommands,
+    `if [ -L ${shellQuote(targetPath)} ]; then echo ${shellQuote("Refusing symlinked attachment target")} >&2; exit 73; fi`,
+    `if [ -e ${shellQuote(targetPath)} ] && [ ! -f ${shellQuote(targetPath)} ]; then echo ${shellQuote("Refusing non-file attachment target")} >&2; exit 73; fi`,
+    `if ${canVerifyExisting ? `verify_attachment ${shellQuote(targetPath)}` : "false"}; then`,
+    "  :",
+    "else",
+    `  tmp=$(mktemp ${shellQuote(`${targetPath}.opengeni-download.XXXXXX`)})`,
     '  cleanup() { rm -f -- "$tmp"; }',
     "  trap cleanup EXIT",
     `  curl --fail --location --silent --show-error --retry 3 --retry-delay 1 --output "$tmp" ${shellQuote(download.url)}`,
-    `  mv -- "$tmp" ${shellQuote(targetPath)}`,
+    '  if ! verify_attachment "$tmp"; then echo "Downloaded attachment failed size or SHA-256 verification" >&2; exit 74; fi',
+    `  mv -f -- "$tmp" ${shellQuote(targetPath)}`,
     "  trap - EXIT",
     "fi",
     `chmod a-w -- ${shellQuote(targetPath)} 2>/dev/null || true`,
@@ -4907,7 +6751,9 @@ export type SandboxLifecycleHookContext = {
   // NEVER the box/agent manifest env (validateNoEnvironmentDelta must never see
   // rotating values).
   gitTokenSeeds?: GitTokenSeeds;
+  gitCredentialBindings?: GitCredentialBindingSeed[];
   toolspaceTokenSeed?: string;
+  toolspaceTokenFile?: string;
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
@@ -5076,8 +6922,30 @@ function gitTokenSeedsForAgent(agent: Agent<any, any>): GitTokenSeeds | undefine
   return agentGitTokenSeeds.get(agent);
 }
 
+function gitCredentialBindingsForAgent(
+  agent: Agent<any, any>,
+): GitCredentialBindingSeed[] | undefined {
+  return agentGitCredentialBindings.get(agent);
+}
+
 function toolspaceTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
   return agentToolspaceTokenSeed.get(agent);
+}
+
+function toolspaceTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
+  return agentToolspaceTokenSessionId.get(agent);
+}
+
+function toolspaceTokenFileForAgent(
+  agent: Agent<any, any>,
+  environment: Readonly<Record<string, string>>,
+): string | undefined {
+  if (!toolspaceTokenSeedForAgent(agent)) return undefined;
+  const sessionId = toolspaceTokenSessionIdForAgent(agent);
+  if (!sessionId) {
+    throw new Error("Toolspace token seed is missing its session identity");
+  }
+  return toolspaceTokenFileFromEnvironment(environment, sessionId);
 }
 
 function sandboxToolspaceTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
@@ -5140,6 +7008,22 @@ function gitCredentialSessionRegistrationHooks(
     ? [
         {
           id: "git-credential-renewal-registration",
+          phase: "beforeAgentStart",
+          run: async (session) => {
+            await callback(session);
+          },
+        },
+      ]
+    : [];
+}
+
+function toolspaceTokenSessionRegistrationHooks(
+  callback: RunAgentStreamOptions["onToolspaceTokenSessionReady"],
+): SandboxLifecycleHook[] {
+  return callback
+    ? [
+        {
+          id: "toolspace-token-renewal-registration",
           phase: "beforeAgentStart",
           run: async (session) => {
             await callback(session);
@@ -5216,6 +7100,20 @@ function gitProviderSeedEnv(provider: GitCredentialProvider): string {
   return `OPENGENI_GIT_${provider.toUpperCase()}_TOKEN_SEED`;
 }
 
+export function gitCredentialBindingHash(credentialBindingId: string): string {
+  return createHash("sha256").update(credentialBindingId, "utf8").digest("hex").slice(0, 32);
+}
+
+function gitBindingSeedEnv(binding: GitCredentialBindingSeed): string {
+  return `OPENGENI_GIT_BINDING_${gitCredentialBindingHash(binding.credentialBindingId).toUpperCase()}_TOKEN_SEED`;
+}
+
+function gitCredentialBindingSeedExportPrefix(bindings: GitCredentialBindingSeed[]): string {
+  return bindings
+    .map((binding) => `export ${gitBindingSeedEnv(binding)}=${shellQuote(binding.token)}`)
+    .join("\n");
+}
+
 function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   const lines: string[] = [];
   for (const provider of GIT_CREDENTIAL_PROVIDERS) {
@@ -5231,37 +7129,323 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   return lines.join("\n");
 }
 
-function repositoryCredentialProvider(
-  resource: Extract<ResourceRef, { kind: "repository" }>,
-): GitCredentialProvider {
-  return resource.provider ?? "github";
+type RuntimeGitBindingDescriptor = {
+  provider: GitCredentialProvider;
+  credentialBindingId: string;
+  bindingHash: string;
+  protocol: string;
+  host: string;
+  path: string;
+  uri: string;
+  mountPath: string;
+};
+
+type RuntimeGitHttpBrokerRouteDescriptor = {
+  provider: GitCredentialProvider;
+  credentialBindingId: string;
+  bindingHash: string;
+  repositoryUri: string;
+  brokerUri: string;
+  protocol: "https";
+  host: string;
+  path: string;
+};
+
+function runtimeGitBindingDescriptors(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+): RuntimeGitBindingDescriptor[] {
+  const remoteBindings = new Map<string, string>();
+  const bindingProviders = new Map<string, GitCredentialProvider>();
+  return resources.map((resource) => {
+    const url = new URL(resource.uri);
+    const credentialProvider = gitCredentialProviderForRepository(resource);
+    // Provider-less public/legacy resources retain the historical GitHub
+    // askpass fallback, but credential-bound resources derive through the
+    // shared contracts helper used by the worker and core.
+    const provider = credentialProvider ?? "github";
+    const credentialBindingId =
+      gitCredentialBindingIdForRepository(resource, credentialProvider) ?? provider;
+    const path = url.pathname.replace(/^\/+|\/+$/g, "");
+    const remote = `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}/${path.replace(/\.git$/, "")}`;
+    const bindingKey = `${provider}\u0000${credentialBindingId}`;
+    const boundProvider = bindingProviders.get(credentialBindingId);
+    if (boundProvider && boundProvider !== provider) {
+      throw new Error(
+        `credential binding ${credentialBindingId} is assigned to multiple Git providers`,
+      );
+    }
+    bindingProviders.set(credentialBindingId, provider);
+    const claimed = remoteBindings.get(remote);
+    if (claimed && claimed !== bindingKey) {
+      throw new Error(
+        `repository remote ${resource.uri} is claimed by multiple credential bindings`,
+      );
+    }
+    remoteBindings.set(remote, bindingKey);
+    return {
+      provider,
+      credentialBindingId,
+      bindingHash: gitCredentialBindingHash(credentialBindingId),
+      protocol: url.protocol.replace(/:$/, "").toLowerCase(),
+      host: url.host.toLowerCase(),
+      path,
+      uri: resource.uri,
+      mountPath: `/workspace/${resourceMountPath(resource)}`,
+    };
+  });
+}
+
+function gitCredentialBindingInventoryCommandLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[],
+): string[] {
+  type GitBindingInventoryTransport = "direct_token" | "git_http_broker";
+  type GitBindingInventoryEntry = {
+    credentialBindingId: string;
+    provider: GitCredentialProvider;
+    transport: GitBindingInventoryTransport;
+    repositories: Array<{ uri: string; mountPath: string }>;
+  };
+  const bindingTransports = new Map<string, GitBindingInventoryTransport>(
+    bindings.map((binding) => [
+      gitCredentialBindingKey(binding.provider, binding.credentialBindingId),
+      binding.transport?.kind === "http_broker" ? "git_http_broker" : "direct_token",
+    ]),
+  );
+  const entries = new Map<string, GitBindingInventoryEntry>();
+  for (const descriptor of runtimeGitBindingDescriptors(resources)) {
+    const key = gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId);
+    const transport = bindingTransports.get(key);
+    if (!transport) continue;
+    const entry: GitBindingInventoryEntry = entries.get(key) ?? {
+      credentialBindingId: descriptor.credentialBindingId,
+      provider: descriptor.provider,
+      transport,
+      repositories: [],
+    };
+    entry.repositories.push({
+      uri: descriptor.uri,
+      mountPath: descriptor.mountPath,
+    });
+    entries.set(key, entry);
+  }
+  const inventory = `${JSON.stringify(
+    {
+      version: 1,
+      bindings: [...entries.values()],
+    },
+    null,
+    2,
+  )}\n`;
+  return [
+    'git_binding_inventory="${OPENGENI_GIT_BINDINGS_FILE:-$HOME/.opengeni/git-bindings.json}"',
+    'mkdir -p "$(dirname "$git_binding_inventory")"',
+    'inventory_umask="$(umask)"',
+    "umask 077",
+    `printf '%s' ${shellQuote(inventory)} > "$git_binding_inventory.tmp.$$"`,
+    'mv -f "$git_binding_inventory.tmp.$$" "$git_binding_inventory"',
+    'umask "$inventory_umask"',
+  ];
+}
+
+function gitCredentialBindingKey(
+  provider: GitCredentialProvider,
+  credentialBindingId: string,
+): string {
+  return `${provider}\u0000${credentialBindingId}`;
+}
+
+function brokeredGitCredentialBindingKeys(
+  bindings: GitCredentialBindingSeed[],
+): ReadonlySet<string> {
+  return new Set(
+    bindings
+      .filter((binding) => binding.transport?.kind === "http_broker")
+      .map((binding) => gitCredentialBindingKey(binding.provider, binding.credentialBindingId)),
+  );
+}
+
+function runtimeGitHttpBrokerRouteDescriptors(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[],
+): RuntimeGitHttpBrokerRouteDescriptor[] {
+  const resourceDescriptors = runtimeGitBindingDescriptors(resources);
+  const byBindingAndUri = new Map<string, RuntimeGitBindingDescriptor>();
+  for (const descriptor of resourceDescriptors) {
+    byBindingAndUri.set(
+      `${gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId)}\u0000${descriptor.uri}`,
+      descriptor,
+    );
+  }
+
+  const routes: RuntimeGitHttpBrokerRouteDescriptor[] = [];
+  const claimedRepositoryUris = new Set<string>();
+  const claimedBrokerUris = new Set<string>();
+  for (const binding of bindings) {
+    if (!binding.transport) continue;
+    if (
+      typeof binding.transport !== "object" ||
+      binding.transport.kind !== "http_broker" ||
+      !Array.isArray(binding.transport.repositories)
+    ) {
+      throw new Error(
+        `Git credential binding ${binding.credentialBindingId} uses an unsupported transport`,
+      );
+    }
+    const bindingKey = gitCredentialBindingKey(binding.provider, binding.credentialBindingId);
+    const expected = resourceDescriptors.filter(
+      (descriptor) =>
+        gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId) === bindingKey,
+    );
+    if (expected.length === 0 || binding.transport.repositories.length !== expected.length) {
+      throw new Error(
+        `Git HTTP broker binding ${binding.credentialBindingId} does not cover its exact repository set`,
+      );
+    }
+    for (const route of binding.transport.repositories) {
+      if (
+        !route ||
+        typeof route !== "object" ||
+        typeof route.repositoryUri !== "string" ||
+        typeof route.brokerUri !== "string"
+      ) {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an invalid repository route`,
+        );
+      }
+      const descriptor = byBindingAndUri.get(`${bindingKey}\u0000${route.repositoryUri}`);
+      if (!descriptor || claimedRepositoryUris.has(route.repositoryUri)) {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an unexpected repository route`,
+        );
+      }
+      let brokerUrl: URL;
+      try {
+        brokerUrl = new URL(route.brokerUri);
+      } catch {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an invalid broker URI`,
+        );
+      }
+      if (
+        brokerUrl.protocol !== "https:" ||
+        brokerUrl.username ||
+        brokerUrl.password ||
+        brokerUrl.search ||
+        brokerUrl.hash ||
+        brokerUrl.href !== route.brokerUri ||
+        claimedBrokerUris.has(brokerUrl.href)
+      ) {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an unsafe broker URI`,
+        );
+      }
+      claimedRepositoryUris.add(route.repositoryUri);
+      claimedBrokerUris.add(brokerUrl.href);
+      routes.push({
+        provider: binding.provider,
+        credentialBindingId: binding.credentialBindingId,
+        bindingHash: gitCredentialBindingHash(binding.credentialBindingId),
+        repositoryUri: route.repositoryUri,
+        brokerUri: route.brokerUri,
+        protocol: "https",
+        host: brokerUrl.host.toLowerCase(),
+        path: brokerUrl.pathname.replace(/^\/+|\/+$/g, ""),
+      });
+    }
+  }
+  return routes;
+}
+
+function gitUsernameForProvider(provider: GitCredentialProvider): string {
+  if (provider === "github") return "x-access-token";
+  if (provider === "gitlab") return "oauth2";
+  return "opengeni";
+}
+
+function gitCredentialHelperBindingCaseLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[],
+): string[] {
+  const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  return runtimeGitBindingDescriptors(resources)
+    .filter(
+      (descriptor) =>
+        !brokeredBindings.has(
+          gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId),
+        ),
+    )
+    .flatMap((descriptor) => {
+      const paths = new Set([
+        descriptor.path,
+        descriptor.path.replace(/\.git$/, ""),
+        `${descriptor.path.replace(/\.git$/, "")}.git`,
+      ]);
+      return [...paths].map(
+        (path) =>
+          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+      );
+    });
+}
+
+function gitCredentialHelperBrokerCaseLines(
+  routes: RuntimeGitHttpBrokerRouteDescriptor[],
+): string[] {
+  return routes.flatMap((route) => {
+    const paths = new Set([
+      route.path,
+      route.path.replace(/\.git$/, ""),
+      `${route.path.replace(/\.git$/, "")}.git`,
+    ]);
+    return [...paths].map(
+      (path) =>
+        `  ${shellQuote(`${route.protocol}|${route.host}|${path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
+    );
+  });
 }
 
 function gitAskpassHostProviderCaseLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
+  brokerRoutes: RuntimeGitHttpBrokerRouteDescriptor[],
 ): string[] {
-  const hosts = new Map<string, GitCredentialProvider>();
-  for (const resource of resources) {
-    try {
-      const hostname = new URL(resource.uri).hostname.toLowerCase();
-      if (!hostname) {
-        continue;
-      }
-      hosts.set(hostname, repositoryCredentialProvider(resource));
-    } catch {
-      // Resource validation catches invalid URIs before normal runtime use. Keep
-      // helper generation tolerant so tests for clone failure can still build.
-    }
+  const hosts = new Map<string, { provider: GitCredentialProvider; bindings: Set<string> }>();
+  for (const descriptor of runtimeGitBindingDescriptors(resources)) {
+    const entry = hosts.get(descriptor.host) ?? {
+      provider: descriptor.provider,
+      bindings: new Set<string>(),
+    };
+    entry.bindings.add(`${descriptor.provider}\u0000${descriptor.credentialBindingId}`);
+    hosts.set(descriptor.host, entry);
   }
-  return [...hosts.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(
-      ([hostname, provider]) =>
-        `    ${shellQuote(hostname)}) printf '%s\\n' ${provider}; return 0 ;;`,
-    );
+  const brokerHosts = [...new Set(brokerRoutes.map((route) => route.host))]
+    .sort((a, b) => a.localeCompare(b))
+    .map((hostname) => `    ${shellQuote(hostname)}) printf '\\n'; return 0 ;;`);
+  return [
+    ...brokerHosts,
+    ...[...hosts.entries()]
+      .filter(([, entry]) => entry.bindings.size === 1)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(
+        ([hostname, entry]) =>
+          `    ${shellQuote(hostname)}) printf '%s\\n' ${entry.provider}; return 0 ;;`,
+      ),
+  ];
 }
 
-function gitCredentialTokenWriterCommandLines(): string[] {
+function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed[] = []): string[] {
+  const bindingWrites = bindings.flatMap((binding) => {
+    const hash = gitCredentialBindingHash(binding.credentialBindingId);
+    const seedEnv = gitBindingSeedEnv(binding);
+    const count = Math.max(1, binding.providerBindingCount ?? 1);
+    const provider = binding.provider;
+    const lines = [`write_git_binding_token ${shellQuote(hash)} "\${${seedEnv}:-}"`];
+    if (count === 1 && binding.transport?.kind !== "http_broker") {
+      lines.push(`write_git_provider_token ${shellQuote(provider)} "\${${seedEnv}:-}"`);
+    } else {
+      lines.push(`remove_git_provider_token ${shellQuote(provider)}`);
+    }
+    return lines;
+  });
   return [
     // TOKEN-BROKER (B1/B2): seed run-scoped provider tokens into stable files and
     // atomically replace each provider file. Token VALUES are supplied only by
@@ -5274,6 +7458,23 @@ function gitCredentialTokenWriterCommandLines(): string[] {
     "    github) printf '%s\\n' \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
     "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
     "  esac",
+    "}",
+    "write_git_binding_token() {",
+    '  binding_hash="$1"',
+    '  token="$2"',
+    '  [ -n "$token" ] || return 0',
+    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  mkdir -p "$credential_dir"',
+    '  token_file="$credential_dir/$binding_hash-token"',
+    '  printf \'%s\' "$token" > "$token_file.tmp.$$"',
+    '  mv -f "$token_file.tmp.$$" "$token_file"',
+    "}",
+    "remove_git_provider_token() {",
+    '  provider="$1"',
+    '  rm -f "$(git_provider_token_file "$provider")"',
+    '  if [ "$provider" = github ]; then',
+    '    rm -f "${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/github-token"',
+    "  fi",
     "}",
     "write_git_provider_token() {",
     '  provider="$1"',
@@ -5295,16 +7496,113 @@ function gitCredentialTokenWriterCommandLines(): string[] {
     'write_git_provider_token github "${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}"',
     'write_git_provider_token gitlab "${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}"',
     'write_git_provider_token azure_devops "${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}"',
+    ...bindingWrites,
     'umask "$seed_umask"',
+  ];
+}
+
+function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
+  return [
+    'git_http_broker_config="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/http-broker.gitconfig"',
+    'mkdir -p "$(dirname "$git_http_broker_config")"',
+    'broker_umask="$(umask)"',
+    "umask 077",
+    ': > "$git_http_broker_config.tmp.$$"',
+    ...routes.map(
+      (route) =>
+        `git config --file "$git_http_broker_config.tmp.$$" --add ${shellQuote(`url.${route.brokerUri}.insteadOf`)} ${shellQuote(route.repositoryUri)}`,
+    ),
+    'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
+    'umask "$broker_umask"',
+    'git config --global --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
+    'git config --global --add include.path "$git_http_broker_config"',
   ];
 }
 
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
+  bindings: GitCredentialBindingSeed[] = [],
 ): string[] {
-  const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
+  const brokerRoutes = runtimeGitHttpBrokerRouteDescriptors(resources, bindings);
+  const hostProviderCases = gitAskpassHostProviderCaseLines(resources, brokerRoutes);
+  const bindingCases = [
+    ...gitCredentialHelperBindingCaseLines(resources, bindings),
+    ...gitCredentialHelperBrokerCaseLines(brokerRoutes),
+  ];
+  const descriptors = runtimeGitBindingDescriptors(resources);
+  const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  const wrapperDescriptors =
+    bindings.length > 0
+      ? descriptors.filter(
+          (descriptor) =>
+            !brokeredBindings.has(
+              gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId),
+            ),
+        )
+      : [];
+  const bindingProviders = new Map<GitCredentialProvider, Set<string>>();
+  for (const descriptor of runtimeGitBindingDescriptors(resources)) {
+    const ids = bindingProviders.get(descriptor.provider) ?? new Set<string>();
+    ids.add(descriptor.credentialBindingId);
+    bindingProviders.set(descriptor.provider, ids);
+  }
+  const strictAskpass = [...bindingProviders.values()].some((ids) => ids.size > 1);
+  const allowedWrapperHashes = [
+    ...new Set(wrapperDescriptors.map((item) => `${item.provider}|${item.bindingHash}`)),
+  ].map((key) => `    ${shellQuote(key)}) return 0 ;;`);
+  const originWrapperHashes = wrapperDescriptors.flatMap((item) => {
+    const base = item.uri.replace(/\.git$/, "");
+    return [...new Set([item.uri, base, `${base}.git`])].map(
+      (uri) =>
+        `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
+    );
+  });
+  const soleWrapperHashes = [...bindingProviders.entries()].flatMap(([provider, ids]) => {
+    if (ids.size !== 1) return [];
+    const descriptor = wrapperDescriptors.find((item) => item.provider === provider);
+    return descriptor
+      ? [
+          `    ${shellQuote(provider)}) printf '%s\\n' ${shellQuote(descriptor.bindingHash)}; return 0 ;;`,
+        ]
+      : [];
+  });
+  const multiWrapperProviders =
+    bindings.length > 0
+      ? [...bindingProviders.entries()]
+          .filter(([, ids]) => ids.size > 1)
+          .map(([provider]) => provider)
+      : [];
+  const brokeredOriginCases = brokerRoutes.flatMap((route) => {
+    const base = route.repositoryUri.replace(/\.git$/, "");
+    return [...new Set([route.repositoryUri, base, `${base}.git`])].map(
+      (uri) => `    ${shellQuote(`${route.provider}|${uri}`)}) return 0 ;;`,
+    );
+  });
+  const brokeredBindingHashCases = bindings
+    .filter((binding) => binding.transport?.kind === "http_broker")
+    .map(
+      (binding) =>
+        `    ${shellQuote(`${binding.provider}|${gitCredentialBindingHash(binding.credentialBindingId)}`)}) return 0 ;;`,
+    );
+  const providerBindingKinds = new Map<
+    GitCredentialProvider,
+    { direct: number; brokered: number }
+  >();
+  for (const binding of bindings) {
+    const counts = providerBindingKinds.get(binding.provider) ?? {
+      direct: 0,
+      brokered: 0,
+    };
+    if (binding.transport?.kind === "http_broker") counts.brokered += 1;
+    else counts.direct += 1;
+    providerBindingKinds.set(binding.provider, counts);
+  }
+  const brokerOnlyProviders = [...providerBindingKinds.entries()]
+    .filter(([, counts]) => counts.brokered > 0 && counts.direct === 0)
+    .map(([provider]) => provider);
   return [
-    ...gitCredentialTokenWriterCommandLines(),
+    ...gitCredentialTokenWriterCommandLines(bindings),
+    ...gitCredentialBindingInventoryCommandLines(resources, bindings),
     // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
     // runs. Renewal updates only token files and deliberately leaves these
     // repository-specific host mappings intact.
@@ -5321,8 +7619,8 @@ function gitCredentialHelperCommandLines(
     '  rest="${prompt_lower#*://}"',
     '  rest="${rest#*@}"',
     '  host="${rest%%/*}"',
-    '  host="${host%%:*}"',
     '  host="$(printf \'%s\\n\' "$host" | tr -d "\'")"',
+    '  host="${host%:}"',
     "  printf '%s\\n' \"$host\"",
     "}",
     "provider_for_prompt() {",
@@ -5334,7 +7632,7 @@ function gitCredentialHelperCommandLines(
     "    *github.com*|*githubusercontent.com*) printf '%s\\n' github ;;",
     "    *gitlab*) printf '%s\\n' gitlab ;;",
     "    *dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
-    "    *) printf '%s\\n' github ;;",
+    strictAskpass ? "    *) printf '\\n' ;;" : "    *) printf '%s\\n' github ;;",
     "  esac",
     "}",
     "token_file_for_provider() {",
@@ -5360,6 +7658,41 @@ function gitCredentialHelperCommandLines(
     "ASKPASS_EOF",
     'chmod 0755 "$git_askpass.tmp.$$"',
     'mv -f "$git_askpass.tmp.$$" "$git_askpass"',
+    'git_credential_helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper"',
+    'mkdir -p "$(dirname "$git_credential_helper")"',
+    "cat > \"$git_credential_helper.tmp.$$\" <<'GIT_CREDENTIAL_HELPER_EOF'",
+    "#!/usr/bin/env sh",
+    "set -eu",
+    '[ "${1:-get}" = get ] || exit 0',
+    "protocol= host= path=",
+    "while IFS='=' read -r key value; do",
+    '  case "$key" in',
+    "    protocol) protocol=\"$(printf '%s' \"$value\" | tr '[:upper:]' '[:lower:]')\" ;;",
+    "    host) host=\"$(printf '%s' \"$value\" | tr '[:upper:]' '[:lower:]')\" ;;",
+    '    path) path="${value#/}" ;;',
+    "  esac",
+    "done",
+    'credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    "username= token_file=",
+    'case "$protocol|$host|$path" in',
+    ...bindingCases,
+    "  *) exit 0 ;;",
+    "esac",
+    '[ -r "$token_file" ] || exit 0',
+    'password="$(cat "$token_file" 2>/dev/null || true)"',
+    '[ -n "$password" ] || exit 0',
+    'printf \'username=%s\\npassword=%s\\n\' "$username" "$password"',
+    "GIT_CREDENTIAL_HELPER_EOF",
+    'chmod 0755 "$git_credential_helper.tmp.$$"',
+    'mv -f "$git_credential_helper.tmp.$$" "$git_credential_helper"',
+    // Empty helper resets lower-priority/system helpers; our exact path-aware
+    // helper returns no credential for an unbound remote, so multi-binding
+    // sessions fail closed instead of falling through to ambient credentials.
+    "git config --global --unset-all credential.helper >/dev/null 2>&1 || true",
+    "git config --global --add credential.helper ''",
+    'git config --global --add credential.helper "$git_credential_helper"',
+    "git config --global credential.useHttpPath true",
+    ...gitHttpBrokerConfigCommandLines(brokerRoutes),
     'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
     'mkdir -p "$wrapper_dir"',
     "for opengeni_git_cli_tool in gh glab az; do",
@@ -5374,11 +7707,71 @@ function gitCredentialHelperCommandLines(
     "  az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
     "  *) provider=; token_env= ;;",
     "esac",
-    'if [ -n "$provider" ]; then',
-    '  case "$provider" in',
-    '    github) token_file="${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}" ;;',
-    '    *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
+    "hash_binding_id() {",
+    "  if command -v sha256sum >/dev/null 2>&1; then printf '%s' \"$1\" | sha256sum | cut -c1-32; return; fi",
+    "  if command -v shasum >/dev/null 2>&1; then printf '%s' \"$1\" | shasum -a 256 | cut -c1-32; return; fi",
+    "  if command -v openssl >/dev/null 2>&1; then printf '%s' \"$1\" | openssl dgst -sha256 | sed 's/^.*= //' | cut -c1-32; return; fi",
+    "  printf '%s\\n' 'No SHA-256 utility is available to select OPENGENI_GIT_BINDING' >&2",
+    "  return 127",
+    "}",
+    "binding_hash_allowed() {",
+    '  case "$provider|$1" in',
+    ...allowedWrapperHashes,
+    "    *) return 1 ;;",
     "  esac",
+    "}",
+    "binding_hash_is_brokered() {",
+    '  case "$provider|$1" in',
+    ...brokeredBindingHashCases,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
+    "binding_hash_for_origin() {",
+    '  case "$provider|$1" in',
+    ...originWrapperHashes,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
+    "origin_is_brokered() {",
+    '  case "$provider|$1" in',
+    ...brokeredOriginCases,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
+    "sole_binding_hash() {",
+    '  case "$provider" in',
+    ...soleWrapperHashes,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
+    `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
+    `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
+    'if [ -n "$provider" ]; then',
+    "  binding_hash=",
+    '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
+    '    binding_hash="$(hash_binding_id "$OPENGENI_GIT_BINDING")"',
+    '    binding_hash_is_brokered "$binding_hash" && { printf \'%s\\n\' "$tool provider API authentication is host-brokered for OPENGENI_GIT_BINDING; use the configured provider MCP tools" >&2; exit 2; }',
+    '    binding_hash_allowed "$binding_hash" || { printf \'%s\\n\' "OPENGENI_GIT_BINDING does not select a $provider credential attached to this session" >&2; exit 2; }',
+    "  elif command -v git >/dev/null 2>&1; then",
+    '    origin="$(git config --get remote.origin.url 2>/dev/null || true)"',
+    '    [ -z "$origin" ] || ! origin_is_brokered "$origin" || { printf \'%s\\n\' "$tool provider API authentication is host-brokered for this repository; use the configured provider MCP tools" >&2; exit 2; }',
+    '    [ -z "$origin" ] || binding_hash="$(binding_hash_for_origin "$origin" 2>/dev/null || true)"',
+    "  fi",
+    '  [ -n "$binding_hash" ] || binding_hash="$(sole_binding_hash 2>/dev/null || true)"',
+    '  if [ -n "$binding_hash" ]; then',
+    '    token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$binding_hash-token"',
+    "  else",
+    '    case " $broker_only_providers " in',
+    '      *" $provider "*) printf \'%s\\n\' "$tool provider API authentication is host-brokered for this session; use the configured provider MCP tools" >&2; exit 2 ;;',
+    "    esac",
+    '    case " $multi_binding_providers " in',
+    '      *" $provider "*) printf \'%s\\n\' "Unable to select one of multiple $provider credentials; run inside an attached repository, or inspect ${OPENGENI_GIT_BINDINGS_FILE:-$HOME/.opengeni/git-bindings.json} and set OPENGENI_GIT_BINDING" >&2; exit 2 ;;',
+    "    esac",
+    '    case "$provider" in',
+    '      github) token_file="${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}" ;;',
+    '      *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
+    "    esac",
+    "  fi",
     '  if [ -f "$token_file" ]; then',
     '    token="$(cat "$token_file" 2>/dev/null || true)"',
     '    if [ -n "$token" ]; then',
@@ -5426,6 +7819,7 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
     return "";
   }
   return [
+    "set +x",
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
@@ -5433,10 +7827,27 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
   ].join("\n");
 }
 
+export function gitCredentialBindingTokenRefreshCommand(
+  bindings: GitCredentialBindingSeed[],
+): string {
+  const seedPrefix = gitCredentialBindingSeedExportPrefix(bindings);
+  if (!seedPrefix) return "";
+  return [
+    "set +x",
+    seedPrefix,
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialTokenWriterCommandLines(bindings),
+  ].join("\n");
+}
+
 export async function refreshGitProviderTokenFiles(
   session: GitCredentialTokenWriterSession,
   seeds: GitTokenSeeds,
-  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+  } = {},
 ): Promise<void> {
   const command = gitProviderTokenRefreshCommand(seeds);
   if (!command) {
@@ -5455,14 +7866,39 @@ export async function refreshGitProviderTokenFiles(
   );
 }
 
+export async function refreshGitCredentialBindingTokenFiles(
+  session: GitCredentialTokenWriterSession,
+  bindings: GitCredentialBindingSeed[],
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+  } = {},
+): Promise<void> {
+  const command = gitCredentialBindingTokenRefreshCommand(bindings);
+  if (!command) return;
+  const args = {
+    cmd: command,
+    workdir: "/workspace",
+    ...(options.runAs ? { runAs: options.runAs } : {}),
+    yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+    maxOutputTokens: 4_000,
+  };
+  assertSandboxCommandSucceeded(
+    await runSandboxLifecycleCommand(session, args, options.commandRunner),
+    "Git credential binding refresh",
+  );
+}
+
 export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[] = [],
 ): string {
+  assertUniqueResourceMountPaths(resources);
   const commands = [
+    "set +x",
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
     'export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"',
-    ...gitCredentialHelperCommandLines(resources),
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",
     "    return 0",
@@ -5478,6 +7914,7 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
+    ...gitCredentialHelperCommandLines(resources, bindings),
     "clone_repository() {",
     '  target="$1"',
     '  uri="$2"',
@@ -5550,33 +7987,42 @@ export function repositoryCloneCommand(
     "}",
   ];
   for (const resource of resources) {
-    const url = new URL(resource.uri);
-    const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-    const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
+    const mountPath = resourceMountPath(resource);
     commands.push(
       [
         "clone_repository",
         shellQuote(posixPath.join("/workspace", mountPath)),
         shellQuote(resource.uri),
         shellQuote(resource.ref),
-        shellQuote(resource.subpath ? normalizeManifestPath(resource.subpath) : ""),
+        shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
       ].join(" "),
     );
   }
   return commands.join("\n");
 }
 
-export function toolspaceTokenSeedCommand(): string {
+export function toolspaceTokenSeedCommand(
+  options: { tokenFile?: string; legacyTokenFile?: string } = {},
+): string {
   return [
+    "set +x",
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
     'if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then',
     '  seed_umask="$(umask)"',
     "  umask 077",
-    '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    options.tokenFile
+      ? `  token_file=${shellToolspacePath(options.tokenFile)}`
+      : '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    options.legacyTokenFile
+      ? `  legacy_token_file=${shellToolspacePath(options.legacyTokenFile)}`
+      : '  legacy_token_file=""',
     '  mkdir -p "$(dirname "$token_file")"',
     '  printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
     '  mv -f "$token_file.tmp.$$" "$token_file"',
+    '  if [ -n "$legacy_token_file" ] && [ "$legacy_token_file" != "$token_file" ]; then',
+    '    rm -f -- "$legacy_token_file"',
+    "  fi",
     '  umask "$seed_umask"',
     "fi",
   ].join("\n");
@@ -5589,7 +8035,14 @@ export async function runToolspaceTokenSeedHook(
   if (!context.toolspaceTokenSeed) {
     return;
   }
-  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand()}`;
+  const command = `set +x\nexport OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand(
+    {
+      ...(context.toolspaceTokenFile ? { tokenFile: context.toolspaceTokenFile } : {}),
+      ...(context.toolspaceTokenFile && context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE
+        ? { legacyTokenFile: context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE }
+        : {}),
+    },
+  )}`;
   const result = await runSandboxLifecycleCommand(
     session,
     {
@@ -5602,6 +8055,36 @@ export async function runToolspaceTokenSeedHook(
     context.commandRunner,
   );
   assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
+}
+
+export async function refreshToolspaceTokenFile(
+  session: ToolspaceTokenWriterSession,
+  token: string,
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+    tokenFile?: string;
+    legacyTokenFile?: string;
+  } = {},
+): Promise<void> {
+  const command = `set +x\nexport OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand(
+    {
+      ...(options.tokenFile ? { tokenFile: options.tokenFile } : {}),
+      ...(options.legacyTokenFile ? { legacyTokenFile: options.legacyTokenFile } : {}),
+    },
+  )}`;
+  const result = await runSandboxLifecycleCommand(
+    session,
+    {
+      cmd: command,
+      workdir: "/workspace",
+      ...(options.runAs ? { runAs: options.runAs } : {}),
+      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+      maxOutputTokens: 4_000,
+    },
+    options.commandRunner,
+  );
+  assertSandboxCommandSucceeded(result, "Toolspace token refresh");
 }
 
 // Bounds the setup output tail carried on a rig.setup failure event/error so a
@@ -5789,10 +8272,15 @@ export async function runRepositoryCloneHook(
       ...(context.gitTokenSeeds ?? {}),
       ...(context.gitTokenSeed ? { github: context.gitTokenSeed } : {}),
     } satisfies GitTokenSeeds;
-    const seedPrefix = gitTokenSeedExportPrefix(gitTokenSeeds);
-    const command = seedPrefix
-      ? `${seedPrefix}\n${repositoryCloneCommand(resources)}`
-      : repositoryCloneCommand(resources);
+    const gitCredentialBindings = context.gitCredentialBindings ?? [];
+    const seedPrefix = [
+      gitTokenSeedExportPrefix(gitTokenSeeds),
+      gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const cloneCommand = repositoryCloneCommand(resources, gitCredentialBindings);
+    const command = seedPrefix ? `set +x\n${seedPrefix}\n${cloneCommand}` : cloneCommand;
     const result = await runSandboxLifecycleCommand(
       session,
       {
@@ -5823,6 +8311,7 @@ export async function runRepositoryCloneHook(
 
 export function azureCliLoginCommand(): string {
   return [
+    "set +x",
     'export HOME="${HOME:-/workspace}"',
     'mkdir -p "$HOME/.azure"',
     'CLIENT_ID="${AZURE_CLIENT_ID:-${ARM_CLIENT_ID:-}}"',
@@ -6031,26 +8520,46 @@ function isPathWithin(root: string, candidate: string): boolean {
 }
 
 /**
- * The skill source fed to the SDK Skills capability. Without pack skills this
- * is the plain bundled local-dir source, byte-for-byte the pre-pack behavior.
- * With pack skills it becomes a single in-memory dir source combining bundled
- * skill directories (as local_dir entries the SDK materializes lazily) with
- * pack skill directories built from manifest-carried file content — one skill
- * index, one `## Skills` instruction section, lazy `load_skill` for all of
- * them. A pack skill shadows a bundled skill with the same directory name.
+ * The skill source fed to the SDK Skills capability. Without pack or curated
+ * skills this is the plain bundled local-dir source, byte-for-byte the
+ * pre-pack behavior. With either selected source it becomes a single
+ * in-memory dir source combining bundled skill directories (as local_dir
+ * entries the SDK materializes lazily) with selected in-memory skill
+ * directories — one skill index, one `## Skills` instruction section, lazy
+ * `load_skill` for all of them. A pack skill shadows a bundled or curated
+ * skill with the same directory name, case-insensitively.
  */
-export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDirLazySkillSource {
+export function lazySkillSourceWithPackSkills(
+  packSkills: PackSkill[],
+  skillLibrarySkills: PackSkill[] = [],
+): LocalDirLazySkillSource {
   const bundledDir = bundledSkillsDir();
   const bundled = localDirLazySkillSource({ src: bundledDir });
-  if (packSkills.length === 0) {
+  if (packSkills.length === 0 && skillLibrarySkills.length === 0) {
     return bundled;
   }
   const children: Record<string, Entry> = {};
   for (const name of bundledSkillDirNames(bundledDir)) {
     children[name] = localDir({ src: join(bundledDir, name) });
   }
+  const libraryIndex: SkillIndexEntry[] = [];
+  const libraryNameKeys = new Set<string>();
+  for (const skill of skillLibrarySkills) {
+    assertSafePackSkillName(skill.name);
+    const key = skill.name.toLowerCase();
+    if (libraryNameKeys.has(key)) {
+      throw new Error(`Duplicate curated skill name: ${skill.name}`);
+    }
+    libraryNameKeys.add(key);
+    removeSkillChildByNameKey(children, key);
+    children[skill.name] = packSkillDirEntry(skill);
+    libraryIndex.push({
+      name: skill.name,
+      description: packSkillDescription(skill),
+      path: skill.name,
+    });
+  }
   const packIndex: SkillIndexEntry[] = [];
-  const packNames = new Set<string>();
   const packNameKeys = new Set<string>();
   for (const skill of packSkills) {
     assertSafePackSkillName(skill.name);
@@ -6058,7 +8567,7 @@ export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDir
       throw new Error(`Duplicate pack skill name: ${skill.name}`);
     }
     packNameKeys.add(skill.name.toLowerCase());
-    packNames.add(skill.name);
+    removeSkillChildByNameKey(children, skill.name.toLowerCase());
     children[skill.name] = packSkillDirEntry(skill);
     packIndex.push({
       name: skill.name,
@@ -6070,11 +8579,119 @@ export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDir
     source: dir({ children }),
     getIndex: (manifest, skillsPath) => [
       ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter(
-        (entry) => !packNames.has(entry.path ?? entry.name),
+        (entry) =>
+          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
+          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
+      ),
+      ...libraryIndex.filter(
+        (entry) => !packNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
       ...packIndex,
     ],
   };
+}
+
+function effectiveSkillSelections(
+  librarySelections: readonly EffectiveSkillSelection[],
+  librarySkills: readonly PackSkill[],
+  packSkills: readonly PackSkill[],
+  sessionSkills: readonly PackSkill[],
+): readonly EffectiveSkillSelection[] {
+  const defaultSelections = bundledSkillDirNames(bundledSkillsDir()).map((name) => ({
+    id: `bundled:${name}`,
+    name,
+    source: "bundled" as const,
+    version: null,
+    contentSha256: null,
+    reason: "deployment default skill bundle",
+  }));
+  const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
+  const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));
+  const effectiveSessionSkills = sessionSkillsForMaterialization(
+    packSkills,
+    librarySkills,
+    sessionSkills,
+  );
+  const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
+  const selected = librarySelections.filter((selection) =>
+    libraryNameKeys.has(selection.name.toLowerCase()),
+  );
+  return [
+    ...defaultSelections.filter(
+      (selection) =>
+        !libraryNameKeys.has(selection.name.toLowerCase()) &&
+        !packNameKeys.has(selection.name.toLowerCase()) &&
+        !sessionNameKeys.has(selection.name.toLowerCase()),
+    ),
+    ...selected.filter(
+      (selection) =>
+        !packNameKeys.has(selection.name.toLowerCase()) &&
+        !sessionNameKeys.has(selection.name.toLowerCase()),
+    ),
+    ...packSkills.map((skill) => ({
+      id: `pack:${skill.name}`,
+      name: skill.name,
+      source: "pack" as const,
+      version: null,
+      contentSha256: null,
+      reason: "enabled capability pack",
+    })),
+    ...effectiveSessionSkills.map((skill) => ({
+      id: `session:${skill.name}`,
+      name: skill.name,
+      source: "session" as const,
+      version: null,
+      contentSha256: null,
+      reason: "attached to session",
+    })),
+  ];
+}
+
+function sessionSkillsForMaterialization(
+  packSkills: readonly PackSkill[],
+  librarySkills: readonly PackSkill[],
+  sessionSkills: readonly PackSkill[],
+): PackSkill[] {
+  const configured = new Map<string, PackSkill>();
+  for (const skill of [...librarySkills, ...packSkills]) {
+    configured.set(skill.name.toLowerCase(), skill);
+  }
+  const bundledNames = new Set(
+    bundledSkillDirNames(bundledSkillsDir()).map((name) => name.toLowerCase()),
+  );
+  const selected = new Map<string, PackSkill>();
+  for (const skill of sessionSkills) {
+    assertSafePackSkillName(skill.name);
+    const key = skill.name.toLowerCase();
+    if (bundledNames.has(key)) {
+      throw new Error(`Session skill "${skill.name}" conflicts with a bundled skill`);
+    }
+    const existing = selected.get(key) ?? configured.get(key);
+    if (existing) {
+      if (skillFingerprint(existing) !== skillFingerprint(skill)) {
+        throw new Error(`Conflicting skill definitions for "${skill.name}"`);
+      }
+      continue;
+    }
+    selected.set(key, skill);
+  }
+  return [...selected.values()];
+}
+
+function skillFingerprint(skill: PackSkill): string {
+  return JSON.stringify(
+    [...skill.files]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map(({ path, content }) => ({ path, content })),
+  );
+}
+
+function removeSkillChildByNameKey(children: Record<string, Entry>, nameKey: string): void {
+  for (const name of Object.keys(children)) {
+    if (name.toLowerCase() === nameKey) {
+      delete children[name];
+    }
+  }
 }
 
 function bundledSkillDirNames(root: string): string[] {
@@ -6220,7 +8837,12 @@ function sortJson(value: unknown): unknown {
   }
   return value;
 }
-
-function approvalIdentifier(item: any): string {
-  return String(item?.rawItem?.callId ?? item?.rawItem?.id ?? item?.id ?? item?.name ?? "approval");
+function interruptionToolName(item: unknown): string {
+  const candidate = item as {
+    toolName?: unknown;
+    name?: unknown;
+    rawItem?: { name?: unknown };
+  };
+  const name = candidate?.toolName ?? candidate?.name ?? candidate?.rawItem?.name;
+  return typeof name === "string" ? name : "";
 }

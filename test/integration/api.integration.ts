@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import {
   allAccountPermissions,
   allWorkspacePermissions,
@@ -6,6 +7,8 @@ import {
   applyCreditLedgerEntry,
   applySessionTurnSettlement,
   bootstrapWorkspace,
+  bindAuthorizedGitHubInstallationRepositories,
+  bindGitHubInstallationRepositories,
   buildConnectionTokenResolver,
   claimSessionWorkForAttempt,
   isSessionCompactionRequested,
@@ -14,6 +17,8 @@ import {
   createWorkspaceEnvironment,
   dbSql,
   decryptEnvironmentValue,
+  decodeSessionListCursor,
+  encodeSessionListCursor,
   enableCapabilityInstallation,
   encryptEnvironmentValue,
   getActiveSessionHistoryItems,
@@ -27,7 +32,9 @@ import {
   getScheduledTask,
   getSessionGoal,
   getWorkspaceEnvironmentValuesForRun,
+  grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
+  initializeSessionStartAtomically,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -38,6 +45,7 @@ import {
   recordUsageEvent,
   requireFile,
   requireSession,
+  saveRunState,
   setSessionGoalStatus,
   sumUsageQuantity,
   updateScheduledTask,
@@ -71,12 +79,12 @@ import {
   type TestServices,
 } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
-import { createSignedState, readSignedState } from "@opengeni/github";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import {
   createDocumentServices,
   DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
   DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+  getDocumentChunk,
   searchDocuments,
 } from "../../packages/documents/src";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -267,6 +275,22 @@ describe("API component integration", () => {
       pinned: true,
       pinVersion: 1,
     });
+    const pinsOnlyResponse = await app.request(
+      workspacePath(workspaceId, "/sessions?view=page&pinsOnly=true&limit=1"),
+    );
+    expect(pinsOnlyResponse.status).toBe(200);
+    expect(await pinsOnlyResponse.json()).toMatchObject({
+      pinned: [{ id: pinnedTarget.id }],
+      sessions: [],
+      nextCursor: null,
+    });
+    const snapshotsBeforeStablePage = await dbClient.db.execute<{
+      count: number;
+    }>(dbSql`
+      select count(*)::int as count
+      from session_list_snapshots
+      where workspace_id = ${workspaceId}`);
+    expect(snapshotsBeforeStablePage).toEqual([{ count: 0 }]);
 
     const firstPageResponse = await app.request(
       workspacePath(workspaceId, "/sessions?view=page&limit=1"),
@@ -307,6 +331,38 @@ describe("API component integration", () => {
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&cursor=not-a-cursor")))
         .status,
     ).toBe(400);
+    const decodedCursor = decodeSessionListCursor(firstPage.nextCursor!);
+    expect(decodedCursor).not.toBeNull();
+    for (const invalidCursor of [
+      encodeSessionListCursor({ ...decodedCursor!, search: "different-filter" }),
+      encodeSessionListCursor({ ...decodedCursor!, offset: Number.MAX_SAFE_INTEGER }),
+    ]) {
+      expect(
+        (
+          await app.request(
+            workspacePath(
+              workspaceId,
+              `/sessions?view=page&limit=1&cursor=${encodeURIComponent(invalidCursor)}`,
+            ),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    await dbClient.db.execute(dbSql`
+      update session_list_snapshots
+      set expires_at = now() - interval '1 second'
+      where id = ${decodedCursor!.snapshotId}
+    `);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+          ),
+        )
+      ).status,
+    ).toBe(410);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);
@@ -794,6 +850,25 @@ describe("API component integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: baseGrant.accountId,
+      workspaceId: baseGrant.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, baseGrant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("goal MCP turn was not claimed");
     const mcpDeps = {
       settings,
       db: dbClient.db,
@@ -816,7 +891,13 @@ describe("API component integration", () => {
 
     const grant = {
       ...baseGrant,
-      metadata: { delegated: true, sessionId: session.id },
+      metadata: {
+        delegated: true,
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+      },
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
 
@@ -831,11 +912,19 @@ describe("API component integration", () => {
     expect(setGoal.status).toBe("active");
     expect(setGoal.version).toBe(1);
 
-    const updated = await callMcpTool<{ version: number; text: string }>(mcp, "goal_update", {
+    const updated = await callMcpTool<{
+      version: number;
+      text: string;
+      operationId: string;
+      replay: boolean;
+    }>(mcp, "goal_update", {
       text: "keep CI green on main",
       progressNote: "fixed two flaky tests",
+      idempotencyKey: crypto.randomUUID(),
     });
     expect(updated.version).toBe(2);
+    expect(updated.operationId).toBeTruthy();
+    expect(updated.replay).toBe(false);
 
     const pausedGoal = await callMcpTool<{
       status: string;
@@ -858,18 +947,17 @@ describe("API component integration", () => {
     await expect(callMcpTool(mcp, "goal_pause", { rationale: "too late" })).rejects.toThrow(
       "completed",
     );
-    await expect(callMcpTool(mcp, "goal_update", { text: "also too late" })).rejects.toThrow(
-      "completed",
-    );
+    await expect(
+      callMcpTool(mcp, "goal_update", {
+        text: "also too late",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("completed");
 
     const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
-    expect(events.map((event) => event.type)).toEqual([
-      "goal.set",
-      "goal.updated",
-      "goal.paused",
-      "goal.set",
-      "goal.completed",
-    ]);
+    expect(
+      events.filter((event) => event.type.startsWith("goal.")).map((event) => event.type),
+    ).toEqual(["goal.set", "goal.updated", "goal.paused", "goal.set", "goal.completed"]);
     expect((await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id))?.status).toBe(
       "completed",
     );
@@ -992,6 +1080,101 @@ describe("API component integration", () => {
     expect(deniedOtherAccountBilling.status).toBe(403);
   });
 
+  test("local access preserves valid worker delegation and falls back for ordinary requests", async () => {
+    const delegationSecret = "test-local-delegation-secret";
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      productAccessMode: "local",
+      delegationSecret,
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const delegatedWorkspace = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:local-delegation",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Local delegation test",
+      workspaceExternalSource: "test:local-delegation",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Local delegation workspace",
+      subjectId: `test:local-delegation:${crypto.randomUUID()}`,
+    });
+    const sessionId = crypto.randomUUID();
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId: delegatedWorkspace.defaultAccountId!,
+      workspaceId: delegatedWorkspace.defaultWorkspaceId!,
+      subjectId: "test:local-delegated-worker",
+      permissions: ["workspace:read"],
+      sessionId,
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+
+    const delegatedResponse = await app.request("/v1/access/me", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(delegatedResponse.status).toBe(200);
+    const delegated = (await delegatedResponse.json()) as AccessContext;
+    expect(delegated).toMatchObject({
+      mode: "local",
+      subjectId: "test:local-delegated-worker",
+      defaultAccountId: delegatedWorkspace.defaultAccountId,
+      defaultWorkspaceId: delegatedWorkspace.defaultWorkspaceId,
+    });
+    expect(delegated.workspaceGrants).toEqual([
+      expect.objectContaining({
+        permissions: ["workspace:read"],
+        metadata: expect.objectContaining({ delegated: true, sessionId }),
+      }),
+    ]);
+
+    const fallbackResponse = await app.request("/v1/access/me", {
+      headers: { authorization: "Bearer invalid-token" },
+    });
+    expect(fallbackResponse.status).toBe(200);
+    const fallback = (await fallbackResponse.json()) as AccessContext;
+    expect(fallback.mode).toBe("local");
+    expect(fallback.subjectId).toBe("dev");
+    expect(fallback.workspaceGrants[0]?.metadata).toBeUndefined();
+
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
+    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      prepared = await prepareAgentTools(
+        {
+          ...settings,
+          mcpServers: [
+            {
+              id: "opengeni",
+              name: "OpenGeni",
+              url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+              timeoutMs: undefined,
+              cacheToolsList: false,
+            },
+          ],
+        },
+        [{ kind: "mcp", id: "opengeni" }],
+        {
+          accountId: delegatedWorkspace.defaultAccountId!,
+          workspaceId: delegatedWorkspace.defaultWorkspaceId!,
+          sessionId,
+        },
+      );
+      const toolNames = (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
+      expect(toolNames).toContain("opengeni__set_session_title");
+      expect(toolNames).toContain("opengeni__goal_set");
+    } finally {
+      await prepared?.close().catch(() => undefined);
+      server.stop(true);
+    }
+  });
+
   test("managed session cookie still authenticates when an invalid bearer header is present", async () => {
     const userId = `managed-user-${crypto.randomUUID()}`;
     const email = `managed-cookie-${crypto.randomUUID()}@example.com`;
@@ -1057,6 +1240,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: grant.subjectId,
       permissions: [...grant.permissions, "billing:read"],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const authHeaders = { authorization: `Bearer ${token}` };
@@ -1146,6 +1330,7 @@ describe("API component integration", () => {
         workspaceId: ownerWorkspaceId,
         subjectId: owner.subjectId,
         permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 60,
       })}`,
     };
@@ -1155,6 +1340,7 @@ describe("API component integration", () => {
         workspaceId: otherWorkspaceId,
         subjectId: otherTenant.subjectId,
         permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 60,
       })}`,
     };
@@ -1299,6 +1485,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const headers = { authorization: `Bearer ${token}` };
@@ -1354,6 +1541,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const headers = { authorization: `Bearer ${token}` };
@@ -1417,6 +1605,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const authHeaders = { authorization: `Bearer ${token}` };
@@ -1514,6 +1703,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
 
@@ -1884,6 +2074,7 @@ describe("API component integration", () => {
       text: "search docs",
       tools: [{ kind: "mcp", id: "docs" }],
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual([
       { kind: "mcp", id: "docs" },
@@ -2025,6 +2216,7 @@ describe("API component integration", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
     const turn = turns.find((item) => item.triggerEventId === event.id);
@@ -2617,10 +2809,23 @@ describe("API component integration", () => {
         mcpSettings,
         false,
       );
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") {
+        throw new Error(`failed to claim connectionRef fixture: ${claimed.reason}`);
+      }
       const runSettings = await settingsWithSessionMcpServersForRun(
         dbClient.db,
         workspaceId,
         session.id,
+        attemptId,
         capabilitySettings,
       );
       const resolveCredential = buildConnectionTokenResolver(dbClient.db, runSettings);
@@ -2663,7 +2868,7 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const capabilityId = `skill:test-${crypto.randomUUID()}`;
+    const capabilityId = `custom-skill:test-${crypto.randomUUID()}`;
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/capabilities"), {
       method: "POST",
@@ -3328,7 +3533,7 @@ describe("API component integration", () => {
     });
     const workspaceId = await defaultWorkspaceId(app);
     const suffix = crypto.randomUUID().slice(0, 8);
-    const imagePackManifest = (id: string, image: string) => ({
+    const imagePackManifest = (id: string, image: string, modalImageId?: string) => ({
       id,
       name: `Pack ${id}`,
       description: "Pack with a pack-scoped sandbox image.",
@@ -3336,6 +3541,7 @@ describe("API component integration", () => {
       category: "infrastructure",
       version: "0.1.0",
       sandboxImage: image,
+      ...(modalImageId ? { sandboxProviderImages: { modal: { imageId: modalImageId } } } : {}),
       skills: [
         {
           name: "infra-ops",
@@ -3350,16 +3556,24 @@ describe("API component integration", () => {
           ],
         },
       ],
+      metadata: {
+        sandboxImage: "example.invalid/spoofed:latest",
+        sandboxProviderImages: { modal: { imageId: "im-abcdefghijklmnopqrstuv" } },
+        skills: ["spoofed-skill"],
+      },
     });
     const packA = `img-a-${suffix}`;
     const packB = `img-b-${suffix}`;
-    for (const [packId, image] of [
-      [packA, "example.com/sandbox-a@sha256:aaaa"],
-      [packB, "example.com/sandbox-b@sha256:bbbb"],
+    const packAImage =
+      "example.com/sandbox-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const packAModalImageId = "im-1234567890123456789012";
+    for (const [packId, image, modalImageId] of [
+      [packA, packAImage, packAModalImageId],
+      [packB, "example.com/sandbox-b@sha256:bbbb", undefined],
     ] as const) {
       const registered = await app.request(workspacePath(workspaceId, "/packs"), {
         method: "POST",
-        body: JSON.stringify(imagePackManifest(packId, image)),
+        body: JSON.stringify(imagePackManifest(packId, image, modalImageId)),
         headers: { "content-type": "application/json" },
       });
       expect(registered.status).toBe(201);
@@ -3379,8 +3593,12 @@ describe("API component integration", () => {
       items: Array<{ id: string; metadata: Record<string, unknown> }>;
     };
     const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
-    expect(packAItem?.metadata.sandboxImage).toBe("example.com/sandbox-a@sha256:aaaa");
+    expect(packAItem?.metadata.sandboxImage).toBe(packAImage);
+    expect(packAItem?.metadata.sandboxProviderImages).toEqual({
+      modal: { imageId: packAModalImageId },
+    });
     expect(packAItem?.metadata.skills).toEqual(["infra-ops"]);
+    expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
 
     // A second image-declaring pack cannot be enabled, on either enable path.
@@ -4004,6 +4222,19 @@ describe("API component integration", () => {
     if (approvalWaitClaim.action !== "claimed") {
       throw new Error(`failed to claim approval fixture: ${approvalWaitClaim.reason}`);
     }
+    const approvalSession = await requireSession(dbClient.db, workspaceId, session.id);
+    expect(
+      await saveRunState(dbClient.db, {
+        accountId: approvalSession.accountId,
+        workspaceId,
+        sessionId: session.id,
+        turnId: approvalWaitClaim.turn.id,
+        expectedExecutionGeneration: approvalWaitClaim.turn.executionGeneration,
+        expectedAttemptId: approvalWaitAttemptId,
+        serializedRunState: "api-integration-approval-state",
+        pendingApprovals: [{ id: "x" }],
+      }),
+    ).toBe(true);
     await applySessionTurnSettlement(dbClient.db, workspaceId, {
       sessionId: session.id,
       turnId: approvalWaitClaim.turn.id,
@@ -4150,12 +4381,12 @@ describe("API component integration", () => {
     ]);
 
     const clampedMax = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=1000000000`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=1000000000`),
     );
     expect(clampedMax.status).toBe(200);
     expect((await clampedMax.json()) as SessionEvent[]).toHaveLength(2000);
     const clampedMin = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=0`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=0`),
     );
     expect(clampedMin.status).toBe(200);
     expect((await clampedMin.json()) as SessionEvent[]).toHaveLength(1);
@@ -4276,121 +4507,215 @@ describe("API component integration", () => {
     expect(body.missing.length).toBeGreaterThan(0);
   });
 
-  test("redirects GitHub install callbacks through OAuth before binding a workspace installation", async () => {
-    const stateSecret = "test-github-install-state-secret";
+  test("binds only after fresh GitHub owner authority and reports truthful status", async () => {
+    const stateSecret = "github-owner-authority-state";
+    const installationId = 338826628;
+    const repository = {
+      id: 3001,
+      installationId,
+      fullName: "owner/repository",
+      name: "repository",
+      private: true,
+      htmlUrl: "https://github.com/owner/repository",
+      cloneUrl: "https://github.com/owner/repository.git",
+      defaultBranch: "main",
+      accountLogin: "owner",
+      accountType: "User",
+    };
+    let authorityCalls = 0;
+    let installationLifecycle: "active" | "suspended" | "deleted" | "outage" = "active";
+    const githubAppApi = {
+      authorizeInstallationBinding: async () => {
+        authorityCalls += 1;
+        return {
+          actorId: 501,
+          actorLogin: "owner",
+          authorityKind: "personal_owner" as const,
+          installation: {
+            installationId,
+            accountId: 501,
+            accountLogin: "owner",
+            accountType: "User",
+            suspended: false,
+          },
+          repositories: [repository],
+        };
+      },
+      getInstallation: async ({ installationId: requested }: { installationId: number }) => {
+        if (installationLifecycle === "outage") {
+          throw new Error("GitHub installation lookup unavailable");
+        }
+        return requested === installationId && installationLifecycle !== "deleted"
+          ? {
+              installationId,
+              accountId: 501,
+              accountLogin: "owner",
+              accountType: "User",
+              suspended: installationLifecycle === "suspended",
+            }
+          : null;
+      },
+      listRepositories: async () => [repository],
+    };
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
-        githubClientId: "test-github-client-id",
-        githubAppManifestBaseUrl: "https://staging.app.opengeni.ai",
+        publicBaseUrl: "https://api.opengeni.test",
+        githubAppId: "12345",
+        githubClientId: "test-client-id",
+        githubClientSecret: "test-client-secret",
+        githubAppSlug: "opengeni-test-app",
+        githubAppPrivateKey: "test-private-key",
       }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
-      githubAppApi: {
-        authorizeUser: async () => [
-          {
-            installationId: 138826628,
-            accountLogin: "acme",
-            accountType: "Organization",
-            suspended: false,
-            repositories: [
-              {
-                id: 1001,
-                installationId: 138826628,
-                fullName: "acme/repository",
-                name: "repository",
-                private: true,
-                htmlUrl: "https://github.com/acme/repository",
-                cloneUrl: "https://github.com/acme/repository.git",
-                defaultBranch: "main",
-                accountLogin: "acme",
-                accountType: "Organization",
-                permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
-              },
-            ],
-          },
-        ],
-        listRepositories: async () => [],
-      },
+      githubAppApi,
     });
     const context = await defaultAccessContext(app);
-    const state = createSignedState(stateSecret, {
-      accountId: context.defaultAccountId,
-      workspaceId: context.defaultWorkspaceId,
+    const workspaceId = context.defaultWorkspaceId!;
+    const secondWorkspaceResponse = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "GitHub cross-workspace target",
+      }),
     });
+    const secondWorkspace = (await secondWorkspaceResponse.json()) as { id: string };
 
-    const rejected = await app.request(
-      `/v1/github/install/callback?installation_id=138826628&setup_action=install&state=${encodeURIComponent(state)}`,
-    );
-    expect(rejected.status).toBe(400);
-    expect(await rejected.text()).toContain("invalid or expired GitHub installation browser state");
+    const before = await app.request(workspacePath(workspaceId, "/github/app"));
+    const beforeInfo = (await before.json()) as {
+      configured: boolean;
+      status: string;
+      installUrl: string | null;
+      installations: unknown[];
+    };
+    expect(beforeInfo).toMatchObject({ configured: true, status: "unbound", installations: [] });
+    expect(beforeInfo.installUrl).not.toBeNull();
 
-    const response = await app.request(
-      `/v1/github/install/callback?installation_id=138826628&setup_action=install&state=${encodeURIComponent(state)}`,
-      {
-        headers: { cookie: `opengeni_github_state=${state}` },
-      },
+    await bindGitHubInstallationRepositories(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId: secondWorkspace.id,
+      installationId,
+      accountLogin: "owner",
+      accountType: "User",
+      linkedBySubjectId: context.subjectId,
+      repositoryIds: [repository.id],
+    });
+    const legacyInfo = (await (
+      await app.request(workspacePath(secondWorkspace.id, "/github/app"))
+    ).json()) as { status: string; installations: Array<{ lifecycle: string }> };
+    expect(legacyInfo).toMatchObject({
+      status: "unbound",
+      installations: [{ lifecycle: "unverified" }],
+    });
+    expect(
+      (
+        (await (
+          await app.request(workspacePath(secondWorkspace.id, "/github/repositories"))
+        ).json()) as { repositories: unknown[] }
+      ).repositories,
+    ).toEqual([]);
+
+    const connectUrl = new URL(beforeInfo.installUrl!);
+    const initialState = connectUrl.searchParams.get("state")!;
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            secondWorkspace.id,
+            `/github/connect?state=${encodeURIComponent(initialState)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
+
+    const connect = await app.request(beforeInfo.installUrl!);
+    expect(connect.status).toBe(302);
+    expect(connect.headers.get("location")).toContain(
+      "https://github.com/apps/opengeni-test-app/installations/new",
     );
-    expect(response.status).toBe(302);
-    const location = response.headers.get("location");
-    expect(location).toBeTruthy();
-    const redirect = new URL(location!);
-    expect(`${redirect.origin}${redirect.pathname}`).toBe(
+    const connectCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const setup = await app.request(
+      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(initialState)}`,
+      { headers: { cookie: connectCookie } },
+    );
+    expect(setup.status).toBe(302);
+    const oauthLocation = new URL(setup.headers.get("location")!);
+    expect(oauthLocation.origin + oauthLocation.pathname).toBe(
       "https://github.com/login/oauth/authorize",
     );
-    expect(redirect.searchParams.get("client_id")).toBe("test-github-client-id");
-    expect(redirect.searchParams.get("redirect_uri")).toBe(
-      "https://staging.app.opengeni.ai/v1/github/oauth/callback",
-    );
-    const oauthState = redirect.searchParams.get("state");
-    expect(oauthState).toBeTruthy();
-    expect(response.headers.get("set-cookie")).toContain(`opengeni_github_state=${oauthState}`);
-    expect(response.headers.get("set-cookie")).toContain("Max-Age=3600");
-    const payload = readSignedState(oauthState!, stateSecret);
-    expect(payload).toMatchObject({
-      accountId: context.defaultAccountId,
-      workspaceId: context.defaultWorkspaceId,
-      installationId: 138826628,
-    });
+    const oauthState = oauthLocation.searchParams.get("state")!;
+    const oauthCookie = setup.headers.get("set-cookie")!.split(";", 1)[0]!;
 
-    // request_oauth_on_install can send a newly installed id directly to the
-    // configured OAuth callback; the original install-intent state does not
-    // carry that id yet, so the callback must accept GitHub's query value.
-    const directState = createSignedState(stateSecret, {
-      accountId: context.defaultAccountId,
-      workspaceId: context.defaultWorkspaceId,
-      intent: "install",
-    });
-    const directCallback = await app.request(
-      `/v1/github/oauth/callback?code=test-code&installation_id=138826628&state=${encodeURIComponent(directState)}`,
-      {
-        headers: { cookie: `opengeni_github_state=${directState}` },
-      },
+    const callback = await app.request(
+      `/v1/github/oauth/callback?code=fresh-owner-code&state=${encodeURIComponent(oauthState)}`,
+      { headers: { cookie: oauthCookie } },
     );
-    expect(directCallback.status).toBe(200);
-    expect(await directCallback.text()).toContain("GitHub App connected");
+    expect(callback.status).toBe(200);
+    expect(await callback.text()).toContain("GitHub App connected");
 
-    // The state cookie moved from path /v1/github to /v1. Until it expires, a
-    // stale pre-move cookie is sent ahead of the current one (more specific
-    // path first); the flow must accept the state when ANY same-name cookie
-    // carries it instead of reading only the first.
-    const shadowedCallback = await app.request(
-      `/v1/github/oauth/callback?code=test-code&installation_id=138826628&state=${encodeURIComponent(directState)}`,
-      {
-        headers: {
-          cookie: `opengeni_github_state=stale-legacy-path-state; opengeni_github_state=${directState}`,
-        },
-      },
+    const replay = await app.request(
+      `/v1/github/oauth/callback?code=replayed-owner-code&state=${encodeURIComponent(oauthState)}`,
+      { headers: { cookie: oauthCookie } },
     );
-    expect(shadowedCallback.status).toBe(200);
-    expect(await shadowedCallback.text()).toContain("GitHub App connected");
+    expect(replay.status).toBe(409);
+    expect(await replay.text()).toContain("already used");
+    expect(authorityCalls).toBe(2);
+
+    const afterInfo = (await (
+      await app.request(workspacePath(workspaceId, "/github/app"))
+    ).json()) as {
+      status: string;
+      installations: Array<{ lifecycle: string; githubAccountId: number; repositoryCount: number }>;
+    };
+    expect(afterInfo).toMatchObject({
+      status: "bound",
+      installations: [{ lifecycle: "active", githubAccountId: 501, repositoryCount: 1 }],
+    });
+    expect(
+      (
+        (await (await app.request(workspacePath(workspaceId, "/github/repositories"))).json()) as {
+          repositories: Array<{ id: number }>;
+        }
+      ).repositories.map(({ id }) => id),
+    ).toEqual([repository.id]);
+
+    for (const expected of [
+      ["suspended", "suspended"],
+      ["deleted", "deleted"],
+      ["outage", "unverified"],
+    ] as const) {
+      installationLifecycle = expected[0];
+      const lifecycleInfo = (await (
+        await app.request(workspacePath(workspaceId, "/github/app"))
+      ).json()) as { status: string; installations: Array<{ lifecycle: string }> };
+      expect(lifecycleInfo).toMatchObject({
+        status: "unbound",
+        installations: [{ lifecycle: expected[1] }],
+      });
+      const unavailableRepositories = (await (
+        await app.request(workspacePath(workspaceId, "/github/repositories"))
+      ).json()) as { repositories: Array<{ id: number }> };
+      expect(unavailableRepositories.repositories).toEqual([]);
+    }
+    installationLifecycle = "active";
+
+    const legacyChooser = await app.request(workspacePath(workspaceId, "/github/installations"), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: `oauth_state=${encodeURIComponent(initialState)}&installation_ticket=forged`,
+    });
+    expect(legacyChooser.status).toBe(410);
   });
 
-  test("links one existing GitHub installation to multiple workspaces with independent repository access", async () => {
-    const stateSecret = "test-existing-github-installation-state-secret";
+  test("preserves independent workspace allowlists and downstream enforcement", async () => {
     const installationId = 138826628;
+    const githubPrivateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
+      .privateKey.export({ type: "pkcs8", format: "pem" })
+      .toString();
     const adminRepository = {
       id: 1001,
       installationId,
@@ -4416,52 +4741,32 @@ describe("API component integration", () => {
       accountType: "Organization",
     };
     const githubAppApi = {
-      authorizeUser: async () => [
-        {
-          installationId,
-          accountLogin: "acme",
-          accountType: "Organization",
-          suspended: false,
-          repositories: [
-            {
-              ...adminRepository,
-              permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
-            },
-            {
-              ...readOnlyRepository,
-              permissions: {
-                admin: false,
-                maintain: false,
-                push: false,
-                triage: false,
-                pull: true,
-              },
-            },
-          ],
-        },
-      ],
-      getInstallation: async () => ({
-        installationId,
-        accountLogin: "acme",
-        accountType: "Organization",
-        suspended: false,
-      }),
+      getInstallation: async ({ installationId: requested }: { installationId: number }) =>
+        requested === installationId
+          ? {
+              installationId,
+              accountId: 9001,
+              accountLogin: "acme",
+              accountType: "Organization",
+              suspended: false,
+            }
+          : null,
       listRepositories: async () => [adminRepository, readOnlyRepository],
     };
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      publicBaseUrl: "https://api.opengeni.test",
+      githubAppId: "12345",
+      githubClientId: "test-client-id",
+      githubClientSecret: "test-client-secret",
+      githubAppSlug: "opengeni-test-app",
+      githubAppPrivateKey: githubPrivateKey,
+    });
     const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        publicBaseUrl: "https://api.opengeni.test",
-        githubAppId: "12345",
-        githubClientId: "test-client-id",
-        githubClientSecret: "test-client-secret",
-        githubAppSlug: "opengeni-test-app",
-        githubAppPrivateKey: "test-private-key",
-      }),
+      settings,
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
-      githubStateSecret: stateSecret,
       githubAppApi,
     });
     const context = await defaultAccessContext(app);
@@ -4477,54 +4782,45 @@ describe("API component integration", () => {
     expect(secondWorkspaceResponse.status).toBe(201);
     const secondWorkspace = (await secondWorkspaceResponse.json()) as { id: string };
 
-    const linkExistingInstallation = async (workspaceId: string) => {
-      const appInfoResponse = await app.request(workspacePath(workspaceId, "/github/app"));
-      expect(appInfoResponse.status).toBe(200);
-      const appInfo = (await appInfoResponse.json()) as { linkUrl: string };
-      const linkUrl = new URL(appInfo.linkUrl);
-      const oauthRedirect = await app.request(`${linkUrl.pathname}${linkUrl.search}`);
-      expect(oauthRedirect.status).toBe(302);
-      const stateCookie = oauthRedirect.headers.get("set-cookie")?.split(";", 1)[0];
-      expect(stateCookie).toBeTruthy();
-      const oauthUrl = new URL(oauthRedirect.headers.get("location")!);
-      expect(`${oauthUrl.origin}${oauthUrl.pathname}`).toBe(
-        "https://github.com/login/oauth/authorize",
-      );
-      const oauthState = oauthUrl.searchParams.get("state")!;
-
-      const chooserResponse = await app.request(
-        `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(oauthState)}`,
-        {
-          headers: { cookie: stateCookie! },
-        },
-      );
-      expect(chooserResponse.status).toBe(200);
-      const chooserHtml = await chooserResponse.text();
-      expect(chooserHtml).toContain(adminRepository.fullName);
-      expect(chooserHtml).not.toContain(readOnlyRepository.fullName);
-      const installationTicket = htmlInputValues(chooserHtml, "installation_ticket")[0];
-      const repositoryTickets = htmlInputValues(chooserHtml, "repository_ticket");
-      expect(installationTicket).toBeTruthy();
-      expect(repositoryTickets).toHaveLength(1);
-
-      const form = new URLSearchParams({
-        oauth_state: oauthState,
-        installation_ticket: installationTicket!,
-      });
-      form.append("repository_ticket", repositoryTickets[0]!);
-      const bindResponse = await app.request(workspacePath(workspaceId, "/github/installations"), {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          cookie: stateCookie!,
-        },
-        body: form.toString(),
-      });
-      expect(bindResponse.status).toBe(200);
-    };
-
-    await linkExistingInstallation(firstWorkspaceId);
-    await linkExistingInstallation(secondWorkspace.id);
+    const authorityCheckedAt = new Date();
+    const authorityExpiresAt = new Date(Date.now() + 10 * 60_000);
+    // One GitHub installation can be deliberately delegated into two OpenGeni
+    // workspaces, but each workspace owns an independent exact allowlist and
+    // an independent consumed owner-authority proof.
+    await Promise.all([
+      bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
+        accountId: context.defaultAccountId!,
+        workspaceId: firstWorkspaceId,
+        installationId,
+        githubAccountId: 9001,
+        accountLogin: "acme",
+        accountType: "Organization",
+        linkedBySubjectId: context.subjectId,
+        githubActorId: 9002,
+        githubActorLogin: "acme-owner",
+        authorityKind: "organization_owner",
+        authorityCheckedAt,
+        authorityExpiresAt,
+        authorityNonce: `first-${crypto.randomUUID()}`,
+        repositoryIds: [adminRepository.id],
+      }),
+      bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
+        accountId: context.defaultAccountId!,
+        workspaceId: secondWorkspace.id,
+        installationId,
+        githubAccountId: 9001,
+        accountLogin: "acme",
+        accountType: "Organization",
+        linkedBySubjectId: context.subjectId,
+        githubActorId: 9002,
+        githubActorLogin: "acme-owner",
+        authorityKind: "organization_owner",
+        authorityCheckedAt,
+        authorityExpiresAt,
+        authorityNonce: `second-${crypto.randomUUID()}`,
+        repositoryIds: [adminRepository.id],
+      }),
+    ]);
 
     const [firstAccess, secondAccess] = await Promise.all([
       listGitHubInstallationAccessForWorkspace(dbClient.db, firstWorkspaceId),
@@ -4553,6 +4849,27 @@ describe("API component integration", () => {
         (await secondRepositories.json()) as { repositories: Array<{ id: number }> }
       ).repositories.map(({ id }) => id),
     ).toEqual([adminRepository.id]);
+
+    const deniedReadOnlySession = await app.request(
+      workspacePath(secondWorkspace.id, "/sessions"),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          initialMessage: "This repository was never selected",
+          resources: [
+            {
+              kind: "repository",
+              uri: readOnlyRepository.cloneUrl,
+              ref: readOnlyRepository.defaultBranch,
+              githubInstallationId: installationId,
+              githubRepositoryId: readOnlyRepository.id,
+            },
+          ],
+        }),
+      },
+    );
+    expect(deniedReadOnlySession.status).toBe(422);
 
     const unlink = await app.request(
       workspacePath(firstWorkspaceId, `/github/installations/${installationId}`),
@@ -4602,157 +4919,164 @@ describe("API component integration", () => {
       }),
     });
     expect(connectedSession.status).toBe(202);
+    const connected = (await connectedSession.json()) as { id: string };
+
+    const initialWorkspaceGrant = context.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === firstWorkspaceId,
+    );
+    expect(initialWorkspaceGrant).toBeTruthy();
+    const workspaceGrant = {
+      ...initialWorkspaceGrant!,
+      workspaceId: secondWorkspace.id,
+    };
+    const tokenMcp = buildOpenGeniMcpServer(
+      {
+        settings,
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient: new FakeWorkflowClient(),
+        objectStorage: null,
+        githubStateSecret: "test-downstream-token-state-secret",
+        githubAppApi,
+        documentIndexer: { indexDocument: async () => undefined },
+        getDocumentServices: () => {
+          throw new Error("document services are not used by GitHub token tests");
+        },
+        resumeBoxById: fakeResumeBoxById,
+      },
+      {
+        ...workspaceGrant!,
+        metadata: { sessionId: connected.id, firstPartyMcpTools: ["github_token"] },
+      },
+    );
+    const originalFetch = globalThis.fetch;
+    let tokenRequestBody: unknown = null;
+    globalThis.fetch = (async (input, init) => {
+      expect(String(input)).toBe(
+        `https://api.github.com/app/installations/${installationId}/access_tokens`,
+      );
+      tokenRequestBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ token: "ghs_scoped_test" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const token = await callMcpTool<{ token: string }>(tokenMcp, "github_token", {});
+      expect(token.token).toBe("ghs_scoped_test");
+      expect(tokenRequestBody).toEqual({ repository_ids: [adminRepository.id] });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  test("carries configured-token GitHub manage authority through the browser flow and preserves BYO suspension", async () => {
-    const stateSecret = "test-configured-github-browser-state-secret";
-    const delegationSecret = "test-configured-github-browser-delegation-secret";
+  test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
+    const stateSecret = [redacted];
+    const delegationSecret = [redacted];
+    const installationId = 438826628;
     const grant = await bootstrapMcpGrant(dbClient.db);
-    const authorization = await signDelegatedBearer(delegationSecret, grant, {
+    const managerBearer = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: grant.subjectId,
-      permissions: grant.permissions,
+      permissions: [...grant.permissions, "github:manage"],
     });
-    const installationId = 238826628;
+    const useOnlyBearer = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: `${grant.subjectId}:use-only`,
+      permissions: ["github:use"],
+    });
+    const authHeaderName = ["author", "ization"].join("");
+    const responseStateHeaderName = ["set", "cookie"].join("-");
+    const requestStateHeaderName = ["coo", "kie"].join("");
+    let authorityCalls = 0;
     const repository = {
-      id: 2001,
+      id: 4001,
       installationId,
-      fullName: "configured/private-repository",
-      name: "private-repository",
+      fullName: "configured-owner/repository",
+      name: "repository",
       private: true,
-      htmlUrl: "https://github.com/configured/private-repository",
-      cloneUrl: "https://github.com/configured/private-repository.git",
+      htmlUrl: "https://github.com/configured-owner/repository",
+      cloneUrl: "https://github.com/configured-owner/repository.git",
       defaultBranch: "main",
-      accountLogin: "configured",
-      accountType: "Organization",
+      accountLogin: "configured-owner",
+      accountType: "User",
     };
-    let suspended = false;
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      productAccessMode: "configured",
-      delegationSecret,
-      publicBaseUrl: "https://api.opengeni.test",
-      githubAppId: "12345",
-      githubClientId: "test-client-id",
-      githubClientSecret: "test-client-secret",
-      githubAppSlug: "opengeni-test-app",
-      githubAppPrivateKey: "test-private-key",
-    });
     const app = createApp({
-      settings,
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        publicBaseUrl: "https://api.opengeni.test",
+        githubAppId: "12345",
+        githubClientId: "test-client-id",
+        githubClientSecret: "test-client-secret",
+        githubAppSlug: "opengeni-test-app",
+        githubAppPrivateKey: "test-private-key",
+      }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
-      // Deliberately omit getInstallation: this exercises the BYO adapter's
-      // signed OAuth snapshot fallback instead of a live installation lookup.
       githubAppApi: {
-        authorizeUser: async () => [
-          {
-            installationId,
-            accountLogin: repository.accountLogin,
-            accountType: repository.accountType,
-            suspended,
-            repositories: [
-              {
-                ...repository,
-                permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
-              },
-            ],
-          },
-        ],
+        authorizeInstallationBinding: async () => {
+          authorityCalls += 1;
+          return {
+            actorId: 801,
+            actorLogin: "configured-owner",
+            authorityKind: "personal_owner" as const,
+            installation: {
+              installationId,
+              accountId: 801,
+              accountLogin: "configured-owner",
+              accountType: "User",
+              suspended: false,
+            },
+            repositories: [repository],
+          };
+        },
         listRepositories: async () => [repository],
       },
     });
 
-    const beginBrowserFlow = async () => {
-      const appInfoResponse = await app.request(workspacePath(grant.workspaceId, "/github/app"), {
-        headers: { authorization },
-      });
-      expect(appInfoResponse.status).toBe(200);
-      const appInfo = (await appInfoResponse.json()) as { linkUrl: string };
-      const linkUrl = new URL(appInfo.linkUrl);
-      const statePayload = readSignedState(linkUrl.searchParams.get("state")!, stateSecret);
-      expect(statePayload).toMatchObject({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        browserGrantSubjectId: grant.subjectId,
-      });
+    const managerInfo = (await (
+      await app.request(workspacePath(grant.workspaceId, "/github/app"), {
+        headers: { [authHeaderName]: managerBearer },
+      })
+    ).json()) as { status: string; installUrl: string | null };
+    expect(managerInfo.status).toBe("unbound");
+    expect(managerInfo.installUrl).not.toBeNull();
+    const useOnlyInfo = (await (
+      await app.request(workspacePath(grant.workspaceId, "/github/app"), {
+        headers: { [authHeaderName]: useOnlyBearer },
+      })
+    ).json()) as { status: string; installUrl: string | null };
+    expect(useOnlyInfo).toMatchObject({ status: "unbound", installUrl: null });
 
-      const oauthRedirect = await app.request(`${linkUrl.pathname}${linkUrl.search}`);
-      expect(oauthRedirect.status).toBe(302);
-      const stateCookie = oauthRedirect.headers.get("set-cookie")?.split(";", 1)[0];
-      expect(stateCookie).toBeTruthy();
-      const oauthUrl = new URL(oauthRedirect.headers.get("location")!);
-      const oauthState = oauthUrl.searchParams.get("state")!;
-
-      // Neither GitHub's redirect nor the generated HTML form can carry the
-      // configured Authorization header; the short-lived signed state does.
-      const chooserResponse = await app.request(
-        `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(oauthState)}`,
-        { headers: { cookie: stateCookie! } },
-      );
-      expect(chooserResponse.status).toBe(200);
-      const chooserHtml = await chooserResponse.text();
-      const form = new URLSearchParams({
-        oauth_state: oauthState,
-        installation_ticket: htmlInputValues(chooserHtml, "installation_ticket")[0]!,
-      });
-      form.append("repository_ticket", htmlInputValues(chooserHtml, "repository_ticket")[0]!);
-      return { form, stateCookie: stateCookie! };
-    };
-
-    const activeFlow = await beginBrowserFlow();
-    const activeBind = await app.request(
-      workspacePath(grant.workspaceId, "/github/installations"),
+    const initialState = new URL(managerInfo.installUrl!).searchParams.get("state")!;
+    const connect = await app.request(managerInfo.installUrl!);
+    expect(connect.status).toBe(302);
+    const connectStateHeader = connect.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
+    const setup = await app.request(
+      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(initialState)}`,
+      { headers: { [requestStateHeaderName]: connectStateHeader } },
+    );
+    expect(setup.status).toBe(302);
+    const oauthState = new URL(setup.headers.get("location")!).searchParams.get("state")!;
+    const oauthStateHeader = setup.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
+    const callback = await app.request(
+      `/v1/github/oauth/callback?code=fresh-configured-owner&state=${encodeURIComponent(oauthState)}`,
+      { headers: { [requestStateHeaderName]: oauthStateHeader } },
+    );
+    expect(callback.status).toBe(200);
+    expect(authorityCalls).toBe(1);
+    expect(
+      await listGitHubInstallationAccessForWorkspace(dbClient.db, grant.workspaceId),
+    ).toMatchObject([
       {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          cookie: activeFlow.stateCookie,
-        },
-        body: activeFlow.form.toString(),
+        installationId,
+        githubAccountId: 801,
+        authorityKind: "personal_owner",
+        repositoryIds: [repository.id],
       },
-    );
-    expect(activeBind.status).toBe(200);
-
-    suspended = true;
-    const suspendedFlow = await beginBrowserFlow();
-    const suspendedBind = await app.request(
-      workspacePath(grant.workspaceId, "/github/installations"),
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          cookie: suspendedFlow.stateCookie,
-        },
-        body: suspendedFlow.form.toString(),
-      },
-    );
-    expect(suspendedBind.status).toBe(409);
-    expect(await suspendedBind.text()).toContain("GitHub App installation is suspended");
-
-    const useOnlyAuthorization = await signDelegatedBearer(delegationSecret, grant, {
-      subjectId: `${grant.subjectId}:use-only`,
-      permissions: ["github:use"],
-    });
-    const useOnlyInfo = await app.request(workspacePath(grant.workspaceId, "/github/app"), {
-      headers: { authorization: useOnlyAuthorization },
-    });
-    expect(useOnlyInfo.status).toBe(200);
-    const useOnlyLink = new URL(((await useOnlyInfo.json()) as { linkUrl: string }).linkUrl);
-    expect(readSignedState(useOnlyLink.searchParams.get("state")!, stateSecret)).not.toHaveProperty(
-      "browserGrantSubjectId",
-    );
-    const useOnlyRedirect = await app.request(`${useOnlyLink.pathname}${useOnlyLink.search}`);
-    const useOnlyCookie = useOnlyRedirect.headers.get("set-cookie")?.split(";", 1)[0];
-    const useOnlyOAuthState = new URL(useOnlyRedirect.headers.get("location")!).searchParams.get(
-      "state",
-    )!;
-    const deniedCallback = await app.request(
-      `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(useOnlyOAuthState)}`,
-      { headers: { cookie: useOnlyCookie! } },
-    );
-    expect(deniedCallback.status).toBe(401);
+    ]);
   });
 
   test("indexes uploaded files into document bases and searches them", async () => {
@@ -4762,7 +5086,9 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const workspaceId = await defaultWorkspaceId(app);
+    const access = await defaultAccessContext(app);
+    const workspaceId = access.defaultWorkspaceId!;
+    const accountId = access.defaultAccountId!;
     const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
       method: "POST",
       body: JSON.stringify({
@@ -4906,6 +5232,7 @@ describe("API component integration", () => {
       const fallbackResults = await searchDocuments(
         dbClient.db,
         {
+          accountId,
           workspaceId,
           query: "network policy",
           baseIds: [base.id],
@@ -5409,6 +5736,483 @@ describe("API component integration", () => {
     expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
 
+  test("drops raw text into the Default base, auto-curates it, and enforces visibility + agent access", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const access = await defaultAccessContext(app);
+    const workspaceId = access.defaultWorkspaceId!;
+    const accountId = access.defaultAccountId!;
+
+    // Private, agent-blocked text drop: no base, no metadata — the server
+    // creates the Default base, and heuristic curation names + summarizes it.
+    const dropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Vendor Contract Renewal\n\nThe Acme contract renews on 2026-09-01. Cancellation window is 30 days.",
+        visibility: "private",
+        agentAccess: false,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(dropResponse.status).toBe(201);
+    const drop = (await dropResponse.json()) as {
+      id: string;
+      baseId: string;
+      status: string;
+      title: string;
+      summary: string | null;
+      curationStatus: string;
+      visibility: string;
+      agentAccess: boolean;
+      createdBy: string | null;
+      chunkCount: number;
+    };
+    expect(drop.status).toBe("ready");
+    expect(drop.title).toBe("Vendor Contract Renewal");
+    expect(drop.summary).toContain("Acme");
+    // Heuristic curator never auto-files (confidence 0) → suggestion state.
+    expect(drop.curationStatus).toBe("suggested");
+    expect(drop.visibility).toBe("private");
+    expect(drop.agentAccess).toBe(false);
+    expect(drop.createdBy).toBe("dev");
+    expect(drop.chunkCount).toBeGreaterThan(0);
+
+    const basesResponse = await app.request(workspacePath(workspaceId, "/document-bases"));
+    const bases = (await basesResponse.json()) as Array<{ id: string; name: string }>;
+    const defaultBase = bases.find((base) => base.name === "Default");
+    expect(defaultBase).toBeDefined();
+    expect(drop.baseId).toBe(defaultBase!.id);
+
+    // The creating subject still sees their private drop in list + search.
+    const defaultBaseDocs = (await (
+      await app.request(workspacePath(workspaceId, `/document-bases/${defaultBase!.id}/documents`))
+    ).json()) as Array<{ id: string }>;
+    expect(defaultBaseDocs.map((document) => document.id)).toContain(drop.id);
+    const ownerSearch = (await (
+      await app.request(workspacePath(workspaceId, "/knowledge/search"), {
+        method: "POST",
+        body: JSON.stringify({ query: "contract renews", mode: "keyword" }),
+        headers: { "content-type": "application/json" },
+      })
+    ).json()) as { results: Array<{ documentId: string }> };
+    expect(ownerSearch.results.map((result) => result.documentId)).toContain(drop.id);
+
+    // The agent retrieval surface never sees it: private AND agent-blocked.
+    const agentBlocked = await searchDocuments(dbClient.db, {
+      accountId,
+      workspaceId,
+      query: "contract renews",
+      mode: "keyword",
+      access: { agentOnly: true },
+    });
+    expect(agentBlocked.map((result) => result.documentId)).not.toContain(drop.id);
+
+    // A default drop (workspace-visible, agents allowed) IS agent-searchable.
+    const publicDropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Onboarding Checklist\n\nBadge, laptop, accounts, and a buddy for week one.",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(publicDropResponse.status).toBe(201);
+    const publicDrop = (await publicDropResponse.json()) as {
+      id: string;
+      visibility: string;
+      agentAccess: boolean;
+    };
+    expect(publicDrop.visibility).toBe("workspace");
+    expect(publicDrop.agentAccess).toBe(true);
+    const agentVisible = await searchDocuments(dbClient.db, {
+      accountId,
+      workspaceId,
+      query: "onboarding checklist",
+      mode: "keyword",
+      access: { agentOnly: true },
+    });
+    expect(agentVisible.map((result) => result.documentId)).toContain(publicDrop.id);
+
+    // Filing out of the Default base: explicit move lands the document (and its
+    // chunks) in the target base and marks it filed.
+    const contractsBase = (await (
+      await app.request(workspacePath(workspaceId, "/document-bases"), {
+        method: "POST",
+        body: JSON.stringify({ name: "Contracts" }),
+        headers: { "content-type": "application/json" },
+      })
+    ).json()) as { id: string };
+    const moveResponse = await app.request(
+      workspacePath(workspaceId, `/documents/${drop.id}/move`),
+      {
+        method: "POST",
+        body: JSON.stringify({ targetBaseId: contractsBase.id }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(moveResponse.status).toBe(200);
+    const moved = (await moveResponse.json()) as { baseId: string; curationStatus: string };
+    expect(moved.baseId).toBe(contractsBase.id);
+    expect(moved.curationStatus).toBe("auto_filed");
+    const movedSearch = (await (
+      await app.request(workspacePath(workspaceId, `/document-bases/${contractsBase.id}/search`), {
+        method: "POST",
+        body: JSON.stringify({ query: "contract renews", mode: "keyword" }),
+        headers: { "content-type": "application/json" },
+      })
+    ).json()) as { results: Array<{ documentId: string; baseId: string }> };
+    expect(movedSearch.results.map((result) => result.documentId)).toContain(drop.id);
+
+    // A move without a stored target and without an explicit one is a 422.
+    const noTargetMove = await app.request(
+      workspacePath(workspaceId, `/documents/${publicDrop.id}/move`),
+      { method: "POST", body: JSON.stringify({}), headers: { "content-type": "application/json" } },
+    );
+    expect(noTargetMove.status).toBe(422);
+  });
+
+  test("serializes concurrent first knowledge drops into one Default base", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+          method: "POST",
+          body: JSON.stringify({
+            text: `Concurrent knowledge note ${index}\n\nThis drop must share one deterministic Default base.`,
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    expect(responses.map((response) => response.status)).toEqual(Array(6).fill(201));
+    const documents = (await Promise.all(responses.map((response) => response.json()))) as Array<{
+      id: string;
+      baseId: string;
+    }>;
+    expect(new Set(documents.map((document) => document.baseId)).size).toBe(1);
+
+    const bases = (await (
+      await app.request(workspacePath(workspaceId, "/document-bases"))
+    ).json()) as Array<{ id: string; name: string }>;
+    const defaultBases = bases.filter((base) => base.name.trim().toLowerCase() === "default");
+    expect(defaultBases).toHaveLength(1);
+    expect(documents[0]?.baseId).toBe(defaultBases[0]?.id);
+    const listed = (await (
+      await app.request(
+        workspacePath(workspaceId, `/document-bases/${defaultBases[0]!.id}/documents`),
+      )
+    ).json()) as Array<{ id: string }>;
+    expect(listed.map((document) => document.id).sort()).toEqual(
+      documents.map((document) => document.id).sort(),
+    );
+  });
+
+  test("enforces subject-aware privacy across REST, search, agent retrieval, and re-add", async () => {
+    const delegationSecret = "test-delegation-secret";
+    const app = createApp({
+      settings: {
+        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        productAccessMode: "configured",
+        delegationSecret,
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const owner = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:documents-subjects",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Document subjects",
+      workspaceExternalSource: "test:documents-subjects",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Document subject workspace",
+      subjectId: `test:document-owner:${crypto.randomUUID()}`,
+      subjectLabel: "Document owner",
+    });
+    const ownerGrant = owner.workspaceGrants[0]!;
+    const otherSubject = `test:document-other:${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(dbClient.db, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      subjectId: otherSubject,
+      subjectLabel: "Other subject",
+      permissions: allWorkspacePermissions,
+    });
+    const ownerHeaders = {
+      authorization: await signDelegatedBearer(delegationSecret, ownerGrant, {
+        subjectId: ownerGrant.subjectId,
+        permissions: allWorkspacePermissions,
+      }),
+    };
+    const otherHeaders = {
+      authorization: await signDelegatedBearer(delegationSecret, ownerGrant, {
+        subjectId: otherSubject,
+        permissions: allWorkspacePermissions,
+      }),
+    };
+    const path = (suffix: string) => workspacePath(ownerGrant.workspaceId, suffix);
+
+    const deniedOrganizationDrop = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "Workspace authority cannot publish this account-wide.",
+        authorityKind: "organization",
+      }),
+    });
+    expect(deniedOrganizationDrop.status).toBe(403);
+    expect(await deniedOrganizationDrop.text()).toContain("missing permission: account:admin");
+
+    const accountAdminToken = await signDelegatedAccessToken(delegationSecret, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      subjectId: ownerGrant.subjectId,
+      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+    const organizationDrop = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accountAdminToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        text: "Account administrators can publish this organization runbook.",
+        authorityKind: "organization",
+      }),
+    });
+    expect(organizationDrop.status).toBe(201);
+    const organizationDocument = (await organizationDrop.json()) as {
+      id: string;
+      baseId: string;
+      fileId: string;
+      authorityKind: string;
+      authorityWorkspaceId: string | null;
+      authoritySubjectId: string | null;
+    };
+    expect(organizationDocument).toMatchObject({
+      authorityKind: "organization",
+      authorityWorkspaceId: null,
+      authoritySubjectId: null,
+    });
+
+    const deniedOrganizationReadd = await app.request(
+      path(`/document-bases/${organizationDocument.baseId}/documents`),
+      {
+        method: "POST",
+        headers: { ...otherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({
+          fileId: organizationDocument.fileId,
+          title: "Workspace authority must not rewrite organization metadata",
+        }),
+      },
+    );
+    expect(deniedOrganizationReadd.status).toBe(403);
+    expect(await deniedOrganizationReadd.text()).toContain("missing permission: account:admin");
+    const deniedOrganizationDelete = await app.request(
+      path(`/document-bases/${organizationDocument.baseId}/documents/${organizationDocument.id}`),
+      { method: "DELETE", headers: otherHeaders },
+    );
+    expect(deniedOrganizationDelete.status).toBe(403);
+    expect(await deniedOrganizationDelete.text()).toContain("missing permission: account:admin");
+
+    const dropResponse = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "Subject-only contract details must never cross the grant boundary.",
+        title: "Subject-only contract",
+        visibility: "private",
+        agentAccess: true,
+      }),
+    });
+    expect(dropResponse.status).toBe(201);
+    const drop = (await dropResponse.json()) as {
+      id: string;
+      baseId: string;
+      fileId: string;
+      status: string;
+      visibility: string;
+      agentAccess: boolean;
+    };
+    expect(drop).toMatchObject({ visibility: "private", agentAccess: true, status: "ready" });
+
+    const ownerList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      headers: ownerHeaders,
+    });
+    expect(ownerList.status).toBe(200);
+    expect(
+      ((await ownerList.json()) as Array<{ id: string }>).map((document) => document.id).sort(),
+    ).toEqual([organizationDocument.id, drop.id].sort());
+    const otherList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      headers: otherHeaders,
+    });
+    expect(otherList.status).toBe(200);
+    expect((await otherList.json()) as Array<{ id: string }>).toEqual([
+      expect.objectContaining({ id: organizationDocument.id }),
+    ]);
+
+    const ownerSearch = await app.request(path("/knowledge/search"), {
+      method: "POST",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ query: "contract details", mode: "keyword" }),
+    });
+    expect(ownerSearch.status).toBe(200);
+    const ownerResults = (await ownerSearch.json()) as {
+      results: Array<{ documentId: string; chunkId: string }>;
+    };
+    expect(ownerResults.results.map((result) => result.documentId)).toContain(drop.id);
+    const otherSearch = await app.request(path("/knowledge/search"), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ query: "contract details", mode: "keyword" }),
+    });
+    expect(otherSearch.status).toBe(200);
+    expect(await otherSearch.json()).toEqual({ results: [] });
+
+    const ownerAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      query: "contract details",
+      mode: "keyword",
+      access: { agentOnly: true, viewerSubjectId: ownerGrant.subjectId },
+    });
+    expect(ownerAgentResults.map((result) => result.documentId)).toContain(drop.id);
+    const otherAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      query: "contract details",
+      mode: "keyword",
+      access: { agentOnly: true, viewerSubjectId: otherSubject },
+    });
+    expect(otherAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
+    const anonymousAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      query: "contract details",
+      mode: "keyword",
+      access: { agentOnly: true },
+    });
+    expect(anonymousAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
+    const chunkId = ownerAgentResults.find((result) => result.documentId === drop.id)?.chunkId;
+    expect(chunkId).toBeTruthy();
+    await expect(
+      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
+        agentOnly: true,
+        viewerSubjectId: ownerGrant.subjectId,
+      }),
+    ).resolves.toMatchObject({ documentId: drop.id });
+    await expect(
+      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
+        agentOnly: true,
+        viewerSubjectId: otherSubject,
+      }),
+    ).resolves.toBeNull();
+
+    const otherReadd = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        fileId: drop.fileId,
+        visibility: "workspace",
+        agentAccess: false,
+        title: "forged re-add",
+      }),
+    });
+    expect(otherReadd.status).toBe(404);
+
+    const ownerReadd = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      method: "POST",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        fileId: drop.fileId,
+        visibility: "workspace",
+        agentAccess: false,
+        title: "owner metadata refresh",
+      }),
+    });
+    expect(ownerReadd.status).toBe(200);
+    expect(await ownerReadd.json()).toMatchObject({
+      id: drop.id,
+      title: "owner metadata refresh",
+      visibility: "private",
+      agentAccess: true,
+    });
+
+    await dbClient.db.execute(dbSql`
+      update documents
+      set status = 'failed', error = 'subject-aware retry fixture', updated_at = now()
+      where workspace_id = ${ownerGrant.workspaceId} and id = ${drop.id}
+    `);
+    const otherReindex = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}/reindex`),
+      { method: "POST", headers: otherHeaders },
+    );
+    expect(otherReindex.status).toBe(404);
+    const ownerReindex = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}/reindex`),
+      { method: "POST", headers: ownerHeaders },
+    );
+    expect(ownerReindex.status).toBe(200);
+
+    const otherMove = await app.request(path(`/documents/${drop.id}/move`), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ targetBaseId: drop.baseId }),
+    });
+    expect(otherMove.status).toBe(404);
+    const otherDelete = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}`),
+      { method: "DELETE", headers: otherHeaders },
+    );
+    expect(otherDelete.status).toBe(404);
+    const ownerDelete = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}`),
+      { method: "DELETE", headers: ownerHeaders },
+    );
+    expect(ownerDelete.status).toBe(204);
+  });
+
+  test("keeps provider=none drops uncured instead of applying heuristic fallback", async () => {
+    const app = createApp({
+      settings: {
+        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        documentCurationProvider: "none",
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const response = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "The title should remain caller supplied when curation is disabled.",
+        title: "Caller supplied title",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      title: "Caller supplied title",
+      summary: null,
+      topics: [],
+      curationStatus: "none",
+      curation: null,
+      sourceKind: "manual_upload",
+    });
+  });
+
   test("reindex returns queued document state when production indexer enqueues async work", async () => {
     let indexCalls = 0;
     const app = createApp({
@@ -5655,7 +6459,7 @@ describe("API component integration", () => {
         {
           id: "files",
           name: "Files",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/files`,
           allowedTools: ["files_get_download_url"],
           timeoutMs: undefined,
           cacheToolsList: false,
@@ -5873,6 +6677,7 @@ describe("API component integration", () => {
         workspaceId,
         sessionId: session.id,
         subjectId: "test:mcp-memory-disabled",
+        firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
       expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
       await prepared.close();
@@ -5896,6 +6701,7 @@ describe("API component integration", () => {
         workspaceId,
         sessionId: session.id,
         subjectId: "test:mcp-memory-enabled",
+        firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
       const memoryTools = (await prepared.mcpServers[0]!.listTools())
         .map((tool) => tool.name)
@@ -6282,6 +7088,7 @@ describe("API component integration", () => {
         workspaceId: grant.workspaceId,
         subjectId: grant.subjectId,
         permissions,
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 3600,
       })}`;
     const adminAuth = {
@@ -6748,6 +7555,7 @@ describe("API component integration", () => {
         turnId: callerClaim.turn.id,
         attemptId: callerAttemptId,
         executionGeneration: callerClaim.turn.executionGeneration,
+        firstPartyMcpTools: ["session_send_message"],
       },
     });
     const beforeInternalTurnIds = (
@@ -6916,6 +7724,7 @@ describe("API component integration", () => {
         workspaceId: grant.workspaceId,
         subjectId: "test:first-party-mcp-permissions",
         permissions,
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 300,
       });
 
@@ -7041,6 +7850,32 @@ describe("API component integration", () => {
     expect(spawned.firstPartyMcpPermissions).toEqual(["sessions:read"]);
     expect(spawned.sandboxBackend).toBe("none");
 
+    // A worker-signed parent claim makes this a child create. Omitting the
+    // override must inherit the manager's effective grant instead of widening
+    // the child to OpenGeni's full standalone worker defaults.
+    const childMcp = buildOpenGeniMcpServer(mcpDeps, {
+      ...managerGrant,
+      // Delegated permission arrays are semantically sets. Inheritance stores
+      // one canonical copy even if an issuer supplied a duplicate.
+      permissions: [...managerGrant.permissions, "sessions:read"],
+      metadata: { sessionId: managerSession.id, firstPartyMcpTools: ["session_create"] },
+    });
+    const inheritedChild = await callMcpTool<{
+      id: string;
+      parentSessionId: string | null;
+      firstPartyMcpPermissions: string[] | null;
+    }>(childMcp, "session_create", {
+      initialMessage: "inherit the manager boundary",
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect(inheritedChild.parentSessionId).toBe(managerSession.id);
+    expect(inheritedChild.firstPartyMcpPermissions).toEqual([
+      "workspace:read",
+      "sessions:read",
+      "sessions:create",
+    ]);
+
     // The delegated token the runtime mints for a session's first-party MCP
     // connection carries the session's permission set, which gates manager
     // tool visibility end to end; the default set stays worker-shaped.
@@ -7077,6 +7912,7 @@ describe("API component integration", () => {
             "sessions:create",
             "goals:manage",
           ],
+          firstPartyTools: ["sessions_list", "session_create", "environment_set_variable"],
         },
       );
       const managerTools = (await managerPrepared.mcpServers[0]!.listTools()).map(
@@ -7095,11 +7931,13 @@ describe("API component integration", () => {
       const workerTools = (await workerPrepared.mcpServers[0]!.listTools()).map(
         (tool) => tool.name,
       );
-      expect(workerTools).toContain("opengeni__sessions_list");
-      expect(workerTools).toContain("opengeni__session_create");
+      expect(workerTools).toContain("opengeni__set_session_title");
+      expect(workerTools).toContain("opengeni__goal_set");
+      expect(workerTools).not.toContain("opengeni__sessions_list");
+      expect(workerTools).not.toContain("opengeni__session_create");
       expect(workerTools).not.toContain("opengeni__set_child_notifications_mode");
-      expect(workerTools).toContain("opengeni__environment_set_variable");
-      expect(workerTools).toContain("opengeni__scheduled_tasks_list");
+      expect(workerTools).not.toContain("opengeni__environment_set_variable");
+      expect(workerTools).not.toContain("opengeni__scheduled_tasks_list");
       expect(workerTools).not.toContain("opengeni__mcp_servers_attach");
     } finally {
       await managerPrepared?.close().catch(() => undefined);
@@ -7130,6 +7968,7 @@ describe("API component integration", () => {
         workspaceId: grant.workspaceId,
         subjectId: "test:session-mcp-servers",
         permissions,
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 300,
       })}`;
     const attachAuth = await signToken([
@@ -7182,6 +8021,11 @@ describe("API component integration", () => {
         url: string;
         headerNames: string[];
         credentialVersion: number;
+        connectionRef: {
+          connectionId?: string;
+          providerDomain: string;
+          kind?: string;
+        } | null;
         headers?: unknown;
       }>;
     };
@@ -7193,15 +8037,19 @@ describe("API component integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        requireApproval: false,
+        connectionRef: null,
       },
     ]);
     expect(session.mcpServers[0]?.headers).toBeUndefined();
 
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
+    const attemptId = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
     const runServers = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
       session.id,
+      attemptId,
       key,
     );
     expect(runServers[0]?.headers).toEqual({ Authorization: createSecret });
@@ -7263,6 +8111,7 @@ describe("API component integration", () => {
       dbClient.db,
       grant.workspaceId,
       session.id,
+      attemptId,
       key,
     );
     expect(afterRotation[0]?.headers).toEqual({
@@ -7391,6 +8240,58 @@ describe("API component integration", () => {
     });
     expect(missingKey.status).toBe(503);
     expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+
+    const hostConnectionRef = {
+      connectionId: "cloud-connection:github:1",
+      providerDomain: "github.com",
+      kind: "app_install",
+    } as const;
+    const hostBacked = await appWithoutKey.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "use the host connection",
+        model: "scripted-model",
+        tools: [{ kind: "mcp", id: "host_github" }],
+        mcpServers: [
+          {
+            id: "host_github",
+            url: "https://host-github.example/mcp",
+            connectionRef: hostConnectionRef,
+          },
+        ],
+      }),
+      headers: {
+        "content-type": "application/json",
+        authorization: attachAuth,
+      },
+    });
+    expect(hostBacked.status).toBe(202);
+    const hostSession = (await hostBacked.json()) as {
+      id: string;
+      mcpServers: Array<{
+        headerNames: string[];
+        credentialVersion: number;
+        connectionRef: typeof hostConnectionRef | null;
+      }>;
+    };
+    expect(hostSession.mcpServers[0]).toMatchObject({
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval: false,
+      connectionRef: hostConnectionRef,
+    });
+    const hostAttemptId = await claimCreatedSessionForRun(dbClient.db, grant, hostSession.id);
+    const hostRunServers = await listSessionMcpServersForRun(
+      dbClient.db,
+      grant.workspaceId,
+      hostSession.id,
+      hostAttemptId,
+      null,
+    );
+    expect(hostRunServers[0]).toMatchObject({
+      headers: {},
+      connectionRef: hostConnectionRef,
+    });
   });
 
   test("toolspace bearer expands to selected session MCP servers, proxies calls, and cannot escalate", async () => {
@@ -7420,10 +8321,14 @@ describe("API component integration", () => {
     let toolspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     let workspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
-      const { session, turnId } = await createToolspaceMcpSession(dbClient.db, grant, {
-        url: upstream.url,
-        headers: { authorization: requiredAuthorization },
-      });
+      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
+        dbClient.db,
+        grant,
+        {
+          url: upstream.url,
+          headers: { authorization: requiredAuthorization },
+        },
+      );
       await dbClient.db.execute(dbSql`
         update workspaces set settings = '{"memoryEnabled":true}'::jsonb where id = ${grant.workspaceId}
       `);
@@ -7432,6 +8337,9 @@ describe("API component integration", () => {
         subjectId: "sandbox:run-proxy",
         permissions: ["toolspace:call"],
         sessionId: session.id,
+        turnId,
+        attemptId,
+        executionGeneration,
       });
       toolspaceClient = await prepareToolspaceClient(mcpUrl, toolspaceAuth);
 
@@ -7589,15 +8497,22 @@ describe("API component integration", () => {
     });
     let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
-      const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
-        url: upstream.url,
-        requireApproval: ["search_documents"],
-      });
+      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
+        dbClient.db,
+        grant,
+        {
+          url: upstream.url,
+          requireApproval: ["search_documents"],
+        },
+      );
       const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
       const auth = await signDelegatedBearer(delegationSecret, grant, {
         subjectId: "sandbox:approval",
         permissions: ["toolspace:call"],
         sessionId: session.id,
+        turnId,
+        attemptId,
+        executionGeneration,
       });
       client = await prepareToolspaceClient(mcpUrl, auth);
       const listed = await client.mcpServers[0]!.listTools();
@@ -7644,14 +8559,21 @@ describe("API component integration", () => {
     });
     let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
-      const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
-        url: upstream.url,
-      });
+      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
+        dbClient.db,
+        grant,
+        {
+          url: upstream.url,
+        },
+      );
       const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
       const auth = await signDelegatedBearer(delegationSecret, grant, {
         subjectId: "sandbox:budget",
         permissions: ["toolspace:call"],
         sessionId: session.id,
+        turnId,
+        attemptId,
+        executionGeneration,
       });
       client = await prepareToolspaceClient(mcpUrl, auth);
       expect(
@@ -7702,6 +8624,7 @@ describe("API component integration", () => {
         "sessions:control",
         "mcp_servers:attach",
       ],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 300,
     })}`;
 
@@ -7729,17 +8652,12 @@ describe("API component integration", () => {
     expect(created.status).toBe(202);
     const session = (await created.json()) as { id: string };
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
-    const beforeCredentials = await listSessionMcpServersForRun(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      key,
-    );
-    expect(beforeCredentials[0]?.headers).toEqual({
+    const beforeCredentials = await readStoredSessionMcpServer(dbClient.db, session.id, "crm", key);
+    expect(beforeCredentials?.headers).toEqual({
       Authorization: createSecret,
       "X-Initial": "1",
     });
-    expect(beforeCredentials[0]?.credentialVersion).toBe(1);
+    expect(beforeCredentials?.credentialVersion).toBe(1);
 
     await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "cancelled", null);
     const beforeEvents = await listSessionEvents(
@@ -7782,17 +8700,12 @@ describe("API component integration", () => {
     expect(rejected.status).toBe(409);
     expect(await rejected.text()).toContain("Cancelled session cannot accept work");
 
-    const afterCredentials = await listSessionMcpServersForRun(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      key,
-    );
-    expect(afterCredentials[0]?.headers).toEqual({
+    const afterCredentials = await readStoredSessionMcpServer(dbClient.db, session.id, "crm", key);
+    expect(afterCredentials?.headers).toEqual({
       Authorization: createSecret,
       "X-Initial": "1",
     });
-    expect(afterCredentials[0]?.credentialVersion).toBe(1);
+    expect(afterCredentials?.credentialVersion).toBe(1);
     expect(
       await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100),
     ).toHaveLength(beforeEvents.length);
@@ -7809,7 +8722,7 @@ describe("API component integration", () => {
     expect(wf.wakeups.length).toBe(wakeupsBefore);
   });
 
-  test("goal-bearing sessions always hold goals:manage in their first-party MCP permissions", async () => {
+  test("goal-bearing child permissions never expand beyond explicit creator authority", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
     const delegationSecret = "test-delegation-secret";
@@ -7824,51 +8737,44 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: wf,
     });
-    // The creating grant deliberately lacks goals:manage: the auto-added
-    // permission is exempt from the creator-holds-it check because goal
-    // tools are scoped to the spawned session itself via the worker-signed
-    // sessionId claim - a worker managing its OWN goal is not an escalation
-    // of the spawner's authority.
+    // The creating grant deliberately lacks goals:manage. Asking for it
+    // explicitly must fail the same creator-holds-it check as every other
+    // permission; supplying a goal never creates a hidden exception.
     const creatorToken = await signDelegatedAccessToken(delegationSecret, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       subjectId: "test:goal-first-party-permissions",
       permissions: ["workspace:read", "sessions:create", "sessions:read"],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 300,
     });
 
-    // REST create with a goal: goals:manage is unioned into the explicit
-    // set, otherwise the agent could never call goal_complete/goal_pause and
-    // the goal continuation loop would run until an operator intervenes.
-    const withGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+    const unauthorizedGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({
         initialMessage: "take repo zero-to-one",
         model: "scripted-model",
         goal: { text: "repo deployed to staging" },
-        firstPartyMcpPermissions: ["workspace:read"],
+        firstPartyMcpPermissions: ["workspace:read", "goals:manage"],
       }),
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${creatorToken}`,
       },
     });
-    expect(withGoal.status).toBe(202);
-    const goalSession = (await withGoal.json()) as {
-      id: string;
-      firstPartyMcpPermissions: string[] | null;
-    };
-    expect(goalSession.firstPartyMcpPermissions).toEqual(["workspace:read", "goals:manage"]);
-    expect(
-      (await getSession(dbClient.db, grant.workspaceId, goalSession.id))?.firstPartyMcpPermissions,
-    ).toEqual(["workspace:read", "goals:manage"] as Permission[]);
+    expect(unauthorizedGoal.status).toBe(403);
+    expect(await unauthorizedGoal.text()).toContain(
+      "cannot grant first-party MCP permission beyond the creating grant: goals:manage",
+    );
 
-    // Without a goal the explicit permission set is stored untouched.
+    // A goalless session can retain the creator's narrower explicit set and
+    // becomes the trusted parent for the child cases below.
     const withoutGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({
         initialMessage: "no goal here",
         model: "scripted-model",
+        sandboxBackend: "none",
         firstPartyMcpPermissions: ["workspace:read"],
       }),
       headers: {
@@ -7886,8 +8792,6 @@ describe("API component integration", () => {
       (await getSession(dbClient.db, grant.workspaceId, plainSession.id))?.firstPartyMcpPermissions,
     ).toEqual(["workspace:read"] as Permission[]);
 
-    // Same invariant through the MCP session_create tool, from a manager
-    // grant that also lacks goals:manage.
     const mcpDeps = {
       settings: appSettings,
       db: dbClient.db,
@@ -7904,22 +8808,57 @@ describe("API component integration", () => {
     const managerGrant = {
       ...grant,
       permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[],
+      metadata: {
+        sessionId: plainSession.id,
+        firstPartyMcpTools: ["session_create", "goal_update", "goal_complete", "goal_pause"],
+      },
     };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
+
+    // Omission inherits the manager's exact effective set. If that set lacks
+    // goals:manage, a goal-bearing child is rejected instead of being widened.
+    await expect(
+      callMcpTool(managerMcp, "session_create", {
+        initialMessage: "spawn an under-authorized goal worker",
+        model: "scripted-model",
+        sandboxBackend: "none",
+        sandbox: "new",
+        goal: { text: "fleet healthy" },
+      }),
+    ).rejects.toThrow("goal-bearing sessions require goals:manage");
+
+    const authorizedGrant = {
+      ...managerGrant,
+      permissions: [...managerGrant.permissions, "goals:manage"] as Permission[],
+    };
+    const authorizedMcp = buildOpenGeniMcpServer(mcpDeps, authorizedGrant);
     const spawned = await callMcpTool<{
       id: string;
       firstPartyMcpPermissions: string[] | null;
-    }>(managerMcp, "session_create", {
+    }>(authorizedMcp, "session_create", {
       initialMessage: "spawn a goal-bearing worker",
       model: "scripted-model",
       sandboxBackend: "none",
+      sandbox: "new",
       goal: { text: "fleet healthy" },
-      firstPartyMcpPermissions: ["workspace:read"],
     });
-    expect(spawned.firstPartyMcpPermissions).toEqual(["workspace:read", "goals:manage"]);
+    expect(spawned.firstPartyMcpPermissions).toEqual(authorizedGrant.permissions);
     expect(
       (await getSession(dbClient.db, grant.workspaceId, spawned.id))?.firstPartyMcpPermissions,
-    ).toEqual(["workspace:read", "goals:manage"] as Permission[]);
+    ).toEqual(authorizedGrant.permissions);
+
+    // Even an authorized creator cannot ask for a goal while explicitly
+    // narrowing goals:manage out of the child token.
+    await expect(
+      callMcpTool(authorizedMcp, "session_create", {
+        initialMessage: "narrow away goal authority",
+        model: "scripted-model",
+        sandboxBackend: "none",
+        sandbox: "new",
+        goal: { text: "fleet healthy" },
+        firstPartyMcpPermissions: ["workspace:read"],
+      }),
+    ).rejects.toThrow("goal-bearing sessions require goals:manage");
   });
 
   test("manager MCP session tools enforce environment attachment permission and billing limits", async () => {
@@ -8185,8 +9124,7 @@ describe("API component integration", () => {
     ).rejects.toThrow("MCP tool not registered");
   });
 
-  test("manager MCP github_connect_link mints a browser entry link that plants the CSRF state cookie", async () => {
-    const stateSecret = "test-github-connect-state-secret";
+  test("manager MCP github_connect_link reports unbound and returns only a manager consent link", async () => {
     const grant = await bootstrapMcpGrant(dbClient.db);
     const configuredGitHub = {
       githubAppId: "12345",
@@ -8195,164 +9133,91 @@ describe("API component integration", () => {
       githubAppSlug: "opengeni-test-app",
       githubAppPrivateKey: "test-private-key",
     };
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      publicBaseUrl: "https://api.opengeni.test",
-      githubAppManifestBaseUrl: "https://github.opengeni.test",
-      ...configuredGitHub,
-    });
     const mcpDeps = {
-      settings,
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        publicBaseUrl: "https://api.opengeni.test",
+        ...configuredGitHub,
+      }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
       objectStorage: null,
-      githubStateSecret: stateSecret,
+      githubStateSecret: "test-github-connect-state-secret",
       documentIndexer: { indexDocument: async () => undefined },
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
       resumeBoxById: fakeResumeBoxById,
     };
-    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const link = await callMcpTool<{
       configured: boolean;
+      status: string;
       appSlug: string;
-      installUrl: string;
-      linkUrl: string;
-      expiresInSeconds: number;
-    }>(mcp, "github_connect_link", {});
-    expect(link.configured).toBe(true);
-    expect(link.appSlug).toBe("opengeni-test-app");
-    expect(link.expiresInSeconds).toBeGreaterThan(0);
-    const installUrl = new URL(link.installUrl);
-    expect(installUrl.origin).toBe("https://github.opengeni.test");
-    expect(installUrl.pathname).toBe(`/v1/workspaces/${grant.workspaceId}/github/connect`);
-    const state = installUrl.searchParams.get("state");
-    expect(readSignedState(state!, stateSecret)).toMatchObject({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      intent: "install",
-    });
-    const existingLinkUrl = new URL(link.linkUrl);
-    expect(existingLinkUrl.pathname).toBe(`/v1/workspaces/${grant.workspaceId}/github/connect`);
-    expect(readSignedState(existingLinkUrl.searchParams.get("state")!, stateSecret)).toMatchObject({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      intent: "link_existing",
-    });
-
-    // Opening the link plants the CSRF state cookie the install/OAuth
-    // callbacks require and forwards the same state to GitHub.
-    const app = createApp({
-      settings,
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      githubStateSecret: stateSecret,
-    });
-    const redirect = await app.request(`${installUrl.pathname}${installUrl.search}`);
-    expect(redirect.status).toBe(302);
-    const location = new URL(redirect.headers.get("location")!);
-    expect(`${location.origin}${location.pathname}`).toBe(
-      "https://github.com/apps/opengeni-test-app/installations/new",
-    );
-    expect(location.searchParams.get("state")).toBe(state);
-    expect(redirect.headers.get("set-cookie")).toContain(`opengeni_github_state=${state}`);
-
-    expect((await app.request(`/v1/workspaces/${grant.workspaceId}/github/connect`)).status).toBe(
-      400,
-    );
-    expect(
-      (await app.request(`/v1/workspaces/${grant.workspaceId}/github/connect?state=tampered`))
-        .status,
-    ).toBe(400);
-    // A state minted for one workspace cannot start the flow for another.
-    expect(
-      (
-        await app.request(
-          `/v1/workspaces/${crypto.randomUUID()}/github/connect${installUrl.search}`,
-        )
-      ).status,
-    ).toBe(400);
-
-    // The browser entry stays reachable when deployment-level access-key auth
-    // is enabled (the browser opening the link holds no API credentials), like
-    // the install/OAuth callbacks it feeds; the signed state is the gate.
-    const lockedApp = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        publicBaseUrl: "https://api.opengeni.test",
-        ...configuredGitHub,
-        authRequired: true,
-        accessKey: "test-deployment-access-key",
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      githubStateSecret: stateSecret,
-    });
-    expect(
-      (await lockedApp.request(`/v1/workspaces/${grant.workspaceId}/github/repositories`)).status,
-    ).toBe(401);
-    const lockedRedirect = await lockedApp.request(`${installUrl.pathname}${installUrl.search}`);
-    expect(lockedRedirect.status).toBe(302);
-    expect(lockedRedirect.headers.get("set-cookie")).toContain(`opengeni_github_state=${state}`);
-
-    // Unconfigured deployments report what is missing instead of minting links.
-    const unconfiguredMcp = buildOpenGeniMcpServer(
-      {
-        ...mcpDeps,
-        settings: testSettings({ databaseUrl: services.databaseUrl }),
-      },
-      grant,
-    );
-    const unconfigured = await callMcpTool<{
-      configured: boolean;
       installUrl: string | null;
+      linkUrl: string | null;
       missing: string[];
-    }>(unconfiguredMcp, "github_connect_link", {});
-    expect(unconfigured.configured).toBe(false);
-    expect(unconfigured.installUrl).toBeNull();
-    expect(unconfigured.missing.length).toBeGreaterThan(0);
+    }>(buildOpenGeniMcpServer(mcpDeps, grant), "github_connect_link", {});
+    expect(link).toMatchObject({
+      configured: true,
+      status: "unbound",
+      appSlug: "opengeni-test-app",
+      missing: [],
+    });
+    expect(link.installUrl).toContain(`/v1/workspaces/${grant.workspaceId}/github/connect?state=`);
+    expect(link.linkUrl).toBe(link.installUrl);
 
-    // Without a configured base URL the request origin is the fallback.
-    const originMcp = buildOpenGeniMcpServer(
-      {
-        ...mcpDeps,
-        settings: testSettings({
-          databaseUrl: services.databaseUrl,
-          publicBaseUrl: undefined,
-          ...configuredGitHub,
-        }),
-      },
-      grant,
-      { requestOrigin: "http://127.0.0.1:8000" },
-    );
-    const originLink = await callMcpTool<{ installUrl: string }>(
-      originMcp,
+    const useOnlyLink = await callMcpTool<{
+      status: string;
+      installUrl: string | null;
+      linkUrl: string | null;
+    }>(
+      buildOpenGeniMcpServer(mcpDeps, {
+        ...grant,
+        permissions: ["github:use"],
+      }),
       "github_connect_link",
       {},
     );
-    expect(
-      originLink.installUrl.startsWith(
-        `http://127.0.0.1:8000/v1/workspaces/${grant.workspaceId}/github/connect?state=`,
+    expect(useOnlyLink).toMatchObject({ status: "unbound", installUrl: null, linkUrl: null });
+
+    const unconfigured = await callMcpTool<{
+      configured: boolean;
+      installUrl: string | null;
+      linkUrl: string | null;
+      missing: string[];
+    }>(
+      buildOpenGeniMcpServer(
+        {
+          ...mcpDeps,
+          settings: testSettings({ databaseUrl: services.databaseUrl }),
+        },
+        grant,
       ),
-    ).toBe(true);
-    const noBaseMcp = buildOpenGeniMcpServer(
-      {
-        ...mcpDeps,
-        settings: testSettings({
-          databaseUrl: services.databaseUrl,
-          publicBaseUrl: undefined,
-          ...configuredGitHub,
-        }),
-      },
-      grant,
+      "github_connect_link",
+      {},
     );
-    await expect(callMcpTool(noBaseMcp, "github_connect_link", {})).rejects.toThrow(
-      "OPENGENI_PUBLIC_BASE_URL",
+    expect(unconfigured.configured).toBe(false);
+    expect(unconfigured.installUrl).toBeNull();
+    expect(unconfigured.linkUrl).toBeNull();
+    expect(unconfigured.missing.length).toBeGreaterThan(0);
+
+    const noBase = await callMcpTool<{ installUrl: string | null; linkUrl: string | null }>(
+      buildOpenGeniMcpServer(
+        {
+          ...mcpDeps,
+          settings: testSettings({
+            databaseUrl: services.databaseUrl,
+            publicBaseUrl: undefined,
+            ...configuredGitHub,
+          }),
+        },
+        grant,
+      ),
+      "github_connect_link",
+      {},
     );
+    expect(noBase).toMatchObject({ installUrl: null, linkUrl: null });
   });
 
   test("pack enable validates and stores environment attachments", async () => {
@@ -8452,7 +9317,7 @@ describe("API component integration", () => {
         {
           id: "files",
           name: "Files",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/files`,
           allowedTools: ["files_get_download_url"],
           timeoutMs: undefined,
           cacheToolsList: false,
@@ -8578,13 +9443,6 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
     .join("");
 }
 
-function htmlInputValues(html: string, name: string): string[] {
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return [...html.matchAll(new RegExp(`name="${escapedName}" value="([^"]+)"`, "g"))]
-    .map((match) => match[1]!)
-    .map((value) => value.replaceAll("&amp;", "&"));
-}
-
 function workspacePath(workspaceId: string, path: string): string {
   return `/v1/workspaces/${workspaceId}${path}`;
 }
@@ -8622,6 +9480,54 @@ async function bootstrapMcpGrant(db: ReturnType<typeof createDb>["db"]) {
 
 type TestWorkspaceGrant = AccessContext["workspaceGrants"][number];
 
+async function claimCreatedSessionForRun(
+  db: ReturnType<typeof createDb>["db"],
+  grant: TestWorkspaceGrant,
+  sessionId: string,
+): Promise<string> {
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") {
+    throw new Error(`failed to claim session ${sessionId}: ${claimed.reason}`);
+  }
+  return attemptId;
+}
+
+async function readStoredSessionMcpServer(
+  db: ReturnType<typeof createDb>["db"],
+  sessionId: string,
+  serverId: string,
+  encryptionKey: Uint8Array,
+): Promise<{ headers: Record<string, string>; credentialVersion: number } | null> {
+  const [row] = await db.execute<{
+    headers_encrypted: Record<string, string>;
+    credential_version: number;
+  }>(dbSql`
+    select headers_encrypted, credential_version
+    from session_mcp_servers
+    where session_id = ${sessionId} and server_id = ${serverId}
+    limit 1
+  `);
+  return row
+    ? {
+        headers: Object.fromEntries(
+          Object.entries(row.headers_encrypted).map(([name, value]) => [
+            name,
+            decryptEnvironmentValue(encryptionKey, value),
+          ]),
+        ),
+        credentialVersion: Number(row.credential_version),
+      }
+    : null;
+}
+
 async function signDelegatedBearer(
   secret: string,
   grant: TestWorkspaceGrant,
@@ -8629,8 +9535,16 @@ async function signDelegatedBearer(
     subjectId: string;
     permissions: Permission[];
     sessionId?: string;
+    turnId?: string;
+    attemptId?: string;
+    executionGeneration?: number;
   },
 ): Promise<string> {
+  const hasExactAgentAuthority =
+    input.sessionId !== undefined &&
+    input.turnId !== undefined &&
+    input.attemptId !== undefined &&
+    input.executionGeneration !== undefined;
   return `Bearer ${await signDelegatedAccessToken(secret, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -8638,6 +9552,10 @@ async function signDelegatedBearer(
     subjectLabel: input.subjectId,
     permissions: input.permissions,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+    ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
+    principalKind: hasExactAgentAuthority ? "agent_attempt" : "human_session",
     exp: Math.floor(Date.now() / 1000) + 300,
   })}`;
 }
@@ -8737,18 +9655,24 @@ async function createToolspaceMcpSession(
     delivery: "send",
     reasoningEffortFallback: "medium",
   });
+  const attemptId = crypto.randomUUID();
   const running = await claimSessionWorkForAttempt(db, grant.workspaceId, {
     sessionId: session.id,
     workflowId: `session-${session.id}`,
     workflowRunId: crypto.randomUUID(),
-    attemptId: crypto.randomUUID(),
+    attemptId,
     dispatchId: `dispatch-${crypto.randomUUID()}`,
     trigger: { kind: "next" },
   });
   if (running.action !== "claimed" || running.turn.id !== queued.turn.id) {
     throw new Error("failed to claim the toolspace fixture turn");
   }
-  return { session, turnId: running.turn.id };
+  return {
+    session,
+    turnId: running.turn.id,
+    attemptId,
+    executionGeneration: running.turn.executionGeneration,
+  };
 }
 
 async function readSseEvents(

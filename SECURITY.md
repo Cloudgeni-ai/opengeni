@@ -21,9 +21,20 @@ OpenGeni runs agents that can execute tools in configured sandboxes. Review `.en
 
 The base API is workspace-scoped and resolves protected requests through an access grant. `managed` mode uses Better Auth for browser human auth and OpenGeni-owned API keys for product/API access. `configured` mode lets a self-hosted or embedded deployment use delegated bearer tokens or a deployment shared-key boundary. The deployment shared key uses `x-opengeni-access-key`; product API keys use `Authorization: Bearer`.
 
-Before exposing OpenGeni beyond local development, choose the access mode intentionally, run the workspace-isolation/RLS checks, use a non-owner application DB role in production where possible, and put appropriate gateway rate limits and request size limits in front of public routes.
+Before exposing OpenGeni beyond local development, choose the access mode intentionally, run the workspace-isolation/RLS checks, and put appropriate gateway rate limits and request size limits in front of public routes. A standalone `force` deployment must separate its migration/owner URL from ordinary API/worker traffic: runtime connects as exact role `opengeni_app`, with no superuser/`BYPASSRLS`/create-role/create-database/replication/inheritance attributes, memberships, ownership, or schema creation. `bun run db:assert-runtime-posture` proves the exact 91-table active FORCE-RLS contract and all 102 runtime table privilege classes: 87 full-CRUD tables, three SELECT-only tables, seven SELECT+INSERT tables, and five host-export tables with no direct app-role DML. API/worker startup and readiness fail closed on the same catalog assertion. The `scoped` strategy is only for an embedded host that explicitly owns the isolation boundary.
+
+Never use a credential rollback to restore an owner, superuser, or `BYPASSRLS` identity to ordinary runtime traffic. If a restricted-identity cutover or an older image fails, keep admission in maintenance and fix forward while preserving the restricted runtime Secret.
 
 No model provider credentials are automatically exposed inside agent sandboxes. Only expose host credentials to a managed sandbox through explicit preparation profiles or allowlists, and prefer short-lived credentials.
+
+Codex rate-limit reset credits are an irreversible owning-human browser
+capability, not agent capacity. The consume route is available only in managed
+mode and requires a direct Better Auth cookie session, the same `user:<id>` that
+most recently connected the credential, workspace admin, exact same-origin
+`Origin`/Fetch Metadata, and a session-bound HMAC confirmation. It rejects every
+`Authorization` header even when a valid cookie is also present. There is no SDK,
+MCP, Toolspace, worker, scheduled, background, allocator, or rotation consume
+path; provider bearer values remain server-only.
 
 ## Connected Machines
 

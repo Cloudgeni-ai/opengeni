@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -208,7 +209,11 @@ describe("standalone context compaction execution", () => {
     };
     await expect(
       getLatestRunStateResumeMetadata(client.db, grant.workspaceId!, session.id),
-    ).resolves.toEqual({ turnId: null, frozenCodexCredentialId: null });
+    ).resolves.toEqual({
+      turnId: null,
+      frozenCodexCredentialId: null,
+      providerArtifactInvalidatedAt: null,
+    });
     await expect(
       getLatestRunState(client.db, grant.workspaceId!, session.id, {
         ...defaults,
@@ -318,7 +323,11 @@ describe("standalone context compaction execution", () => {
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
           position: 0,
-          item: { type: "message", role: "user", content: "build the queue correctly" },
+          item: {
+            type: "message",
+            role: "user",
+            content: "build the queue correctly",
+          },
         },
         {
           accountId: grant.accountId,
@@ -376,7 +385,12 @@ describe("standalone context compaction execution", () => {
       configure: () => undefined,
       resolveTurnModel: () => ({
         client: fakeClient,
-        provider: { id: "test-chat", kind: "api-key", api: "chat", builtin: false },
+        provider: {
+          id: "test-chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
         configured: {
           id: "scripted-compactor",
           contextWindowTokens: 250_000,
@@ -446,6 +460,7 @@ describe("standalone context compaction execution", () => {
       limit: 100,
     });
     expect(events.map((event) => event.type)).toContain("session.context.compaction.requested");
+    expect(events.map((event) => event.type)).toContain("session.context.compaction.started");
     expect(events.map((event) => event.type)).toContain("session.context.compacted");
     expect(events.map((event) => event.type)).toContain("turn.completed");
     expect(events.filter((event) => event.type === "agent.model.usage")).toEqual([
@@ -457,6 +472,190 @@ describe("standalone context compaction execution", () => {
         }),
       }),
     ]);
+  });
+
+  test("never replays an invalidated provider artifact into the compaction model", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Invalidated compaction artifact test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Invalidated compaction artifact test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const invalidatedAt = new Date();
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          item: { type: "message", role: "user", content: "x".repeat(40_000) },
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 1,
+          item: {
+            type: "reasoning",
+            id: "rs_rejected",
+            providerData: { encrypted_content: "must-never-replay" },
+          },
+          providerArtifactInvalidatedAt: invalidatedAt,
+          providerArtifactInvalidationReason: "encrypted_content_rejected",
+          providerArtifactInvalidatedByAttemptId: crypto.randomUUID(),
+        },
+      ]);
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    let summarizerInput: Array<Record<string, unknown>> = [];
+
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 10_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+      },
+      null,
+      async (_settings, input) => {
+        summarizerInput = input;
+        return "Safe compacted context.";
+      },
+      {
+        force: true,
+        trigger: "operator",
+        codexAccount: { currentCodexCredentialId: null },
+      },
+    );
+
+    expect(outcome).toMatchObject({ compacted: false, reason: "replacement_not_smaller" });
+    expect(summarizerInput.length).toBeGreaterThan(0);
+    expect(summarizerInput.some((item) => item.type === "reasoning")).toBe(false);
+    expect(JSON.stringify(summarizerInput)).not.toContain("must-never-replay");
+  });
+
+  test("compacts the model-safe view while retaining canonical attachment refs", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Attachment compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Attachment compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const attachmentRefs = [{ kind: "file", fileId: "00000000-0000-4000-8000-000000000081" }];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          item: {
+            type: "message",
+            role: "user",
+            content: "inspect the retained attachment",
+            [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
+          },
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "working notes ".repeat(20_000) }],
+          },
+        },
+      ]);
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    let summarizerInput: Array<Record<string, unknown>> = [];
+
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 10_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+      },
+      null,
+      async (_settings, input) => {
+        summarizerInput = input;
+        return "The user asked to inspect the retained attachment.";
+      },
+      {
+        force: true,
+        trigger: "operator",
+        projectModelInput: async (items) =>
+          items.map((item) => {
+            if (!(MODEL_ATTACHMENT_REFS_FIELD in item)) return item;
+            const projected = { ...item };
+            delete projected[MODEL_ATTACHMENT_REFS_FIELD];
+            return projected;
+          }),
+      },
+    );
+
+    expect(outcome).toMatchObject({ compacted: true });
+    expect(JSON.stringify(summarizerInput)).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
+    const active = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    expect(active.find((item) => item.role === "user")).toMatchObject({
+      [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
+    });
   });
 
   test("a failed standalone summary consumes the request once and preserves active history", async () => {
@@ -510,13 +709,22 @@ describe("standalone context compaction execution", () => {
             completions: {
               create: async () => ({
                 id: "chatcmpl-empty",
-                usage: { prompt_tokens: 100, completion_tokens: 0, total_tokens: 100 },
+                usage: {
+                  prompt_tokens: 100,
+                  completion_tokens: 0,
+                  total_tokens: 100,
+                },
                 choices: [{ message: { content: "" }, finish_reason: "stop" }],
               }),
             },
           },
         },
-        provider: { id: "test-chat", kind: "api-key", api: "chat", builtin: false },
+        provider: {
+          id: "test-chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
         configured: {
           id: "scripted-compactor",
           contextWindowTokens: 250_000,
@@ -631,7 +839,11 @@ describe("standalone context compaction execution", () => {
       sandboxBackend: "none",
     });
     const originalItems = [
-      { type: "message", role: "user", content: "preserve this transient request" },
+      {
+        type: "message",
+        role: "user",
+        content: "preserve this transient request",
+      },
       {
         type: "message",
         role: "assistant",
@@ -666,7 +878,12 @@ describe("standalone context compaction execution", () => {
             },
           },
         },
-        provider: { id: "test-chat", kind: "api-key", api: "chat", builtin: false },
+        provider: {
+          id: "test-chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
         configured: {
           id: "scripted-compactor",
           contextWindowTokens: 250_000,
@@ -804,7 +1021,12 @@ describe("standalone context compaction execution", () => {
             },
           },
         },
-        provider: { id: "test-chat", kind: "api-key", api: "chat", builtin: false },
+        provider: {
+          id: "test-chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
         configured: {
           id: "scripted-compactor",
           contextWindowTokens: 250_000,
@@ -815,6 +1037,7 @@ describe("standalone context compaction execution", () => {
       }),
       prepareTools: async () => ({
         mcpServers: [],
+        resolvedMcpConnectionIds: new Map<string, string>(),
         codexConnectorNamespaces: new Set<string>(),
         close: async () => undefined,
       }),
@@ -1069,16 +1292,23 @@ describe("standalone context compaction execution", () => {
       status: "failed",
     });
     expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("idle");
-    expect(
-      JSON.stringify(
-        (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
-          (row) => row.item,
-        ),
-      ),
-    ).toBe(historyBefore);
+    const historyAfter = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    expect(JSON.stringify(historyAfter.slice(0, originalItems.length).map((row) => row.item))).toBe(
+      historyBefore,
+    );
+    expect(historyAfter.at(-1)?.item).toMatchObject({
+      type: "message",
+      role: "system",
+    });
+    expect(String(historyAfter.at(-1)?.item.content)).toContain(ordinary.update.id);
+    expect(String(historyAfter.at(-1)?.item.content)).toContain(goalContinuation.update.id);
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
-    ).toMatchObject([{ id: ordinary.update.id, state: "deferred", deliveredTurnId: null }]);
+    ).toEqual([]);
     const storedUpdates = await withWorkspaceRls(
       client.db,
       grant.workspaceId!,
@@ -1093,7 +1323,7 @@ describe("standalone context compaction execution", () => {
     const storedGoalContinuation = storedUpdates.find(
       (update) => update.id === goalContinuation.update.id,
     );
-    expect(storedGoalContinuation?.state).toBe("failed");
+    expect(storedGoalContinuation?.state).toBe("delivered");
     expect(
       (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
     ).toEqual([]);
@@ -1130,7 +1360,7 @@ describe("standalone context compaction execution", () => {
       (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
         (update) => update.id,
       ),
-    ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
+    ).toEqual([newUpdate.update.id]);
 
     await withWorkspaceSubjectRls(
       client.db,
@@ -1177,7 +1407,7 @@ describe("standalone context compaction execution", () => {
           retryClaim.turn.id,
         )
       ).map((update) => update.id),
-    ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
+    ).toEqual([newUpdate.update.id]);
   });
 
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {
@@ -1250,7 +1480,10 @@ describe("standalone context compaction execution", () => {
       compacted: false,
       reason: "replacement_not_smaller",
       requestConsumed: true,
-      events: [expect.objectContaining({ type: "session.context.compaction.skipped" })],
+      events: [
+        expect.objectContaining({ type: "session.context.compaction.started" }),
+        expect.objectContaining({ type: "session.context.compaction.skipped" }),
+      ],
     });
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       false,
@@ -1337,6 +1570,10 @@ describe("standalone context compaction execution", () => {
     expect(outcome).toMatchObject({
       compacted: true,
       events: [
+        expect.objectContaining({
+          type: "session.context.compaction.started",
+          payload: expect.objectContaining({ trigger: "overflow" }),
+        }),
         expect.objectContaining({
           type: "session.context.compacted",
           payload: expect.objectContaining({ trigger: "overflow" }),

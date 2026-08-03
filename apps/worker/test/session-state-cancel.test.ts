@@ -20,6 +20,65 @@ const quiescenceReceipts: Array<{
 }> = [];
 
 describe("session-state interrupt settlement", () => {
+  test("expires through the durable first-writer transaction and publishes its response event", async () => {
+    publishedEvents.length = 0;
+    const expireCalls: unknown[] = [];
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        expireSessionHumanInputRequest: mock(async (_db, input) => {
+          expireCalls.push(input);
+          return {
+            action: "conflict" as const,
+            request: { status: "expired" },
+            workflowWakeRevision: 4,
+            events: [
+              {
+                type: "user.humanInputResponse",
+                payload: { requestId: "request-1", response: { outcome: "expired" } },
+              },
+            ],
+          } as any;
+        }),
+        publishDurableSessionEvents: mock(
+          async (_bus, _workspaceId, _sessionId, events: typeof publishedEvents) => {
+            publishedEvents.push(...events);
+          },
+        ),
+      },
+    );
+
+    expect(
+      await activities.expireSessionHumanInput({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        requestId: "request-1",
+      }),
+    ).toEqual({ action: "expired" });
+    expect(expireCalls).toEqual([
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        requestId: "request-1",
+      },
+    ]);
+    expect(publishedEvents).toEqual([
+      {
+        type: "user.humanInputResponse",
+        payload: { requestId: "request-1", response: { outcome: "expired" } },
+      },
+    ]);
+  });
+
   test("publishes the already-atomic durable pause recovery batch", async () => {
     publishedEvents.length = 0;
     controlApplications.length = 0;
@@ -245,5 +304,104 @@ describe("session-state interrupt settlement", () => {
     ).resolves.toBeUndefined();
     expect(quiescenceReceipts).toHaveLength(1);
     expect(fanoutErrors).toHaveLength(1);
+  });
+
+  test("publishes a writer-set quiescence recovery and returns its exact state", async () => {
+    publishedEvents.length = 0;
+    const reconcileCalls: unknown[] = [];
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+          inspectSessionAttemptActivity: async () => "settled",
+        }) as any,
+      {
+        getSessionAttemptActivityRef: mock(async () => ({
+          workflowId: "session-session-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+          quiesced: false,
+        })),
+        reconcileSessionAttemptQuiescence: mock(async (_db, input) => {
+          reconcileCalls.push(input);
+          return {
+            action: "quiesced" as const,
+            events: [{ type: "session.queue.changed", payload: { operation: "attempt_quiesced" } }],
+          } as any;
+        }),
+        publishDurableSessionEvents: mock(
+          async (_bus, _workspaceId, _sessionId, events: typeof publishedEvents) => {
+            publishedEvents.push(...events);
+          },
+        ),
+      },
+    );
+
+    expect(
+      await activities.reconcileSessionAttemptQuiescence({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "session-session-1",
+      }),
+    ).toEqual({ action: "quiesced" });
+    expect(reconcileCalls).toEqual([
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        temporalWorkflowId: "session-session-1",
+        temporalWorkflowRunId: "run-1",
+        temporalActivityId: "activity-1",
+        activitySettled: true,
+      },
+    ]);
+    expect(publishedEvents).toEqual([
+      { type: "session.queue.changed", payload: { operation: "attempt_quiesced" } },
+    ]);
+  });
+
+  test("keeps admission closed while the exact Temporal activity lease is live", async () => {
+    let reconciled = false;
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+          inspectSessionAttemptActivity: async () => "pending",
+        }) as any,
+      {
+        getSessionAttemptActivityRef: mock(async () => ({
+          workflowId: "session-session-1",
+          workflowRunId: "run-live",
+          activityId: "activity-live",
+          quiesced: false,
+        })),
+        reconcileSessionAttemptQuiescence: mock(async () => {
+          reconciled = true;
+          return { action: "quiesced", events: [] };
+        }),
+      },
+    );
+
+    expect(
+      await activities.reconcileSessionAttemptQuiescence({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "session-session-1",
+      }),
+    ).toEqual({ action: "pending" });
+    expect(reconciled).toBe(false);
   });
 });

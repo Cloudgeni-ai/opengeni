@@ -10,13 +10,24 @@
 //   - retries once on 401 after a forced token refresh (spec §1.9)
 // Stream parsing is delegated to the SDK (SSE passthrough; spec §0(d)).
 
+import { randomUUID } from "node:crypto";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
 import {
   codexRequestStorage,
+  type CodexModelRequestEvent,
+  type CodexRequestContext,
+  type CodexResponseTimeoutPolicy,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
 } from "./request-context";
+import {
+  CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+  CodexResponseTimeoutError,
+  classifyCodexResponseTimeoutError,
+  isPreHeadersTimeoutError,
+  resolveCodexResponseTimeoutPolicy,
+} from "./response-timeout";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -50,6 +61,56 @@ export function isCodexTransportError(error: unknown): boolean {
     current = value.cause;
   }
   return false;
+}
+
+export type CodexEncryptedArtifactRejection = {
+  status: 400;
+  kind: "encrypted_content_rejected";
+};
+
+/**
+ * Classify only the provider's definitive request rejection for an opaque
+ * reasoning artifact that it can no longer decrypt/parse. A Codex transport
+ * marker plus HTTP 400 proves this request was rejected before inference; the
+ * semantic match prevents unrelated malformed prompts from entering recovery.
+ */
+export function classifyCodexEncryptedArtifactRejection(
+  error: unknown,
+): CodexEncryptedArtifactRejection | null {
+  if (!isCodexTransportError(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    const body =
+      value.error && typeof value.error === "object"
+        ? (value.error as Record<string, unknown>)
+        : null;
+    const status = Number(value.status ?? body?.status);
+    const message = [
+      typeof value.message === "string" ? value.message : "",
+      typeof body?.message === "string" ? body.message : "",
+      typeof value.code === "string" ? value.code : "",
+      typeof body?.code === "string" ? body.code : "",
+      typeof value.type === "string" ? value.type : "",
+      typeof body?.type === "string" ? body.type : "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    const unsupportedFieldShape =
+      /(?:invalid value|supported values?|unsupported|unknown (?:field|parameter|value))/.test(
+        message,
+      );
+    if (
+      status === 400 &&
+      !unsupportedFieldShape &&
+      /(?:encrypted[_ ]content|encrypted reasoning|reasoning artifact)/.test(message) &&
+      /(?:decrypt(?:ed|ion)?|could not be parsed|cannot be parsed|failed to parse)/.test(message)
+    ) {
+      return { status: 400, kind: "encrypted_content_rejected" };
+    }
+    current = value.cause;
+  }
+  return null;
 }
 
 /** Parse an integer header value; null when absent or not a finite integer. */
@@ -118,6 +179,258 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
   };
 }
 
+type RequestAudit = {
+  ctx: CodexRequestContext;
+  requestId: string;
+  transportAttempt: number;
+  model?: string;
+  logicalStartedAt: number;
+  attemptStartedAt: number;
+  policy: CodexResponseTimeoutPolicy;
+};
+
+async function emitRequestEvent(
+  audit: RequestAudit,
+  event: Omit<
+    CodexModelRequestEvent,
+    "requestId" | "transportAttempt" | "model" | "durationMs" | "timeoutPolicy"
+  >,
+): Promise<void> {
+  await audit.ctx.onModelRequestEvent?.({
+    requestId: audit.requestId,
+    transportAttempt: audit.transportAttempt,
+    ...(audit.model ? { model: audit.model } : {}),
+    durationMs: Math.max(0, Date.now() - audit.attemptStartedAt),
+    timeoutPolicy: audit.policy,
+    ...event,
+  });
+}
+
+function providerRequestId(headers: Headers): string | undefined {
+  return headers.get("x-request-id") ?? headers.get("request-id") ?? undefined;
+}
+
+async function fetchBeforeHeaders(
+  base: FetchLike,
+  input: string,
+  init: RequestInit,
+  audit: RequestAudit,
+): Promise<Response> {
+  const elapsed = Date.now() - audit.logicalStartedAt;
+  const wholeRemainingMs = audit.policy.wholeRequestTimeoutMs - elapsed;
+  const timeoutClass =
+    wholeRemainingMs <= audit.policy.headersTimeoutMs ? "whole_request" : "headers";
+  const deadlineMs = Math.max(1, Math.min(audit.policy.headersTimeoutMs, wholeRemainingMs));
+  if (wholeRemainingMs <= 0) {
+    throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
+  }
+
+  const externalSignal = init.signal;
+  if (externalSignal?.aborted) throw externalSignal.reason;
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(externalSignal?.reason);
+  externalSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const basePromise = base(input, { ...init, signal: controller.signal });
+  let deadlineError: CodexResponseTimeoutError | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      deadlineError = new CodexResponseTimeoutError(timeoutClass, audit.requestId, false);
+      reject(deadlineError);
+    }, deadlineMs);
+  });
+  try {
+    return await Promise.race([basePromise, deadline]);
+  } catch (error) {
+    if (deadlineError) {
+      controller.abort(deadlineError);
+      void basePromise
+        .then((late) => late.body?.cancel(deadlineError ?? undefined))
+        .catch(() => undefined);
+      throw deadlineError;
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", forwardAbort);
+  }
+}
+
+async function observedResponse(
+  res: Response,
+  audit: RequestAudit,
+  externalSignal: AbortSignal | null | undefined,
+): Promise<Response> {
+  const requestId = providerRequestId(res.headers);
+  if (!res.body) {
+    await emitRequestEvent(audit, {
+      phase: res.ok ? "completed" : "failed",
+      responseObserved: true,
+      status: res.status,
+      ...(requestId ? { providerRequestId: requestId } : {}),
+    });
+    return res;
+  }
+
+  const reader = res.body.getReader();
+  let terminal = false;
+  let firstByte = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let wholeTimer: ReturnType<typeof setTimeout> | undefined;
+  let armIdle: () => void = () => undefined;
+  let abortFromOutside: (() => void) | undefined;
+
+  const clearTimers = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (wholeTimer) clearTimeout(wholeTimer);
+    if (abortFromOutside) externalSignal?.removeEventListener("abort", abortFromOutside);
+  };
+
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const timeOut = (klass: "idle_stream" | "whole_request") => {
+        if (terminal) return;
+        terminal = true;
+        clearTimers();
+        const error = new CodexResponseTimeoutError(klass, audit.requestId, true);
+        void reader.cancel(error).catch(() => undefined);
+        void emitRequestEvent(audit, {
+          phase: "timed_out",
+          responseObserved: true,
+          timeoutClass: klass,
+          status: res.status,
+          ...(requestId ? { providerRequestId: requestId } : {}),
+        }).then(
+          () => controller.error(error),
+          () => controller.error(error),
+        );
+      };
+      armIdle = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => timeOut("idle_stream"), audit.policy.streamIdleTimeoutMs);
+      };
+      armIdle();
+      const wholeRemaining = Math.max(
+        1,
+        audit.policy.wholeRequestTimeoutMs - (Date.now() - audit.logicalStartedAt),
+      );
+      wholeTimer = setTimeout(() => timeOut("whole_request"), wholeRemaining);
+      abortFromOutside = () => {
+        if (terminal) return;
+        terminal = true;
+        clearTimers();
+        const reason = externalSignal?.reason ?? new DOMException("Aborted", "AbortError");
+        void reader.cancel(reason).catch(() => undefined);
+        void emitRequestEvent(audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: res.status,
+          ...(requestId ? { providerRequestId: requestId } : {}),
+        }).then(
+          () => controller.error(reason),
+          () => controller.error(reason),
+        );
+      };
+      if (externalSignal?.aborted) {
+        abortFromOutside();
+      } else {
+        externalSignal?.addEventListener("abort", abortFromOutside, {
+          once: true,
+        });
+      }
+    },
+    async pull(controller) {
+      if (terminal) return;
+      try {
+        const chunk = await reader.read();
+        if (terminal) return;
+        if (chunk.done) {
+          terminal = true;
+          clearTimers();
+          await emitRequestEvent(audit, {
+            phase: res.ok ? "completed" : "failed",
+            responseObserved: true,
+            status: res.status,
+            ...(requestId ? { providerRequestId: requestId } : {}),
+          });
+          controller.close();
+          return;
+        }
+        armIdle();
+        if (!firstByte) {
+          firstByte = true;
+          await emitRequestEvent(audit, {
+            phase: "first_byte",
+            responseObserved: true,
+            status: res.status,
+            ...(requestId ? { providerRequestId: requestId } : {}),
+          });
+        }
+        controller.enqueue(chunk.value);
+      } catch (error) {
+        if (terminal) return;
+        terminal = true;
+        clearTimers();
+        await emitRequestEvent(audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: res.status,
+          ...(requestId ? { providerRequestId: requestId } : {}),
+        });
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      if (!terminal) {
+        terminal = true;
+        clearTimers();
+        await emitRequestEvent(audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: res.status,
+          ...(requestId ? { providerRequestId: requestId } : {}),
+        }).catch(() => undefined);
+      }
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+  const headers = new Headers(res.headers);
+  headers.delete("content-length");
+  return new Response(body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  });
+}
+
+function timeoutErrorResponse(info: {
+  timeoutClass: "connect" | "headers" | "idle_stream" | "whole_request";
+  requestId: string;
+  responseObserved: boolean;
+  message: string;
+}): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        type: CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+        code: CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+        message: info.message,
+        timeout_class: info.timeoutClass,
+        response_observed: info.responseObserved,
+        request_id: info.requestId,
+      },
+    }),
+    {
+      status: 504,
+      headers: {
+        "content-type": "application/json",
+        "x-should-retry": "false",
+        [CODEX_TRANSPORT_ERROR_HEADER]: "1",
+      },
+    },
+  );
+}
+
 export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): FetchLike {
   return async (input, init) => {
     const ctx = codexRequestStorage.getStore();
@@ -131,7 +444,15 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     // URLs whose base already includes /codex (avoids /codex/codex/responses).
     const rewritten = rawUrl.replace(/(?<!\/codex)\/responses(\b|$)/, "/codex/responses$1");
 
-    const attempt = async (auth: CodexTokenSnapshot): Promise<Response> => {
+    const policy = resolveCodexResponseTimeoutPolicy(ctx.responseTimeoutPolicy);
+    const requestId = ctx.nextRequestId?.() ?? randomUUID();
+    const logicalStartedAt = Date.now();
+    let transportAttempt = 0;
+
+    const attempt = async (
+      auth: CodexTokenSnapshot,
+      authenticationAttempt: number,
+    ): Promise<Response> => {
       const headers = new Headers(init?.headers);
       headers.set("Authorization", `Bearer ${auth.accessToken}`);
       if (auth.chatgptAccountId) {
@@ -153,31 +474,104 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       }
       headers.delete("OpenAI-Beta"); // omit on SSE (spec §1.2); fallback: "responses=experimental" if backend 400s
       headers.delete("x-api-key");
+      // Codex CLI advertises betas via x-codex-beta-features (not OpenAI-Beta).
+      if (ctx.betaFeatures && ctx.betaFeatures.length > 0) {
+        headers.set("x-codex-beta-features", ctx.betaFeatures.join(","));
+      }
+      // Turn analytics / request_kind live in x-codex-turn-metadata — body
+      // metadata is stripped by normalizeCodexRequestBody and rejected upstream.
+      if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
+        headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
+      }
 
       // The backend is streaming-only; force stream=true on the wire but remember
       // the caller's intent so a non-streaming caller (e.g. the compaction
       // summarizer) still gets a single JSON Response back.
       let callerWantsStream = true;
+      let model: string | undefined;
       const nextInit: RequestInit = { ...init, headers };
       if (typeof init?.body === "string") {
         try {
           const parsed = JSON.parse(init.body) as Record<string, unknown>;
           callerWantsStream = parsed.stream === true;
-          nextInit.body = JSON.stringify(normalizeCodexRequestBody(parsed, ctx.resolveModel));
+          const normalized = normalizeCodexRequestBody(parsed, ctx.resolveModel);
+          model = typeof normalized.model === "string" ? normalized.model : undefined;
+          nextInit.body = JSON.stringify(normalized);
         } catch {
           /* leave unparseable bodies untouched (already copied from init) */
         }
       }
+      headers.set(
+        "Idempotency-Key",
+        authenticationAttempt === 0 ? requestId : `${requestId}:auth-${authenticationAttempt}`,
+      );
       if (process.env.CODEX_DEBUG) {
-        const keys =
-          typeof nextInit.body === "string"
-            ? Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>)
-            : [];
+        let keys: string[] = [];
+        if (typeof nextInit.body === "string") {
+          try {
+            keys = Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>);
+          } catch {
+            /* an unparseable body is already passed through unchanged above */
+          }
+        }
         console.error(
           `[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`,
         );
       }
-      const res = await base(rewritten, nextInit);
+      let res: Response;
+      transportAttempt += 1;
+      const audit: RequestAudit = {
+        ctx,
+        requestId,
+        transportAttempt,
+        ...(model ? { model } : {}),
+        logicalStartedAt,
+        attemptStartedAt: Date.now(),
+        policy,
+      };
+      await emitRequestEvent(audit, {
+        phase: "started",
+        responseObserved: false,
+      });
+      try {
+        res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
+        const upstreamRequestId = providerRequestId(res.headers);
+        await emitRequestEvent(audit, {
+          phase: "headers",
+          responseObserved: true,
+          status: res.status,
+          ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+        });
+        const observed = await observedResponse(res, audit, nextInit.signal);
+        res = observed;
+      } catch (error) {
+        if (nextInit.signal?.aborted) {
+          await emitRequestEvent(audit, {
+            phase: "failed",
+            responseObserved: false,
+          }).catch(() => undefined);
+          throw error;
+        }
+        const klass = isPreHeadersTimeoutError(error);
+        if (!klass) {
+          await emitRequestEvent(audit, {
+            phase: "failed",
+            responseObserved: false,
+          });
+          throw error;
+        }
+        // An absent response does not prove that the provider never accepted
+        // this operation. Until a provider-specific receipt can prove
+        // non-acceptance or resume the same operation, never replay it.
+        // Audit persistence must not replace the typed transport timeout.
+        await emitRequestEvent(audit, {
+          phase: "timed_out",
+          responseObserved: false,
+          timeoutClass: klass,
+          willRetry: false,
+        }).catch(() => undefined);
+        throw new CodexResponseTimeoutError(klass, requestId, false);
+      }
       // Multi-account P4 (Part A): scrape the usage headers ONCE, before the
       // OK/!res.ok branch, so the same fire-and-forget read also covers the 429
       // hard-cap path (an exhausted serving account stamps its own fresh
@@ -216,11 +610,22 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       return callerWantsStream ? repairCodexStream(res) : await sseToJsonResponse(res);
     };
 
-    let res = await attempt(await ctx.getToken());
-    if (res.status === 401) {
-      res = await attempt(await ctx.refresh()); // single refresh-on-401 retry (spec §1.9)
+    try {
+      let res = await attempt(await ctx.getToken(), 0);
+      if (res.status === 401) {
+        res = await attempt(await ctx.refresh(), 1); // single refresh-on-401 retry (spec §1.9)
+      }
+      return res;
+    } catch (error) {
+      const timeout = classifyCodexResponseTimeoutError(error);
+      if (!timeout) throw error;
+      return timeoutErrorResponse({
+        timeoutClass: timeout.timeoutClass,
+        requestId: timeout.requestId ?? requestId,
+        responseObserved: timeout.responseObserved,
+        message: timeout.message,
+      });
     }
-    return res;
   };
 }
 

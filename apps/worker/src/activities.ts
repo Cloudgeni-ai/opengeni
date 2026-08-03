@@ -25,6 +25,8 @@ export type {
   ActivityDependencies,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
+  ExpireSessionHumanInputInput,
+  ExpireSessionHumanInputResult,
   IndexDocumentInput,
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
@@ -34,7 +36,11 @@ export type {
   ReconcileCodexCapacityWaitResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  RecoverEscapedMcpTimeoutInput,
+  RecoverEscapedMcpTimeoutResult,
   PersistSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
   SessionAttemptQuiescenceProof,
@@ -102,6 +108,7 @@ function createActivityServices(
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
         signalSessionAttemptQuiesced: dependencies.signalSessionAttemptQuiesced ?? null,
+        inspectSessionAttemptActivity: dependencies.inspectSessionAttemptActivity ?? null,
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         // §7.5 P3 — host-entitlements port. No constructed default: standalone
         // has no host meter, so unset → null → `ensureRunAllowed` reads the
@@ -161,8 +168,12 @@ export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
 export const persistSessionAttemptQuiescence =
   defaultControlActivities.persistSessionAttemptQuiescence;
+export const reconcileSessionAttemptQuiescence =
+  defaultControlActivities.reconcileSessionAttemptQuiescence;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
+export const recoverEscapedMcpTimeout = defaultControlActivities.recoverEscapedMcpTimeout;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
+export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;

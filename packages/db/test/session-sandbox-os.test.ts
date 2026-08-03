@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Session, SessionTurn } from "@opengeni/contracts";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS, Session, SessionTurn } from "@opengeni/contracts";
 
 // Pure (no-postgres) spec for the 0018 read-side shape: the contract Session
 // carries sandboxOs (enum, default linux) + sandboxGroupId (uuid), and
@@ -10,6 +10,10 @@ import { Session, SessionTurn } from "@opengeni/contracts";
 const id = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const accountId = "33333333-3333-4333-8333-333333333333";
+const initiator = {
+  kind: "subject" as const,
+  subjectId: "session-sandbox-os-test",
+};
 
 function baseSession() {
   return {
@@ -24,15 +28,26 @@ function baseSession() {
     resources: [],
     tools: [],
     metadata: {},
+    createdBy: initiator,
+    createdByContext: {},
     model: "gpt",
     sandboxBackend: "modal" as const,
     sandboxOs: "linux" as const,
     sandboxGroupId: id,
+    rootSessionId: id,
+    nestedAgentDepth: 0,
+    maxNestedAgentDepthOverride: null,
+    effectiveMaxNestedAgentDepth: 3,
+    nestedAgentDepthPolicySource: "default" as const,
+    nestedAgentDepthPolicySessionId: null,
     // M2 swappable-sandbox pointer (null == use the group sandbox; epoch 0 default).
     activeSandboxId: null,
     activeEpoch: 0,
     environmentId: null,
     firstPartyMcpPermissions: null,
+    firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+    toolPolicyVersion: 1,
     parentSessionId: null,
     createIdempotencyKey: null,
     temporalWorkflowId: null,
@@ -56,6 +71,7 @@ function baseSession() {
     },
     codexPinnedCredentialId: null,
     codexLastCredentialId: null,
+    codexCompactionMode: "portable",
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
   };
@@ -106,6 +122,8 @@ describe("Session sandbox OS + group (0018 read-side contract)", () => {
       executionGeneration: 0,
       activeAttemptId: null,
       lineage: {},
+      initiator,
+      initiatorContext: {},
       cancelledBy: null,
       cancelReason: null,
       startedAt: null,

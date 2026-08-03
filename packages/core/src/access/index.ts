@@ -1,6 +1,7 @@
-import type { Settings } from "@opengeni/config";
+import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import {
   verifyDelegatedAccessToken,
+  type AccountGrant,
   type AccessContext,
   type AccessGrant,
   type Permission,
@@ -39,10 +40,64 @@ export async function requireAccessGrant(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrant> {
+  return (await requireAccessGrantAuthorization(c, deps, workspaceId, permission)).grant;
+}
+
+export type AccessGrantAuthorization = {
+  grant: AccessGrant;
+  accountGrant: AccountGrant | null;
+  authenticatedSubjectId: string;
+  contextIntegrity: boolean;
+};
+
+export function accessGrantAuthorizationFromContext(
+  context: AccessContext,
+  grant: AccessGrant,
+): AccessGrantAuthorization {
+  const matchingAccountGrants = context.accountGrants.filter(
+    (candidate) => candidate.accountId === grant.accountId,
+  );
+  const delegated = grant.metadata?.delegated === true;
+  const contextIntegrity =
+    context.subjectId === grant.subjectId &&
+    context.accountGrants.every((candidate) => candidate.subjectId === context.subjectId) &&
+    context.workspaceGrants.every(
+      (candidate) =>
+        candidate.subjectId === context.subjectId &&
+        candidate.principalKind === grant.principalKind &&
+        (candidate.metadata?.delegated === true) === delegated &&
+        Boolean(candidate.serviceInitiator) === Boolean(grant.serviceInitiator) &&
+        Boolean(candidate.serviceInitiatorContext) === Boolean(grant.serviceInitiatorContext) &&
+        context.accountGrants.filter(
+          (accountGrant) => accountGrant.accountId === candidate.accountId,
+        ).length === 1,
+    ) &&
+    matchingAccountGrants.length === 1 &&
+    matchingAccountGrants[0]?.subjectId === context.subjectId;
+  return {
+    grant,
+    accountGrant: contextIntegrity ? matchingAccountGrants[0]! : null,
+    authenticatedSubjectId: context.subjectId,
+    contextIntegrity,
+  };
+}
+
+export async function requireAccessGrantAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
+  const principalKind = hostedHumanSessionPrincipalKind(context);
   const grant =
     context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
-    (await getWorkspaceGrant(deps.db, context.subjectId, workspaceId));
+    (await getWorkspaceGrant(
+      deps.db,
+      context.subjectId,
+      workspaceId,
+      principalKind ? { principalKind } : undefined,
+    ));
   if (!grant) {
     const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
     if (!workspace) {
@@ -53,7 +108,21 @@ export async function requireAccessGrant(
   if (permission) {
     requirePermission(grant, permission);
   }
-  return grant;
+  return accessGrantAuthorizationFromContext(context, grant);
+}
+
+function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session" | undefined {
+  if (context.mode !== "managed" || context.workspaceGrants.length === 0) {
+    return undefined;
+  }
+  return context.workspaceGrants.every(
+    (grant) =>
+      grant.principalKind === "human_session" &&
+      grant.metadata?.delegated !== true &&
+      !grant.serviceInitiator,
+  )
+    ? "human_session"
+    : undefined;
 }
 
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
@@ -68,7 +137,9 @@ export function requirePermission(grant: AccessGrant, permission: Permission): v
         message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
       });
     }
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new HTTPException(403, {
+      message: `missing permission: ${permission}`,
+    });
   }
 }
 
@@ -86,6 +157,10 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
   if (deps.settings.productAccessMode === "local") {
+    const delegated = await delegatedAccessContext(c, deps, "local");
+    if (delegated) {
+      return delegated;
+    }
     return await bootstrapWorkspace(deps.db, {
       accountExternalSource: "opengeni:local",
       accountExternalId: "default",
@@ -135,7 +210,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await deps.managedAuth.api.getSession({ headers: c.req.raw.headers });
+    const session = await deps.managedAuth.api.getSession({
+      headers: c.req.raw.headers,
+    });
     if (session?.user) {
       return await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,
@@ -187,6 +264,7 @@ async function apiKeyAccessContext(
             subjectId,
             subjectLabel: apiKey.name,
             permissions: apiKey.permissions,
+            principalKind: "api_key",
           },
         ]
       : [],
@@ -198,13 +276,14 @@ async function apiKeyAccessContext(
 async function delegatedAccessContext(
   c: Context,
   deps: AccessDeps,
-  mode: "configured" | "managed",
+  mode: "local" | "configured" | "managed",
   token = bearerToken(c),
 ): Promise<AccessContext | null> {
-  if (!token || !deps.settings.delegationSecret) {
+  const delegationSecret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (!token || !delegationSecret) {
     return null;
   }
-  const payload = await verifyDelegatedAccessToken(deps.settings.delegationSecret, token);
+  const payload = await verifyDelegatedAccessToken(delegationSecret, token);
   if (!payload) {
     return null;
   }
@@ -227,11 +306,15 @@ async function delegatedAccessContext(
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
         permissions: payload.permissions,
+        principalKind: payload.principalKind,
         // sessionId is worker-asserted (HMAC-signed token claim), not agent
         // controlled; it scopes session-bound MCP tools such as goal management.
         metadata: {
           delegated: true,
           ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
+          ...(payload.firstPartyMcpTools !== undefined
+            ? { firstPartyMcpTools: payload.firstPartyMcpTools }
+            : {}),
           // Caller identity: the turn that minted this token. Tools classify the
           // CALLER from this instead of re-reading the live active pointer.
           ...(payload.turnId ? { turnId: payload.turnId } : {}),
@@ -240,6 +323,10 @@ async function delegatedAccessContext(
             ? { executionGeneration: payload.executionGeneration }
             : {}),
         },
+        ...(payload.serviceInitiator ? { serviceInitiator: payload.serviceInitiator } : {}),
+        ...(payload.serviceInitiatorContext
+          ? { serviceInitiatorContext: payload.serviceInitiatorContext }
+          : {}),
       },
     ],
     defaultAccountId: payload.accountId,

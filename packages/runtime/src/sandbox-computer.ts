@@ -39,6 +39,7 @@ import {
   PointerButton,
   type DesktopInputRequest,
 } from "@opengeni/agent-proto";
+import { redactSensitiveText } from "@opengeni/contracts";
 
 import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunning } from "./index";
 // `stripExecBanner` is the SAME pure helper recording.ts uses to recover the raw
@@ -328,7 +329,7 @@ export class SandboxComputer implements Computer {
       // produces empty bytes, and the retry loop eventually throws. The wire-level
       // backstop in computerCallNormalizingFetch is also in place as a second net.
       console.warn(
-        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${cmd}`,
+        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${redactSensitiveText(cmd)}`,
       );
       return output;
     }
@@ -758,7 +759,9 @@ export class NativeDesktopComputer implements Computer {
     // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
     // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
     // then rethrow — never return "".
-    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    const reason = redactSensitiveText(
+      lastError instanceof Error ? lastError.message : String(lastError),
+    );
     console.warn(
       `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
     );
@@ -935,23 +938,6 @@ function renderImageForTextTransport(output: ToolOutputImage | string): string {
   const mediaType =
     typeof image.mediaType === "string" ? image.mediaType : "application/octet-stream";
   return `data:${mediaType};base64,${Buffer.from(image.data).toString("base64")}`;
-}
-
-/** Whether the bound model supports the structured tool-output transport, in
- *  lockstep with the SDK's private `supportsStructuredToolOutputTransport`
- *  (capabilities/transport): a ChatCompletions-family model — and an UNBOUND model
- *  (undefined) — does NOT, so it gets the function tools; every other model keeps
- *  the hosted `computer_use_preview` tool. The codex neutralize trick in index.ts
- *  drops `_modelInstance`, so this returns false there and the function tools win. */
-function supportsStructuredToolOutputTransport(modelInstance: unknown): boolean {
-  if (!modelInstance) return false;
-  const constructorName =
-    typeof modelInstance === "object" &&
-    modelInstance &&
-    typeof (modelInstance as { constructor?: unknown }).constructor === "function"
-      ? ((modelInstance as { constructor: { name?: string } }).constructor.name ?? "")
-      : "";
-  return !constructorName.includes("ChatCompletions");
 }
 
 const COMPUTER_READ_ONLY_MESSAGE =
@@ -1190,39 +1176,28 @@ export function computerFunctionTools(
 /**
  * EXPLICIT tool-transport selection, decided by the caller that knows the
  * provider's true wire identity (the worker's model resolution — see agent-turn.ts),
- * NOT inferred from the bound model instance's constructor name. This is the
- * HARDENING seam: `supportsStructuredToolOutputTransport` string-sniffs the
- * constructor for "ChatCompletions", which a wrapped / proxied / minified model
- * instance would defeat — silently handing a chat-completions provider the HOSTED
- * `computer_use_preview` tool it 400s on every turn. When `toolMode` is set, tools()
- * OBEYS it and never consults the sniff:
+ * never inferred from the bound model instance's constructor name:
  *   • "hosted"         → the single hosted `computer_use_preview` tool (Responses backends).
  *   • "function-image" → the FUNCTION `computer_*` tools with screenshots delivered as a
  *                        structured `{type:'image'}` output (the codex/ChatGPT backend,
  *                        which rejects hosted tool types but SEES structured image results).
- *   • "function-text"  → the FUNCTION tools with screenshots rendered as a text
- *                        `data:…;base64` URL (chat-completions providers, which can't read
- *                        structured image tool results).
+ *   • "disabled"       → no computer tools. Providers without a proven visual image
+ *                        transport fail closed instead of receiving base64 as text.
+ *   • "function-text"  → deprecated fail-closed alias retained for source compatibility.
+ *   • omitted           → fail closed exactly like "disabled"; public runtime callers must
+ *                        prove the transport explicitly before computer tools are exposed.
  */
-export type ComputerToolMode = "hosted" | "function-image" | "function-text";
+export type ComputerToolMode = "hosted" | "function-image" | "disabled" | "function-text";
 
 export type ComputerUseArgs = {
   dimensions?: [number, number];
   readOnly?: boolean;
   display?: string;
   needsApproval?: boolean | ((ctx: unknown, action: unknown) => boolean | Promise<boolean>);
-  // Deliver screenshots from the FUNCTION tools as a REAL image the model can see
-  // (a structured `{type:'image'}` tool output → agents-core normalizes it to an
-  // `input_image` content item inside the function_call_output) instead of the text
-  // data-URL string. Only the codex/ChatGPT backend can read structured image tool
-  // results; chat-completions providers cannot, so this stays OFF (text rendering)
-  // by default and is turned on only on the codex path (see index.ts). Ignored when
-  // `toolMode` is set (the mode carries its own image-delivery choice).
+  /** @deprecated Use `toolMode: "function-image"`. Omitted transport now fails closed. */
   imageFunctionResults?: boolean;
-  // EXPLICIT transport selection (see {@link ComputerToolMode}). When present, tools()
-  // obeys it directly — the constructor-name sniff is NOT consulted. When ABSENT, the
-  // legacy sniff behaviour is preserved byte-for-byte (back-compat for any embedder
-  // that constructs the capability without threading a mode).
+  // EXPLICIT transport selection (see {@link ComputerToolMode}). When absent, tools()
+  // returns no computer tools; constructor-name sniffing is never a transport proof.
   toolMode?: ComputerToolMode;
   /** Called after the display is ready on the first actual computer action. */
   onReady?: (session: SandboxSessionLike) => Promise<void>;
@@ -1238,17 +1213,9 @@ export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
  * the LIVE externally-owned session, so the agent's actions and the viewers'
  * pixels are one display.
  *
- * `tools()` is TRANSPORT-AWARE, mirroring the SDK's `filesystem()` capability
- * (which branches its `view_image` / `apply_patch` on
- * `supportsStructuredToolOutputTransport(this._modelInstance)`):
- *   • structured transport (the Responses/OpenAI backend) → the single HOSTED
- *     `computer_use_preview` tool over a Computer bound to the session (unchanged).
- *   • text transport (codex / ChatGPT backend — or an unbound model) → a set of
- *     FUNCTION tools ({@link computerFunctionTools}) that route to the SAME Computer,
- *     because the codex backend rejects the hosted computer tool type.
- * The bound model instance is captured by the SDK's `bind().bindRunAs().bindModel()`
- * chain (base `Capability._modelInstance`); the codex path in index.ts neutralizes
- * `bindModel` so `_modelInstance` stays undefined here → the function tools win.
+ * `tools()` is transport-aware only through `ComputerUseArgs.toolMode`. The bound
+ * model instance is intentionally ignored: a constructor name cannot prove whether
+ * screenshots travel as hosted computer output or structured function images.
  */
 export class ComputerUseCapability extends Capability {
   readonly type = "computer-use";
@@ -1279,16 +1246,14 @@ export class ComputerUseCapability extends Capability {
           // any computer-use-only recording. One SandboxComputer instance caches
           // this for the rest of the turn.
           prepare: async (preparedSession) => {
-            await ensureDisplayStack(preparedSession);
+            await ensureDisplayStack(preparedSession, {
+              telemetryContext: { callerKind: "computer" },
+            });
             await this.args.onReady?.(preparedSession);
           },
         });
-    // HARDENING: when the caller declares an EXPLICIT toolMode, obey it and NEVER
-    // consult `supportsStructuredToolOutputTransport` — tool selection must not
-    // depend on the model instance's constructor name (a wrapped/proxied/minified
-    // instance would defeat the "ChatCompletions" string-sniff and silently hand a
-    // chat-completions provider the hosted tool it 400s on). The mode is decided by
-    // the worker, where provider identity is authoritative (see agent-turn.ts).
+    // Tool selection must not depend on the model instance's constructor name. The
+    // worker supplies a proven explicit mode; public callers that omit it fail closed.
     switch (this.args.toolMode) {
       case "hosted":
         return [this.hostedComputerTool(computer)];
@@ -1299,31 +1264,21 @@ export class ComputerUseCapability extends Capability {
           this.args.needsApproval,
           true,
         );
+      case "disabled":
       case "function-text":
-        return computerFunctionTools(
-          computer,
-          this.args.readOnly ?? false,
-          this.args.needsApproval,
-          false,
-        );
       case undefined:
-        break; // fall through to the legacy sniff (back-compat), preserved byte-for-byte
+        // A text data URL is not a visual observation for the provider and can
+        // consume hundreds of thousands of apparent text tokens. Disable the
+        // entire coordinate-dependent capability: action tools without a usable
+        // screenshot would be blind and unsafe.
+        return [];
     }
-    // Legacy (no toolMode): structured transport keeps the HOSTED computer tool
-    // (unchanged); the codex / text backend gets the FUNCTION tools it can call.
-    if (supportsStructuredToolOutputTransport(this._modelInstance)) {
-      return [this.hostedComputerTool(computer)];
-    }
-    return computerFunctionTools(
-      computer,
-      this.args.readOnly ?? false,
-      this.args.needsApproval,
-      this.args.imageFunctionResults ?? false,
-    );
+    // Runtime callers may bypass TypeScript or pass a value from a newer client.
+    // Unknown transport modes must remain fail-closed.
+    return [];
   }
 
-  /** The single HOSTED `computer_use_preview` tool bound to `computer` — identical
-   *  construction for the explicit "hosted" mode and the legacy structured-sniff path. */
+  /** The single HOSTED `computer_use_preview` tool bound to `computer`. */
   private hostedComputerTool(computer: Computer): Tool<unknown> {
     return computerTool({
       computer,

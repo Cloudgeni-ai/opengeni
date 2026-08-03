@@ -1,5 +1,553 @@
 # @opengeni/react
 
+## 0.38.1
+
+### Patch Changes
+
+- d299c54: Keep captured-file actions legible and ensure the hosted voice-options control meets its minimum target size.
+
+## 0.38.0
+
+### Patch Changes
+
+- 763aa97: Preserve a latency-mode selection made while a durable composer draft is loading.
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [3e4842d]
+  - @opengeni/sdk@0.38.0
+
+## 0.37.0
+
+### Minor Changes
+
+- 1c49020: Publish the full model, reasoning-effort, and latency-mode picker used by the web app as a reusable, token-themed React component.
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [3baaebd]
+  - @opengeni/sdk@0.37.0
+
+## 0.36.2
+
+### Patch Changes
+
+- b4982fa: Expose GPT-5.6 Max reasoning end to end for managed and connected Codex models.
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+  - @opengeni/sdk@0.36.2
+
+## 0.36.1
+
+### Patch Changes
+
+- 9c4d73d: Add curated OpenGeni-credit and workspace-key Vercel AI Gateway model paths for
+  DeepSeek V4 Flash and Kimi K3, including exact provider routing, cache-aware
+  pricing and metering, Responses tool continuity, provider-blind catalog UX, and
+  stable remote-compaction cache prefixes.
+- Updated dependencies [9c4d73d]
+  - @opengeni/sdk@0.36.1
+
+## 0.36.0
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/sdk@0.36.0
+
+## 0.35.3
+
+### Patch Changes
+
+- a299919: Make horizontally scrollable Markdown code blocks and tables reachable from the keyboard.
+
+## 0.35.2
+
+### Patch Changes
+
+- 83ac3b6: Keep a malformed or unavailable timeline renderer from crashing the entire conversation by isolating each timeline group behind a visible fallback, then retry the row when its renderer inputs change.
+  - @opengeni/sdk@0.35.0
+
+## 0.35.1
+
+### Patch Changes
+
+- b286dad: Keep fleet-decision timeline rows mounted when unrelated session metadata, including personal pin state, changes.
+
+## 0.35.0
+
+### Minor Changes
+
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+
+### Patch Changes
+
+- Updated dependencies [dd71248]
+  - @opengeni/sdk@0.35.0
+
+## 0.34.3
+
+### Patch Changes
+
+- ea344d6: Keep agent goal tools inside the activity cluster (no breakaway GoalRow split),
+  allow collapsing live turn step shells, and keep densified Workspace hub /
+  timeline disclosure changes under a stable Radix vendor chunk.
+
+## 0.34.2
+
+### Patch Changes
+
+- 9840496: Avoid replacing an in-flight initial workspace-capture read when the matching capture announcement arrives first.
+
+## 0.34.1
+
+### Patch Changes
+
+- Updated dependencies [408543f]
+  - @opengeni/sdk@0.34.1
+
+## 0.34.0
+
+### Patch Changes
+
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/sdk@0.34.0
+
+## 0.33.1
+
+### Patch Changes
+
+- b5f2fb5: Keep live workbench acceptance aligned with the hosted controlled-panel contract and remove a real-time boundary from its related React regression coverage.
+- Updated dependencies [8243ffe]
+  - @opengeni/sdk@0.33.1
+
+## 0.33.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- Updated dependencies [1ec9912]
+  - @opengeni/sdk@0.33.0
+
+## 0.32.1
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- 48ae722: Smooth tip-follow camera and streaming timeline motion (settle folds, tool enter, fence soft-close).
+- Updated dependencies [c52acc0]
+  - @opengeni/sdk@0.32.1
+
+## 0.32.0
+
+### Patch Changes
+
+- Updated dependencies [f413e6c]
+  - @opengeni/sdk@0.32.0
+
+## 0.31.0
+
+### Minor Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+  - @opengeni/sdk@0.31.0
+
+## Unreleased
+
+- Copy affordances: fenced code + tables in `Markdown`, hover copy on user/assistant messages, and "Copy turn" on settled turn chips (includes the lifted final answer).
+- Session timeline history navigation: `loadOldest` / `loadNewer` / `jumpToLatest` on `useSessionEvents`, plus Jump to start / Jump to latest chrome on `MessageTimeline` (bounded windows; no middle gap walk).
+- Add `SessionChrome` — production/embed session-signal dock (incoming / queue / goal / agents) with token overrides (`--og-session-chrome-*`), token tooltips, crossfade panel switches, and queue hover actions wired to `UseTurnQueueResult`. Replaces stacked `QueueSurface` + host goal/agents chrome in the web session route.
+- Export shared `Tooltip*` primitives used by SessionChrome (portal-token aware).
+- Fix SessionChrome tooltips: inverted tip surface uses inline fg/bg so `.og-root` cannot blank the text; tip only icon actions; Steer copy matches QueueSurface (`Make this the next direction`).
+- Light ChatComposer spacing/token freshen (quieter focus border, tighter footer/input padding).
+- Replace host-adapter composer transcription with native MediaRecorder capture and immediate server transcription.
+- Compact composer voice chrome: live/fallback waveform, separate cancel vs stop-and-transcribe actions, and a quieter transcribing state.
+
+## 0.30.2
+
+### Patch Changes
+
+- 84fb671: Prevent a ready file restored during reconnect from being counted twice across the durable composer draft and the still-live attachment card. Canonical duplicate refs are removed before draft persistence and composer submission while custom mounts and exact draft revision/content conflict protection remain intact.
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/sdk@0.30.2
+
+## 0.30.1
+
+### Patch Changes
+
+- Updated dependencies [bbcbef5]
+- Updated dependencies [ddff8db]
+  - @opengeni/sdk@0.30.1
+
+## 0.30.0
+
+### Patch Changes
+
+- Updated dependencies [1f6f13f]
+  - @opengeni/sdk@0.30.0
+
+## 0.29.3
+
+### Patch Changes
+
+- 8dca209: Remove redundant success glyphs from collapsed turn summaries while preserving failed, cancelled, and active state indicators.
+- 821f664: Seed shared session-event cursors from loaded history to prevent historical replay storms, and preserve the MCP SDK's exact request-timeout classification through safe transport-error sanitization.
+
+## 0.29.2
+
+### Patch Changes
+
+- ad0bdc3: Surface managed-credit admission rejections with actionable composer recovery guidance while preserving drafts and attachments, and canonicalize default attachment mounts across established-session draft admission and replay.
+  - @opengeni/sdk@0.29.0
+
+## 0.29.1
+
+### Patch Changes
+
+- 8478e60: Default workspace-tracking sessions to every configured MCP server while
+  preserving exact explicit API allow-lists. Keep OpenGeni's internal carrier and
+  default-on Files surface out of the web picker's visible choices and counts.
+  Settle provider-native web searches from their own terminal status, render each
+  web action truthfully, keep completed searches before the answer they informed,
+  and hide unresolved private citation handles from the human timeline.
+
+## 0.29.0
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+  - @opengeni/sdk@0.29.0
+
+## 0.28.3
+
+### Patch Changes
+
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+- Updated dependencies [28c678d]
+- Updated dependencies [1c4018e]
+  - @opengeni/sdk@0.28.3
+
+## 0.28.2
+
+### Patch Changes
+
+- c1dcccc: Publish the current client surfaces from one exact reviewed source revision.
+- Updated dependencies [c1dcccc]
+  - @opengeni/sdk@0.28.2
+
+## 0.28.1
+
+### Patch Changes
+
+- 2ec6494: Publish the current client surfaces from one exact reviewed source revision.
+- Updated dependencies [2ec6494]
+  - @opengeni/sdk@0.28.1
+
+## 0.28.0
+
+### Minor Changes
+
+- 29ad09b: Persist typed machine inputs into canonical model history at turn claim, expose
+  authoritative pending-input queue projections and lifecycle events, render
+  delivered batches in the timeline, and preserve append-only prompt-cache
+  prefixes across tools, later turns, recovery, and explicit compaction.
+
+### Patch Changes
+
+- 8eaa377: Add per-timeline `add`, `remove`, and `replace` customization for collapsed turn summary facets while preserving the existing defaults.
+- 8eaa377: Expose transport-tolerant MCP output normalization from the SDK and reuse it in the React timeline parser.
+- Updated dependencies [29ad09b]
+- Updated dependencies [8eaa377]
+- Updated dependencies [dfc3235]
+  - @opengeni/sdk@0.28.0
+
+## 0.27.0
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/sdk@0.27.0
+
+## 0.26.3
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/sdk@0.26.3
+
+## 0.26.2
+
+### Patch Changes
+
+- f92af07: Give each session-only React hook an exact structural client contract so embedded hosts can use session reads, goals, lineage, file attachments, structured human input, and MCP approval policies without implementing unrelated composer, queue, workspace, or workbench APIs.
+
+## 0.26.1
+
+### Patch Changes
+
+- ffd246c: Keep workspace-capture Git status, diffs, and untracked files below provider retained-output limits, and publish an explicit degraded revision instead of an authoritative empty diff when repository reads fail.
+- Updated dependencies [ffd246c]
+  - @opengeni/sdk@0.26.1
+
+## 0.26.0
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [5511c24]
+  - @opengeni/sdk@0.26.0
+
+## 0.25.5
+
+### Patch Changes
+
+- 6f0690d: Preserve persisted tool-call correlation and bounded truncation telemetry when loading timeline history.
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/sdk@0.25.5
+
+## 0.25.4
+
+### Patch Changes
+
+- 5846352: Keep the session-only React entry provider-free by resolving session hooks through the session context, preserving the exclusion of provider and workbench dependencies.
+
+## 0.25.3
+
+### Patch Changes
+
+- a0f2442: Return typed correlation-safe API failures, discard bounded non-JSON gateway bodies in the SDK, preserve retryability and ambiguous mutation outcomes, and keep composer drafts stable across transient failures and live policy rerenders.
+- Updated dependencies [a0f2442]
+  - @opengeni/sdk@0.25.3
+
+## 0.25.2
+
+### Patch Changes
+
+- Updated dependencies [85cb323]
+  - @opengeni/sdk@0.25.2
+
+## 0.25.1
+
+### Patch Changes
+
+- 9db6c17: Prevent live session and policy rerenders from repeatedly fetching the same composer draft while preserving target, explicit, and event-driven reloads.
+  - @opengeni/sdk@0.25.0
+
+## 0.25.0
+
+### Patch Changes
+
+- c549ed8: Persist and transactionally materialize revisioned active-goal continuation
+  obligations, recover their Temporal delivery without human input or model
+  polling, preserve authoritative human/Steer ordering, and expose truthful
+  scheduled, running, blocked, and invariant-broken continuation state to clients.
+  Make agent goal updates revisioned, attempt-recoverable commands so ambiguous
+  commit responses reconcile without duplicate mutation or stale overwrites.
+- 860de22: Persist actor-private pre-session drafts on the server, consume only the exact accepted revision after durable session initialization, return structured create errors, deduplicate create resources, derive checksums for SDK uploads, restore finalized attachments without browser-local byte authority, and preserve attachments added while an earlier send is in flight.
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/sdk@0.25.0
+
+## 0.24.0
+
+### Minor Changes
+
+- 0ed0f01: Add per-member session pin preferences with isolated server persistence, bounded/reused stable
+  pagination snapshots, snapshot-free pin polling, typed SDK and React reconciliation, and accessible
+  list and header controls.
+
+### Patch Changes
+
+- 744a93d: Add default-off, bounded adaptive Codex fleet decision telemetry with strict deterministic replay, cache-aware and work-conserving policy simulation, secret-safe event/UI observability, and independent future policy gates.
+- Updated dependencies [744a93d]
+- Updated dependencies [0ed0f01]
+  - @opengeni/sdk@0.24.0
+
+## 0.23.0
+
+### Minor Changes
+
+- 0d60720: Add capability-first session tool policies with omission-as-discovery defaults,
+  explicit per-turn narrowing and child inheritance, secret-safe effective-policy
+  projections, stable lazy `tool_search` catalogs, and matching API, SDK, React,
+  worker, embedding, and audit contracts.
+
+  Harden credential-bearing MCP and OAuth traffic with destination-bound
+  credentials, single-resolution DNS-pinned transport, bounded catalogs, schemas,
+  results, request and response bodies, and independently validated manual
+  redirects. Extend renewable, session-bound Toolspace access to connected
+  machines while dynamically fencing every call to the session's active attempt.
+
+### Patch Changes
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+- Updated dependencies [3214d70]
+  - @opengeni/sdk@0.23.0
+
+## 0.22.1
+
+### Patch Changes
+
+- Updated dependencies [524599e]
+  - @opengeni/sdk@0.22.1
+
+## 0.22.0
+
+### Patch Changes
+
+- Updated dependencies [229902b]
+  - @opengeni/sdk@0.22.0
+
+## 0.21.2
+
+### Patch Changes
+
+- Updated dependencies [4966649]
+  - @opengeni/sdk@0.21.2
+
+## 0.21.1
+
+### Patch Changes
+
+- bd46c89: Mount long session timelines progressively so the newest activity paints first and low-end browsers remain responsive while older groups hydrate.
+- Updated dependencies [ff23da5]
+  - @opengeni/sdk@0.21.1
+
+## 0.21.0
+
+### Minor Changes
+
+- d1dee7a: Let embedding hosts read and update an existing session MCP server's approval
+  policy through the public API, SDK, and React session hook. Each claimed
+  attempt freezes its policy under the session lock, so updates affect the next
+  attempt without reinterpreting work already running; model MCP and
+  Toolspace/Code Mode consume the same exact snapshot. Toolspace tokens and
+  side-effect receipts bind every proxied call to the exact active attempt, so
+  Pause, Steer, recovery, and late outputs preserve one authoritative owner.
+
+### Patch Changes
+
+- Updated dependencies [d1dee7a]
+  - @opengeni/sdk@0.21.0
+
+## 0.20.0
+
+### Minor Changes
+
+- 9f84cc9: Add durable host-provided per-turn instructions, headless structured-input hooks, host-local queue
+  focus, and reusable approval and human-input surfaces for embedded session consumers.
+
+### Patch Changes
+
+- Updated dependencies [9f84cc9]
+  - @opengeni/sdk@0.20.0
+
+## 0.19.0
+
+### Minor Changes
+
+- 3aee519: Add a workspace-accepted, provider-agnostic transcription policy and host-adapter contract, plus an accessible composer microphone that keeps partials ephemeral and appends non-empty accepted finals to the editable draft exactly once. Policies explicitly accept automatic language detection and speaker diarization, events can carry strict neutral result metadata, pending starts and cleanup are abortable/bounded, and adapter failures stay behind controlled UI copy with redacted non-UI diagnostics.
+
+### Patch Changes
+
+- 136227e: Add an immutable, versioned curated skill library with explicit workspace selection and inspectable provenance, and preserve WCAG AA contrast for dark-theme primary actions.
+- Updated dependencies [136227e]
+- Updated dependencies [3aee519]
+  - @opengeni/sdk@0.19.0
+
+## 0.18.0
+
+### Minor Changes
+
+- 5547b2f: Let embedders allowlist Changes, Files, Terminal, and Desktop workbench surfaces while keeping disabled surfaces behaviorally dormant.
+- 4401ce7: Add a scope-checked host MCP credential resolver to the public embedding port and use it consistently for model-visible MCP tools and Toolspace/Code Mode while preserving the standalone connection broker as the default. Requests carry both the immediate session and its workspace-scoped lineage root so embedded hosts can authorize child sessions through one durable root binding. Provider-neutral bindings now carry a provider family, provider host, opaque host binding id, and exact selected-repository set; successful credentials must echo the complete binding before headers are accepted. Incompatible endpoint authentication and unenforceable resource containment surface as explicit unavailable states instead of starting a duplicate OpenGeni provider connection.
+- c389adc: Add a provider-neutral host run-credential port with frozen turn/session lineage,
+  off-manifest environment and file generations, proactive renewal, attempt-safe
+  cleanup with bounded generation retention, output redaction hints, and structured
+  reconnect UI support. Hosts can explicitly opt a frozen target out, and the
+  POSIX materializer supports both Linux `flock` and a portable directory-lock
+  fallback with cross-platform base64 decoding.
+- a11a7fc: Support mixed GitHub, GitLab, and Azure DevOps repositories—including multiple
+  accounts or installations for one provider—in a single session through bounded,
+  host-opaque credential bindings and optional read/write access intent.
+
+  Validate binding/provider/host echoes before token injection, isolate tokens in
+  hashed binding files, select Git credentials by remote path, fail provider CLIs
+  closed on ambiguous bindings, and renew each binding independently while keeping
+  legacy one-binding-per-provider request and file aliases compatible.
+
+- 2dfd415: Let embedders keep composer drafts in local React state while leaving message, attachment, steer, and control behavior active. Queue checkout is withheld because its atomic API contract necessarily creates a durable composer draft.
+- dda6398: Add durable structured human-input tool calls with exact-turn ownership,
+  answer/skip/expiry/cancellation outcomes, restart-safe Temporal resumption,
+  authorized API and SDK methods, and headless plus styled React embed surfaces.
+
+### Patch Changes
+
+- 4498714: Preserve tool names and arguments when projecting serialized approval items through the session-only React API.
+- 51f45a3: Publish the session-only React entry point and typed session control surface in a stable registry release.
+- 44ff327: Fence queue, composer, and control hook state to the active workspace and session so target switches cannot expose or accept stale private state.
+- Updated dependencies [1fcd83d]
+- Updated dependencies [4401ce7]
+- Updated dependencies [c389adc]
+- Updated dependencies [d249403]
+- Updated dependencies [a11a7fc]
+- Updated dependencies [51f45a3]
+- Updated dependencies [dda6398]
+- Updated dependencies [e8ca4f6]
+- Updated dependencies [736f4fe]
+  - @opengeni/sdk@0.18.0
+
+## 0.17.0
+
+### Minor Changes
+
+- 717a7ef: Add a headless chat-composer controller, compound composer primitives, and typed message overrides while preserving `ChatComposer` as the default preset.
+- dbb6232: Support linking an existing GitHub App installation to multiple OpenGeni workspaces with independent repository allowlists.
+
+  - Discover installations through GitHub App user OAuth, require repository-level administrator permission, and configure the OAuth callback in generated App manifests.
+  - Persist workspace-scoped installation bindings and repository selections while retaining legacy `all` bindings for compatibility.
+  - Enforce the current binding during repository listing, session admission, MCP token minting, and GitHub-authenticated worker turn startup.
+  - Add SDK and web controls to link, rescope, and unlink a workspace without uninstalling the GitHub App or affecting another workspace.
+
+### Patch Changes
+
+- bb09be8: Add a session-only React entrypoint and mirror MCP approval policy in
+  the public SDK type.
+- Bound model-facing tool output, complete input accounting, compact session discovery,
+  event and realtime projections, authorized evidence retrieval, and compaction failure
+  convergence with explicit truncation and loss metadata throughout the output lifecycle.
+  Session event `latest` lookups are now class-exclusive across REST, MCP, and SDK clients.
+  Updated-order session discovery now uses a transactional workspace activity-revision fence,
+  and the workspace-control bounds migration rewrites only historical cap violations.
+- Updated dependencies [bb09be8]
+- Updated dependencies
+- Updated dependencies [dbb6232]
+  - @opengeni/sdk@0.17.0
+
 ## 0.16.1
 
 ### Patch Changes

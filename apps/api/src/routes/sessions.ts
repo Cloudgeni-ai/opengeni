@@ -1,17 +1,23 @@
 import {
   AcknowledgeStreamRequest,
+  ActivateCodexRealtimeConnectionRequest,
   AttachViewerRequest,
+  BeginSessionRealtimeRequest,
   ClearSessionContextRequest,
+  CodexRealtimeWebrtcRequest,
+  GatewayRealtimeConnectRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
+  EndSessionRealtimeRequest,
   FsDeleteRequest,
   FsListRequest,
   FsMkdirRequest,
   FsMoveRequest,
   FsReadRequest,
   FsWriteRequest,
+  HumanInputRequestStatus,
   GitDiffRequest,
   GitLogRequest,
   GitShowRequest,
@@ -21,25 +27,38 @@ import {
   PtyOpenRequest,
   PtyResizeRequest,
   PtyWriteRequest,
+  RenewSessionRealtimeRequest,
+  SyncSessionRealtimeLedgerRequest,
   SessionControlRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
+  SessionEventLatestClass,
+  SessionEventResultMode,
   SessionEventSemanticClass,
   SessionEventType,
+  SessionMcpServerId,
+  compactSessionEventResult,
+  sessionEventLatestClassToSemanticClass,
   SaveComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
+  UpdateSessionToolPolicyRequest,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   workspaceControlUtf8Bytes,
   type SandboxBackend,
+  type LineageNode,
   type Session,
+  type ErrorCode,
+  type SessionAuthorizationOperation,
+  type SessionQueueSnapshot,
   type TerminalPtyExitedPayload,
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
@@ -47,21 +66,29 @@ import {
 import { streamTokenDegraded } from "@opengeni/config";
 import {
   acceptSessionApprovalDecision,
+  acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
-  closePtySession,
   getOpenPtySession,
+  getRetainedProcess,
   getSandbox,
   getSession,
+  getSessionEvent,
   getSessionForSubject,
   getSessionGoal,
+  getSessionHumanInputRequest,
+  getSessionGoalWithContinuation,
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
   listSessionEventPage,
+  listSessionHumanInputRequests,
   listSessionIdsInGroup,
   listSessionsForSubject,
+  getLatestStartedSessionTurn,
   listSessionTurns,
+  projectEffectiveControlForRelatedAccess,
+  projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
   setSessionCodexPin,
@@ -71,17 +98,37 @@ import {
   SessionPinAccessError,
   SessionListAccessError,
   SessionListCursorError,
+  SessionListCursorExpiredError,
+  SessionListSnapshotLimitError,
   decodeSessionListCursor,
   revokeViewer,
-  setSessionGoalStatus,
+  setSessionGoalStatusWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
+  beginSessionRealtimeInTransaction,
+  activateSessionRealtimeConnectionInTransaction,
+  claimSessionRealtimeConnectionInTransaction,
+  completeSessionRealtimeConnectionInTransaction,
+  endSessionRealtimeInTransaction,
+  failSessionRealtimeConnectionInTransaction,
+  NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
+  SessionRealtimeConflictError,
+  SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
+  HumanInputResponseValidationError,
   latestWorkspaceCapture,
+  sessionLatestWorkspaceCapture,
+  renewSessionRealtimeInTransaction,
+  syncSessionRealtimeLedgerInTransaction,
+  withWorkspaceRls,
   workspaceCaptureAtRevision,
   type AppendEventInput,
+  type SandboxOpenPtySessionRow,
+  type SandboxPtyProcessIdentity,
+  type SandboxRetainedProcess,
+  type Database,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -89,12 +136,25 @@ import {
   coalesceSessionEventDeltas,
   publishDurableSessionEvents,
 } from "@opengeni/events";
-import { z } from "zod";
-import { withChannelA } from "../sandbox/channel-a";
+import {
+  createGatewayRealtimeConnectionSecret,
+  GatewayRealtimeBrokerError,
+} from "../gateway-realtime";
+import { z, ZodError } from "zod";
+import { withChannelA, type ChannelAContext, type ChannelAHandle } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
-import type { Context, Hono } from "hono";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import {
+  requireAccessGrant,
+  requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
+  SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+  type ResolvedSessionAuthorization,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   attachViewer,
@@ -107,38 +167,302 @@ import {
   viewerHeartbeatIntervalMs,
   type DesktopStreamMint,
   type TerminalStreamMint,
+  type ViewerServices,
 } from "../sandbox/viewer";
+import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
   createSessionForRequest,
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
+  getActorNewSessionDraft,
   getHumanComposerDraft,
   moveHumanQueuePrompt,
   readSessionLineage,
   saveHumanComposerDraft,
+  saveActorNewSessionDraft,
+  SessionSpawnDeniedError,
+  sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
+  updateSessionMcpApprovalPolicy,
+  updateSessionToolPolicy,
   updateSessionTitle,
   workflowIdForSession,
+  sessionWithEffectiveToolPolicy,
+  workspaceSessionToolPolicyDefaultServerIds,
+  workspaceSessionToolPolicyServerIds,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
-import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-capture";
+import {
+  serveWorkspaceCapture,
+  serveWorkspaceCaptureFile,
+  WorkspaceCaptureManifestCache,
+} from "./workspace-capture";
 
-export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
+type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
+
+export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  const channelAServices = { db, settings, bus, observability: deps.observability };
+  const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
+  const ptyIdentity = (pty: SandboxOpenPtySessionRow): SandboxPtyProcessIdentity => ({
+    leaseId: pty.leaseId,
+    sandboxGroupId: pty.sandboxGroupId,
+    retainedProcessId: pty.retainedProcessId,
+    openAdmissionId: pty.openAdmissionId,
+    execSessionId: pty.execSessionId,
+    leaseEpoch: pty.leaseEpoch,
+    providerBackend: pty.providerBackend,
+    providerInstanceId: pty.providerInstanceId,
+    routeKind: pty.routeKind,
+    routeTargetId: pty.routeTargetId,
+    routeEpoch: pty.routeEpoch,
+  });
+  const adoptPtyProcess = async (
+    ctx: ChannelAContext,
+    handle: ChannelAHandle,
+    pty: SandboxOpenPtySessionRow,
+  ): Promise<SandboxRetainedProcess> => {
+    if (!handle.lease) {
+      throw new HTTPException(409, {
+        message: "durable interactive terminals require a session-home provider lease",
+      });
+    }
+    const process = await getRetainedProcess(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      processId: pty.retainedProcessId,
+    });
+    if (
+      !process ||
+      process.state !== "active" ||
+      process.ownerActorKind !== "direct" ||
+      process.accountId !== ctx.accountId ||
+      process.leaseId !== pty.leaseId ||
+      process.sandboxGroupId !== pty.sandboxGroupId ||
+      process.parentAdmissionId !== pty.openAdmissionId ||
+      process.leaseEpoch !== pty.leaseEpoch ||
+      process.providerBackend !== pty.providerBackend ||
+      process.providerInstanceId !== pty.providerInstanceId ||
+      process.routeKind !== pty.routeKind ||
+      process.routeTargetId !== pty.routeTargetId ||
+      process.routeEpoch !== pty.routeEpoch ||
+      process.providerSessionId !== pty.execSessionId ||
+      // Only a persistable home backend can currently be reconstructed by an
+      // API request without consulting the mutable active pointer.
+      process.routeTargetId !== null ||
+      handle.lease.id !== process.leaseId ||
+      handle.lease.sandboxGroupId !== process.sandboxGroupId ||
+      handle.lease.leaseEpoch !== process.leaseEpoch ||
+      handle.lease.backend !== process.providerBackend ||
+      handle.lease.instanceId !== process.providerInstanceId
+    ) {
+      throw new HTTPException(409, {
+        message: "pty retained-process identity is stale; reopen the terminal",
+      });
+    }
+    handle.routingSession.adoptRetainedProcess({
+      process: { id: process.id, providerSessionId: process.providerSessionId },
+      backend: {
+        sandboxId: null,
+        leaseEpoch: process.leaseEpoch,
+        providerInstanceId: process.providerInstanceId,
+        activeEpoch: process.routeEpoch,
+      },
+    });
+    return process;
+  };
+  const emitPtyExited = async (
+    ctx: ChannelAContext,
+    ptyId: string,
+    process: SandboxRetainedProcess,
+  ): Promise<void> => {
+    const exited: TerminalPtyExitedPayload = {
+      ptyId,
+      exitCode: process.exitCode,
+      reason: process.state === "exited" ? "exit" : "lost",
+    };
+    await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
+      { type: "terminal.pty.exited", payload: exited },
+    ]);
+  };
+  const drainOpenedPty = async (handle: ChannelAHandle, execSessionId: number): Promise<void> => {
+    let chars = "\u0004";
+    while (handle.routingSession.hasRetainedProcess(execSessionId)) {
+      await handle.routingSession.writeStdinForProcessControl({
+        sessionId: execSessionId,
+        chars,
+        yieldTimeMs: 250,
+        maxOutputTokens: 128,
+      });
+      chars = "";
+    }
+  };
+  const failPtyPersistenceAndDrain = (persistenceError: unknown, drainError: unknown): never => {
+    throw new AggregateError(
+      [persistenceError, drainError],
+      "PTY persistence failed and the exact opened process could not be drained",
+      { cause: drainError },
+    );
+  };
+  const requestSessionAuthorization = new WeakMap<Request, ResolvedSessionAuthorization>();
+  const relatedSessionAccessFor = (c: Context): "target" | "root" =>
+    requestSessionAuthorization.get(c.req.raw)?.relatedSessionAccess ?? "root";
+  const projectQueueSnapshot = (
+    snapshot: SessionQueueSnapshot,
+    sessionId: string,
+    access: "target" | "root",
+  ): SessionQueueSnapshot => ({
+    ...snapshot,
+    effectiveControl: projectEffectiveControlForRelatedAccess(
+      snapshot.effectiveControl,
+      sessionId,
+      access,
+    ),
+  });
+
+  // Every deployment has one fail-closed authorization seam for every HTTP
+  // session surface. The core boundary always enforces durable OpenGeni-owned
+  // private-session rules; an embedding host port can add narrower policy.
+  // Register it before the routes so a newly added path cannot accidentally
+  // inherit workspace access without an explicit operation classification. The
+  // long-lived event stream performs its own initial check and bounded
+  // reauthorization below.
+  const authorizeSessionHttp: MiddlewareHandler = async (c, next) => {
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    const sessionId = c.req.param("sessionId") ?? "";
+    const operation = sessionAuthorizationOperationForHttp(
+      c.req.method,
+      new URL(c.req.url).pathname,
+      sessionId,
+    );
+    if (operation === "session.stream.read") {
+      await next();
+      return;
+    }
+    if (!operation) {
+      throw sessionAuthorizationHttpError(new SessionAuthorizationUnavailableError());
+    }
+    if (operation === "session.codex_account.write" && !deps.sessionAuthorization) {
+      await next();
+      return;
+    }
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    try {
+      const authorization = await requireSessionAuthorization(deps, grant, {
+        sessionId,
+        operation,
+        surface: "http",
+      });
+      if (authorization) requestSessionAuthorization.set(c.req.raw, authorization);
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
+    await next();
+  };
+  app.use("/v1/workspaces/:workspaceId/sessions/:sessionId/*", authorizeSessionHttp);
+
+  const viewerServices: ViewerServices = {
+    db,
+    settings,
+    bus,
+    ...(deps.establishSandboxSession
+      ? { establishSandboxSession: deps.establishSandboxSession }
+      : {}),
+  };
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const session = await createSessionForRequest(deps, grant, workspaceId, await c.req.json());
-    return c.json(session, 202);
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json(
+        {
+          code: "INVALID_SESSION_CREATE_REQUEST",
+          message: "Invalid session create request: request body must contain valid JSON",
+        },
+        422,
+      );
+    }
+    let session: Session;
+    try {
+      session = await createSessionForRequest(deps, grant, workspaceId, payload);
+    } catch (error) {
+      return sessionCreateErrorResponse(c, error);
+    }
+    // Creation has committed by this point. Keep response projection outside
+    // the create-rejection boundary so a post-commit policy read cannot be
+    // misreported as though the session itself was rejected.
+    return c.json(await withEffectivePolicy(deps, workspaceId, session), 202);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    return c.json(await getActorNewSessionDraft({ settings, db }, grant, workspaceId));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json(
+        {
+          code: "INVALID_NEW_SESSION_DRAFT_REQUEST",
+          message: "Invalid new-session draft request: request body must contain valid JSON",
+        },
+        422,
+      );
+    }
+    try {
+      return c.json(
+        await saveActorNewSessionDraft(
+          { settings, db, objectStorage },
+          grant,
+          workspaceId,
+          payload,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof NewSessionDraftConflictError) {
+        return c.json(
+          {
+            code: "NEW_SESSION_DRAFT_CONFLICT",
+            message: error.message,
+            currentRevision: error.currentRevision,
+          },
+          409,
+        );
+      }
+      if (error instanceof ZodError) {
+        return c.json(
+          {
+            code: "INVALID_NEW_SESSION_DRAFT_REQUEST",
+            message: `Invalid new-session draft request: ${zodErrorFields(error)} failed schema validation`,
+          },
+          422,
+        );
+      }
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    let authorizationScope;
+    try {
+      authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "http");
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
     let page: Awaited<ReturnType<typeof listSessionsForSubject>>;
@@ -146,16 +470,30 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       page = await listSessionsForSubject(db, workspaceId, {
         subjectId: grant.subjectId,
         limit: boundedLimit(query.limit),
+        materializeSnapshot: pageView,
         ...(query.cursor ? { cursor: query.cursor } : {}),
         ...(query.search ? { search: query.search } : {}),
+        ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+        ...(authorizationScope ? { authorizationScope } : {}),
       });
     } catch (error) {
       if (error instanceof SessionListAccessError) {
         throw new HTTPException(403, { message: error.message });
       }
+      if (error instanceof SessionListCursorExpiredError) {
+        // The caller's short-lived snapshot is no longer usable. Keep this
+        // distinct from auth, network, and validation failures so clients can
+        // rebase a retained continuation exactly once instead of retrying the
+        // expired cursor forever.
+        throw new HTTPException(410, { message: error.message });
+      }
       if (error instanceof SessionListCursorError) {
         throw new HTTPException(400, { message: error.message });
+      }
+      if (error instanceof SessionListSnapshotLimitError) {
+        c.header("Retry-After", "5");
+        throw new HTTPException(429, { message: error.message });
       }
       throw error;
     }
@@ -163,15 +501,26 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
+    const policy = await loadEffectivePolicyContext(deps, workspaceId);
+    const decorate = (session: Session): Session =>
+      sessionWithEffectiveToolPolicy(
+        session,
+        policy.workspaceServerIds,
+        policy.workspaceDefaultServerIds,
+      );
     if (pageView) {
-      return c.json(page);
+      return c.json({
+        ...page,
+        pinned: page.pinned.map(decorate),
+        sessions: page.sessions.map(decorate),
+      });
     }
     // Same-major compatibility: listSessions() has historically returned an
     // array. Preserve that wire shape while adding personal pin metadata/order;
     // cursor consumers opt into the additive page view. A query flag rather
     // than a /sessions/page path is deliberate: an older API safely ignores it
     // and returns its historical array instead of treating "page" as a UUID.
-    return c.json([...page.pinned, ...page.sessions]);
+    return c.json([...page.pinned, ...page.sessions].map(decorate));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
@@ -181,12 +530,519 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const session = await getSessionForSubject(db, workspaceId, sessionId, grant.subjectId);
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(session);
+    return c.json(await withEffectivePolicy(deps, workspaceId, session));
   });
+
+  const publishRealtimeMutation = async (
+    accountId: string,
+    workspaceId: string,
+    sessionId: string,
+    result: {
+      eventIds: string[];
+      workflowWakeRevision: number | null;
+    },
+  ): Promise<void> => {
+    const events = (
+      await Promise.all(result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)))
+    ).filter((event) => event !== null);
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, events);
+    if (result.workflowWakeRevision !== null) {
+      await workflowClient.wakeSessionWorkflow({
+        accountId,
+        workspaceId,
+        sessionId,
+        workflowId: workflowIdForSession(sessionId),
+        wakeRevision: result.workflowWakeRevision,
+      });
+    }
+  };
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(400, { message: "invalid session id" });
+    }
+    const parsed = BeginSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session realtime request" });
+    }
+    try {
+      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          beginSessionRealtimeInTransaction(tx as unknown as Database, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
+        ),
+      );
+      await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+      c.header("cache-control", "private, no-store");
+      return c.json({ mode: result.mode, replay: result.replay }, result.replay ? 200 : 201);
+    } catch (error) {
+      throw sessionRealtimeHttpError(error);
+    }
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/heartbeat",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      const realtimeId = c.req.param("realtimeId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (
+        !z.string().uuid().safeParse(sessionId).success ||
+        !z.string().uuid().safeParse(realtimeId).success
+      ) {
+        throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
+      }
+      const parsed = RenewSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid realtime heartbeat request" });
+      }
+      try {
+        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            renewSessionRealtimeInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              ownerSubjectId: grant.subjectId,
+              ...parsed.data,
+            }),
+          ),
+        );
+        await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+        c.header("cache-control", "private, no-store");
+        return c.json({ mode: result.mode, replay: result.replay });
+      } catch (error) {
+        throw sessionRealtimeHttpError(error);
+      }
+    },
+  );
+
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const realtimeId = c.req.param("realtimeId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (
+      !z.string().uuid().safeParse(sessionId).success ||
+      !z.string().uuid().safeParse(realtimeId).success
+    ) {
+      throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
+    }
+    const parsed = EndSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid realtime end request" });
+    }
+    try {
+      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          endSessionRealtimeInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
+        ),
+      );
+      await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+      c.header("cache-control", "private, no-store");
+      return c.json({ mode: result.mode, replay: result.replay });
+    } catch (error) {
+      throw sessionRealtimeHttpError(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/webrtc", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = CodexRealtimeWebrtcRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid Codex realtime WebRTC request",
+      });
+    }
+
+    c.header("cache-control", "private, no-store");
+    try {
+      const {
+        realtimeId,
+        operationId,
+        browserInstanceId,
+        ownerKey,
+        expectedVersion,
+        expectedConnectionEpoch,
+        rotate,
+        browserActivation,
+        ...providerRequest
+      } = parsed.data;
+      const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            operationId,
+            ownerSubjectId: grant.subjectId,
+            browserInstanceId,
+            ownerKey,
+            expectedVersion,
+            expectedConnectionEpoch,
+            rotate,
+            promotionMode: browserActivation === "required" ? "staged" : "legacy",
+          }),
+        ),
+      );
+      if (claim.replay) {
+        if (
+          (claim.connection.state !== "ready" && claim.connection.state !== "active") ||
+          !claim.connection.sdpAnswer
+        ) {
+          throw new SessionRealtimeConflictError(
+            "REALTIME_CONNECTION_STATE_CHANGED",
+            "Realtime connection operation cannot be replayed; rotate with a new operation",
+          );
+        }
+        const legacyActivation =
+          browserActivation !== "required" && claim.connection.state === "ready"
+            ? await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+                scopedDb.transaction(async (tx) =>
+                  activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId,
+                    realtimeId,
+                    connectionId: claim.connection.id,
+                    operationId,
+                    ownerSubjectId: grant.subjectId,
+                    browserInstanceId,
+                    ownerKey,
+                    expectedVersion,
+                    expectedConnectionEpoch,
+                    connectionEpoch: claim.connection.connectionEpoch,
+                  }),
+                ),
+              )
+            : null;
+        return c.json({
+          sdp: claim.connection.sdpAnswer,
+          version: "v3" as const,
+          model: "gpt-live-1-boulder-alpha" as const,
+          connectionId: claim.connection.id,
+          connectionEpoch: claim.connection.connectionEpoch,
+          startupFenceSequence: claim.connection.startupFenceSequence,
+          modeVersion: legacyActivation?.mode.version ?? claim.modeVersion,
+          replay: true,
+        });
+      }
+      const broker = buildSessionCodexRealtimeBroker(
+        db,
+        settings,
+        workspaceId,
+        sessionId,
+        deps.codexFetch,
+      );
+      try {
+        const answer = await broker({ request: providerRequest, signal: c.req.raw.signal });
+        const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId: claim.connection.id,
+              operationId,
+              connectionEpoch: claim.connection.connectionEpoch,
+              sdpAnswer: answer.sdp,
+            }),
+          ),
+        );
+        const legacyActivation =
+          browserActivation !== "required"
+            ? await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+                scopedDb.transaction(async (tx) =>
+                  activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId,
+                    realtimeId,
+                    connectionId: completed.connection.id,
+                    operationId,
+                    ownerSubjectId: grant.subjectId,
+                    browserInstanceId,
+                    ownerKey,
+                    expectedVersion,
+                    expectedConnectionEpoch,
+                    connectionEpoch: completed.connection.connectionEpoch,
+                  }),
+                ),
+              )
+            : null;
+        return c.json({
+          ...answer,
+          connectionId: completed.connection.id,
+          connectionEpoch: completed.connection.connectionEpoch,
+          startupFenceSequence: completed.connection.startupFenceSequence,
+          modeVersion: legacyActivation?.mode.version ?? claim.modeVersion,
+          replay: false,
+        });
+      } catch (error) {
+        if (error instanceof CodexRealtimeBrokerError) {
+          await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+            scopedDb.transaction(async (tx) =>
+              failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+                workspaceId,
+                sessionId,
+                realtimeId,
+                connectionId: claim.connection.id,
+                operationId,
+                connectionEpoch: claim.connection.connectionEpoch,
+                failureCode: error.reason,
+              }),
+            ),
+          ).catch(() => undefined);
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof SessionRealtimeConflictError) {
+        throw sessionRealtimeHttpError(error);
+      }
+      if (!(error instanceof CodexRealtimeBrokerError)) throw error;
+      const failure = codexRealtimeHttpFailure(error);
+      return c.json(
+        {
+          error: {
+            status: failure.status,
+            code: failure.code,
+            message: error.message,
+            retryable: failure.retryable,
+            details: {
+              reason: error.reason,
+              ...(error.providerStatus === null ? {} : { providerStatus: error.providerStatus }),
+            },
+          },
+        },
+        failure.status,
+      );
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/gateway", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid Gateway realtime request" });
+    }
+    c.header("cache-control", "private, no-store");
+    const {
+      realtimeId,
+      operationId,
+      browserInstanceId,
+      ownerKey,
+      expectedVersion,
+      expectedConnectionEpoch,
+      rotate,
+    } = parsed.data;
+    let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
+      null;
+    let connectionCompleted = false;
+    try {
+      claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            operationId,
+            ownerSubjectId: grant.subjectId,
+            browserInstanceId,
+            ownerKey,
+            expectedVersion,
+            expectedConnectionEpoch,
+            rotate,
+            promotionMode: "staged",
+          }),
+        ),
+      );
+      if (claim.replay) {
+        throw new SessionRealtimeConflictError(
+          "REALTIME_CONNECTION_STATE_CHANGED",
+          "Realtime Gateway tokens are single-use; reconnect with a new operation",
+        );
+      }
+      const secret = await createGatewayRealtimeConnectionSecret({
+        db,
+        settings,
+        workspaceId,
+        sessionId,
+        model: claim.mode.model,
+        fetchImpl: deps.codexFetch ?? fetch,
+      });
+      const claimed = claim;
+      const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            connectionId: claimed.connection.id,
+            operationId,
+            connectionEpoch: claimed.connection.connectionEpoch,
+            sdpAnswer: "gateway-client-secret-minted",
+          }),
+        ),
+      );
+      connectionCompleted = true;
+      return c.json({
+        ...secret,
+        connectionId: completed.connection.id,
+        connectionEpoch: completed.connection.connectionEpoch,
+        startupFenceSequence: completed.connection.startupFenceSequence,
+        modeVersion: claimed.modeVersion,
+        replay: false as const,
+      });
+    } catch (error) {
+      if (claim !== null && !claim.replay && !connectionCompleted) {
+        const claimed = claim;
+        await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId: claimed.connection.id,
+              operationId,
+              connectionEpoch: claimed.connection.connectionEpoch,
+              failureCode:
+                error instanceof GatewayRealtimeBrokerError ? error.code : "gateway_error",
+            }),
+          ),
+        ).catch(() => undefined);
+      }
+      if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
+      if (!(error instanceof GatewayRealtimeBrokerError)) throw error;
+      const status = error.code === "credential_unavailable" ? 409 : 502;
+      return c.json(
+        {
+          error: {
+            status,
+            code: `GATEWAY_REALTIME_${error.code.toUpperCase()}`,
+            message: error.message,
+            retryable: error.code === "provider_error",
+          },
+        },
+        status,
+      );
+    }
+  });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/connections/:connectionId/activate",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      const realtimeId = c.req.param("realtimeId");
+      const connectionId = c.req.param("connectionId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (
+        !z.string().uuid().safeParse(sessionId).success ||
+        !z.string().uuid().safeParse(realtimeId).success ||
+        !z.string().uuid().safeParse(connectionId).success
+      ) {
+        throw new HTTPException(400, { message: "invalid realtime connection id" });
+      }
+      const parsed = ActivateCodexRealtimeConnectionRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsed.success) {
+        throw new HTTPException(422, { message: "invalid realtime connection activation" });
+      }
+      try {
+        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId,
+              ownerSubjectId: grant.subjectId,
+              ...parsed.data,
+            }),
+          ),
+        );
+        c.header("cache-control", "private, no-store");
+        return c.json({ mode: result.mode, replay: result.replay });
+      } catch (error) {
+        throw sessionRealtimeHttpError(error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/sync",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      const realtimeId = c.req.param("realtimeId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (
+        !z.string().uuid().safeParse(sessionId).success ||
+        !z.string().uuid().safeParse(realtimeId).success
+      ) {
+        throw new HTTPException(400, { message: "invalid realtime ledger id" });
+      }
+      const parsed = SyncSessionRealtimeLedgerRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsed.success) {
+        throw new HTTPException(422, { message: "invalid realtime ledger sync request" });
+      }
+      try {
+        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            syncSessionRealtimeLedgerInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              ownerSubjectId: grant.subjectId,
+              ...parsed.data,
+            }),
+          ),
+        );
+        await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+        c.header("cache-control", "private, no-store");
+        return c.json({ accepted: result.accepted, outbound: result.outbound });
+      } catch (error) {
+        throw sessionRealtimeHttpError(error);
+      }
+    },
+  );
 
   // Personal pin only: this is organization state for the authenticated member,
   // not a mutation of the shared session. It deliberately requires read access
@@ -212,7 +1068,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      return c.json(session);
+      return c.json(
+        await withEffectivePolicy(
+          deps,
+          workspaceId,
+          projectSessionForRelatedAccess(session, relatedSessionAccessFor(c)),
+        ),
+      );
     } catch (error) {
       if (error instanceof SessionPinAccessError) {
         throw new HTTPException(403, { message: error.message });
@@ -232,8 +1094,20 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    return c.json(await readSessionLineage(db, workspaceId, c.req.param("sessionId")));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
+    const policy = await loadEffectivePolicyContext(deps, workspaceId);
+    return c.json({
+      ...lineage,
+      ancestors: lineage.ancestors.map((session) =>
+        sessionWithEffectiveToolPolicy(
+          session,
+          policy.workspaceServerIds,
+          policy.workspaceDefaultServerIds,
+        ),
+      ),
+      children: mapLineageNodes(lineage.children, policy),
+    });
   });
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
@@ -243,7 +1117,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   // account id isn't in the workspace.
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const body = (await c.req.json()) as { target?: string };
     const target = typeof body.target === "string" ? body.target : "";
@@ -251,6 +1125,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, {
         message: 'target is required ("auto" or an account id)',
       });
+    }
+    if (!deps.sessionAuthorization) {
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: "session.codex_account.write",
+          surface: "http",
+        });
+      } catch (error) {
+        throw sessionAuthorizationHttpError(error);
+      }
     }
     const pinned = target === "auto" ? null : target;
     const mutation = await withCodexCapacityMutation(
@@ -299,15 +1184,72 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = UpdateSessionRequest.parse(await c.req.json());
-    await updateSessionTitle({ db, bus }, workspaceId, sessionId, payload.title, "user");
+    const titleUpdate = await updateSessionTitle(deps, grant, sessionId, payload.title, "user");
     // A session-returning member route must preserve the caller's private pin
     // projection. Returning the generic mapSession() default here would reset a
     // pinned React consumer to false/version 0 after a harmless rename.
-    const session = await getSessionForSubject(db, workspaceId, sessionId, grant.subjectId);
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      titleUpdate.relatedSessionAccess,
+    );
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(session);
+    return c.json(await withEffectivePolicy(deps, workspaceId, session));
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/mcp-servers/:serverId/approval-policy",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
+      const payload = UpdateSessionMcpApprovalPolicyRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsedServerId.success || !payload.success) {
+        throw new HTTPException(400, {
+          message: "invalid MCP approval-policy request",
+        });
+      }
+      await assertSessionExists(db, workspaceId, sessionId);
+      return c.json(
+        await updateSessionMcpApprovalPolicy(
+          deps,
+          grant,
+          sessionId,
+          parsedServerId.data,
+          payload.data.requireApproval,
+        ),
+      );
+    },
+  );
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/tool-policy", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = UpdateSessionToolPolicyRequest.parse(await c.req.json().catch(() => null));
+    try {
+      const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
@@ -315,7 +1257,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const goal = await getSessionGoal(db, workspaceId, sessionId);
+    const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
     if (!goal) {
       throw new HTTPException(404, { message: "session goal not found" });
     }
@@ -338,27 +1280,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     if (payload.status === "paused") {
-      const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
+      const { goal, events } = await setSessionGoalStatusWithEvent(db, workspaceId, sessionId, {
         status: "paused",
         ...(payload.rationale ? { rationale: payload.rationale } : {}),
         pausedReason: "api",
+        event: {
+          type: "goal.paused",
+          actor: "api",
+          reason: "api",
+          ...(payload.rationale ? { rationale: payload.rationale } : {}),
+        },
       });
-      if (changed) {
-        await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-          {
-            type: "goal.paused",
-            payload: {
-              goalId: goal.id,
-              actor: "api",
-              reason: "api",
-              ...(payload.rationale ? { rationale: payload.rationale } : {}),
-              autoContinuations: goal.autoContinuations,
-              noProgressStreak: goal.noProgressStreak,
-            },
-          },
-        ]);
+      if (events.length > 0) {
+        await bus.publish(workspaceId, sessionId, events);
       }
-      return c.json(goal);
+      return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
     }
     // Resume: only valid from paused; resets counters and re-arms the loop.
     if (existing.status !== "paused") {
@@ -366,32 +1302,24 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: `session goal is ${existing.status}; only paused goals can be resumed`,
       });
     }
-    const { goal, changed, workflowWakeRevision } = await setSessionGoalStatus(
+    const { goal, changed, workflowWakeRevision, events } = await setSessionGoalStatusWithEvent(
       db,
       workspaceId,
       sessionId,
       {
         status: "active",
+        event: { type: "goal.resumed", actor: "api" },
       },
     );
     // `changed` guards the racing-PATCH case: both requests can pass the
     // status pre-check, but only the transition winner emits and wakes.
     if (changed) {
-      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-        {
-          type: "goal.resumed",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            version: goal.version,
-            actor: "api",
-          },
-        },
-      ]);
-      // signalWithStart restarts an eligible idle workflow so maybeContinueGoal
-      // fires. A closed workspace/session gate keeps the resumed goal durable
-      // and inert until that gate's own Resume mutation commits its wake.
+      if (events.length > 0) {
+        await bus.publish(workspaceId, sessionId, events);
+      }
+      // signalWithStart restarts an eligible idle workflow so the durable goal
+      // revision is evaluated. A closed workspace/session gate keeps the
+      // revision inert until that gate's own Resume mutation commits its wake.
       if (workflowWakeRevision !== null) {
         await workflowClient.wakeSessionWorkflow({
           accountId: grant.accountId,
@@ -402,7 +1330,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
     }
-    return c.json(goal);
+    return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
   });
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
@@ -507,12 +1435,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       "mode",
       explicitReplay ? "forensic" : "monitoring",
     );
-    const latestClass = eventEnumValue(
+    const latestRequested = eventEnumValue(
       c.req.query("latest"),
-      SessionEventSemanticClass,
+      SessionEventLatestClass,
       "latest",
       undefined,
     );
+    const latestClass =
+      latestRequested === undefined
+        ? undefined
+        : sessionEventLatestClassToSemanticClass(latestRequested);
+    const resultMode = eventEnumValue(
+      c.req.query("resultMode") ?? c.req.query("result"),
+      SessionEventResultMode,
+      "resultMode",
+      "events",
+    );
+    if (resultMode === "compact" && latestClass === undefined) {
+      throw new HTTPException(400, {
+        message: "resultMode=compact requires latest",
+      });
+    }
     if (
       latestClass &&
       ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some(
@@ -570,19 +1513,42 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           compact ? 5000 : mode === "monitoring" ? 250 : 2000,
           mode === "monitoring" ? 40 : 500,
         );
+    const dbPayloadMode = resultMode === "compact" ? ("full" as const) : payloadMode;
     const dbPage = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
       direction,
-      payloadMode,
+      payloadMode: dbPayloadMode,
       includeTypes,
       excludeTypes,
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+      ...(latestClass ? { authoritativeLatest: true } : {}),
     });
     const events = dbPage.events;
+    if (resultMode === "compact") {
+      const event = events[0];
+      c.header("X-OpenGeni-Event-Result-Mode", "compact");
+      c.header("X-OpenGeni-Event-Result", event ? "found" : "not_found");
+      c.header("X-OpenGeni-Event-Mode", mode);
+      c.header("X-OpenGeni-Event-Direction", direction);
+      c.header("X-OpenGeni-Payload-Mode", "full");
+      c.header("X-OpenGeni-Forensic-Exact", "false");
+      if (!event) return c.json(null, 200);
+      const result = compactSessionEventResult(
+        event,
+        latestClass!,
+        dbPage.coveredSequence ?? {
+          first: event.sequence,
+          last: event.sequence,
+        },
+      );
+      c.header("X-OpenGeni-Covered-First", String(result.coveredSequence.first));
+      c.header("X-OpenGeni-Covered-Last", String(result.coveredSequence.last));
+      return c.json(result);
+    }
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
     const page = boundSessionEventHttpPage(projected, {
       direction,
@@ -613,8 +1579,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
+    let authorization;
+    try {
+      authorization = await requireSessionAuthorization(deps, grant, {
+        sessionId,
+        operation: "session.stream.read",
+        surface: "stream",
+      });
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
     await assertSessionExists(db, workspaceId, sessionId);
     const after = Number(c.req.query("after") ?? c.req.header("Last-Event-ID") ?? 0);
     return sseSessionStream(
@@ -624,7 +1600,22 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       Number.isFinite(after) ? after : 0,
       c.req.raw.signal,
-      { observability: deps.observability },
+      {
+        observability: deps.observability,
+        ...(authorization
+          ? {
+              reauthorizeAfterMs:
+                authorization.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+              reauthorize: async () => {
+                await requireSessionAuthorization(deps, grant, {
+                  sessionId,
+                  operation: "session.stream.read",
+                  surface: "stream",
+                });
+              },
+            }
+          : {}),
+      },
     );
   });
 
@@ -633,6 +1624,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
+    // Exact turn that most recently emitted durable `turn.started` — the same
+    // boundary goal continuations use for inherited model/effort. Queued-only
+    // or preflight-rejected turns are deliberately excluded.
+    if (c.req.query("latestStarted") === "1" || c.req.query("latestStarted") === "true") {
+      const latest = await getLatestStartedSessionTurn(db, workspaceId, sessionId);
+      return c.json(latest ? [latest] : []);
+    }
     return c.json(
       await listSessionTurns(db, workspaceId, sessionId, boundedLimit(c.req.query("limit"))),
     );
@@ -644,7 +1642,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
     if (!snapshot) throw new HTTPException(404, { message: "session not found" });
-    return c.json(snapshot);
+    return c.json(projectQueueSnapshot(snapshot, sessionId, relatedSessionAccessFor(c)));
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/move", async (c) => {
@@ -654,19 +1652,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = MoveSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await moveHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await moveHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -679,19 +1679,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = EditSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await editHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await editHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -704,19 +1706,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = SteerSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await steerHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await steerHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -729,19 +1733,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = DeleteSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await deleteHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await deleteHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -752,7 +1758,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     return c.json(
-      await getHumanComposerDraft(db, {
+      await getHumanComposerDraft(deps, {
         accountId: grant.accountId,
         workspaceId,
         sessionId,
@@ -769,7 +1775,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       return c.json(
         await saveHumanComposerDraft(
-          db,
+          deps,
           {
             accountId: grant.accountId,
             workspaceId,
@@ -788,26 +1794,36 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
-      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+      throw new HTTPException(400, {
+        message: "workspace-control actor is too large",
+      });
     }
     const sessionId = c.req.param("sessionId");
     const parsed = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid session control request" });
+      throw new HTTPException(400, {
+        message: "invalid session control request",
+      });
     }
     try {
-      return c.json(
-        await controlHumanSessionWorkstream(
-          { db, bus, workflowClient },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          parsed.data,
-        ),
+      const response = await controlHumanSessionWorkstream(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        parsed.data,
       );
+      return c.json({
+        ...response,
+        effectiveControl: projectEffectiveControlForRelatedAccess(
+          response.effectiveControl,
+          sessionId,
+          relatedSessionAccessFor(c),
+        ),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -822,11 +1838,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = SteerSessionMessageRequest.parse(raw);
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
+      turnInstructions: payload.turnInstructions ?? null,
       resources: payload.resources,
-      tools: payload.tools,
-      toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
       model: payload.model ?? null,
       reasoningEffort: payload.reasoningEffort ?? null,
+      latencyMode: payload.latencyMode ?? null,
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
       delivery: "steer",
       origin: "human",
@@ -845,14 +1861,31 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     const rawEvent = await c.req.json();
     const event = ClientSessionEvent.parse(rawEvent);
+    const refinedOperation =
+      event.type === "user.approvalDecision"
+        ? "session.approval.write"
+        : event.type === "user.humanInputResponse"
+          ? "session.human_input.write"
+          : null;
+    if (refinedOperation) {
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: refinedOperation,
+          surface: "http",
+        });
+      } catch (error) {
+        throw sessionAuthorizationHttpError(error);
+      }
+    }
     if (event.type === "user.message") {
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
+        turnInstructions: event.payload.turnInstructions ?? null,
         resources: event.payload.resources ?? [],
-        tools: event.payload.tools ?? [],
-        toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
+        latencyMode: event.payload.latencyMode ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
         ...(event.payload.controlEtag !== undefined
           ? { controlEtag: event.payload.controlEtag }
@@ -870,6 +1903,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         sessionId,
+        subjectId: grant.subjectId,
         payload: event.payload,
         clientEventId: event.clientEventId ?? null,
       });
@@ -890,7 +1924,89 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       return c.json(accepted.event, 202);
     }
+
+    if (event.type === "user.humanInputResponse") {
+      let accepted;
+      try {
+        accepted = await acceptSessionHumanInputResponse(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          requestId: event.payload.requestId,
+          response: event.payload.response,
+          respondedBy: grant.subjectId,
+          clientEventId: event.clientEventId ?? null,
+        });
+      } catch (error) {
+        if (error instanceof HumanInputResponseValidationError) {
+          throw new HTTPException(error.code === "SKIP_NOT_ALLOWED" ? 409 : 422, {
+            message: error.message,
+          });
+        }
+        throw error;
+      }
+      if (accepted.action === "not_found") {
+        throw new HTTPException(404, {
+          message: "human-input request not found",
+        });
+      }
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
+      if (accepted.workflowWakeRevision !== null) {
+        await workflowClient.signalApprovalDecision({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          eventId: accepted.events[0]?.id ?? event.payload.requestId,
+          workflowId: workflowIdForSession(sessionId),
+          workflowWakeRevision: accepted.workflowWakeRevision,
+        });
+      }
+      if (accepted.action === "conflict") {
+        throw new HTTPException(409, {
+          message: `human-input request is ${accepted.request.status}`,
+        });
+      }
+      return c.json(accepted.event, 202);
+    }
   });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const rawStatus = c.req.query("status");
+    const status = rawStatus ? HumanInputRequestStatus.safeParse(rawStatus) : null;
+    if (status && !status.success) {
+      throw new HTTPException(400, {
+        message: "invalid human-input request status",
+      });
+    }
+    const requests = await listSessionHumanInputRequests(db, workspaceId, sessionId, {
+      ...(status?.success ? { status: status.data } : {}),
+    });
+    return c.json({ requests });
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests/:requestId",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const sessionId = c.req.param("sessionId");
+      const request = await getSessionHumanInputRequest(
+        db,
+        workspaceId,
+        sessionId,
+        c.req.param("requestId"),
+      );
+      if (!request)
+        throw new HTTPException(404, {
+          message: "human-input request not found",
+        });
+      return c.json(request);
+    },
+  );
 
   // ── API-direct stream capabilities + viewer attach (P1.4) ─────────────────
   //
@@ -945,6 +2061,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       { workspaceId, sandboxGroupId: session.sandboxGroupId },
     );
     const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
+    const visibleSharedSessionIds = relatedSessionAccessFor(c) === "root" ? sharedSessionIds : [];
     // Per-principal acknowledgment: A acknowledging does not consent for B. The
     // un-redacted desktop stream ALWAYS requires the un-redacted ack; a shared box
     // ADDITIONALLY requires the shared-exposure ack. Both must match the POST
@@ -1026,6 +2143,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       os: session.sandboxOs,
       liveness: lease?.liveness ?? "cold",
       leaseEpoch: lease?.leaseEpoch ?? 0,
+      workspaceGeneration: lease?.workspaceGeneration ?? null,
+      archiveGeneration: lease?.archiveGeneration ?? null,
+      archiveComplete: lease?.archiveComplete ?? false,
       desktopEnabled: settings.sandboxDesktopEnabled,
       // Human take-control: when the desktop is available + this policy is on
       // (default), the cell is mode "interactive" — the noVNC viewer drives :0
@@ -1042,7 +2162,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
       desktopAcknowledged: acknowledged,
       shared,
-      sharedSessionIds,
+      sharedSessionIds: visibleSharedSessionIds,
       // The minted live address (null when not unlocked/degraded). The resolver
       // only folds it in when the desktop gates pass + the ack is present.
       ...(desktopStream
@@ -1213,6 +2333,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewerId,
         liveness: "warm",
         leaseEpoch: session.activeEpoch,
+        workspaceGeneration: null,
+        archiveGeneration: null,
+        archiveComplete: false,
         sandboxGroupId: session.sandboxGroupId,
         viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
         dataPlaneUrl: null,
@@ -1222,40 +2345,31 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         !streamTokenDegraded(settings)
       ) {
         if (wantDesktop && settings.sandboxDesktopEnabled) {
-          stream = await mintDesktopStream(
-            { db, settings, bus },
-            {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId,
-              // No Modal lease for selfhosted-active; the mint routes to the relay.
-            },
-          );
+          stream = await mintDesktopStream(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
+          });
         }
         if (settings.sandboxTerminalEnabled) {
-          terminal = await mintTerminalStream(
-            { db, settings, bus },
-            {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId,
-              // No Modal lease for selfhosted-active; the mint routes to the relay.
-            },
-          );
+          terminal = await mintTerminalStream(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
+          });
         }
       }
     } else {
-      result = await attachViewer(
-        { db, settings },
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          session,
-          ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
-        },
-      );
+      result = await attachViewer(viewerServices, {
+        accountId: grant.accountId,
+        workspaceId,
+        session,
+        ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
+      });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
       // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS
@@ -1277,31 +2391,25 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           // (and consented above). A terminal-only attach skips it — the box is warm,
           // the terminal mint below still runs.
           if (wantDesktop && settings.sandboxDesktopEnabled) {
-            stream = await mintDesktopStream(
-              { db, settings, bus },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                session,
-                viewerId: result.viewerId,
-                lease,
-              },
-            );
+            stream = await mintDesktopStream(viewerServices, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
           }
           // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
           // address (independent of the desktop toggle). A degraded mint leaves the
           // terminal fields null → the client falls back to the sse-events firehose.
           if (settings.sandboxTerminalEnabled) {
-            terminal = await mintTerminalStream(
-              { db, settings, bus },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                session,
-                viewerId: result.viewerId,
-                lease,
-              },
-            );
+            terminal = await mintTerminalStream(viewerServices, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
           }
         }
       }
@@ -1484,54 +2592,42 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsListRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.fsList(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsList(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsReadRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.fsRead(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsRead(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsWriteRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.fsWrite(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsWrite(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsDeleteRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.fsDelete(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsDelete(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsMoveRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.fsMove(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsMove(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsMkdirRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.fsMkdir(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsMkdir(req));
     return c.json(out);
   });
 
@@ -1539,36 +2635,28 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitStatusRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.gitStatus(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitStatus(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitDiffRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.gitDiff(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitDiff(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitLogRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.gitLog(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitLog(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitShowRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-      service.gitShow(req),
-    );
+    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitShow(req));
     return c.json(out);
   });
 
@@ -1582,16 +2670,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId") ?? "";
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     const sessionId = c.req.param("sessionId") ?? "";
-    const session = await getSession(db, workspaceId, sessionId);
-    if (!session) {
+    const lookup = await sessionLatestWorkspaceCapture(db, workspaceId, sessionId);
+    if (!lookup.sessionExists) {
       throw new HTTPException(404, { message: "session not found" });
     }
     if (!objectStorage) {
       // No storage configured → no captures can exist. Cold-fallback, not an error.
       return c.json({ available: false });
     }
-    const row = await latestWorkspaceCapture(db, workspaceId, sessionId);
-    return c.json(await serveWorkspaceCapture(row, objectStorage));
+    return c.json(
+      await serveWorkspaceCapture(lookup.capture, objectStorage, workspaceCaptureManifestCache),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file", async (c) => {
@@ -1632,7 +2721,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, TerminalExecRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+    const out = await withChannelA(channelAServices, ctx, ({ service }) =>
       service.terminalExec(req),
     );
     return c.json(out);
@@ -1642,23 +2731,88 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyOpenRequest);
-    const ptyId = crypto.randomUUID();
-    const out = await withChannelA({ db, settings, bus }, ctx, async ({ service, lease }) => {
-      const opened = await service.ptyOpen(req, ptyId);
-      // Persist the ptyId<->exec-session map fenced to the box's epoch.
-      await insertPtySession(db, {
-        id: ptyId,
-        accountId: ctx.accountId,
-        workspaceId: ctx.workspaceId,
-        sessionId: ctx.session.id,
-        execSessionId: opened.execSessionId,
-        leaseEpoch: lease.leaseEpoch,
-        cols: req.cols,
-        rows: req.rows,
-        shell: opened.shell,
-        cwd: req.cwd,
-        openedBy: ctx.subjectId,
+    if (ctx.session.sandboxBackend === "selfhosted" || ctx.session.activeSandboxId !== null) {
+      throw new HTTPException(409, {
+        message:
+          "durable interactive terminals require the session-home provider route and are unavailable on active swaps or non-persistable routes; use synchronous exec or attach the session home sandbox",
       });
+    }
+    const ptyId = crypto.randomUUID();
+    const out = await withChannelA(channelAServices, ctx, async (handle) => {
+      if (!handle.lease) {
+        throw new HTTPException(409, {
+          message: "durable interactive terminals require a session-home provider lease",
+        });
+      }
+      const { service } = handle;
+      const opened = await service.ptyOpen(req, ptyId);
+      const execSessionId = opened.execSessionId;
+      const retained =
+        execSessionId === null
+          ? null
+          : handle.routingSession.retainedProcessIdentity(execSessionId);
+      const process = retained
+        ? await getRetainedProcess(db, {
+            workspaceId: ctx.workspaceId,
+            sessionId: ctx.session.id,
+            processId: retained.id,
+          })
+        : null;
+      if (
+        execSessionId === null ||
+        !retained ||
+        !process ||
+        process.state !== "active" ||
+        process.ownerActorKind !== "direct" ||
+        process.providerSessionId !== execSessionId ||
+        process.routeTargetId !== null ||
+        process.leaseId !== handle.lease.id ||
+        process.sandboxGroupId !== handle.lease.sandboxGroupId ||
+        process.leaseEpoch !== handle.lease.leaseEpoch ||
+        process.providerBackend !== handle.lease.backend ||
+        process.providerInstanceId !== handle.lease.instanceId
+      ) {
+        if (execSessionId !== null && handle.routingSession.hasRetainedProcess(execSessionId)) {
+          await drainOpenedPty(handle, execSessionId);
+        }
+        throw new HTTPException(409, {
+          message: "interactive terminal did not acquire durable process authority",
+        });
+      }
+      const identity: SandboxPtyProcessIdentity = {
+        leaseId: process.leaseId,
+        sandboxGroupId: process.sandboxGroupId,
+        retainedProcessId: process.id,
+        openAdmissionId: process.parentAdmissionId,
+        execSessionId: process.providerSessionId,
+        leaseEpoch: process.leaseEpoch,
+        providerBackend: process.providerBackend,
+        providerInstanceId: process.providerInstanceId,
+        routeKind: process.routeKind,
+        routeTargetId: process.routeTargetId,
+        routeEpoch: process.routeEpoch,
+      };
+      try {
+        await insertPtySession(db, {
+          id: ptyId,
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          identity,
+          cols: req.cols,
+          rows: req.rows,
+          shell: opened.shell,
+          cwd: req.cwd,
+          openedBy: ctx.subjectId,
+        });
+      } catch (persistenceError) {
+        try {
+          await drainOpenedPty(handle, execSessionId);
+        } catch (drainError) {
+          failPtyPersistenceAndDrain(persistenceError, drainError);
+        }
+        throw persistenceError;
+      }
       // Emit terminal.pty.started + any initial banner output on A1.
       const started: TerminalPtyStartedPayload = {
         ptyId,
@@ -1686,24 +2840,52 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyWriteRequest);
-    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    const pty = await getOpenPtySession(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      ptyId: req.ptyId,
+    });
     if (!pty) {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
-    if (pty.execSessionId === null) {
-      throw new HTTPException(409, {
-        message: "interactive terminal unsupported on this backend",
-      });
-    }
     let seq = 1;
-    await withChannelA({ db, settings, bus }, ctx, async ({ service }) => {
-      const output = await service.ptyWrite(req, pty.execSessionId!, req.data);
-      await updatePtySessionActivity(db, {
+    await withChannelA(channelAServices, ctx, async (handle) => {
+      await adoptPtyProcess(ctx, handle, pty);
+      let output: string;
+      try {
+        output = await handle.service.ptyWrite(req, pty.execSessionId, req.data);
+      } catch (error) {
+        const terminal = await getRetainedProcess(db, {
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          processId: pty.retainedProcessId,
+        });
+        if (terminal && terminal.state !== "active") {
+          await emitPtyExited(ctx, req.ptyId, terminal);
+        }
+        throw error;
+      }
+      const updated = await updatePtySessionActivity(db, {
         accountId: ctx.accountId,
         workspaceId: ctx.workspaceId,
+        sessionId: ctx.session.id,
         ptyId: req.ptyId,
-        execSessionId: pty.execSessionId,
+        identity: ptyIdentity(pty),
       });
+      if (!updated) {
+        const terminal = await getRetainedProcess(db, {
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          processId: pty.retainedProcessId,
+        });
+        if (terminal && terminal.state !== "active") {
+          await emitPtyExited(ctx, req.ptyId, terminal);
+          return;
+        }
+        throw new HTTPException(409, {
+          message: "pty identity changed while input was in flight; reopen the terminal",
+        });
+      }
       if (output) {
         const delta: TerminalPtyOutputDeltaPayload = {
           ptyId: req.ptyId,
@@ -1722,21 +2904,31 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/resize", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyResizeRequest);
-    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    const pty = await getOpenPtySession(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      ptyId: req.ptyId,
+    });
     if (!pty) {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
-    if (pty.execSessionId !== null) {
-      await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-        service.ptyResize(req, pty.execSessionId!),
-      );
-    }
-    await updatePtySessionActivity(db, {
-      accountId: ctx.accountId,
-      workspaceId: ctx.workspaceId,
-      ptyId: req.ptyId,
-      cols: req.cols,
-      rows: req.rows,
+    await withChannelA(channelAServices, ctx, async (handle) => {
+      await adoptPtyProcess(ctx, handle, pty);
+      await handle.service.ptyResize(req, pty.execSessionId);
+      const updated = await updatePtySessionActivity(db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.session.id,
+        ptyId: req.ptyId,
+        identity: ptyIdentity(pty),
+        cols: req.cols,
+        rows: req.rows,
+      });
+      if (!updated) {
+        throw new HTTPException(409, {
+          message: "pty identity changed while resize was in flight; reopen the terminal",
+        });
+      }
     });
     return c.body(null, 204);
   });
@@ -1744,25 +2936,28 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/close", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyCloseRequest);
-    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    const pty = await getOpenPtySession(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      ptyId: req.ptyId,
+    });
     // Idempotent: closing an already-closed/absent PTY is a 204 no-op.
     if (pty) {
-      await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-        service.ptyClose(req, pty.execSessionId),
-      );
-      await closePtySession(db, {
-        accountId: ctx.accountId,
-        workspaceId: ctx.workspaceId,
-        ptyId: req.ptyId,
+      await withChannelA(channelAServices, ctx, async (handle) => {
+        await adoptPtyProcess(ctx, handle, pty);
+        await handle.service.ptyClose(req, pty.execSessionId);
+        const terminal = await getRetainedProcess(db, {
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          processId: pty.retainedProcessId,
+        });
+        if (!terminal || terminal.state === "active") {
+          throw new HTTPException(409, {
+            message: "pty close is pending exact provider exit proof; retry",
+          });
+        }
+        await emitPtyExited(ctx, req.ptyId, terminal);
       });
-      const exited: TerminalPtyExitedPayload = {
-        ptyId: req.ptyId,
-        exitCode: 0,
-        reason: "exit",
-      };
-      await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
-        { type: "terminal.pty.exited", payload: exited },
-      ]);
     }
     return c.body(null, 204);
   });
@@ -1774,6 +2969,167 @@ function eventListLimit(raw: string | undefined, max = 2000, fallback = 500): nu
     return fallback;
   }
   return Math.min(max, Math.max(1, Math.floor(limit)));
+}
+
+function codexRealtimeHttpFailure(error: CodexRealtimeBrokerError): {
+  status: ContentfulStatusCode;
+  code: ErrorCode;
+  retryable: boolean;
+} {
+  switch (error.reason) {
+    case "invalid_request":
+    case "incompatible":
+      return { status: 422, code: "validation_failed", retryable: false };
+    case "entitlement_denied":
+      return { status: 403, code: "forbidden", retryable: false };
+    case "rate_limited":
+      return { status: 429, code: "limit_exceeded", retryable: true };
+    case "timeout":
+      return { status: 504, code: "upstream_unavailable", retryable: true };
+    case "cancelled":
+      return { status: 408, code: "upstream_unavailable", retryable: true };
+    case "provider_error":
+    case "invalid_provider_response":
+    case "network_error":
+      return { status: 502, code: "upstream_unavailable", retryable: true };
+    case "subscription_disabled":
+    case "credential_unavailable":
+    case "reconnect_required":
+      return { status: 409, code: "conflict", retryable: false };
+  }
+}
+
+function sessionRealtimeHttpError(error: unknown): HTTPException {
+  if (error instanceof HTTPException) return error;
+  if (error instanceof SessionRealtimeConflictError) {
+    return new HTTPException(error.code === "REALTIME_NOT_FOUND" ? 404 : 409, {
+      message: error.message,
+      cause: error,
+    });
+  }
+  throw error;
+}
+
+/**
+ * Map every mounted session-addressed HTTP path to the host-neutral operation
+ * the embedding port authorizes. Returning null is deliberately fail-closed in
+ * host-managed mode; standalone deployments never consult this classifier.
+ */
+export function sessionAuthorizationOperationForHttp(
+  method: string,
+  pathname: string,
+  sessionId: string,
+): SessionAuthorizationOperation | null {
+  const marker = `/sessions/${sessionId}`;
+  const markerAt = pathname.indexOf(marker);
+  if (markerAt < 0) return null;
+  const suffix = pathname.slice(markerAt + marker.length);
+  const verb = method.toUpperCase();
+
+  if (suffix === "") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PATCH") return "session.title.write";
+    return null;
+  }
+  if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
+  if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
+    return "session.mcp.approval_policy.write";
+  }
+  if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
+  if (suffix === "/codex-account" && verb === "POST") {
+    return "session.codex_account.write";
+  }
+  if (suffix === "/realtime/webrtc" && verb === "POST") {
+    return "session.realtime.start";
+  }
+  if (suffix === "/realtime/gateway" && verb === "POST") {
+    return "session.realtime.start";
+  }
+  if (suffix === "/realtime" && verb === "POST") {
+    return "session.realtime.start";
+  }
+  if (/^\/realtime\/[^/]+\/heartbeat$/.test(suffix) && verb === "PATCH") {
+    return "session.realtime.control";
+  }
+  if (/^\/realtime\/[^/]+\/sync$/.test(suffix) && verb === "POST") {
+    return "session.realtime.control";
+  }
+  if (/^\/realtime\/[^/]+\/connections\/[^/]+\/activate$/.test(suffix) && verb === "POST") {
+    return "session.realtime.control";
+  }
+  if (/^\/realtime\/[^/]+$/.test(suffix) && verb === "DELETE") {
+    return "session.realtime.control";
+  }
+  if (suffix === "/goal") {
+    return verb === "GET"
+      ? "session.goal.read"
+      : ["PATCH", "DELETE"].includes(verb)
+        ? "session.goal.write"
+        : null;
+  }
+  if (suffix === "/context/clear" || suffix === "/context/compact") {
+    return verb === "POST" ? "session.context.write" : null;
+  }
+  if (suffix === "/events/stream" && verb === "GET") return "session.stream.read";
+  if (suffix === "/events") {
+    if (verb === "GET") return "session.events.read";
+    if (verb === "POST") return "session.append";
+    return null;
+  }
+  if (suffix === "/turns" && verb === "GET") return "session.turns.read";
+  if (suffix === "/queue" && verb === "GET") return "session.queue.read";
+  if (suffix.startsWith("/queue/") && verb === "POST") return "session.queue.control";
+  if (suffix === "/composer-draft") {
+    if (verb === "GET") return "session.composer.read";
+    if (verb === "PUT") return "session.composer.write";
+    return null;
+  }
+  if (suffix === "/control" && verb === "POST") return "session.control";
+  if (suffix === "/steer" && verb === "POST") return "session.steer";
+  if (suffix === "/human-input-requests" && verb === "GET") {
+    return "session.human_input.read";
+  }
+  if (suffix.startsWith("/human-input-requests/") && verb === "GET") {
+    return "session.human_input.read";
+  }
+  if (suffix === "/stream-capabilities" && verb === "GET") return "session.viewer.read";
+  if (suffix === "/stream-capabilities/acknowledge" && verb === "POST") {
+    return "session.stream.acknowledge";
+  }
+  if (suffix === "/viewers" && verb === "POST") return "session.viewer.control";
+  if (suffix.startsWith("/viewers/") && ["POST", "DELETE"].includes(verb)) {
+    return "session.viewer.control";
+  }
+  if (suffix === "/fs/list" || suffix === "/fs/read") {
+    return verb === "POST" ? "session.files.read" : null;
+  }
+  if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
+    return verb === "POST" ? "session.files.write" : null;
+  }
+  if (suffix.startsWith("/git/") && verb === "POST") return "session.git.read";
+  if ((suffix === "/workspace/capture" || suffix === "/workspace/capture/file") && verb === "GET") {
+    return "session.capture.read";
+  }
+  if (suffix === "/terminal/exec" && verb === "POST") return "session.terminal.control";
+  if (suffix === "/terminal/pty" && verb === "POST") return "session.terminal.control";
+  if (suffix.startsWith("/terminal/pty/") && verb === "POST") {
+    return "session.terminal.control";
+  }
+  return null;
+}
+
+function sessionAuthorizationHttpError(error: unknown): HTTPException {
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return new HTTPException(404, { message: "session not found" });
+  }
+  if (error instanceof SessionAuthorizationUnavailableError) {
+    return new HTTPException(503, {
+      message: "session authorization is unavailable",
+    });
+  }
+  if (error instanceof HTTPException) return error;
+  throw error;
 }
 
 function eventEnumValue<T extends string>(
@@ -1813,12 +3169,16 @@ function eventEnumList<T extends string>(
     .map((value) => value.trim())
     .filter(Boolean);
   if (values.length > 100) {
-    throw new HTTPException(400, { message: `${name} accepts at most 100 values` });
+    throw new HTTPException(400, {
+      message: `${name} accepts at most 100 values`,
+    });
   }
   return values.map((value) => {
     const parsed = schema.safeParse(value);
     if (!parsed.success) {
-      throw new HTTPException(400, { message: `${name} contains an invalid value` });
+      throw new HTTPException(400, {
+        message: `${name} contains an invalid value`,
+      });
     }
     return parsed.data as T;
   });
@@ -1832,6 +3192,7 @@ function sessionListQuery(
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
+  pinsOnly: boolean;
 } {
   const parentSessionId = query.parentSessionId;
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -1857,6 +3218,20 @@ function sessionListQuery(
       message: "search must be at most 200 characters",
     });
   }
+  if (query.pinsOnly !== undefined && query.pinsOnly !== "true") {
+    throw new HTTPException(400, {
+      message: 'pinsOnly must be the literal "true"',
+    });
+  }
+  const pinsOnly = query.pinsOnly === "true";
+  if (pinsOnly && !allowCursor) {
+    throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
+  }
+  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search)) {
+    throw new HTTPException(400, {
+      message: "pinsOnly cannot be combined with cursor, parentSessionId, or search",
+    });
+  }
   return {
     limit: query.limit,
     parentSessionId:
@@ -1867,6 +3242,7 @@ function sessionListQuery(
           : parentSessionId,
     cursor,
     search: search || undefined,
+    pinsOnly,
   };
 }
 
@@ -1893,18 +3269,47 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
   return Math.floor(sequence);
 }
 
-function hasOwnProperty(value: unknown, key: string): boolean {
-  return Boolean(
-    value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key),
-  );
+/** Stable, value-free JSON errors for only the create-session boundary. */
+export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionSpawnDeniedError) {
+    return c.json(
+      sessionSpawnDenialEnvelope(error),
+      error.denial.code === "nested_agent_depth_override_forbidden" ? 403 : 409,
+    );
+  }
+  if (error instanceof ZodError) {
+    return c.json(
+      {
+        code: "INVALID_SESSION_CREATE_REQUEST",
+        message: `Invalid session create request: ${zodErrorFields(error)} failed schema validation`,
+      },
+      422,
+    );
+  }
+  if (error instanceof HTTPException && error.status === 422) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+      },
+      422,
+    );
+  }
+  throw error;
 }
 
-function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const payload = (value as { payload?: unknown }).payload;
-  return hasOwnProperty(payload, key);
+function zodErrorFields(error: ZodError): string {
+  const paths = [
+    ...new Set(
+      error.issues.map((issue) => {
+        const path = issue.path.map(String).join(".");
+        return path || "request";
+      }),
+    ),
+  ];
+  const shown = paths.slice(0, 5);
+  const remainder = paths.length - shown.length;
+  return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
 function commandConflictResponse(c: Context, error: unknown): Response {
@@ -1918,4 +3323,45 @@ function commandConflictResponse(c: Context, error: unknown): Response {
     return c.json({ code: error.code, message: error.message }, 409);
   }
   throw error;
+}
+
+type EffectivePolicyContext = {
+  workspaceServerIds: string[];
+  workspaceDefaultServerIds: string[];
+};
+
+async function loadEffectivePolicyContext(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<EffectivePolicyContext> {
+  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+  ]);
+  return { workspaceServerIds, workspaceDefaultServerIds };
+}
+
+async function withEffectivePolicy(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  const policy = await loadEffectivePolicyContext(deps, workspaceId);
+  return sessionWithEffectiveToolPolicy(
+    session,
+    policy.workspaceServerIds,
+    policy.workspaceDefaultServerIds,
+  );
+}
+
+function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): LineageNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    session: sessionWithEffectiveToolPolicy(
+      node.session as Session,
+      policy.workspaceServerIds,
+      policy.workspaceDefaultServerIds,
+    ),
+    children: mapLineageNodes(node.children, policy),
+  }));
 }

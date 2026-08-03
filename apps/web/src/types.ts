@@ -19,26 +19,40 @@ export type {
   ClientConfig,
   ConnectionKind,
   ConnectionMetadata,
+  ConnectionOwnership,
   ConnectionStatus,
   CreateConnectionRequest,
   CreateFileUploadResponse,
   CreateRigRequest,
   ProposeRigChangeRequest,
   McpServerConnectionRef,
+  McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
   CreateWorkspaceRequest,
   Document as IndexedDocument,
   DocumentBase,
+  DocumentCurationStatus,
   DocumentSearchMode,
   DocumentSearchResult,
+  DocumentVisibility,
   EntitlementValue,
   Entitlements,
   FileAsset,
   FileDownloadUrlResponse,
   GitHubAppInfo,
+  GitHubAppSetupMode,
+  GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
+  GoogleDriveBrowseItem,
+  GoogleDriveBrowseResponse,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveOAuthStartResponse,
+  GoogleDriveReadPolicy,
+  GoogleDriveSelectedSource,
+  GoogleDriveSyncCadence,
+  GoogleDriveTargetScope,
   GoalSpec,
   CreateKnowledgeMemoryRequest,
   KnowledgeMemory,
@@ -47,6 +61,7 @@ export type {
   KnowledgeSourceKind,
   PackInstallation,
   Permission as SdkPermission,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   Rig,
@@ -88,6 +103,7 @@ export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type {
   GoalSpec,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   SandboxBackend,
@@ -103,6 +119,7 @@ export type TurnSubmission = {
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
   sandboxBackend?: SandboxBackend;
   variableSetId?: string;
   /**  use variableSetId */
@@ -111,6 +128,7 @@ export type TurnSubmission = {
   rigId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
+  firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
 };
 
 export type AuthSession = {

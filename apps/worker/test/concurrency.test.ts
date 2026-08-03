@@ -9,14 +9,24 @@ import {
   TURN_WORKER_HARD_MEMORY_BYTES_PER_TURN,
   TURN_WORKER_MAX_CONCURRENT_TURNS,
   TURN_WORKER_NATIVE_HEADROOM_BYTES,
+  createTurnWorkerConcurrencyPlan,
   createTurnWorkerTuner,
   parseCgroupCurrentValue,
   parseCgroupLimitValue,
   readCgroupMemorySnapshot,
+  turnWorkerConcurrencyLogFields,
+  turnWorkerConcurrencyOptions,
   type CgroupMemorySnapshot,
+  type TurnWorkerConcurrencySettings,
 } from "../src/concurrency";
 
 const MIB = 1024 * 1024;
+const fixed: TurnWorkerConcurrencySettings = {
+  turnWorkerConcurrencyMode: "fixed",
+  turnWorkerMaxConcurrentTurns: 16,
+  turnWorkerTargetCpuUsage: 0.8,
+  turnWorkerTargetMemoryUsage: 0.75,
+};
 
 describe("worker concurrency contract", () => {
   test("pins the measured density and hard memory budget independently of control work", () => {
@@ -25,6 +35,69 @@ describe("worker concurrency contract", () => {
     expect(TURN_WORKER_NATIVE_HEADROOM_BYTES).toBe(512 * MIB);
     expect(CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES).toBe(32);
     expect(CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS).toBe(40);
+  });
+
+  test("keeps ordinary horizontally-scaled settings on a fixed ceiling", () => {
+    expect(turnWorkerConcurrencyOptions(fixed)).toEqual({
+      maxConcurrentActivityTaskExecutions: 16,
+    });
+    expect(turnWorkerConcurrencyLogFields(fixed)).toEqual({
+      concurrencyMode: "fixed",
+      maxConcurrentTurns: 16,
+      targetCpuUsage: null,
+      targetMemoryUsage: null,
+    });
+  });
+
+  test("wires fixed/HPA workers through the hard-reservation supplier", () => {
+    const memory = mutableMemory(300 * MIB, 2_500 * MIB);
+    const plan = createTurnWorkerConcurrencyPlan(fixed, {
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+      memorySnapshot: memory.read,
+    });
+
+    expect(plan.admission).toBeInstanceOf(MemoryAwareTurnSlotSupplier);
+    expect(plan.options.maxConcurrentActivityTaskExecutions).toBeUndefined();
+    expect(plan.options.tuner).toBeDefined();
+    expect(plan.admission?.snapshot()).toMatchObject({
+      maximumTurns: 16,
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+    });
+  });
+
+  test("preserves the explicit single-machine resource tuner", () => {
+    const settings: TurnWorkerConcurrencySettings = {
+      ...fixed,
+      turnWorkerConcurrencyMode: "resource-based",
+      turnWorkerMaxConcurrentTurns: 256,
+    };
+    const expected = {
+      tuner: {
+        tunerOptions: {
+          targetCpuUsage: 0.8,
+          targetMemoryUsage: 0.75,
+        },
+        activityTaskSlotOptions: {
+          minimumSlots: 1,
+          maximumSlots: 256,
+          rampThrottle: "50ms",
+        },
+      },
+    };
+
+    expect(turnWorkerConcurrencyOptions(settings)).toEqual(expected);
+    expect(createTurnWorkerConcurrencyPlan(settings)).toEqual({
+      options: expected,
+      admission: null,
+    });
+    expect(turnWorkerConcurrencyLogFields(settings)).toEqual({
+      concurrencyMode: "resource-based",
+      maxConcurrentTurns: 256,
+      targetCpuUsage: 0.8,
+      targetMemoryUsage: 0.75,
+    });
   });
 
   test("caps permits at the lower of density and baseline memory capacity", () => {

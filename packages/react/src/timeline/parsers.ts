@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import { normalizeMcpOutput, type GitFileDiff } from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
 
 /* ----------------------------------------------------------------------------
@@ -227,6 +227,19 @@ export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
   return r.operation ? [r.operation] : [];
 }
 
+/** Ops from provider `raw`, or from function-tool arguments when raw is empty. */
+export function applyPatchOpsFromToolItem(item: {
+  raw: unknown;
+  arguments: unknown;
+}): ApplyPatchOperation[] {
+  const fromRaw = applyPatchOps(item.raw);
+  if (fromRaw.length > 0) {
+    return fromRaw;
+  }
+  const args = parseToolArgs(item.arguments);
+  return applyPatchOps(args);
+}
+
 /**
  * True when a tool item is an `apply_patch_call` — by its provider-native
  * `raw.type` (the live-wire source of truth) or by tool `name` (first-party
@@ -235,7 +248,11 @@ export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
 export function isApplyPatch(item: { name: string; raw: unknown }): boolean {
   const type =
     item.raw && typeof item.raw === "object" ? (item.raw as { type?: unknown }).type : undefined;
-  return type === "apply_patch_call" || item.name === "apply_patch_call";
+  if (type === "apply_patch_call") {
+    return true;
+  }
+  const name = item.name;
+  return name === "apply_patch_call" || name === "apply_patch" || name.endsWith("__apply_patch");
 }
 
 /* --- secret redaction ------------------------------------------------------- */
@@ -288,36 +305,8 @@ export function unwrapMcpOutput(output: unknown): {
   text: string;
   isError: boolean;
 } {
-  // Managed MCP events persist a normalized single text part as
-  // `{ type: "text", text }`; accept it alongside the SDK-native content array.
-  if (
-    output &&
-    typeof output === "object" &&
-    (output as { type?: unknown }).type === "text" &&
-    typeof (output as { text?: unknown }).text === "string"
-  ) {
-    const record = output as { text: string; isError?: unknown };
-    return { text: record.text, isError: Boolean(record.isError) };
-  }
-  if (output && typeof output === "object" && "content" in output) {
-    const record = output as { content?: unknown; isError?: unknown };
-    const isError = Boolean(record.isError);
-    if (Array.isArray(record.content)) {
-      const textPart = record.content.find(
-        (part): part is { type: string; text: string } =>
-          !!part && typeof part === "object" && (part as { type?: unknown }).type === "text",
-      );
-      return {
-        text: textPart ? String(textPart.text) : JSON.stringify(output),
-        isError,
-      };
-    }
-    return { text: JSON.stringify(output), isError };
-  }
-  return {
-    text: typeof output === "string" ? output : output == null ? "" : JSON.stringify(output),
-    isError: false,
-  };
+  const normalized = normalizeMcpOutput(output);
+  return { text: normalized.text, isError: normalized.isError };
 }
 
 /* --- computer-use screenshot extraction ------------------------------------- */

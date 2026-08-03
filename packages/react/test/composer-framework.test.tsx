@@ -44,6 +44,7 @@ function delivery(
 function fullComposer(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     ...delivery("hello", () => {}),
+    hasDraftContent: () => true,
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -68,10 +69,13 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     attachments: [],
     readyResources: [],
     uploading: false,
+    hasUnresolved: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
+    removeReadyFiles: () => {},
     clear: () => {},
     ...overrides,
   };
@@ -189,7 +193,7 @@ describe("compound composer framework", () => {
             return true;
           },
         }),
-        attachments: attachments({ uploading: true }),
+        attachments: attachments({ uploading: true, hasUnresolved: true }),
       });
       return (
         <Composer.Root controller={controller}>
@@ -533,6 +537,36 @@ describe("compound composer framework", () => {
     expect(mounted.container.querySelector('[role="listbox"]')?.getAttribute("aria-label")).toBe(
       "Operator commands",
     );
+  });
+
+  test("autoFocus waits until the composer is interactive", async () => {
+    let setDisabled: ((value: boolean) => void) | null = null;
+    function Harness() {
+      const [value, setValue] = useState("");
+      const [disabled, set] = useState(true);
+      setDisabled = set;
+      return (
+        <ChatComposer
+          composer={fullComposer({ value, setValue, canSend: value.trim().length > 0 })}
+          disabled={disabled}
+          autoFocus
+        />
+      );
+    }
+    mounted = await renderComponent(<Harness />);
+    const textarea = mounted.container.querySelector("textarea");
+    expect(textarea?.disabled).toBe(true);
+    expect(document.activeElement).not.toBe(textarea);
+
+    await act(async () => {
+      setDisabled?.(false);
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    });
+
+    expect(textarea?.disabled).toBe(false);
+    expect(document.activeElement).toBe(textarea);
   });
 
   test("the compound composition is server-renderable with deterministic ownership markup", () => {

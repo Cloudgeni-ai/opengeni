@@ -44,12 +44,25 @@ variable "deployment_phase" {
   }
 }
 
+variable "aks_existing_pool" {
+  description = "Whether this composition manages an already-existing AKS system pool. Existing pools must explicitly select a staged aks_rollout phase; new clusters retain the direct default."
+  type        = bool
+  default     = false
+}
+
 variable "aks" {
   description = "AKS cluster settings."
   type = object({
     kubernetes_version                            = optional(string)
     node_count                                    = optional(number, 2)
     vm_size                                       = optional(string, "Standard_D4ds_v5")
+    auto_scaling_enabled                          = optional(bool, false)
+    min_count                                     = optional(number)
+    max_count                                     = optional(number)
+    max_pods                                      = optional(number)
+    os_disk_size_gb                               = optional(number)
+    os_disk_type                                  = optional(string)
+    temporary_name_for_rotation                   = optional(string)
     dns_prefix                                    = optional(string)
     node_pool_upgrade_max_surge                   = optional(string, "10%")
     node_pool_upgrade_drain_timeout_minutes       = optional(number, 0)
@@ -57,23 +70,116 @@ variable "aks" {
     microsoft_defender_log_analytics_workspace_id = optional(string)
   })
   default = {}
-}
-
-variable "managed_aks_capacity" {
-  description = "Optional non-secret capacity policy for the managed AKS system pool. Production automation can pin live node capacity without duplicating the rest of the environment configuration."
-  type = object({
-    node_count = number
-  })
-  default  = null
-  nullable = true
 
   validation {
-    condition = var.managed_aks_capacity == null ? true : (
-      var.managed_aks_capacity.node_count >= 1 &&
-      var.managed_aks_capacity.node_count <= 1000 &&
-      floor(var.managed_aks_capacity.node_count) == var.managed_aks_capacity.node_count
+    condition = (
+      var.aks.node_count >= 1 &&
+      var.aks.node_count <= 1000 &&
+      floor(var.aks.node_count) == var.aks.node_count
     )
-    error_message = "managed_aks_capacity.node_count must be a whole number between 1 and 1000."
+    error_message = "aks.node_count must be a whole number between 1 and 1000."
+  }
+
+  validation {
+    condition = var.aks.auto_scaling_enabled ? (
+      var.aks.min_count != null &&
+      var.aks.max_count != null &&
+      var.aks.min_count >= 1 &&
+      var.aks.min_count <= var.aks.node_count &&
+      var.aks.node_count <= var.aks.max_count &&
+      var.aks.max_count <= 1000 &&
+      floor(var.aks.min_count) == var.aks.min_count &&
+      floor(var.aks.max_count) == var.aks.max_count
+      ) : (
+      var.aks.min_count == null && var.aks.max_count == null
+    )
+    error_message = "aks autoscaling requires whole-number min_count <= node_count <= max_count; fixed pools must omit min_count and max_count."
+  }
+
+  validation {
+    condition = var.aks.max_pods == null ? true : (
+      var.aks.max_pods >= 10 &&
+      var.aks.max_pods <= 250 &&
+      floor(var.aks.max_pods) == var.aks.max_pods
+    )
+    error_message = "aks.max_pods must be a whole number between 10 and 250."
+  }
+
+  validation {
+    condition = var.aks.os_disk_size_gb == null ? true : (
+      var.aks.os_disk_size_gb >= 30 &&
+      var.aks.os_disk_size_gb <= 2048 &&
+      floor(var.aks.os_disk_size_gb) == var.aks.os_disk_size_gb
+    )
+    error_message = "aks.os_disk_size_gb must be a whole number between 30 and 2048."
+  }
+
+  validation {
+    condition     = var.aks.os_disk_type == null ? true : contains(["Ephemeral", "Managed"], var.aks.os_disk_type)
+    error_message = "aks.os_disk_type must be Ephemeral or Managed."
+  }
+
+  validation {
+    condition = var.aks.temporary_name_for_rotation == null ? true : (
+      can(regex("^[a-z][a-z0-9]{0,11}$", var.aks.temporary_name_for_rotation)) &&
+      var.aks.temporary_name_for_rotation != "system"
+    )
+    error_message = "aks.temporary_name_for_rotation must be a different 1-12 character lowercase alphanumeric pool name."
+  }
+}
+
+variable "aks_rollout" {
+  description = "Optional explicit guardrails for staged AKS changes. Existing-pool bounds compare expected_existing and desired rotation-sensitive settings with a refreshed live system-pool data source, then rotation compares observed count and quota evidence with that same live count."
+  type = object({
+    phase = optional(string, "direct")
+    expected_existing = optional(object({
+      vm_size                     = optional(string)
+      max_pods                    = optional(number)
+      os_disk_size_gb             = optional(number)
+      os_disk_type                = optional(string)
+      temporary_name_for_rotation = optional(string)
+    }))
+    rotation_preflight = optional(object({
+      observed_node_count    = number
+      regional_vcpu_used     = number
+      regional_vcpu_limit    = number
+      rotation_vcpu_per_node = number
+    }))
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["direct", "bounds", "rotation"], var.aks_rollout.phase)
+    error_message = "aks_rollout.phase must be direct, bounds, or rotation."
+  }
+
+  validation {
+    condition     = var.aks_rollout.phase != "bounds" || var.aks_rollout.expected_existing != null
+    error_message = "aks_rollout.expected_existing is required for a bounds-only rollout."
+  }
+
+  validation {
+    condition     = var.aks_rollout.phase != "rotation" || var.aks_rollout.rotation_preflight != null
+    error_message = "aks_rollout.rotation_preflight is required before a rotation rollout."
+  }
+
+  validation {
+    condition = var.aks_rollout.phase != "rotation" || try(
+      var.aks_rollout.rotation_preflight.observed_node_count > 0 &&
+      floor(var.aks_rollout.rotation_preflight.observed_node_count) == var.aks_rollout.rotation_preflight.observed_node_count &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_used > 0 &&
+      floor(var.aks_rollout.rotation_preflight.regional_vcpu_used) == var.aks_rollout.rotation_preflight.regional_vcpu_used &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_limit > 0 &&
+      floor(var.aks_rollout.rotation_preflight.regional_vcpu_limit) == var.aks_rollout.rotation_preflight.regional_vcpu_limit &&
+      var.aks_rollout.rotation_preflight.rotation_vcpu_per_node > 0 &&
+      floor(var.aks_rollout.rotation_preflight.rotation_vcpu_per_node) == var.aks_rollout.rotation_preflight.rotation_vcpu_per_node &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_used <= var.aks_rollout.rotation_preflight.regional_vcpu_limit &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_used +
+      var.aks_rollout.rotation_preflight.observed_node_count * var.aks_rollout.rotation_preflight.rotation_vcpu_per_node <=
+      var.aks_rollout.rotation_preflight.regional_vcpu_limit,
+      false
+    )
+    error_message = "aks rotation preflight values must be positive whole numbers, use a limit at least as large as current usage, and fit the temporary-pool vCPU peak."
   }
 }
 

@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   cancellableShellCommand,
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
+import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 
@@ -58,26 +61,62 @@ async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolea
 }
 
 describe("turn sandbox-tool physical cancellation fence", () => {
-  test("promotes a provider shell into an isolated process group before user code", async () => {
-    const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
-    const command = cancellableShellCommand(
-      'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
-      markerPath,
-    );
-    const process = Bun.spawn(["/bin/sh", "-c", command], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-      process.exited,
-    ]);
-    expect(exitCode, stderr).toBe(0);
-    expect(stdout).toBe("isolated");
-    expect(existsSync(markerPath)).toBe(false);
-  });
+  test.skipIf(Bun.which("setsid") === null)(
+    "promotes a provider shell into an isolated process group before user code",
+    async () => {
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const command = cancellableShellCommand(
+        'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
+        markerPath,
+      );
+      const process = Bun.spawn(["/bin/sh", "-c", command], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(process.stdout).text(),
+        new Response(process.stderr).text(),
+        process.exited,
+      ]);
+      expect(exitCode, stderr).toBe(0);
+      expect(stdout).toBe("isolated");
+      expect(existsSync(markerPath)).toBe(false);
+    },
+  );
+
+  test.skipIf(!existsSync("/proc/self/stat") || Bun.which("setsid") === null)(
+    "uses Linux procfs when a minimal sandbox image omits ps",
+    async () => {
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const command = cancellableShellCommand("printf isolated", markerPath);
+      const binDir = mkdtempSync(join(tmpdir(), "opengeni-procless-"));
+      try {
+        for (const executable of ["mkdir", "rm", "setsid"]) {
+          const resolved = Bun.which(executable);
+          expect(resolved).not.toBeNull();
+          symlinkSync(resolved!, join(binDir, executable));
+        }
+        const child = Bun.spawn(["/bin/sh", "-c", command], {
+          env: { ...process.env, PATH: binDir },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(exitCode, stderr).toBe(0);
+        expect(stdout).toBe("isolated");
+        expect(command).toContain("/proc/$__opengeni_lookup_pid/stat");
+        expect(existsSync(markerPath)).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("forces a short PTY yield and escalates ignored Ctrl-C/TERM to a confirmed group KILL", async () => {
     const abort = new AbortController();
@@ -133,6 +172,240 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(writes[0]).toBe("\u0003");
     expect(signals).toEqual(["TERM", "KILL"]);
     expect(processAlive).toBe(false);
+  });
+
+  test("model-facing stdin uses retained-process mutation routing, never control or generic write", async () => {
+    const controller = createTurnToolCancellationController();
+    let rawWrites = 0;
+    const mutations: Array<Record<string, unknown>> = [];
+    let controls = 0;
+    const exec = functionTool("exec_command", async () => running(31));
+    const write = functionTool("write_stdin", async () => {
+      rawWrites += 1;
+      return exited(0);
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 31,
+      writeStdinForProcessMutation: async (args: Record<string, unknown>) => {
+        mutations.push(args);
+        return exited(0, "done");
+      },
+      writeStdinForProcessControl: async () => {
+        controls += 1;
+        return exited(0);
+      },
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    expect(
+      await wrappedWrite!.invoke(
+        runContext,
+        JSON.stringify({
+          session_id: 31,
+          chars: "hello",
+          yield_time_ms: 30_000,
+          max_output_tokens: 256,
+        }),
+      ),
+    ).toContain("done");
+
+    expect(mutations).toEqual([
+      { sessionId: 31, chars: "hello", yieldTimeMs: 250, maxOutputTokens: 256 },
+    ]);
+    expect(controls).toBe(0);
+    expect(rawWrites).toBe(0);
+  });
+
+  test("cancellation uses retained-process control routing without a generic write tool", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let processAlive = true;
+    let rawExecs = 0;
+    let mutations = 0;
+    const controlWrites: Array<Record<string, unknown>> = [];
+    const helperCommands: string[] = [];
+    const settlementOrder: string[] = [];
+    const exec = functionTool("exec_command", async () => {
+      rawExecs += 1;
+      return running(32);
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 32,
+      writeStdinForProcessMutation: async () => {
+        mutations += 1;
+        return running(32);
+      },
+      writeStdinForProcessControl: async (args: Record<string, unknown>) => {
+        controlWrites.push(args);
+        settlementOrder.push("provider-control");
+        return processAlive ? running(32) : exited(137);
+      },
+      execCommandForProcessControl: async (
+        sessionId: number,
+        args: { cmd: string; yieldTimeMs?: number; maxOutputTokens?: number },
+      ) => {
+        expect(sessionId).toBe(32);
+        expect(args.yieldTimeMs).toBe(1_000);
+        expect(args.maxOutputTokens).toBe(128);
+        expect("yield_time_ms" in args).toBe(false);
+        helperCommands.push(args.cmd);
+        if (args.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return exited(0, "5200 5200\n");
+        }
+        if (args.cmd.includes("command kill -KILL")) {
+          settlementOrder.push("group-kill");
+          processAlive = false;
+          return exited(0);
+        }
+        if (args.cmd.includes("command kill -0")) {
+          settlementOrder.push(processAlive ? "group-live" : "group-absent");
+          return exited(processAlive ? 75 : 0);
+        }
+        return exited(0);
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+
+    expect(rawExecs).toBe(1);
+    expect(mutations).toBe(0);
+    expect(controlWrites.at(-1)).toMatchObject({ sessionId: 32, chars: "" });
+    expect(helperCommands.some((command) => command.includes("command cat"))).toBe(true);
+    expect(helperCommands.some((command) => command.includes("command kill -TERM"))).toBe(true);
+    expect(helperCommands.some((command) => command.includes("command kill -KILL"))).toBe(true);
+    expect(
+      helperCommands.some((command) => command.includes("/proc/$__opengeni_lookup_pid/cmdline")),
+    ).toBe(true);
+    expect(
+      helperCommands.some((command) => command.includes("/proc/$__opengeni_lookup_pid/stat")),
+    ).toBe(true);
+    const guardedIdentityProbe = helperCommands.find(
+      (command) =>
+        command.includes("__opengeni_process_args") && command.includes("command kill -0"),
+    );
+    expect(guardedIdentityProbe).toContain(
+      '__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")" || exit 76',
+    );
+    expect(guardedIdentityProbe).toContain(
+      '__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")" || exit 76',
+    );
+    const emptyBin = mkdtempSync(join(tmpdir(), "opengeni-inspection-unavailable-"));
+    try {
+      const inspectionFailure = Bun.spawn(["/bin/sh", "-c", guardedIdentityProbe!], {
+        env: { ...process.env, PATH: emptyBin },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [inspectionStderr, inspectionExitCode] = await Promise.all([
+        new Response(inspectionFailure.stderr).text(),
+        inspectionFailure.exited,
+      ]);
+      expect(inspectionExitCode, inspectionStderr).toBe(76);
+    } finally {
+      rmSync(emptyBin, { recursive: true, force: true });
+    }
+    expect(processAlive).toBe(false);
+    expect(settlementOrder.lastIndexOf("provider-control")).toBeGreaterThan(
+      settlementOrder.indexOf("group-absent"),
+    );
+  });
+
+  test("registers a durably promoted process even when stale authority rejects the exec output", async () => {
+    const controller = createTurnToolCancellationController();
+    let processAlive = true;
+    let retained = true;
+    let providerCalls = 0;
+    let controlPolls = 0;
+    const exec = functionTool("exec_command", async () => {
+      providerCalls += 1;
+      throw new RoutingMutationOutcomeUnknownError(
+        "execCommand",
+        "durable promotion succeeded but output was rejected",
+        {
+          retainedProcess: {
+            id: "77777777-7777-4777-8777-777777777777",
+            providerSessionId: 34,
+          },
+        },
+      );
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 34 && retained,
+      writeStdinForProcessControl: async () => {
+        controlPolls += 1;
+        retained = false;
+        return exited(143);
+      },
+      execCommandForProcessControl: async (sessionId: number, args: { cmd: string }) => {
+        expect(sessionId).toBe(34);
+        if (args.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return exited(0, "6200 6200\n");
+        }
+        if (args.cmd.includes("command kill -TERM")) {
+          processAlive = false;
+          return exited(0);
+        }
+        if (args.cmd.includes("command kill -0")) return exited(processAlive ? 75 : 0);
+        return exited(0);
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await expect(
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" })),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    controller.cancel(new Error("turn finalized"));
+    await controller.waitForQuiescence();
+
+    expect(providerCalls).toBe(1);
+    expect(controlPolls).toBe(1);
+    expect(retained).toBe(false);
+  });
+
+  test("retained-process terminal settlement failure keeps the cancellation fence closed", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let rawWrites = 0;
+    let allowSettlement = false;
+    let controlAttempts = 0;
+    const write = functionTool("write_stdin", async () => {
+      rawWrites += 1;
+      return running(33);
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 33,
+      writeStdinForProcessMutation: async () => running(33),
+      writeStdinForProcessControl: async () => {
+        controlAttempts += 1;
+        if (!allowSettlement) throw new Error("durable settlement unavailable");
+        return "write_stdin failed: session not found: 33";
+      },
+    };
+    const [wrappedWrite] = controller.wrapTools([write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 33, chars: "input" }));
+    abort.abort(new Error("steered"));
+    const quiescence = controller.waitForQuiescence();
+    await Bun.sleep(125);
+    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+
+    allowSettlement = true;
+    await quiescence;
+    expect(controlAttempts).toBeGreaterThanOrEqual(2);
+    expect(rawWrites).toBe(0);
   });
 
   test("abort waits for an exec invocation that has not yielded its provider session yet", async () => {

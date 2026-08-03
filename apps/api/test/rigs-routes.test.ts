@@ -95,6 +95,7 @@ async function bearer(
     workspaceId: workspace.workspaceId,
     subjectId,
     permissions,
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   return `Bearer ${token}`;
@@ -210,8 +211,15 @@ describe("rig route permission matrix", () => {
     const rig = await created.json();
 
     const [session] = await shared!.admin<{ id: string }[]>`
-      insert into sessions (account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id, rig_id)
-      values (${ws.accountId}, ${ws.workspaceId}, 'hi', 'gpt-5.6-sol', 'none', gen_random_uuid(), ${rig.id})
+      insert into sessions (
+        account_id, workspace_id, initial_message, model, sandbox_backend,
+        sandbox_group_id, rig_id, tool_policy
+      )
+      values (
+        ${ws.accountId}, ${ws.workspaceId}, 'hi', 'gpt-5.6-sol', 'none',
+        gen_random_uuid(), ${rig.id},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )
       returning id`;
 
     const blocked = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });

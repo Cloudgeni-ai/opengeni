@@ -1,14 +1,16 @@
 /* ----------------------------------------------------------------------------
    ChatComposer's opt-in `attachments` prop: the built-in attach button, the
    attachment-chips strip, the paste->addFromPaste wiring, and the send-gate
-   that blocks BOTH the button and Enter while files are uploading.
+   that blocks BOTH the button and Enter while files are unresolved.
    -------------------------------------------------------------------------- */
 import { afterEach, describe, expect, test } from "bun:test";
-import { act } from "react";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChatComposer } from "../src/components/chat-composer";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { FileAttachment, UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
+import { COMPOSER_PAYMENT_REQUIRED_MESSAGE } from "../src/lib/format";
 import { registerDom } from "./render-hook";
 
 registerDom();
@@ -30,6 +32,7 @@ function makeComposer(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     value: "hello there",
     setValue: () => {},
+    hasDraftContent: () => true,
     send: async () => true,
     steer: async () => true,
     sending: false,
@@ -62,10 +65,13 @@ function makeAttachments(
     attachments: [],
     readyResources: [],
     uploading: false,
+    hasUnresolved: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
+    removeReadyFiles: () => {},
     clear: () => {},
     ...overrides,
   };
@@ -138,8 +144,16 @@ describe("ChatComposer attachments", () => {
   });
 
   test("the attach button and hidden file input render in controlsStart when attachments is present", async () => {
+    const added: File[][] = [];
     const container = await mount(
-      <ChatComposer composer={makeComposer()} attachments={makeAttachments()} />,
+      <ChatComposer
+        composer={makeComposer()}
+        attachments={makeAttachments({
+          addFiles: (files) => {
+            added.push([...files]);
+          },
+        })}
+      />,
     );
     const attach = [...container.querySelectorAll("button")].find(
       (b) => b.getAttribute("aria-label") === "Attach files",
@@ -148,6 +162,14 @@ describe("ChatComposer attachments", () => {
     const input = container.querySelector('input[type="file"]');
     expect(input).toBeTruthy();
     expect(input?.getAttribute("multiple")).not.toBeNull();
+    const image = new File(["image"], "chosen.png", { type: "image/png" });
+    Object.defineProperty(input, "files", { configurable: true, value: [image] });
+    await act(async () => {
+      input?.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(added).toHaveLength(1);
+    expect(added[0]!.map((file) => file.name)).toEqual(["chosen.png"]);
   });
 
   test("attachment chips render above the textarea when files are attached", async () => {
@@ -163,6 +185,35 @@ describe("ChatComposer attachments", () => {
     expect(remove).toBeTruthy();
   });
 
+  test("a managed-credit rejection is actionable and keeps the ready attachment visible", async () => {
+    const error = new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: {
+          status: 402,
+          code: "payment_required",
+          message: "insufficient OpenGeni credits",
+          retryable: false,
+        },
+      }),
+      { mutation: true },
+    );
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer({ error })}
+        attachments={makeAttachments({
+          attachments: [readyChip("preserved.png")],
+          readyResources: [{ kind: "file", fileId: "preserved-file" }],
+        })}
+      />,
+    );
+
+    expect(container.textContent ?? "").toContain(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(container.textContent ?? "").toContain("preserved.png");
+    expect(container.querySelector('[aria-label="Remove preserved.png"]')).not.toBeNull();
+    expect(sendButton(container)?.disabled).toBe(false);
+  });
+
   test("while uploading, the send button is disabled and Enter does not call send", async () => {
     let sent = 0;
     const composer = makeComposer({
@@ -173,6 +224,7 @@ describe("ChatComposer attachments", () => {
     });
     const attachments = makeAttachments({
       uploading: true,
+      hasUnresolved: true,
       attachments: [{ ...readyChip("a.png"), status: "uploading" }],
     });
     const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
@@ -193,6 +245,83 @@ describe("ChatComposer attachments", () => {
       await Promise.resolve();
     });
     expect(sent).toBe(0);
+  });
+
+  test("a failed attachment blocks the send button and Enter instead of being silently omitted", async () => {
+    let sent = 0;
+    const composer = makeComposer({
+      send: async () => {
+        sent += 1;
+        return true;
+      },
+    });
+    const attachments = makeAttachments({
+      hasUnresolved: true,
+      attachments: [
+        {
+          ...readyChip("failed.png"),
+          status: "failed",
+          error: "storage unavailable",
+        },
+      ],
+    });
+    const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
+
+    expect(sendButton(container)!.disabled).toBe(true);
+    expect(container.querySelector('[aria-label="Retry failed.png"]')).not.toBeNull();
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+      sendButton(container)!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(sent).toBe(0);
+  });
+
+  test("removing the failed attachment unblocks send without dropping the typed prompt", async () => {
+    let sent = 0;
+    function Harness() {
+      const [failed, setFailed] = useState(true);
+      return (
+        <ChatComposer
+          composer={makeComposer({
+            send: async () => {
+              sent += 1;
+              return true;
+            },
+          })}
+          attachments={makeAttachments({
+            hasUnresolved: failed,
+            attachments: failed
+              ? [{ ...readyChip("failed.png"), status: "failed", error: "try again" }]
+              : [],
+            remove: () => setFailed(false),
+          })}
+        />
+      );
+    }
+    const container = await mount(<Harness />);
+    expect(sendButton(container)!.disabled).toBe(true);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Remove failed.png"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(sendButton(container)!.disabled).toBe(false);
+
+    await act(async () => {
+      container
+        .querySelector("textarea")!
+        .dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      await Promise.resolve();
+    });
+    expect(sent).toBe(1);
   });
 
   test("with uploads settled, Enter sends and the button is enabled", async () => {
@@ -245,6 +374,7 @@ describe("ChatComposer attachments", () => {
     const composer = makeComposer({ value: "", canSend: false });
     const attachments = makeAttachments({
       uploading: true,
+      hasUnresolved: true,
       attachments: [readyChip("ready.png"), { ...readyChip("pending.png"), status: "uploading" }],
       readyResources: [{ kind: "file", fileId: "f1" }],
     });

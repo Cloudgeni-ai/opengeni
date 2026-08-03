@@ -28,6 +28,10 @@ export const SUMMARY_BUFFER_TOKENS = 20_000;
 // A single cumulative budget for all retained real user messages, matching
 // Codex core's build_compacted_history_with_limit (not a per-message allowance).
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
+/** Codex CLI remote compaction v2 retained-message budget (codex-rs). */
+export const REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
+export const REMOTE_COMPACTION_V2_IMPLEMENTATION = "responses_compaction_v2" as const;
+export const REMOTE_COMPACTION_V2_BETA_FEATURE = "remote_compaction_v2" as const;
 // 0.9: compact as LATE as possible — retained context is worth more than early
 // headroom now that declared per-model windows are honest. Model-catalog
 // explicit limits take precedence; the ratio is used for models without one.
@@ -101,11 +105,6 @@ export function isCompactionSummary(item: unknown): boolean {
   );
 }
 
-/** Platform-authored system context exists for one inference and is never persisted. */
-export function isEphemeralInternalContext(item: unknown): boolean {
-  return itemType(item) === "message" && itemRole(item) === "system";
-}
-
 /**
  * Conservative tokenizer-independent text estimate used for every local input
  * budget. Preserve the stable ASCII `chars / 4` heuristic, but never discount
@@ -124,23 +123,6 @@ export function estimateTextTokens(text: string): number {
   return nonAsciiCodeUnits + Math.ceil(asciiCodeUnits / 4);
 }
 
-/** Serialized-item estimate for pre-call accounting and retained user budgets. */
-export function estimateItemTokens(item: CompactionItem): number {
-  try {
-    return jsonSerializedTokenEstimate(item);
-  } catch {
-    return estimateTextTokens(materializedJson(item));
-  }
-}
-
-/**
- * Count the UTF-16 code units JSON.stringify emits for a persisted plain
- * JSON/JSONB value without materializing the serialized payload. This exact
- * path deliberately rejects custom prototypes, proxies, accessors, wrappers,
- * symbols, sparse arrays, and toJSON hooks. Direct non-persisted callers use
- * JSON.stringify itself for unusual values so their estimate remains truthful;
- * values with no JSON representation fail closed.
- */
 export function jsonSerializedLength(value: unknown): number {
   const length = jsonValueLength(value, new Set<object>());
   if (length === undefined) {
@@ -483,10 +465,507 @@ function jsonStringUtf8ByteLength(value: string): number {
   return length;
 }
 
+const IMAGE_LOW_DETAIL_TOKENS = 85;
+const IMAGE_HIGH_DETAIL_BASE_TOKENS = 85;
+const IMAGE_HIGH_DETAIL_TILE_TOKENS = 170;
+const IMAGE_HIGH_DETAIL_TILE_SIZE = 512;
+const IMAGE_HIGH_DETAIL_MAX_SIDE = 2_048;
+const IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE = 768;
+export const UNKNOWN_IMAGE_TOKENS = 4_096;
+export const MAX_NATIVE_IMAGE_TOKENS = 8_192;
+
+export type NativeImageEstimateReason = "dimensions" | "bounded_fallback";
+export type NativeImageTokenEstimate = {
+  tokens: number;
+  width: number | null;
+  height: number | null;
+  detail: string;
+  reason: NativeImageEstimateReason;
+};
+
+export type ModelInputTokenBreakdown = {
+  totalTokens: number;
+  textTokens: number;
+  imageTokens: number;
+  imageCount: number;
+  imageFallbackCount: number;
+};
+
+type ImageDescriptor = {
+  source: unknown;
+  detail: string;
+  width: number | null;
+  height: number | null;
+};
+
+type NativeImageProjection = {
+  value: unknown;
+  imageTokens: number;
+  imageCount: number;
+  imageFallbackCount: number;
+};
+
+function finitePositiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : null;
+}
+
+function dimensionsFromRecord(record: Record<string, unknown>): [number, number] | null {
+  const width = finitePositiveInteger(record.width);
+  const height = finitePositiveInteger(record.height);
+  if (width && height) return [width, height];
+  if (Array.isArray(record.dimensions) && record.dimensions.length >= 2) {
+    const dimensionsWidth = finitePositiveInteger(record.dimensions[0]);
+    const dimensionsHeight = finitePositiveInteger(record.dimensions[1]);
+    if (dimensionsWidth && dimensionsHeight) return [dimensionsWidth, dimensionsHeight];
+  }
+  return null;
+}
+
+function dataUrlBytesPrefix(value: string, maxBytes = 262_144): Uint8Array | null {
+  const match = /^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\r\n]+)$/i.exec(value);
+  if (!match) return null;
+  try {
+    const maxBase64CodeUnits = Math.ceil(maxBytes / 3) * 4;
+    return new Uint8Array(Buffer.from(match[1]!.slice(0, maxBase64CodeUnits), "base64"));
+  } catch {
+    return null;
+  }
+}
+
+function base64BytesPrefix(value: string, maxBytes = 262_144): Uint8Array | null {
+  if (!/^[a-z0-9+/=\r\n]+$/i.test(value)) return null;
+  try {
+    const maxBase64CodeUnits = Math.ceil(maxBytes / 3) * 4;
+    return new Uint8Array(Buffer.from(value.slice(0, maxBase64CodeUnits), "base64"));
+  } catch {
+    return null;
+  }
+}
+
+function uint16BigEndian(bytes: Uint8Array, offset: number): number {
+  return ((bytes[offset] ?? 0) << 8) | (bytes[offset + 1] ?? 0);
+}
+
+function uint32BigEndian(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] ?? 0) * 0x1000000 +
+      ((bytes[offset + 1] ?? 0) << 16) +
+      ((bytes[offset + 2] ?? 0) << 8) +
+      (bytes[offset + 3] ?? 0)) >>>
+    0
+  );
+}
+
+function crc32(bytes: Uint8Array, start: number, end: number): number {
+  let crc = 0xffff_ffff;
+  for (let offset = start; offset < end; offset += 1) {
+    crc ^= bytes[offset] ?? 0;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb8_8320 : 0);
+    }
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
+}
+
+function dimensionsFromImageBytes(bytes: Uint8Array): [number, number] | null {
+  // PNG IHDR: trust geometry only from a complete first IHDR chunk whose CRC32
+  // authenticates the 4-byte chunk type plus 13-byte data. This inspects exactly
+  // the bounded 33-byte prefix and never decodes the rest of the image.
+  if (
+    bytes.length >= 33 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a &&
+    uint32BigEndian(bytes, 8) === 13 &&
+    bytes[12] === 0x49 &&
+    bytes[13] === 0x48 &&
+    bytes[14] === 0x44 &&
+    bytes[15] === 0x52 &&
+    crc32(bytes, 12, 29) === uint32BigEndian(bytes, 29)
+  ) {
+    const width = uint32BigEndian(bytes, 16);
+    const height = uint32BigEndian(bytes, 20);
+    return width > 0 && height > 0 ? [width, height] : null;
+  }
+  // GIF logical screen descriptor.
+  if (
+    bytes.length >= 10 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38
+  ) {
+    const width = (bytes[6] ?? 0) | ((bytes[7] ?? 0) << 8);
+    const height = (bytes[8] ?? 0) | ((bytes[9] ?? 0) << 8);
+    return width > 0 && height > 0 ? [width, height] : null;
+  }
+  // WebP VP8X canvas size (24-bit little-endian, stored minus one).
+  if (
+    bytes.length >= 30 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50 &&
+    bytes[12] === 0x56 &&
+    bytes[13] === 0x50 &&
+    bytes[14] === 0x38 &&
+    bytes[15] === 0x58
+  ) {
+    const width = 1 + (bytes[24] ?? 0) + ((bytes[25] ?? 0) << 8) + ((bytes[26] ?? 0) << 16);
+    const height = 1 + (bytes[27] ?? 0) + ((bytes[28] ?? 0) << 8) + ((bytes[29] ?? 0) << 16);
+    return width > 0 && height > 0 ? [width, height] : null;
+  }
+  // JPEG SOF markers can appear after variable-length metadata segments.
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 8 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1] ?? 0;
+      offset += 2;
+      if (marker === 0xd8 || marker === 0xd9 || marker === 0x01) continue;
+      if (marker >= 0xd0 && marker <= 0xd7) continue;
+      if (offset + 2 > bytes.length) break;
+      const segmentLength = uint16BigEndian(bytes, offset);
+      if (segmentLength < 2 || offset + segmentLength > bytes.length) break;
+      const isStartOfFrame =
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf);
+      if (isStartOfFrame && segmentLength >= 7) {
+        const height = uint16BigEndian(bytes, offset + 3);
+        const width = uint16BigEndian(bytes, offset + 5);
+        return width > 0 && height > 0 ? [width, height] : null;
+      }
+      offset += segmentLength;
+    }
+  }
+  return null;
+}
+
+function dimensionsFromImageSource(source: unknown): [number, number] | null {
+  if (source instanceof Uint8Array) {
+    return dimensionsFromImageBytes(source);
+  }
+  if (typeof source === "string") {
+    const bytes = dataUrlBytesPrefix(source);
+    return bytes ? dimensionsFromImageBytes(bytes) : null;
+  }
+  if (!source || typeof source !== "object") return null;
+  const record = source as Record<string, unknown>;
+  const rawData = record.data;
+  const mediaType = record.mediaType ?? record.media_type;
+  const rawDataDimensions =
+    rawData instanceof Uint8Array
+      ? dimensionsFromImageBytes(rawData)
+      : typeof rawData === "string" &&
+          typeof mediaType === "string" &&
+          mediaType.toLowerCase().startsWith("image/")
+        ? dimensionsFromImageBytes(base64BytesPrefix(rawData) ?? new Uint8Array())
+        : null;
+  return (
+    dimensionsFromRecord(record) ??
+    rawDataDimensions ??
+    dimensionsFromImageSource(record.url) ??
+    dimensionsFromImageSource(rawData)
+  );
+}
+
+function highDetailImageTokens(width: number, height: number): number {
+  let scaledWidth = width;
+  let scaledHeight = height;
+  const longest = Math.max(scaledWidth, scaledHeight);
+  if (longest > IMAGE_HIGH_DETAIL_MAX_SIDE) {
+    const scale = IMAGE_HIGH_DETAIL_MAX_SIDE / longest;
+    scaledWidth *= scale;
+    scaledHeight *= scale;
+  }
+  const shortest = Math.min(scaledWidth, scaledHeight);
+  if (shortest > IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE) {
+    const scale = IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE / shortest;
+    scaledWidth *= scale;
+    scaledHeight *= scale;
+  }
+  const tiles =
+    Math.ceil(scaledWidth / IMAGE_HIGH_DETAIL_TILE_SIZE) *
+    Math.ceil(scaledHeight / IMAGE_HIGH_DETAIL_TILE_SIZE);
+  return Math.min(
+    MAX_NATIVE_IMAGE_TOKENS,
+    IMAGE_HIGH_DETAIL_BASE_TOKENS + IMAGE_HIGH_DETAIL_TILE_TOKENS * Math.max(1, tiles),
+  );
+}
+
+/**
+ * Provider-neutral local estimate for one native image. Inline bytes are used
+ * only to recover dimensions; their base64 length never becomes text tokens.
+ */
+export function estimateNativeImageTokens(input: {
+  source?: unknown;
+  width?: number | null;
+  height?: number | null;
+  detail?: unknown;
+}): NativeImageTokenEstimate {
+  const explicitWidth = finitePositiveInteger(input.width);
+  const explicitHeight = finitePositiveInteger(input.height);
+  const sourceDimensions = dimensionsFromImageSource(input.source);
+  const width = explicitWidth ?? sourceDimensions?.[0] ?? null;
+  const height = explicitHeight ?? sourceDimensions?.[1] ?? null;
+  const detail =
+    typeof input.detail === "string" && input.detail.length > 0 ? input.detail : "auto";
+  if (detail === "low") {
+    return { tokens: IMAGE_LOW_DETAIL_TOKENS, width, height, detail, reason: "dimensions" };
+  }
+  if (!width || !height) {
+    return {
+      tokens: UNKNOWN_IMAGE_TOKENS,
+      width: null,
+      height: null,
+      detail,
+      reason: "bounded_fallback",
+    };
+  }
+  return {
+    tokens: highDetailImageTokens(width, height),
+    width,
+    height,
+    detail,
+    reason: "dimensions",
+  };
+}
+
+function imageDescriptor(record: Record<string, unknown>): ImageDescriptor | null {
+  const type = typeof record.type === "string" ? record.type : "";
+  if (!new Set(["input_image", "image_url", "image", "computer_screenshot"]).has(type)) {
+    return null;
+  }
+  const imageUrl = record.image_url;
+  const nestedImageUrl =
+    imageUrl && typeof imageUrl === "object" ? (imageUrl as Record<string, unknown>).url : imageUrl;
+  const source =
+    record.image ??
+    record.imageUrl ??
+    nestedImageUrl ??
+    record.data ??
+    record.url ??
+    record.fileId ??
+    record.file_id ??
+    record.artifact ??
+    record.artifactReference;
+  const nestedDetail =
+    imageUrl && typeof imageUrl === "object"
+      ? (imageUrl as Record<string, unknown>).detail
+      : undefined;
+  const dimensions =
+    dimensionsFromRecord(record) ??
+    (source && typeof source === "object"
+      ? dimensionsFromRecord(source as Record<string, unknown>)
+      : null);
+  return {
+    source,
+    detail:
+      typeof record.detail === "string"
+        ? record.detail
+        : typeof nestedDetail === "string"
+          ? nestedDetail
+          : "auto",
+    width: dimensions?.[0] ?? null,
+    height: dimensions?.[1] ?? null,
+  };
+}
+
+function projectNativeImages(value: unknown, seen: WeakSet<object>): NativeImageProjection {
+  if (!value || typeof value !== "object") {
+    return { value, imageTokens: 0, imageCount: 0, imageFallbackCount: 0 };
+  }
+  if (seen.has(value)) {
+    return { value: "[circular]", imageTokens: 0, imageCount: 0, imageFallbackCount: 0 };
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    let imageTokens = 0;
+    let imageCount = 0;
+    let imageFallbackCount = 0;
+    const projected = value.map((entry) => {
+      const result = projectNativeImages(entry, seen);
+      imageTokens += result.imageTokens;
+      imageCount += result.imageCount;
+      imageFallbackCount += result.imageFallbackCount;
+      return result.value;
+    });
+    seen.delete(value);
+    return { value: projected, imageTokens, imageCount, imageFallbackCount };
+  }
+
+  const record = value as Record<string, unknown>;
+  const descriptor = imageDescriptor(record);
+  if (descriptor) {
+    const estimate = estimateNativeImageTokens(descriptor);
+    const projected: Record<string, unknown> = {};
+    const payloadKeys = new Set([
+      "image",
+      "image_url",
+      "imageUrl",
+      "data",
+      "url",
+      "fileId",
+      "file_id",
+      "artifact",
+      "artifactReference",
+    ]);
+    for (const [key, entry] of Object.entries(record)) {
+      projected[key] = payloadKeys.has(key) ? "[native image]" : entry;
+    }
+    projected.image_estimate = {
+      width: estimate.width,
+      height: estimate.height,
+      detail: estimate.detail,
+      reason: estimate.reason,
+    };
+    seen.delete(value);
+    return {
+      value: projected,
+      imageTokens: estimate.tokens,
+      imageCount: 1,
+      imageFallbackCount: estimate.reason === "bounded_fallback" ? 1 : 0,
+    };
+  }
+
+  let imageTokens = 0;
+  let imageCount = 0;
+  let imageFallbackCount = 0;
+  const projected: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    const result = projectNativeImages(entry, seen);
+    projected[key] = result.value;
+    imageTokens += result.imageTokens;
+    imageCount += result.imageCount;
+    imageFallbackCount += result.imageFallbackCount;
+  }
+  seen.delete(value);
+  return { value: projected, imageTokens, imageCount, imageFallbackCount };
+}
+
+/**
+ * Codex CLI `estimate_reasoning_length`: opaque encrypted payloads are not
+ * model-visible as raw JSON/base64. Visible bytes ≈ `len * 3/4 - 650`.
+ */
+export function estimateOpaqueEncryptedModelVisibleBytes(encodedLen: number): number {
+  const length = Math.max(0, Math.floor(encodedLen));
+  return Math.max(0, Math.floor((length * 3) / 4) - 650);
+}
+
+/** Codex CLI bytes→tokens for opaque encrypted content (`ceil(bytes / 4)`). */
+export function estimateOpaqueEncryptedTokens(encodedLen: number): number {
+  const bytes = estimateOpaqueEncryptedModelVisibleBytes(encodedLen);
+  return bytes === 0 ? 0 : Math.ceil(bytes / 4);
+}
+
+/**
+ * Length of opaque encrypted content that must use the Codex encrypted
+ * estimator instead of JSON.stringify (compaction blobs and reasoning).
+ */
+export function opaqueEncryptedContentLength(item: unknown): number | null {
+  if (!item || typeof item !== "object") return null;
+  const record = item as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  if (
+    (type === "compaction" || type === "context_compaction" || type === "reasoning") &&
+    typeof record.encrypted_content === "string" &&
+    record.encrypted_content.length > 0
+  ) {
+    return record.encrypted_content.length;
+  }
+  if (type === "reasoning") {
+    const providerData =
+      record.providerData && typeof record.providerData === "object"
+        ? (record.providerData as Record<string, unknown>)
+        : null;
+    const nested =
+      providerData && typeof providerData.encrypted_content === "string"
+        ? providerData.encrypted_content
+        : providerData && typeof providerData.encryptedContent === "string"
+          ? providerData.encryptedContent
+          : null;
+    if (nested && nested.length > 0) return nested.length;
+  }
+  return null;
+}
+
+/** Native-image-aware item estimate for pre-call accounting and retained budgets. */
+export function estimateItemTokenBreakdown(item: CompactionItem): ModelInputTokenBreakdown {
+  const opaqueLen = opaqueEncryptedContentLength(item);
+  if (opaqueLen !== null) {
+    // Match Codex: Compaction / encrypted reasoning use the opaque byte
+    // heuristic only — never JSON-stringify the ciphertext into the budget.
+    const textTokens = estimateOpaqueEncryptedTokens(opaqueLen);
+    return {
+      totalTokens: textTokens,
+      textTokens,
+      imageTokens: 0,
+      imageCount: 0,
+      imageFallbackCount: 0,
+    };
+  }
+  const projected = projectNativeImages(item, new WeakSet<object>());
+  let text: string;
+  try {
+    text = JSON.stringify(projected.value);
+  } catch {
+    text = String(projected.value);
+  }
+  const textTokens = estimateTextTokens(text);
+  return {
+    totalTokens: textTokens + projected.imageTokens,
+    textTokens,
+    imageTokens: projected.imageTokens,
+    imageCount: projected.imageCount,
+    imageFallbackCount: projected.imageFallbackCount,
+  };
+}
+
+export function estimateItemTokens(item: CompactionItem): number {
+  return estimateItemTokenBreakdown(item).totalTokens;
+}
+
 export function estimateTokens(items: readonly CompactionItem[]): number {
   let total = 0;
   for (const item of items) {
     total += estimateItemTokens(item);
+  }
+  return total;
+}
+
+export function estimateTokensBreakdown(
+  items: readonly CompactionItem[],
+): ModelInputTokenBreakdown {
+  const total: ModelInputTokenBreakdown = {
+    totalTokens: 0,
+    textTokens: 0,
+    imageTokens: 0,
+    imageCount: 0,
+    imageFallbackCount: 0,
+  };
+  for (const item of items) {
+    const estimate = estimateItemTokenBreakdown(item);
+    total.totalTokens += estimate.totalTokens;
+    total.textTokens += estimate.textTokens;
+    total.imageTokens += estimate.imageTokens;
+    total.imageCount += estimate.imageCount;
+    total.imageFallbackCount += estimate.imageFallbackCount;
   }
   return total;
 }
@@ -500,10 +979,6 @@ export function estimateSerializedValueTokens(value: unknown): number {
   } catch {
     return estimateTextTokens(materializedJson(value));
   }
-}
-
-function materializedJsonLength(value: unknown): number {
-  return materializedJson(value).length;
 }
 
 function materializedJson(value: unknown): string {
@@ -531,6 +1006,10 @@ export type CompleteModelInputEstimate = {
   tokens: number;
   source: "complete_estimate" | "provider_plus_local";
   inputTokens: number;
+  inputTextTokens: number;
+  inputImageTokens: number;
+  inputImageCount: number;
+  inputImageFallbackCount: number;
   instructionsTokens: number;
   toolSchemaTokens: number;
   appendedAfterModelTokens: number;
@@ -549,7 +1028,8 @@ export function estimateCompleteModelInput(input: {
   provider?: ProviderContextTokenSignal | null;
   providerRequestFootprint?: CompleteModelInputFootprint | null;
 }): CompleteModelInputEstimate {
-  const inputTokens = estimateTokens(input.current.input);
+  const inputEstimate = estimateTokensBreakdown(input.current.input);
+  const inputTokens = inputEstimate.totalTokens;
   const instructionsTokens = input.current.instructionsTokens;
   const toolSchemaTokens = input.current.toolSchemaTokens;
   if (!input.provider || !input.providerRequestFootprint || input.provider.totalTokens <= 0) {
@@ -557,6 +1037,10 @@ export function estimateCompleteModelInput(input: {
       tokens: inputTokens + instructionsTokens + toolSchemaTokens,
       source: "complete_estimate",
       inputTokens,
+      inputTextTokens: inputEstimate.textTokens,
+      inputImageTokens: inputEstimate.imageTokens,
+      inputImageCount: inputEstimate.imageCount,
+      inputImageFallbackCount: inputEstimate.imageFallbackCount,
       instructionsTokens,
       toolSchemaTokens,
       appendedAfterModelTokens: 0,
@@ -578,6 +1062,10 @@ export function estimateCompleteModelInput(input: {
       input.provider.totalTokens + appendedAfterModelTokens + instructionGrowth + toolSchemaGrowth,
     source: "provider_plus_local",
     inputTokens,
+    inputTextTokens: inputEstimate.textTokens,
+    inputImageTokens: inputEstimate.imageTokens,
+    inputImageCount: inputEstimate.imageCount,
+    inputImageFallbackCount: inputEstimate.imageFallbackCount,
     instructionsTokens,
     toolSchemaTokens,
     appendedAfterModelTokens,
@@ -918,6 +1406,105 @@ export function buildCompactionReplacementHistory(
   return history;
 }
 
+/** True for a Codex remote-compaction output item with opaque encrypted content. */
+export function isRemoteCompactionItem(item: unknown): item is CompactionItem {
+  if (!item || typeof item !== "object") return false;
+  const record = item as Record<string, unknown>;
+  return (
+    record.type === "compaction" &&
+    typeof record.encrypted_content === "string" &&
+    record.encrypted_content.length > 0
+  );
+}
+
+/** Messages retained beside a remote v2 compaction blob (user + developer). */
+export function isRetainedRemoteV2Message(item: unknown): boolean {
+  if (isCompactionSummary(item) || itemType(item) === "compaction") return false;
+  const role = itemRole(item);
+  return itemType(item) === "message" && (role === "user" || role === "developer");
+}
+
+/**
+ * Build the active history after Codex remote compaction v2:
+ * newest retained user/developer messages within the CLI 64k budget plus the
+ * opaque `{ type: "compaction", encrypted_content }` item.
+ *
+ * Unlike the portable rebuild, retained messages keep `input_image` parts
+ * (Codex CLI `truncate_retained_messages_for_remote_compaction`). Image-only
+ * messages charge at least 1 token against the retain budget, matching CLI
+ * `message_text_token_count(...).max(1)`.
+ */
+export function buildRemoteV2ReplacementHistory(
+  items: readonly CompactionItem[],
+  compactionItem: CompactionItem,
+): CompactionItem[] {
+  if (!isRemoteCompactionItem(compactionItem)) {
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_compaction_item" });
+  }
+  const retainedReversed: CompactionItem[] = [];
+  let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
+  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = items[index]!;
+    if (!isRetainedRemoteV2Message(item)) continue;
+    const textTokens = estimateTextTokens(messageText(item));
+    const chargeTokens = Math.max(1, textTokens);
+    if (chargeTokens <= remaining) {
+      retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+      remaining -= chargeTokens;
+      continue;
+    }
+    retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+    remaining = 0;
+    break;
+  }
+  const history = retainedReversed.reverse();
+  history.push({
+    type: "compaction",
+    encrypted_content: compactionItem.encrypted_content,
+    ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
+  });
+  return history;
+}
+
+/**
+ * Append the transient compaction_trigger used only for the remote v2 request.
+ *
+ * The OpenAI Agents SDK's Responses converter rejects a bare
+ * `{ type: "compaction_trigger" }` (`UserError: Unsupported item`). It does
+ * accept `type: "unknown"` and forwards `providerData` onto the wire, which is
+ * how we deliver the Codex-only trigger through CompactionResponsesModel into
+ * the Codex fetch normalizer (which allowlists top-level `compaction_trigger`).
+ */
+export function buildRemoteCompactionV2PromptInput(
+  items: readonly CompactionItem[],
+): CompactionItem[] {
+  return [
+    ...items,
+    {
+      type: "unknown",
+      providerData: { type: "compaction_trigger" },
+    },
+  ];
+}
+
+/** Extract exactly one compaction output item from a Responses payload. */
+export function extractRemoteCompactionV2OutputItem(response: unknown): CompactionItem {
+  if (!response || typeof response !== "object") {
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_extract", reason: "no_response" });
+  }
+  const record = response as Record<string, unknown>;
+  const output = Array.isArray(record.output) ? record.output : [];
+  const compactionItems = output.filter(isRemoteCompactionItem);
+  if (compactionItems.length !== 1) {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_extract",
+      reason: "expected_exactly_one_compaction",
+      found: compactionItems.length,
+    });
+  }
+  return compactionItems[0]!;
+}
+
 export function compactionReplacementFingerprint(items: readonly CompactionItem[]): string {
   // PostgreSQL JSONB does not preserve JavaScript object-key insertion order.
   // Canonicalize recursively so a replacement has the same identity before
@@ -975,6 +1562,33 @@ function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): C
   }
   next.content = contentWithoutImages(item);
   return next;
+}
+
+/**
+ * Retain a remote_v2 suffix message: keep images, truncate text only when the
+ * text budget is exceeded (CLI keeps InputImage parts through truncation).
+ */
+function compactRemoteV2RetainedMessage(item: CompactionItem, maxTokens: number): CompactionItem {
+  const text = messageText(item);
+  const next = { ...item };
+  if (estimateTextTokens(text) <= maxTokens) {
+    return next;
+  }
+  const truncated = truncateMiddleByEstimatedTokens(text, maxTokens);
+  const content = (item as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    next.content = truncated;
+    return next;
+  }
+  const imageParts = content.filter(isImageContentPart);
+  next.content = [{ type: "input_text", text: truncated }, ...imageParts];
+  return next;
+}
+
+function isImageContentPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false;
+  const type = (part as { type?: unknown }).type;
+  return type === "input_image" || type === "image_url";
 }
 
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {

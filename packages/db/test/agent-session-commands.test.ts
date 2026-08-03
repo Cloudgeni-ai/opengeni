@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -12,6 +13,7 @@ import {
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   markSessionAttemptQuiesced,
+  markSessionWorkflowWakeDelivered,
   mutateSessionControlInTransaction,
   sendAgentMessageInTransaction,
   settleSessionAttemptInterruptions,
@@ -73,6 +75,7 @@ async function submit(
   sessionId: string,
   text: string,
   delivery: "send" | "steer" = "send",
+  personalConnectionDelegations: McpPersonalConnectionDelegation[] = [],
 ) {
   return await withWorkspaceSubjectRls(client.db, grant.workspaceId!, grant.subjectId, (db) =>
     db.transaction((tx) =>
@@ -86,11 +89,11 @@ async function submit(
         delivery,
         text,
         resources: [],
-        tools: [],
         model: "scripted-model",
         reasoningEffort: "low",
         reasoningEffortFallback: "medium",
         source: "user",
+        personalConnectionDelegations,
       }),
     ),
   );
@@ -99,9 +102,10 @@ async function submit(
 async function activeAgent(
   grant: Awaited<ReturnType<typeof fixture>>,
   parentSessionId: string | null = null,
+  personalConnectionDelegations: McpPersonalConnectionDelegation[] = [],
 ) {
   const session = await makeSession(grant, parentSessionId);
-  await submit(grant, session.id, "agent is working");
+  await submit(grant, session.id, "agent is working", "send", personalConnectionDelegations);
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
     sessionId: session.id,
@@ -122,7 +126,284 @@ async function activeAgent(
   return { session, turn: claim.turn, attemptId, actor };
 }
 
+async function wakeRow(workspaceId: string, sessionId: string) {
+  return await withWorkspaceRls(client.db, workspaceId, async (db) => {
+    const [row] = await db
+      .select()
+      .from(schema.sessionWorkflowWakeOutbox)
+      .where(
+        and(
+          eq(schema.sessionWorkflowWakeOutbox.workspaceId, workspaceId),
+          eq(schema.sessionWorkflowWakeOutbox.sessionId, sessionId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
+}
+
 describe("attempt-fenced Agent session commands", () => {
+  test("Agent Message and Steer freeze caller authority while queue disclosure stays public-safe", async () => {
+    const grant = await fixture();
+    const connectionId = crypto.randomUUID();
+    const delegations: McpPersonalConnectionDelegation[] = [
+      {
+        serverId: "linear",
+        connectionId,
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
+    ];
+    const caller = await activeAgent(grant, null, delegations);
+
+    const messageTarget = await makeSession(grant);
+    const messageOperationKey = crypto.randomUUID();
+    const message = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: messageTarget.id,
+          actor: caller.actor,
+          operationKey: messageOperationKey,
+          text: "Use my delegated Linear connection",
+        }),
+      ),
+    );
+    const messageReplay = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: messageTarget.id,
+          actor: caller.actor,
+          operationKey: messageOperationKey,
+          text: "Use my delegated Linear connection",
+        }),
+      ),
+    );
+    expect(messageReplay).toMatchObject({ replay: true, updateId: message.updateId });
+
+    const steerTarget = await makeSession(grant);
+    const steerOperationKey = crypto.randomUUID();
+    const steer = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: steerTarget.id,
+          actor: caller.actor,
+          operationKey: steerOperationKey,
+          instruction: "Continue with my delegated Linear connection",
+        }),
+      ),
+    );
+    const steerReplay = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: steerTarget.id,
+          actor: caller.actor,
+          operationKey: steerOperationKey,
+          instruction: "Continue with my delegated Linear connection",
+        }),
+      ),
+    );
+    expect(steerReplay).toMatchObject({ replay: true, updateId: steer.updateId });
+
+    const stored = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          id: schema.sessionSystemUpdates.id,
+          personalConnectionDelegations: schema.sessionSystemUpdates.personalConnectionDelegations,
+        })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, grant.workspaceId!),
+            eq(schema.sessionSystemUpdates.sourceId, caller.session.id),
+          ),
+        )
+        .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id)),
+    );
+    expect(stored).toEqual([
+      { id: message.updateId, personalConnectionDelegations: delegations },
+      { id: steer.updateId, personalConnectionDelegations: delegations },
+    ]);
+
+    const messageAttemptId = crypto.randomUUID();
+    const messageClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: messageTarget.id,
+      workflowId: `session-${messageTarget.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: messageAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (messageClaim.action !== "claimed") throw new Error("Agent message was not claimed");
+    expect(messageClaim.turn.personalConnectionDelegations).toEqual(delegations);
+
+    const snapshot = await getSessionQueueSnapshot(client.db, grant.workspaceId!, messageTarget.id);
+    expect(snapshot?.activePersonalConnections).toEqual([
+      { serverId: "linear", providerDomain: "linear.app" },
+    ]);
+    const publicProjection = JSON.stringify(snapshot);
+    expect(publicProjection).not.toContain(connectionId);
+    expect(publicProjection).not.toContain(grant.subjectId);
+  });
+
+  test("child completion keeps the exact spawning parent-turn authority after the parent moves on", async () => {
+    const grant = await fixture();
+    const spawningDelegations: McpPersonalConnectionDelegation[] = [
+      {
+        serverId: "linear",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
+    ];
+    const parent = await activeAgent(grant, null, spawningDelegations);
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child initial work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: parent.session.id,
+      createdByActor: parent.actor,
+      personalConnectionDelegations: spawningDelegations,
+    });
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      turnId: parent.turn.id,
+      triggerEventId: parent.turn.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const laterDelegations: McpPersonalConnectionDelegation[] = [
+      {
+        serverId: "github",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "github.com",
+        kind: "oauth2",
+      },
+    ];
+    await submit(grant, parent.session.id, "later unrelated parent work", "send", laterDelegations);
+    const laterParentClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (laterParentClaim.action !== "claimed") throw new Error("later parent turn was not claimed");
+    expect(laterParentClaim.turn.personalConnectionDelegations).toEqual(laterDelegations);
+
+    await submit(grant, child.id, "child work that fails");
+    const childAttemptId = crypto.randomUUID();
+    const childClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: child.id,
+      workflowId: `session-${child.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: childAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (childClaim.action !== "claimed") throw new Error("child turn was not claimed");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: child.id,
+      turnId: childClaim.turn.id,
+      triggerEventId: childClaim.turn.triggerEventId,
+      attemptId: childAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "expected test failure" } }],
+    });
+
+    const [outbox] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          lineage: schema.sessionSystemUpdateOutbox.lineage,
+          personalConnectionDelegations:
+            schema.sessionSystemUpdateOutbox.personalConnectionDelegations,
+        })
+        .from(schema.sessionSystemUpdateOutbox)
+        .where(eq(schema.sessionSystemUpdateOutbox.sourceSessionId, child.id)),
+    );
+    expect(outbox?.personalConnectionDelegations).toEqual(spawningDelegations);
+    expect(outbox?.lineage).toMatchObject({
+      childSessionId: child.id,
+      parentSessionId: parent.session.id,
+      parentTurnId: parent.turn.id,
+      turnId: childClaim.turn.id,
+    });
+  });
+
+  test("per-turn instructions are durable on the turn and absent from the visible user event", async () => {
+    const grant = await fixture();
+    const session = await makeSession(grant);
+    const instructions = "Current host context: record 42 is selected.";
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Use the selected record",
+            turnInstructions: instructions,
+            resources: [],
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+
+    const [turn] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          prompt: schema.sessionTurns.prompt,
+          turnInstructions: schema.sessionTurns.turnInstructions,
+        })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, submitted.turnId)),
+    );
+    const [event] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ payload: schema.sessionEvents.payload })
+        .from(schema.sessionEvents)
+        .where(eq(schema.sessionEvents.id, submitted.acceptedEventId)),
+    );
+
+    expect(turn).toEqual({
+      prompt: "Use the selected record",
+      turnInstructions: instructions,
+    });
+    expect(event?.payload).toMatchObject({ text: "Use the selected record" });
+    expect(event?.payload).not.toHaveProperty("turnInstructions");
+  });
+
   test("Agent Pause rejects self and every ancestor workstream with zero writes", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);
@@ -328,6 +609,237 @@ describe("attempt-fenced Agent session commands", () => {
     ).toHaveLength(1);
   });
 
+  test("idle repeated Agent Steer keeps stale wake acknowledgements outstanding until one newest-direction claim", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant);
+    const steer = (instruction: string) =>
+      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          steerAgentSessionInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            targetSessionId: target.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            instruction,
+          }),
+        ),
+      );
+    const acknowledge = (wakeRevision: number) =>
+      markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision,
+      });
+
+    const first = await steer("first direction must be superseded");
+    const firstWakeRevision = first.wakeRevision;
+    if (firstWakeRevision === null) throw new Error("Agent Steer did not register a wake");
+    expect(await acknowledge(firstWakeRevision)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_agent_steer",
+    });
+    // An accepted Temporal signal whose response was lost can be delivered and
+    // acknowledged again. Transport duplication still cannot consume DB work.
+    expect(await acknowledge(firstWakeRevision)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_agent_steer",
+    });
+
+    const newest = await steer("only this newest direction may run");
+    const newestWakeRevision = newest.wakeRevision;
+    if (newestWakeRevision === null) throw new Error("Newest Agent Steer did not register a wake");
+    expect(newestWakeRevision).toBe(firstWakeRevision + 1);
+    expect(await acknowledge(firstWakeRevision)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_agent_steer",
+    });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: newestWakeRevision,
+      deliveredRevision: 0,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("Newest Agent Steer was not claimed");
+    expect(claimed.turn.source).toBe("system");
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        target.id,
+        claimed.turn.id,
+      ),
+    ).toMatchObject([{ id: newest.updateId, kind: "agent_steer_instruction" }]);
+
+    const updates = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          id: schema.sessionSystemUpdates.id,
+          state: schema.sessionSystemUpdates.state,
+          deliveredTurnId: schema.sessionSystemUpdates.deliveredTurnId,
+        })
+        .from(schema.sessionSystemUpdates)
+        .where(eq(schema.sessionSystemUpdates.sessionId, target.id)),
+    );
+    expect(updates.find((update) => update.id === first.updateId)).toMatchObject({
+      state: "superseded",
+      deliveredTurnId: null,
+    });
+    expect(updates.find((update) => update.id === newest.updateId)).toMatchObject({
+      state: "delivered",
+      deliveredTurnId: claimed.turn.id,
+    });
+
+    const duplicateClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(duplicateClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+
+    // Once the DB claim adopted the newest direction, an old sender may only
+    // acknowledge its own revision; it cannot hide the newer wake.
+    expect(await acknowledge(firstWakeRevision)).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: newestWakeRevision,
+      deliveredRevision: firstWakeRevision,
+    });
+    expect(await acknowledge(newestWakeRevision)).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: newestWakeRevision,
+      deliveredRevision: newestWakeRevision,
+    });
+    const systemTurns = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.sessionId, target.id),
+            eq(schema.sessionTurns.source, "system"),
+          ),
+        ),
+    );
+    expect(systemTurns).toEqual([{ id: claimed.turn.id }]);
+  });
+
+  test("Pause may acknowledge an Agent Steer wake only because Resume commits a fresh admission revision", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant);
+    const steered = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: target.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          instruction: "preserve this direction across Pause and Resume",
+        }),
+      ),
+    );
+    const steeredWakeRevision = steered.wakeRevision;
+    if (steeredWakeRevision === null) throw new Error("Agent Steer did not register a wake");
+    const paused = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: target.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(paused.control.state).toBe("paused");
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
+
+    const resumed = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: target.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "resume",
+        }),
+      ),
+    );
+    expect(resumed.control.state).toBe("active");
+    expect(resumed.wakeCount).toBe(1);
+    const freshWake = await wakeRow(grant.workspaceId!, target.id);
+    expect(freshWake).toMatchObject({
+      wakeRevision: steeredWakeRevision + 1,
+      deliveredRevision: steeredWakeRevision,
+      reason: "session_resume",
+    });
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: freshWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
+
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("Resumed Agent Steer was not claimed");
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        target.id,
+        claimed.turn.id,
+      ),
+    ).toMatchObject([{ id: steered.updateId, state: "delivered" }]);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: freshWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: freshWake!.wakeRevision,
+      deliveredRevision: freshWake!.wakeRevision,
+    });
+  });
+
   test("Agent Steer waits for the old owner to quiesce then runs before an unchanged human queue", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
@@ -371,7 +883,18 @@ describe("attempt-fenced Agent session commands", () => {
         }),
       ),
     );
+    const steeredWakeRevision = steered.wakeRevision;
+    if (steeredWakeRevision === null) throw new Error("Agent Steer did not register a wake");
     expect(steered.interruptionCount).toBe(1);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
     const afterOrder = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
         .select({ id: schema.sessionTurns.id })
@@ -392,6 +915,15 @@ describe("attempt-fenced Agent session commands", () => {
       target.id,
       targetAttemptId,
     );
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
     const internalAttemptId = crypto.randomUUID();
     const internalClaimInput = {
       sessionId: target.id,
@@ -414,6 +946,17 @@ describe("attempt-fenced Agent session commands", () => {
       attemptId: targetAttemptId,
       temporalWorkflowId: `session-${target.id}`,
     });
+    const receiptWake = await wakeRow(grant.workspaceId!, target.id);
+    expect(receiptWake!.wakeRevision).toBe(steeredWakeRevision + 1);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: receiptWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
     const internalClaim = await claimSessionWorkForAttempt(
       client.db,
       grant.workspaceId!,
@@ -429,6 +972,28 @@ describe("attempt-fenced Agent session commands", () => {
         internalClaim.turn.id,
       ),
     ).toMatchObject([{ id: steered.updateId, kind: "agent_steer_instruction" }]);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: receiptWake!.wakeRevision,
+      deliveredRevision: steeredWakeRevision,
+    });
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: receiptWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
     const [oldQuiescedAt] = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
       const [attempt] = await db
         .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
@@ -471,5 +1036,76 @@ describe("attempt-fenced Agent session commands", () => {
     });
     if (humanClaim.action !== "claimed") throw new Error("Human queue did not resume");
     expect(humanClaim.turn.id).toBe(queued.turnId);
+  });
+
+  test("a human Steer claims ahead of an older pending Agent Steer and carries it as context", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant);
+    await submit(grant, target.id, "currently running");
+    const targetAttemptId = crypto.randomUUID();
+    const targetClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: targetAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (targetClaim.action !== "claimed") throw new Error("Target was not claimed");
+
+    const agentSteer = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: target.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          instruction: "inspect the older agent direction",
+        }),
+      ),
+    );
+    const humanSteer = await submit(grant, target.id, "the human replacement direction", "steer");
+
+    await settleSessionAttemptInterruptions(
+      client.db,
+      grant.workspaceId!,
+      target.id,
+      targetAttemptId,
+    );
+    await markSessionAttemptQuiesced(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: target.id,
+      attemptId: targetAttemptId,
+      temporalWorkflowId: `session-${target.id}`,
+    });
+
+    const replacement = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (replacement.action !== "claimed") throw new Error("Human Steer was not claimed");
+    expect(replacement.turn.id).toBe(humanSteer.turnId);
+    expect(replacement.turn.source).toBe("user");
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        target.id,
+        replacement.turn.id,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: agentSteer.updateId,
+          kind: "agent_steer_instruction",
+        }),
+      ]),
+    );
   });
 });

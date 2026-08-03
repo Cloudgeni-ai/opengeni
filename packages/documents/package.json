@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/documents",
-  "version": "0.2.14",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -19,6 +19,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./google-drive": {
+      "types": "./src/google-drive.ts",
+      "default": "./src/google-drive.ts"
     }
   },
   "publishConfig": {
@@ -26,8 +30,8 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsup",
-    "typecheck": "tsgo --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
@@ -40,7 +44,8 @@
     "openai": "6.36.0"
   },
   "devDependencies": {
+    "@opengeni/testing": "workspace:*",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   }
 }

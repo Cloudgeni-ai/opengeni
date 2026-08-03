@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
+import type { Settings } from "@opengeni/config";
 import type { Observability } from "@opengeni/observability";
+import { readFileSync } from "node:fs";
 import type {
   ActivitySlotInfo,
   CustomSlotSupplier,
@@ -7,23 +8,112 @@ import type {
   SlotPermit,
   SlotReleaseContext,
   SlotReserveContext,
+  WorkerOptions,
   WorkerTuner,
 } from "@temporalio/worker";
 
 const MIB = 1024 * 1024;
 
 /**
- * Process-local Temporal execution ceilings.
- *
- * Turn workers host only runAgentTurn. Sixteen remains the measured production
- * density until the capacity sweep proves a different optimum. It is a hard
- * ceiling, not an amount the worker promises to admit: the slot supplier below
- * may expose fewer permits when the pod's memory limit cannot safely support
- * all sixteen turns.
+ * Default fixed/HPA turn-worker admission contract. The configured fixed-mode
+ * ceiling may be lower, but every live Temporal permit reserves the complete
+ * hard budget until the runAgentTurn activity promise physically completes.
  */
 export const TURN_WORKER_MAX_CONCURRENT_TURNS = 16;
 export const TURN_WORKER_HARD_MEMORY_BYTES_PER_TURN = 100 * MIB;
 export const TURN_WORKER_NATIVE_HEADROOM_BYTES = 512 * MIB;
+
+export type TurnWorkerConcurrencySettings = Pick<
+  Settings,
+  | "turnWorkerConcurrencyMode"
+  | "turnWorkerMaxConcurrentTurns"
+  | "turnWorkerTargetCpuUsage"
+  | "turnWorkerTargetMemoryUsage"
+>;
+
+export type TurnWorkerConcurrencyOptions = Pick<
+  WorkerOptions,
+  "maxConcurrentActivityTaskExecutions" | "tuner"
+>;
+
+/**
+ * Ordinary multi-worker deployments keep a fixed per-process ceiling so HPA or
+ * an operator owns horizontal capacity. The single-machine profile selects the
+ * resource tuner instead: Temporal admits activity slots while whole-system CPU
+ * and memory remain below the configured targets, then stops polling more work.
+ */
+export function turnWorkerConcurrencyOptions(
+  settings: TurnWorkerConcurrencySettings,
+): TurnWorkerConcurrencyOptions {
+  if (settings.turnWorkerConcurrencyMode === "fixed") {
+    return {
+      maxConcurrentActivityTaskExecutions: settings.turnWorkerMaxConcurrentTurns,
+    };
+  }
+
+  return {
+    tuner: {
+      tunerOptions: {
+        targetCpuUsage: settings.turnWorkerTargetCpuUsage,
+        targetMemoryUsage: settings.turnWorkerTargetMemoryUsage,
+      },
+      activityTaskSlotOptions: {
+        minimumSlots: 1,
+        maximumSlots: settings.turnWorkerMaxConcurrentTurns,
+        rampThrottle: "50ms",
+      },
+    },
+  };
+}
+
+export type TurnWorkerConcurrencyPlan = {
+  options: TurnWorkerConcurrencyOptions;
+  admission: MemoryAwareTurnSlotSupplier | null;
+};
+
+/**
+ * Build the runtime concurrency policy for a turn worker.
+ *
+ * Fixed/HPA deployments use the hard-reservation supplier below. The explicit
+ * non-HA single-machine profile keeps Temporal's native CPU/memory resource
+ * tuner because it controls whole-machine load rather than a pod cgroup; that
+ * profile documents that its configured maximum is not a per-turn reservation.
+ */
+export function createTurnWorkerConcurrencyPlan(
+  settings: TurnWorkerConcurrencySettings,
+  options: Omit<TurnAdmissionOptions, "maximumTurns"> = {},
+): TurnWorkerConcurrencyPlan {
+  if (settings.turnWorkerConcurrencyMode === "resource-based") {
+    return {
+      options: turnWorkerConcurrencyOptions(settings),
+      admission: null,
+    };
+  }
+
+  const fixed = createTurnWorkerTuner({
+    ...options,
+    maximumTurns: settings.turnWorkerMaxConcurrentTurns,
+  });
+  return {
+    options: { tuner: fixed.tuner },
+    admission: fixed.admission,
+  };
+}
+
+export function turnWorkerConcurrencyLogFields(settings: TurnWorkerConcurrencySettings): {
+  concurrencyMode: "fixed" | "resource-based";
+  maxConcurrentTurns: number;
+  targetCpuUsage: number | null;
+  targetMemoryUsage: number | null;
+} {
+  const resourceBased = settings.turnWorkerConcurrencyMode === "resource-based";
+  return {
+    concurrencyMode: settings.turnWorkerConcurrencyMode,
+    maxConcurrentTurns: settings.turnWorkerMaxConcurrentTurns,
+    targetCpuUsage: resourceBased ? settings.turnWorkerTargetCpuUsage : null,
+    targetMemoryUsage: resourceBased ? settings.turnWorkerTargetMemoryUsage : null,
+  };
+}
 
 export const CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES = 32;
 export const CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS = 40;

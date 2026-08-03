@@ -4,17 +4,157 @@ import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
   assertFixtureCapture,
+  assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
   assertAcceptancePrincipalScopes,
+  assertChangedFileLabelsContainRepositoryRoots,
+  assertChangesDefaultVisible,
+  assertRepositoryChangesVisible,
   controlCancellationDurationMs,
   fixturePrompt,
+  isExpectedBrowserCancellation,
+  openWorkspaceIfCollapsed,
   parseCookieHeader,
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
   sanitizeDiagnostic,
+  selectTreeFile,
+  waitForSandboxLiveness,
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("ignores only expected browser-cancelled background reads", () => {
+    const path = "/v1/workspaces/workspace/sessions/session/workspace/capture/file";
+    expect(isExpectedBrowserCancellation(path, "net::ERR_ABORTED")).toBe(true);
+    expect(
+      isExpectedBrowserCancellation("/assets/analytics-consent-aB_09.js", "net::ERR_ABORTED"),
+    ).toBe(true);
+    expect(isExpectedBrowserCancellation("/v1/auth/get-session", "net::ERR_ABORTED")).toBe(true);
+    expect(isExpectedBrowserCancellation(path, "net::ERR_FAILED")).toBe(false);
+    expect(isExpectedBrowserCancellation("/assets/index-aB_09.js", "net::ERR_ABORTED")).toBe(false);
+    expect(isExpectedBrowserCancellation("/v1/config/client", "net::ERR_ABORTED")).toBe(false);
+  });
+
+  test("keeps an open workspace open when Files hides the Changes panel", async () => {
+    const selectors: string[] = [];
+    let lookedUpCollapseControl = false;
+    const page = {
+      locator(selector: string) {
+        selectors.push(selector);
+        return { isVisible: async () => true };
+      },
+      getByRole() {
+        lookedUpCollapseControl = true;
+        throw new Error("should not look up a reopen control");
+      },
+    } as never;
+
+    await openWorkspaceIfCollapsed(page);
+
+    expect(selectors).toEqual(["[data-workspace-surface]"]);
+    expect(lookedUpCollapseControl).toBe(false);
+  });
+
+  test("observes the Changes default before requiring its layout to be visible", async () => {
+    const calls: string[] = [];
+    const page = {
+      getByRole() {
+        return {
+          waitFor: async () => calls.push("tab.wait"),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[role="tab"][aria-selected="true"]') {
+          return {
+            filter: () => ({
+              waitFor: async () => calls.push("selected-changes.wait"),
+            }),
+          };
+        }
+        expect(selector).toBe("[data-workbench-changes-layout]");
+        return {
+          waitFor: async (options: { state?: string; timeout?: number }) => {
+            expect(options).toEqual({ state: "visible", timeout: 20_000 });
+            calls.push("layout.wait");
+          },
+        };
+      },
+    } as never;
+
+    await assertChangesDefaultVisible(page);
+
+    expect(calls).toEqual(["tab.wait", "selected-changes.wait", "layout.wait"]);
+  });
+
+  test("keeps an expanded file-tree directory open when selecting another file", async () => {
+    const clicks: string[] = [];
+    const directoryButton = { click: async () => clicks.push("directory") };
+    const fileButton = { click: async () => clicks.push("file") };
+    const directoryItem = {
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-expanded");
+        return "true";
+      },
+      getByRole: () => ({ first: () => directoryButton }),
+    };
+    const fileItem = {
+      getByRole: () => fileButton,
+    };
+    const page = {
+      getByRole(role: string) {
+        expect(role).toBe("treeitem");
+        return {
+          filter({ hasText }: { hasText: string }) {
+            return { first: () => (hasText === "api" ? directoryItem : fileItem) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "base.txt");
+
+    expect(clicks).toEqual(["file"]);
+  });
+
+  test("accepts repository evidence from the compact changed-file picker", async () => {
+    const calls: string[] = [];
+    const page = {
+      locator(selector: string) {
+        if (selector === "[data-workbench-changes-layout]") {
+          return {
+            getAttribute: async () => "compact",
+          };
+        }
+        expect(selector).toBe("[data-compact-file-picker]");
+        return {
+          waitFor: async (options: { state?: string; timeout?: number }) => {
+            expect(options).toEqual({ state: "visible", timeout: 20_000 });
+            calls.push("picker.wait");
+          },
+          locator(optionSelector: string) {
+            expect(optionSelector).toBe("option");
+            return {
+              allTextContents: async () => ["M · server.ts — api/", "M · app.tsx — web/src/"],
+            };
+          },
+        };
+      },
+      getByText() {
+        throw new Error("compact mode must not require hidden repository group labels");
+      },
+    } as never;
+
+    await assertRepositoryChangesVisible(page, ["api", "web"]);
+
+    expect(calls).toEqual(["picker.wait"]);
+  });
+
+  test("fails closed when compact changes omit an expected repository", () => {
+    expect(() =>
+      assertChangedFileLabelsContainRepositoryRoots(["M · server.ts — api/"], ["api", "web"]),
+    ).toThrow("compact workbench changes omitted repository web");
+  });
+
   test("rejects the protected manually used production account", () => {
     const protectedEmails = parseProtectedEmails("manually-used@example.com");
     expect(() =>
@@ -88,6 +228,36 @@ describe("workbench live acceptance preflight", () => {
     expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
   });
 
+  test("liveness polling bounds and retries a transient transport failure", async () => {
+    const signals: AbortSignal[] = [];
+    let calls = 0;
+    const client = {
+      async getStreamCapabilities(
+        _workspaceId: string,
+        _sessionId: string,
+        options: { signal?: AbortSignal } = {},
+      ) {
+        if (options.signal) signals.push(options.signal);
+        calls += 1;
+        if (calls === 1) throw new DOMException("request timed out", "TimeoutError");
+        return { liveness: "cold" } as never;
+      },
+    };
+
+    await waitForSandboxLiveness(
+      client,
+      "10000000-0000-4000-8000-000000000001",
+      "20000000-0000-4000-8000-000000000002",
+      new Set(["cold"]),
+      1_000,
+      0,
+      50,
+    );
+
+    expect(calls).toBe(2);
+    expect(signals).toHaveLength(2);
+  });
+
   test("requires interactive scopes only from the dedicated canary principal", () => {
     const workspaceId = "10000000-0000-4000-8000-000000000001";
     const canary = accessContext(workspaceId, [
@@ -153,6 +323,21 @@ describe("workbench live acceptance preflight", () => {
       .find((repo) => repo.root === "web")!
       .status.filter((item) => item.path !== "renamed.txt");
     expect(() => assertFixtureCapture(manifest, marker)).toThrow("renamed fixture status drifted");
+  });
+
+  test("requires the exact fixture marker in a tool output", () => {
+    const marker = "OPENGENI_WORKBENCH_ACCEPTANCE_001";
+    const event = {
+      type: "agent.toolCall.output",
+      payload: { output: `setup complete\n${marker}\n` },
+    } as never;
+    expect(() => assertFixtureToolOutput([event], marker)).not.toThrow();
+    expect(() =>
+      assertFixtureToolOutput(
+        [{ type: "agent.message.completed", payload: { text: marker } } as never],
+        marker,
+      ),
+    ).toThrow("acceptance fixture command did not emit its exact marker");
   });
 });
 

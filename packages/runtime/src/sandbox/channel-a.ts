@@ -12,9 +12,10 @@
 // Built on `session.exec(args): Promise<SandboxExecResult>`, which
 // returns RAW {stdout,stderr,exitCode} on the agents-core local/docker sessions
 // (and Modal/the extensions providers expose the equivalent). `execCommand`
-// returns a BANNER-DECORATED string (formatExecResponse) — NEVER used for
-// parsing; only as a last-resort fallback when `exec` is absent, with the banner
-// stripped. `readFile` returns string|Uint8Array (binary-safe). Writes go
+// returns a BANNER-DECORATED string (formatExecResponse). Structured reads use
+// it only with bounded, explicit framing and strip the banner before parsing;
+// raw `exec` remains preferred. `readFile` returns string|Uint8Array
+// (binary-safe). Writes go
 // through `exec` (a base64 heredoc — raw + binary capable, unlike createEditor's
 // apply-patch-only path which cannot do binary, C4), falling back to
 // `createEditor` for text when `exec` is absent.
@@ -58,6 +59,21 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
+import {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./turn-tool-cancellation";
+
+export {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
 
 // ── The minimal session surface Channel A consumes (a structural subset of the
 // SDK's SandboxSession, all optional — capability-probed before use). ─────────
@@ -98,6 +114,21 @@ export type ChannelASession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }): Promise<string>;
+  writeStdinForProcessMutation?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  writeStdinForProcessControl?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  cancelExecCommand?(opId: string): Promise<boolean>;
+  hasRetainedProcess?(providerSessionId: number): boolean;
+  execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
 };
@@ -182,6 +213,57 @@ const FS_LIST_TRUNCATED_MARKER = "__OPENGENI_FS_LIST_TRUNCATED__";
 // stream. Leave ample framing/translation headroom and emit an explicit marker
 // instead of allowing the SDK to drop the tree's leading parent records.
 const FS_LIST_MAX_OUTPUT_BYTES = 768 * 1024;
+// Modal and the local SDK retain at most 1 MiB of command output and discard
+// the prefix when that limit is crossed. Git's NUL-delimited metadata and
+// unified patches therefore travel as bounded base64 chunks. 512 KiB of raw
+// data expands to ~683 KiB, leaving room for confinement/provider framing.
+const GIT_COMMAND_CHUNK_BYTES = 512 * 1024;
+const GIT_METADATA_MAX_BYTES = 2 * 1024 * 1024;
+const GIT_MEASURE_FRAME = "__OPENGENI_GIT_MEASURE_V1__";
+const GIT_CHUNK_FRAME = "__OPENGENI_GIT_CHUNK_V1__";
+const GIT_CHUNK_FRAME_END = "__OPENGENI_GIT_CHUNK_END_V1__";
+// Keep Channel-A's remote hashing aligned with the existing git-credential
+// wrapper portability contract: GNU coreutils on managed Linux boxes, stock
+// shasum on macOS/BSD Connected Machines, then OpenSSL as the final common
+// fallback. Missing or failing implementations remain a typed unavailable read.
+const PORTABLE_SHA256_FILE_FUNCTION = [
+  "opengeni_sha256_file() {",
+  '  if command -v sha256sum >/dev/null 2>&1 && digest=$(sha256sum -- "$1" 2>/dev/null); then printf "%s\\n" "$digest" | awk \'{print $1}\'; return; fi',
+  '  if command -v shasum >/dev/null 2>&1 && digest=$(shasum -a 256 "$1" 2>/dev/null); then printf "%s\\n" "$digest" | awk \'{print $1}\'; return; fi',
+  '  if command -v openssl >/dev/null 2>&1 && digest=$(openssl dgst -sha256 "$1" 2>/dev/null); then printf "%s\\n" "$digest" | sed \'s/^.*= //\'; return; fi',
+  "  return 127",
+  "}",
+].join("\n");
+// Descriptor confinement has two provider command surfaces. Linux exposes the
+// opened path through procfs and GNU stat; stock macOS exposes descriptor paths
+// through lsof and BSD stat over /dev/fd. Both branches bind two already-open
+// descriptors to the same current non-symlink inode beneath the physical repo
+// root before any body reads bytes, preserving the symlink/parent-swap defense.
+const PORTABLE_DESCRIPTOR_FUNCTIONS = [
+  "opengeni_set_fd_path() {",
+  '  fd="$1"',
+  "  opengeni_fd_path=",
+  '  if opengeni_fd_path=$(readlink -f -- "/proc/$$/fd/$fd" 2>/dev/null); then [ -n "$opengeni_fd_path" ]; return; fi',
+  "  lsof_bin=",
+  "  if [ -x /usr/sbin/lsof ]; then lsof_bin=/usr/sbin/lsof; elif command -v lsof >/dev/null 2>&1; then lsof_bin=$(command -v lsof); else return 127; fi",
+  '  while IFS= read -r -d \'\' field; do case "$field" in n*) opengeni_fd_path=${field#n} ;; esac; done < <("$lsof_bin" -a -p "$$" -d "$fd" -Fn0 2>/dev/null)',
+  '  [ -n "$opengeni_fd_path" ]',
+  "}",
+  "opengeni_fd_identity() {",
+  '  fd="$1"',
+  '  if identity=$(stat -Lc "%d:%i" -- "/proc/$$/fd/$fd" 2>/dev/null); then printf "%s" "$identity"; return; fi',
+  '  stat -f "%d:%i" "/dev/fd/$fd" 2>/dev/null',
+  "}",
+  "opengeni_path_identity() {",
+  '  if identity=$(stat -c "%d:%i" -- "$1" 2>/dev/null); then printf "%s" "$identity"; return; fi',
+  '  stat -f "%d:%i" "$1" 2>/dev/null',
+  "}",
+  "opengeni_fd_size() {",
+  '  fd="$1"',
+  '  if size=$(stat -Lc "%s" -- "/proc/$$/fd/$fd" 2>/dev/null); then printf "%s" "$size"; return; fi',
+  '  stat -f "%z" "/dev/fd/$fd" 2>/dev/null',
+  "}",
+].join("\n");
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
 const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
@@ -226,8 +308,9 @@ export class SandboxChannelAService {
   // ════════════════════════════ exec primitive ══════════════════════════════
   // RAW exec — returns {stdout, stderr, exitCode}. Uses session.exec when present
   // (the local/docker sessions return raw output); falls back to execCommand +
-  // a banner strip (last resort; banner-truncation can mangle, so exec is always
-  // preferred). Throws ChannelAUnsupportedError when neither exists.
+  // a banner strip. Callers that parse output must independently bound/frame it
+  // because provider retained-output truncation drops command prefixes. Throws
+  // ChannelAUnsupportedError when neither exists.
   private async run(args: ChannelAExecArgs): Promise<{
     stdout: string;
     stderr: string;
@@ -463,9 +546,10 @@ export class SandboxChannelAService {
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
       : ":";
     const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       rejectLink,
-      `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
@@ -490,11 +574,12 @@ export class SandboxChannelAService {
       ? ":"
       : 'test -d "$parent" || { printf "__OPENGENI_FS_NOT_FOUND__"; exit 66; }';
     const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       rejectLink,
       `parent=$(dirname -- ${shellQuote(abs)})`,
       locateParent,
-      `target=$(realpath -e -- "$probe") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `target=$(opengeni_realpath_existing "$probe") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
@@ -535,7 +620,8 @@ export class SandboxChannelAService {
     const root = this.workspaceRoot || ".";
     const abs = this.joinRoot(path);
     const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `target=$(readlink -f -- "/proc/$$/fd/3") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
@@ -767,6 +853,216 @@ export class SandboxChannelAService {
 
   // ════════════════════════════ Git (A2, read-only) ═════════════════════════
 
+  /** Measure one Git command without returning its potentially large or
+   * NUL-bearing output through the provider's text transport. */
+  private async measureConfinedCommandBytes(
+    repo: string,
+    command: string,
+  ): Promise<{ sizeBytes: number; sha256: string }> {
+    const measured = await this.runInConfinedDirectory(repo, {
+      cmd: [
+        PORTABLE_SHA256_FILE_FUNCTION,
+        "tmp=$(mktemp) || exit 70",
+        "trap 'rm -f \"$tmp\"' EXIT",
+        `/bin/bash --noprofile --norc -c ${shellQuote(command)} >"$tmp" 2>/dev/null`,
+        "producer_status=$?",
+        `bytes=$(wc -c <"$tmp" | tr -d ' \\n')`,
+        `sha256=$(opengeni_sha256_file "$tmp") || exit 71`,
+        `printf '${GIT_MEASURE_FRAME}\\t%s\\t%s\\t%s' "$producer_status" "$bytes" "$sha256"`,
+      ].join("; "),
+      maxOutputTokens: 1_024,
+    });
+    const match = measured.stdout.match(
+      new RegExp(`^${GIT_MEASURE_FRAME}\\t(\\d+)\\t(\\d+)\\t([0-9a-f]{64})$`),
+    );
+    if (
+      !match ||
+      (measured.exitCode !== null && measured.exitCode !== 0) ||
+      Number(match[1]) !== 0
+    ) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    const size = Number(match[2]);
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    return { sizeBytes: size, sha256: match[3]! };
+  }
+
+  /** Read an exact prefix of a command's output in chunks that remain below
+   * every supported execCommand retained-output ceiling. The producer is
+   * intentionally rerun per chunk; turn-end capture calls this only after the
+   * durable mutation authority has quiesced the workspace. */
+  private async readConfinedCommandPrefix(
+    repo: string,
+    command: string,
+    measurement: { sizeBytes: number; sha256: string },
+    prefixByteLength = measurement.sizeBytes,
+  ): Promise<Buffer> {
+    if (
+      !Number.isSafeInteger(prefixByteLength) ||
+      prefixByteLength < 0 ||
+      prefixByteLength > measurement.sizeBytes
+    ) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    if (prefixByteLength === 0) return Buffer.alloc(0);
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < prefixByteLength; offset += GIT_COMMAND_CHUNK_BYTES) {
+      const expected = Math.min(GIT_COMMAND_CHUNK_BYTES, prefixByteLength - offset);
+      const chunk = await this.runInConfinedDirectory(repo, {
+        cmd: [
+          PORTABLE_SHA256_FILE_FUNCTION,
+          "tmp=$(mktemp) || exit 70",
+          "trap 'rm -f \"$tmp\"' EXIT",
+          `/bin/bash --noprofile --norc -c ${shellQuote(command)} >"$tmp" 2>/dev/null`,
+          "producer_status=$?",
+          `bytes=$(wc -c <"$tmp" | tr -d ' \\n')`,
+          `sha256=$(opengeni_sha256_file "$tmp") || exit 71`,
+          `printf '${GIT_CHUNK_FRAME}\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$producer_status" "$bytes" "$sha256" ${offset} ${expected}`,
+          `if [ "$producer_status" -eq 0 ]; then tail -c +${offset + 1} "$tmp" | head -c ${expected} | base64 | tr -d '\\n'; fi`,
+          `printf '\\n${GIT_CHUNK_FRAME_END}'`,
+        ].join("; "),
+        maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
+      });
+      if (chunk.exitCode !== null && chunk.exitCode !== 0) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      const headerEnd = chunk.stdout.indexOf("\n");
+      const trailer = `\n${GIT_CHUNK_FRAME_END}`;
+      if (headerEnd < 0 || !chunk.stdout.endsWith(trailer)) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      const header = chunk.stdout.slice(0, headerEnd).split("\t");
+      if (
+        header.length !== 6 ||
+        header[0] !== GIT_CHUNK_FRAME ||
+        header[1] !== "0" ||
+        header[2] !== String(measurement.sizeBytes) ||
+        header[3] !== measurement.sha256 ||
+        header[4] !== String(offset) ||
+        header[5] !== String(expected)
+      ) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data changed during capture. Retry the operation.",
+        );
+      }
+      const encoded = chunk.stdout.slice(headerEnd + 1, -trailer.length);
+      const bytes = Buffer.from(encoded, "base64");
+      if (bytes.byteLength !== expected || bytes.toString("base64") !== encoded) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      chunks.push(bytes);
+    }
+    return Buffer.concat(chunks, prefixByteLength);
+  }
+
+  private async readConfinedCommandBytes(
+    repo: string,
+    command: string,
+    maxBytes: number,
+  ): Promise<{ bytes: Buffer; sizeBytes: number; truncated: boolean }> {
+    const measurement = await this.measureConfinedCommandBytes(repo, command);
+    if (measurement.sizeBytes > maxBytes) {
+      return { bytes: Buffer.alloc(0), sizeBytes: measurement.sizeBytes, truncated: true };
+    }
+    return {
+      bytes: await this.readConfinedCommandPrefix(repo, command, measurement),
+      sizeBytes: measurement.sizeBytes,
+      truncated: false,
+    };
+  }
+
+  /** Bind an untracked regular-file descriptor to its repository root and its
+   * lstat identity before producing bytes. The final producer reads fd 3 rather
+   * than reopening the path, so a check→read symlink swap cannot disclose a
+   * target outside the repository (or substitute another in-repository inode). */
+  private confinedUntrackedRegularFileCommand(target: string, body: string): string {
+    const fileArg = target.startsWith("./") ? target : `./${target}`;
+    return [
+      PORTABLE_DESCRIPTOR_FUNCTIONS,
+      `file=${shellQuote(fileArg)}`,
+      'exec 3<"$file" || exit 66',
+      'exec 4<"$file" || exit 66',
+      "root=$(pwd -P) || exit 66",
+      "opengeni_set_fd_path 3 || exit 66",
+      'opened3="$opengeni_fd_path"',
+      "opengeni_set_fd_path 4 || exit 66",
+      'opened4="$opengeni_fd_path"',
+      'case "$opened3" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      'case "$opened4" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      'test ! -L "$file" && test -f "$file" || exit 66',
+      "opened3_identity=$(opengeni_fd_identity 3) || exit 66",
+      "opened4_identity=$(opengeni_fd_identity 4) || exit 66",
+      'path_identity=$(opengeni_path_identity "$file") || exit 66',
+      'test "$opened3_identity" = "$opened4_identity" || exit 66',
+      'test "$opened3_identity" = "$path_identity" || exit 66',
+      body,
+    ].join("; ");
+  }
+
+  /** Read a regular untracked file without routing its body through one large
+   * execCommand response. Native provider reads are binary-safe; providers
+   * without that surface use the same bounded chunk protocol as Git patches. */
+  private async readUntrackedRegularFile(
+    repo: string,
+    target: string,
+    prefixByteLength: number,
+    sizeBytes: number,
+  ): Promise<Buffer> {
+    const path = repo ? `${repo}/${target}` : target;
+    assertSafeRelPath(path);
+    if (this.session.readFile) {
+      try {
+        const raw = await this.session.readFile({
+          path: this.joinRoot(path),
+          maxBytes: prefixByteLength,
+          ...(this.runAs ? { runAs: this.runAs } : {}),
+        });
+        const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
+        if (bytes.byteLength !== prefixByteLength) {
+          throw new ChannelAUnavailableError(
+            "Workspace Git data changed during capture. Retry the operation.",
+          );
+        }
+        return bytes;
+      } catch (error) {
+        if (error instanceof ChannelAUnavailableError) throw error;
+        if (isWorkspaceEscapeError(error)) {
+          throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
+        }
+        if (isDefinitePathNotFoundError(error)) {
+          throw new ChannelANotFoundError(`file not found: ${path}`);
+        }
+        if (!this.session.exec && !this.session.execCommand) {
+          throw new ChannelAUnavailableError(
+            "Workspace Git data is temporarily unavailable. Retry the operation.",
+          );
+        }
+      }
+    }
+    const command = this.confinedUntrackedRegularFileCommand(target, "cat <&3");
+    const measurement = await this.measureConfinedCommandBytes(repo, command);
+    if (measurement.sizeBytes !== sizeBytes) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data changed during capture. Retry the operation.",
+      );
+    }
+    return await this.readConfinedCommandPrefix(repo, command, measurement, prefixByteLength);
+  }
+
   async gitStatus(req: GitStatusRequest): Promise<GitStatusResponse> {
     const repo = assertSafeRelPathOrRoot(req.path);
     const inside = await this.runInConfinedDirectory(repo, {
@@ -784,10 +1080,17 @@ export class SandboxChannelAService {
         revision: this.revision,
       };
     }
-    const { stdout } = await this.runInConfinedDirectory(repo, {
-      cmd: "git status --porcelain=v2 --branch -z",
-    });
-    return { ...parsePorcelainV2(stdout), revision: this.revision };
+    const status = await this.readConfinedCommandBytes(
+      repo,
+      "git status --porcelain=v2 --branch -z",
+      GIT_METADATA_MAX_BYTES,
+    );
+    if (status.truncated) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+      );
+    }
+    return { ...parsePorcelainV2(decodeGitMetadataUtf8(status.bytes)), revision: this.revision };
   }
 
   async gitDiff(req: GitDiffRequest): Promise<GitDiffResponse> {
@@ -796,16 +1099,34 @@ export class SandboxChannelAService {
     // Selector precedence: refs > staged > worktree.
     let range = "";
     if (req.fromRef && req.toRef) range = `${shellQuote(req.fromRef)} ${shellQuote(req.toRef)}`;
-    else if (req.fromRef) range = `${shellQuote(req.fromRef)}`;
-    else if (req.staged) range = "--cached";
+    else if (req.fromRef) {
+      if (req.fromRef === "HEAD") {
+        const head = await this.runInConfinedDirectory(repo, {
+          cmd: "if git rev-parse --verify --quiet HEAD >/dev/null; then printf 'present'; else printf 'unborn'; fi",
+        });
+        // An unborn repository has no HEAD tree. `--cached` compares its index
+        // to Git's empty tree and preserves staged additions; every other
+        // invalid ref remains a real read failure in the bounded command path.
+        range = head.stdout.trim() === "present" ? shellQuote(req.fromRef) : "--cached";
+      } else {
+        range = shellQuote(req.fromRef);
+      }
+    } else if (req.staged) range = "--cached";
     const pathspec = req.pathspec.length ? ` -- ${req.pathspec.map(shellQuote).join(" ")}` : "";
 
     // Pass 1: numstat (stats + binary detection). -z gives NUL-separated fields;
     // a rename emits old\0new for that record's path fields.
-    const numstat = await this.runInConfinedDirectory(repo, {
-      cmd: `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
-    });
-    const stats = parseNumstatZ(numstat.stdout);
+    const numstat = await this.readConfinedCommandBytes(
+      repo,
+      `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
+      GIT_METADATA_MAX_BYTES,
+    );
+    if (numstat.truncated) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+      );
+    }
+    const stats = parseNumstatZ(decodeGitMetadataUtf8(numstat.bytes));
 
     const files: GitFileDiff[] = [];
     for (const stat of stats) {
@@ -826,13 +1147,14 @@ export class SandboxChannelAService {
         continue;
       }
       // Pass 2: the per-file unified patch -> hunks.
-      const patch = await this.runInConfinedDirectory(repo, {
-        cmd: `git -c core.quotePath=false diff --no-color -U${ctx} ${range} -- ${shellQuote(target)}`.trim(),
-      });
-      const oversized = Buffer.byteLength(patch.stdout, "utf8") > req.maxBytesPerFile;
-      const parsed = oversized
+      const patch = await this.readConfinedCommandBytes(
+        repo,
+        `git -c core.quotePath=false diff --no-color -U${ctx} ${range} -- ${shellQuote(target)}`.trim(),
+        req.maxBytesPerFile,
+      );
+      const parsed = patch.truncated
         ? { hunks: [] as GitDiffHunk[], status: "modified" as GitFileStatusCode }
-        : parseUnifiedPatch(patch.stdout);
+        : parseUnifiedPatch(patch.bytes.toString("utf8"));
       files.push({
         path: target,
         oldPath: stat.oldPath,
@@ -842,7 +1164,7 @@ export class SandboxChannelAService {
         additions: stat.additions,
         deletions: stat.deletions,
         hunks: parsed.hunks,
-        truncated: oversized,
+        truncated: patch.truncated,
       });
     }
 
@@ -852,54 +1174,90 @@ export class SandboxChannelAService {
       // Ask Git for the exact NUL-delimited set, then synthesize an added-file
       // hunk from a bounded read. The explicit request flag keeps commit/staged
       // consumers on native Git semantics.
-      const untracked = await this.runInConfinedDirectory(repo, {
-        cmd: `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec}`,
-      });
-      for (const target of untracked.stdout.split(NUL).filter(Boolean)) {
+      const untracked = await this.readConfinedCommandBytes(
+        repo,
+        `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec}`,
+        GIT_METADATA_MAX_BYTES,
+      );
+      if (untracked.truncated) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+        );
+      }
+      for (const target of decodeGitMetadataUtf8(untracked.bytes).split(NUL).filter(Boolean)) {
         const fileArg = target.startsWith("./") ? target : `./${target}`;
-        const read = await this.runInConfinedDirectory(repo, {
-          cmd: [
-            `file=${shellQuote(fileArg)}`,
-            'if [ -L "$file" ]; then printf "L\\n"; readlink -z -- "$file" | base64 | tr -d "\\n"; exit; fi',
-            'size=$(wc -c < "$file") || exit 66',
-            'line_count=$(wc -l < "$file") || exit 66',
-            'if [ "$size" -gt 0 ]; then last_byte=$(tail -c 1 "$file" | od -An -tu1 | tr -d " \\n"); if [ "$last_byte" != "10" ]; then line_count=$((line_count + 1)); fi; fi',
-            'printf "F\\t%s\\t%s\\n" "$size" "$line_count"',
-            `head -c ${req.maxBytesPerFile + 1} "$file" | base64 | tr -d "\\n"`,
-          ].join("; "),
-        });
-        if (read.exitCode !== null && read.exitCode !== 0) continue;
+        const kind = await this.readConfinedCommandBytes(
+          repo,
+          `file=${shellQuote(fileArg)}; if [ -L "$file" ]; then printf L; elif [ -f "$file" ]; then printf F; else exit 66; fi`,
+          1,
+        );
+        if (kind.truncated || (kind.bytes[0] !== 0x4c && kind.bytes[0] !== 0x46)) {
+          throw new ChannelAUnavailableError(
+            "Workspace Git data is temporarily unavailable. Retry the operation.",
+          );
+        }
 
-        const lineBreak = read.stdout.indexOf("\n");
-        if (lineBreak < 0) continue;
-        const header = read.stdout.slice(0, lineBreak);
-        const encoded = read.stdout.slice(lineBreak + 1).replace(/\s/g, "");
-        let sampled = Buffer.from(encoded, "base64");
+        let sampled: Buffer = Buffer.alloc(0);
         let sizeBytes: number;
         let lineCount: number;
-        if (header === "L") {
-          // GNU readlink -z preserves every byte (including trailing newlines)
-          // and adds one NUL framing byte. The diff shows the link destination
+        if (kind.bytes[0] === 0x4c) {
+          const link = await this.readConfinedCommandBytes(
+            repo,
+            `file=${shellQuote(fileArg)}; test -L "$file" || exit 66; readlink -n "$file" || exit 66; printf '\\0'`,
+            GIT_METADATA_MAX_BYTES,
+          );
+          if (link.truncated) {
+            throw new ChannelAUnavailableError(
+              "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+            );
+          }
+          sampled = link.bytes;
+          // GNU and BSD readlink both support -n. Append our own NUL framing byte
+          // so trailing newlines remain data and the diff shows the link target
           // itself, matching Git's symlink-blob semantics, never target content.
-          if (sampled.at(-1) !== 0) continue;
+          if (sampled.at(-1) !== 0) {
+            throw new ChannelAUnavailableError(
+              "Workspace Git data is temporarily unavailable. Retry the operation.",
+            );
+          }
           sampled = sampled.subarray(0, -1);
           sizeBytes = sampled.length;
           lineCount = addedLines(sampled).length;
         } else {
-          const [kind, sizeRaw, lineCountRaw] = header.split("\t");
-          if (kind !== "F") continue;
-          const parsedSize = safeInt(sizeRaw);
-          const parsedLineCount = safeInt(lineCountRaw);
-          if (
-            parsedSize === null ||
-            parsedSize < 0 ||
-            parsedLineCount === null ||
-            parsedLineCount < 0
-          ) {
-            continue;
+          const metadata = await this.readConfinedCommandBytes(
+            repo,
+            this.confinedUntrackedRegularFileCommand(
+              target,
+              [
+                "size=$(opengeni_fd_size 3) || exit 66",
+                "line_count=$(wc -l <&3) || exit 66",
+                'if [ "$size" -gt 0 ]; then last_byte=$(tail -c 1 <&4 | od -An -tu1 | tr -d " \\n") || exit 66; if [ "$last_byte" != "10" ]; then line_count=$((line_count + 1)); fi; fi',
+                'printf "%s\\t%s" "$size" "$line_count"',
+              ].join("; "),
+            ),
+            128,
+          );
+          if (metadata.truncated) {
+            throw new ChannelAUnavailableError(
+              "Workspace Git data is temporarily unavailable. Retry the operation.",
+            );
+          }
+          const frame = metadata.bytes.toString("ascii").match(/^(0|[1-9]\d*)\t(0|[1-9]\d*)$/);
+          const parsedSize = safeInt(frame?.[1]);
+          const parsedLineCount = safeInt(frame?.[2]);
+          if (parsedSize === null || parsedLineCount === null) {
+            throw new ChannelAUnavailableError(
+              "Workspace Git data is temporarily unavailable. Retry the operation.",
+            );
           }
           sizeBytes = parsedSize;
           lineCount = parsedLineCount;
+          const truncated = sizeBytes > req.maxBytesPerFile;
+          const sampleSize = Math.min(sizeBytes, 8_192);
+          sampled = await this.readUntrackedRegularFile(repo, target, sampleSize, sizeBytes);
+          if (!sniffBinary(sampled) && !truncated && sampleSize < sizeBytes) {
+            sampled = await this.readUntrackedRegularFile(repo, target, sizeBytes, sizeBytes);
+          }
         }
         const truncated = sizeBytes > req.maxBytesPerFile || sampled.length > req.maxBytesPerFile;
         const bytes = truncated ? sampled.subarray(0, req.maxBytesPerFile) : sampled;
@@ -1017,9 +1375,10 @@ export class SandboxChannelAService {
   /**
    * Detect repo roots within every supported workspace layout.
    *
-   * The platform seeds GitHub repositories at
-   * `repos/<owner>/<repo>`, which puts the `.git` marker at depth four from the
-   * workspace root. Do not reintroduce a fixed maxdepth here. Traversal is
+   * The platform normally seeds repositories at
+   * `repos/<encoded-host>/<owner>/<repo>`, while explicit mount paths and
+   * connected-machine layouts can be deeper. Do not reintroduce a fixed
+   * maxdepth here. Traversal is
    * bounded instead by pruning known machine/build residue, a wall-clock
    * timeout, and a result limit. `.git` may be either a directory (ordinary
    * clone/submodule) or a file (linked worktree).
@@ -1129,17 +1488,49 @@ export class SandboxChannelAService {
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════
 
-  /** Run a bounded command, return buffered stdout/stderr + exit code inline. The
-   *  long-running tail (when the process hasn't exited within timeoutMs) keeps
-   *  running in-box; if emitStream is set the buffered output is also published as
-   *  the agent firehose so other viewers see it. */
+  /** Run a bounded command to physical completion and return buffered output.
+   *  A deadline cancels the exact provider operation, proves its process group
+   *  absent, and settles any retained-process admission before returning 124. */
   async terminalExec(req: TerminalExecRequest): Promise<TerminalExecResponse> {
-    const r = await this.run({
-      cmd: req.command,
-      workdir: this.terminalWorkdir(req.cwd),
-      yieldTimeMs: req.timeoutMs,
-    });
-    const running = r.exitCode === null && typeof r.sessionId === "number";
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const timeoutReason = new Error(`Terminal command exceeded ${req.timeoutMs}ms`);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort(timeoutReason);
+    }, req.timeoutMs);
+    const terminalWorkdir = this.terminalWorkdir(req.cwd);
+    let r: Awaited<ReturnType<typeof controller.runSandboxCommandStructured>>;
+    try {
+      r = await controller.runSandboxCommandStructured(this.session, {
+        cmd: req.command,
+        ...(terminalWorkdir ? { workdir: terminalWorkdir } : {}),
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+        yieldTimeMs: req.timeoutMs,
+      });
+      if (timedOut) {
+        await controller.waitForQuiescence();
+        r = {
+          stdout: "",
+          stderr: timeoutReason.message,
+          exitCode: 124,
+          wallTimeSeconds: req.timeoutMs / 1_000,
+        };
+      }
+    } catch (error) {
+      controller.cancel(error);
+      await controller.waitForQuiescence();
+      if (!timedOut && !(error instanceof TurnSandboxCommandCancelledError)) throw error;
+      r = {
+        stdout: "",
+        stderr: timeoutReason.message,
+        exitCode: 124,
+        wallTimeSeconds: req.timeoutMs / 1_000,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
     if (req.emitStream && (r.stdout || r.stderr)) {
       const events: { type: SessionEventType; payload: unknown }[] = [];
       const commandId = crypto.randomUUID();
@@ -1159,7 +1550,7 @@ export class SandboxChannelAService {
       stdout: r.stdout,
       stderr: r.stderr,
       exitCode: r.exitCode,
-      running,
+      running: false,
       wallTimeSeconds: r.wallTimeSeconds,
     };
   }
@@ -1199,10 +1590,13 @@ export class SandboxChannelAService {
    *  it as terminal.pty.output.delta). Throws ChannelAUnsupportedError when the
    *  backend has no writeStdin. */
   async ptyWrite(_req: PtyWriteRequest, execSessionId: number, data: string): Promise<string> {
-    if (!this.session.writeStdin) {
+    const write =
+      this.session.writeStdinForProcessMutation?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
-    const out = await this.session.writeStdin({
+    const out = await write({
       sessionId: execSessionId,
       chars: data,
       yieldTimeMs: 250,
@@ -1224,25 +1618,27 @@ export class SandboxChannelAService {
   /** Resize an open PTY (SIGWINCH via stty against the exec-session). The SDK has
    *  no resize method; stty in the same tty session updates the geometry. */
   async ptyResize(req: PtyResizeRequest, execSessionId: number): Promise<void> {
-    if (!this.session.writeStdin) return;
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) return;
     // Send a stty in-band on the same pty session.
-    await this.session.writeStdin({
+    await write({
       sessionId: execSessionId,
       chars: `stty cols ${req.cols} rows ${req.rows}\n`,
       yieldTimeMs: 50,
     });
   }
 
-  /** Close an open PTY: write exit/EOF. The caller marks the row closed + emits
-   *  terminal.pty.exited. */
-  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<void> {
-    if (execSessionId !== null && this.session.writeStdin) {
-      try {
-        await this.session.writeStdin({ sessionId: execSessionId, chars: "", yieldTimeMs: 50 }); // EOF
-      } catch {
-        // best-effort; the row is marked closed regardless.
-      }
-    }
+  /** Ask an open PTY to exit and return the exact provider banner. The routing
+   * session settles durable process authority only when that banner proves this
+   * locator exited or was lost; callers must keep metadata open otherwise. */
+  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<string> {
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (execSessionId === null || !write) return "";
+    return await write({ sessionId: execSessionId, chars: "", yieldTimeMs: 250 }); // EOF
   }
 
   // ──────────────────────────── helpers ──────────────────────────────────────
@@ -1276,18 +1672,29 @@ export class SandboxChannelAService {
     const rejectLink = safe
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
       : ":";
-    const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      rejectLink,
-      `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
-      `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `cd -P -- "$target"`,
-      `printf '__OPENGENI_FS_CONFINED_OK__\\n'`,
-      args.cmd,
-    ].join("; ");
-    const successPrefix = "__OPENGENI_FS_CONFINED_OK__\n";
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      // A fresh nonce on each transport attempt prevents a delayed/replayed
+      // response from an earlier attempt from satisfying this attempt's frame.
+      const frameId = crypto.randomUUID().replaceAll("-", "");
+      const successPrefix = `__OPENGENI_FS_CONFINED_${frameId}_OK__\n`;
+      const successSuffixPrefix = `__OPENGENI_FS_CONFINED_${frameId}_END__:`;
+      const successSuffixTerminator = "__";
+      const script = [
+        PORTABLE_REALPATH_EXISTING_FUNCTION,
+        `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        rejectLink,
+        `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+        `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        `cd -P -- "$target"`,
+        `printf ${shellQuote(successPrefix)}`,
+        // Keep an operation-level `exit` inside the subshell so the trusted end
+        // frame is emitted for every completed command.
+        `( ${args.cmd} )`,
+        `operation_status=$?`,
+        `printf ${shellQuote(`${successSuffixPrefix}%s${successSuffixTerminator}`)} "$operation_status"`,
+        `exit "$operation_status"`,
+      ].join("; ");
       let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
       try {
         result = await this.run({
@@ -1309,7 +1716,27 @@ export class SandboxChannelAService {
       }
       const successIndex = result.stdout.indexOf(successPrefix);
       if (successIndex >= 0) {
-        return { ...result, stdout: result.stdout.slice(successIndex + successPrefix.length) };
+        const payloadStart = successIndex + successPrefix.length;
+        const suffixIndex = result.stdout.lastIndexOf(successSuffixPrefix);
+        if (suffixIndex >= payloadStart) {
+          const suffixEnd = result.stdout.indexOf(
+            successSuffixTerminator,
+            suffixIndex + successSuffixPrefix.length,
+          );
+          const statusText =
+            suffixEnd < 0
+              ? null
+              : result.stdout.slice(suffixIndex + successSuffixPrefix.length, suffixEnd);
+          if (statusText && /^(?:0|[1-9][0-9]{0,2})$/.test(statusText)) {
+            const operationStatus = Number(statusText);
+            if (operationStatus > 255) continue;
+            return {
+              ...result,
+              stdout: result.stdout.slice(payloadStart, suffixIndex),
+              exitCode: operationStatus,
+            };
+          }
+        }
       }
       if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
         throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
@@ -1431,56 +1858,24 @@ function isDefinitePathNotFoundError(error: unknown): boolean {
   );
 }
 
-// Detect the Modal "the exec-session you're writing to no longer exists" banner.
-// writeStdin reports a vanished session as a non-throwing string of the shape
-// `write_stdin failed: session not found: <N>` (it does NOT raise). This is a
-// hard cancellation-fence fact, so classify only the complete known banner (or
-// its bare provider fact) carrying the exact tracked numeric id. ID-less,
-// malformed, mismatched, or embellished/ambiguous text must remain fail-closed.
-export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
-  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
-  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
-  // JavaScript's `$` also matches immediately before one final line terminator.
-  // Requiring the regex match to consume the entire string keeps even that
-  // otherwise-special case fail-closed.
-  if (!match || match[0] !== out) return false;
-  // String equality is intentional: parseInt would normalize malformed facts
-  // such as `01` and can round an out-of-range integer into another identity.
-  return match[1] === String(execSessionId);
-}
-
-// Recover the numeric exec-session id the SDK embeds in a formatExecResponse
-// banner for a STILL-RUNNING process (`Process running with session ID <N>`).
-// A finished command emits `Process exited with code <N>` instead (no session
-// id) — that yields null. Only the banner region (before the `Output:` marker)
-// is scanned so a session-id-looking line in the command's own output can't
-// spoof it. This is what makes the interactive PTY work on backends whose only
-// exec surface is execCommand (Modal): without it ptyOpen reports execSessionId
-// = null and every pty/write 409s ("interactive terminal unsupported").
-export function parseExecBannerSessionId(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process running with session ID (\d+)/);
-  if (!match) return null;
-  const n = Number.parseInt(match[1]!, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Recover a completed execCommand fallback's exit status from its banner.
- * Only the banner region is inspected, so command output cannot spoof success. */
-export function parseExecBannerExitCode(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process exited with code (-?\d+)/);
-  if (!match) return null;
-  const exitCode = Number.parseInt(match[1]!, 10);
-  return Number.isSafeInteger(exitCode) ? exitCode : null;
-}
-
 function sniffBinary(bytes: Buffer): boolean {
   const n = Math.min(bytes.byteLength, 8192);
   for (let i = 0; i < n; i++) if (bytes[i] === 0) return true;
   return false;
+}
+
+/** Git's -z metadata is byte-oriented. JavaScript's ordinary UTF-8 decode
+ * replaces malformed bytes with U+FFFD; reissuing that replacement as a Git
+ * pathspec would read a different path while claiming authority. Preserve only
+ * byte-round-trippable UTF-8 and make every other path set unavailable. */
+function decodeGitMetadataUtf8(bytes: Buffer): string {
+  const decoded = bytes.toString("utf8");
+  if (!Buffer.from(decoded, "utf8").equals(bytes)) {
+    throw new ChannelAUnavailableError(
+      "Workspace Git paths are not valid UTF-8 and cannot be captured authoritatively.",
+    );
+  }
+  return decoded;
 }
 
 function addedLines(bytes: Buffer): GitDiffHunk["lines"] {
@@ -1520,6 +1915,17 @@ export function assertSafeRelPath(p: string): string {
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+
+// GNU realpath's `-e --` is not accepted by stock macOS. Require the candidate
+// to exist ourselves, prefix relative option-like paths, and then use the
+// common realpath invocation on both GNU and BSD implementations.
+const PORTABLE_REALPATH_EXISTING_FUNCTION = [
+  'opengeni_realpath_existing() { local candidate="$1"',
+  'case "$candidate" in /*) ;; *) candidate="./$candidate" ;; esac',
+  '[ -e "$candidate" ] || [ -L "$candidate" ] || return 1',
+  'realpath "$candidate"',
+  "}",
+].join("; ");
 
 /** Run control-plane-generated Bash without user/provider startup files. The
  * marker protocol is private control data; profile output must not corrupt it. */

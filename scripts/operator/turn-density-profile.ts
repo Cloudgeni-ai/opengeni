@@ -11,7 +11,6 @@ import {
   countSessionHistoryItems,
   createDb,
   createSession,
-  deleteWorkspace,
   enqueueSessionTurn,
   isSessionCompactionRequested,
   requestSessionCompaction,
@@ -23,7 +22,13 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { MemoryEventBus, ScriptedModel, type ScriptedModelStep } from "@opengeni/testing";
+import {
+  MemoryEventBus,
+  ScriptedModel,
+  startTestMcpServer,
+  type ScriptedModelStep,
+} from "@opengeni/testing";
+import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
 
 const MIB = 1024 * 1024;
@@ -456,16 +461,36 @@ export function profileConfigFromEnv(
 }
 
 async function main(): Promise<void> {
+  const densityMcp = startTestMcpServer();
+  const densityMcpUrl = `${densityMcp.url}?workspace={workspaceId}`;
+  let runFailure: unknown = null;
+  try {
+    await runDensityProfileMain(densityMcpUrl);
+  } catch (error) {
+    runFailure = error;
+  } finally {
+    densityMcp.close();
+  }
+  if (runFailure) throw runFailure;
+}
+
+async function runDensityProfileMain(densityMcpUrl: string): Promise<void> {
   const seedManifestPath = process.env[DENSITY_SEED_MANIFEST_ENV];
   if (seedManifestPath) {
-    await runDensitySeedChild(seedManifestPath);
+    await runDensitySeedChild(seedManifestPath, densityMcpUrl);
     return;
   }
 
   const config = profileConfigFromEnv();
   const runId = crypto.randomUUID();
+  const profileSubjectId = `operator:turn-density-profile:${runId}`;
+  const profileInitiator = {
+    kind: "service" as const,
+    subjectId: profileSubjectId,
+    label: "Turn density profile",
+  };
   const productionSettings = getSettings();
-  const settings = densityProfileSettings(productionSettings);
+  const settings = densityProfileSettings(productionSettings, densityMcpUrl);
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
@@ -473,6 +498,7 @@ async function main(): Promise<void> {
   });
   const bus = new MemoryEventBus();
   let workspaceId: string | null = null;
+  let accountId: string | null = null;
   let sessionsCreated = 0;
 
   try {
@@ -483,12 +509,13 @@ async function main(): Promise<void> {
       workspaceExternalSource: "operator:turn-density-profile",
       workspaceExternalId: runId,
       workspaceName: `Turn density profile ${runId}`,
-      subjectId: `operator:turn-density-profile:${runId}`,
+      subjectId: profileSubjectId,
       subjectLabel: "Turn density profile",
     });
     const grant = access.workspaceGrants[0];
     if (!grant?.workspaceId)
       throw new Error("Density profile workspace bootstrap returned no grant");
+    accountId = grant.accountId;
     workspaceId = grant.workspaceId;
 
     const densityMeasurements: DensityMeasurement[] = [];
@@ -506,6 +533,7 @@ async function main(): Promise<void> {
             db: dbClient.db,
             bus,
             settings,
+            initiator: profileInitiator,
           }),
         );
         sessionsCreated += density;
@@ -514,9 +542,11 @@ async function main(): Promise<void> {
     }
 
     await cleanupDensityWorkspace(
-      () => deleteWorkspace(dbClient.db, workspaceId!),
+      () =>
+        dbClient.db.delete(schema.managedAccounts).where(eq(schema.managedAccounts.id, accountId!)),
       config.timeoutMs,
     );
+    accountId = null;
     workspaceId = null;
     const result = buildProfileResult({
       config,
@@ -533,14 +563,20 @@ async function main(): Promise<void> {
     console.log(`OPENGENI_DENSITY_RESULT=${JSON.stringify(result)}`);
     if (!result.thresholds.hardLimitMet) process.exitCode = 2;
   } finally {
-    if (workspaceId) {
+    if (accountId) {
       await cleanupDensityWorkspace(
-        () => deleteWorkspace(dbClient.db, workspaceId!),
+        () =>
+          dbClient.db
+            .delete(schema.managedAccounts)
+            .where(eq(schema.managedAccounts.id, accountId!)),
         config.timeoutMs,
       ).catch((error) => {
-        console.error(`Density workspace cleanup failed: ${errorMessage(error)}`);
+        console.error(`Density account cleanup failed: ${errorMessage(error)}`);
         process.exitCode = 1;
       });
+    } else if (workspaceId) {
+      console.error("Density profile cannot clean a workspace without its managed account");
+      process.exitCode = 1;
     }
     await dbClient.close();
   }
@@ -556,8 +592,10 @@ export async function runWave(input: {
   db: Parameters<typeof withWorkspaceRls>[0];
   bus: MemoryEventBus;
   settings: Settings;
+  initiator: { kind: "service"; subjectId: string; label: string };
 }): Promise<WaveMeasurement> {
-  const { config, density, wave, runId, accountId, workspaceId, db, bus, settings } = input;
+  const { config, density, wave, runId, accountId, workspaceId, db, bus, settings, initiator } =
+    input;
   const model = createDensityModel(density, config);
   const activities = createTurnActivities({
     settings,
@@ -600,6 +638,7 @@ export async function runWave(input: {
             turnIndex: index,
             syntheticScenarios: SYNTHETIC_SCENARIOS,
           },
+          createdBy: initiator,
           model: "scripted-density-model",
           sandboxBackend: "none",
         }),
@@ -661,6 +700,7 @@ export async function runWave(input: {
             turnIndex: session.index,
           },
           placement: "tail",
+          initiator,
         }),
         "turn enqueue",
       );
@@ -913,7 +953,7 @@ export function parseDensitySeedManifest(text: string): DensitySeedManifest {
   };
 }
 
-async function runDensitySeedChild(manifestPath: string): Promise<void> {
+async function runDensitySeedChild(manifestPath: string, densityMcpUrl: string): Promise<void> {
   const manifestStat = await stat(manifestPath);
   if (!manifestStat.isFile() || manifestStat.size > MAX_SEED_MANIFEST_BYTES) {
     throw new Error(
@@ -921,7 +961,7 @@ async function runDensitySeedChild(manifestPath: string): Promise<void> {
     );
   }
   const manifest = parseDensitySeedManifest(await readFile(manifestPath, "utf8"));
-  const settings = densityProfileSettings(getSettings());
+  const settings = densityProfileSettings(getSettings(), densityMcpUrl);
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
@@ -2275,7 +2315,7 @@ async function writeArtifact(path: string | undefined, result: unknown): Promise
   console.error(`Wrote density profile artifact to ${path}`);
 }
 
-function densityProfileSettings(productionSettings: Settings): Settings {
+function densityProfileSettings(productionSettings: Settings, densityMcpUrl: string): Settings {
   return {
     ...productionSettings,
     environment: `${productionSettings.environment}-density-profile`,
@@ -2293,7 +2333,15 @@ function densityProfileSettings(productionSettings: Settings): Settings {
       },
     }),
     modelProvidersJson: "[]",
-    mcpServers: [],
+    opengeniMcpUrl: densityMcpUrl,
+    mcpServers: [
+      {
+        id: "opengeni",
+        name: "OpenGeni density profile",
+        url: densityMcpUrl,
+        cacheToolsList: false,
+      },
+    ],
     codexSubscriptionEnabled: false,
     codexCredentialLeasingEnabled: false,
     webSearchEnabled: false,
@@ -2427,4 +2475,5 @@ function errorMessage(error: unknown): string {
 
 if (import.meta.main) {
   await main();
+  process.exit(process.exitCode ?? 0);
 }

@@ -9,6 +9,7 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  createWorkspace,
   createKnowledgeMemory,
   getKnowledgeMemory,
   saveWorkspaceMemory,
@@ -35,6 +36,7 @@ import {
   ensureManagedAccessForUser,
   evaluateGoalContinuation,
   findActiveApiKeyByHash,
+  grantWorkspaceAccess,
   getSession,
   getSessionGoal,
   setSessionGoalStatus,
@@ -127,6 +129,41 @@ describe("DB integration", () => {
     );
     expect(await readUpdatedAt()).toEqual(before);
   }, 60_000);
+
+  test("access bootstrap retains additional workspace grants", async () => {
+    const suffix = crypto.randomUUID();
+    const input = {
+      accountExternalSource: "test:multi-workspace-bootstrap",
+      accountExternalId: `account:${suffix}`,
+      accountName: "Multi-workspace account",
+      workspaceExternalSource: "test:multi-workspace-bootstrap",
+      workspaceExternalId: `workspace:${suffix}`,
+      workspaceName: "Default workspace",
+      subjectId: `configured:${suffix}`,
+      subjectLabel: "Workspace owner",
+    };
+    const initial = await bootstrapWorkspace(dbClient.db, input);
+    const defaultGrant = initial.workspaceGrants[0]!;
+    const additionalWorkspace = await createWorkspace(dbClient.db, {
+      accountId: defaultGrant.accountId,
+      name: "Additional workspace",
+    });
+    await grantWorkspaceAccess(dbClient.db, {
+      accountId: defaultGrant.accountId,
+      workspaceId: additionalWorkspace.id,
+      subjectId: input.subjectId,
+      subjectLabel: input.subjectLabel,
+      role: "owner",
+      permissions: defaultGrant.permissions,
+    });
+
+    const refreshed = await bootstrapWorkspace(dbClient.db, input);
+
+    expect(refreshed.defaultWorkspaceId).toBe(defaultGrant.workspaceId);
+    expect(refreshed.workspaceGrants.map((grant) => grant.workspaceId).sort()).toEqual(
+      [defaultGrant.workspaceId, additionalWorkspace.id].sort(),
+    );
+  });
 
   test("migrates, creates sessions, and replays ordered events", async () => {
     const grant = await testGrant(dbClient.db);
@@ -330,6 +367,8 @@ describe("DB integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        requireApproval: false,
+        connectionRef: null,
       },
     ]);
     expect(await listSessionMcpServerMetadata(dbClient.db, grant.workspaceId, session.id)).toEqual(
@@ -349,10 +388,22 @@ describe("DB integration", () => {
     );
     expect(Number(raw.credential_version)).toBe(1);
 
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "run the session MCP",
+      resources: [],
+      tools: [{ kind: "mcp", id: "crm" }],
+      reasoningEffortFallback: "medium",
+    });
+    const execution = await claimRegisteredExecution(dbClient.db, grant, session.id);
     const forRun = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
       session.id,
+      execution.attemptId,
       encryptionKey,
     );
     expect(forRun).toEqual([
@@ -366,6 +417,8 @@ describe("DB integration", () => {
         headerNames: ["Authorization"],
         headers: { Authorization: "Bearer create-secret" },
         credentialVersion: 1,
+        requireApproval: false,
+        connectionRef: null,
       },
     ]);
 
@@ -390,6 +443,8 @@ describe("DB integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization", "X-Session"],
         credentialVersion: 2,
+        requireApproval: false,
+        connectionRef: null,
       },
     ]);
 
@@ -397,6 +452,7 @@ describe("DB integration", () => {
       dbClient.db,
       grant.workspaceId,
       session.id,
+      execution.attemptId,
       encryptionKey,
     );
     expect(afterRotation[0]?.headers).toEqual({

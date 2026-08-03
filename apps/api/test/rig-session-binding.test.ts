@@ -101,7 +101,9 @@ function grant(accountId: string, workspaceId: string, fromSessionId?: string): 
     workspaceId,
     subjectId: "subject",
     permissions: ["sessions:create", "sessions:read"],
-    ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
+    ...(fromSessionId
+      ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
+      : {}),
   } as AccessGrant;
 }
 
@@ -170,7 +172,7 @@ describe("M3 rig binding: freeze at create", () => {
     expect(s1Reloaded?.rigVersionId).toBe(v1);
   }, 60_000);
 
-  test("falls back to the workspace default rig when no rigId is given; explicit rigId overrides the default", async () => {
+  test("omission inherits the workspace default while an explicit rig or null overrides it", async () => {
     if (!available) return;
     const bus = new MemoryEventBus();
     const { accountId, workspaceId } = await freshWorkspace();
@@ -199,6 +201,18 @@ describe("M3 rig binding: freeze at create", () => {
       },
     );
     expect(overridden.rigId).toBe(other.rigId);
+
+    const rigless = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "no rig",
+        rigId: null,
+      },
+    );
+    expect(rigless.rigId).toBeNull();
+    expect(rigless.rigVersionId).toBeNull();
   }, 60_000);
 
   test("a session with no rig and no workspace default is rig-less (both null)", async () => {
@@ -345,8 +359,15 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     // A's group directly. Today the create gate must compare the joiner against
     // ALL members, not just parent A.
     await admin`
-      insert into sessions (account_id, workspace_id, initial_message, rig_id, rig_version_id, sandbox_group_id, model, sandbox_backend)
-      values (${accountId}, ${workspaceId}, 'legacy mixed-rig member', ${rigB.rigId}, ${rigB.activeVersionId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
+      insert into sessions (
+        account_id, workspace_id, initial_message, rig_id, rig_version_id,
+        sandbox_group_id, model, sandbox_backend, tool_policy
+      )
+      values (
+        ${accountId}, ${workspaceId}, 'legacy mixed-rig member', ${rigB.rigId},
+        ${rigB.activeVersionId}, ${a.sandboxGroupId}, 'gpt-test', 'modal',
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )`;
     await expect(
       createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
         initialMessage: "joiner matching parent only",

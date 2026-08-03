@@ -22,6 +22,7 @@ function composer(spy: { sends: string[]; pauses: number; resumes: number }): Co
   return {
     value: "next prompt",
     setValue: () => {},
+    hasDraftContent: () => true,
     send: async () => {
       spy.sends.push("send");
       return true;
@@ -199,8 +200,9 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     const send = mounted.container.querySelector<HTMLButtonElement>(
       'button[aria-label="Send message"]',
     );
-    expect(send?.title).toContain("Queue message");
-    expect(send?.title).toContain("Cmd/Ctrl+Enter");
+    // Tips are Radix tooltips (not native `title`); tip copy is on data-og-tip.
+    expect(send?.getAttribute("data-og-tip")).toContain("Queue message");
+    expect(send?.getAttribute("data-og-tip")).toContain("Cmd/Ctrl+Enter");
     await act(async () => send?.click());
     expect(spy.sends).toEqual(["send"]);
   });

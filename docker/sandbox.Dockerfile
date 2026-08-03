@@ -1,9 +1,10 @@
+FROM node:22.22.0-bookworm-slim AS node-runtime
+
 FROM python:3.12-slim
 
 ARG TERRAFORM_VERSION=1.13.3
 ARG CHECKOV_VERSION=3.2.526
 ARG TTYD_VERSION=1.7.7
-ARG NODE_MAJOR=20
 ARG TARGETARCH
 
 RUN set -eux; \
@@ -15,6 +16,8 @@ RUN set -eux; \
         gpg \
         git \
         jq \
+        libatomic1 \
+        libstdc++6 \
         openssh-client \
         procps \
         fuse3 \
@@ -35,27 +38,10 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends $packages; \
     rm -rf /var/lib/apt/lists/*
 
-# Node.js LTS from NodeSource. The distro `nodejs` package is far too old for
-# ogtool (Debian bookworm ships 18, Ubuntu jammy ships 12); pin the 20.x LTS
-# line via the NodeSource apt repo, mirroring the gh keyring+repo layer below.
-RUN set -eux; \
-    mkdir -p -m 755 /etc/apt/keyrings; \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
-    chmod go+r /etc/apt/keyrings/nodesource.gpg; \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-        > /etc/apt/sources.list.d/nodesource.list; \
-    for attempt in 1 2 3; do \
-        rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
-        apt-get update \
-        && apt-get install -y --download-only --no-install-recommends nodejs \
-        && break; \
-        if [ "$attempt" = "3" ]; then exit 1; fi; \
-        sleep $((attempt * 5)); \
-    done; \
-    apt-get install -y --no-install-recommends nodejs; \
-    rm -rf /var/lib/apt/lists/*; \
-    node --version
+# ogtool is dependency-free but requires a supported Node runtime. Copy the
+# exact official LTS binary instead of trusting a mutable third-party apt key.
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+RUN test "$(node --version)" = "v22.22.0"
 
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
@@ -107,16 +93,17 @@ ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 
 COPY docker/opengeni-git-askpass /usr/local/bin/opengeni-git-askpass
-COPY docker/ogtool                 /usr/local/bin/ogtool
+COPY packages/ogtool/package.json  /opt/opengeni/ogtool/package.json
+COPY packages/ogtool/bin/ogtool.cjs /opt/opengeni/ogtool/bin/ogtool.cjs
 COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-up
 COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
-               /usr/local/bin/ogtool \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down; \
-    cp /usr/local/bin/ogtool /tmp/ogtool-check.js; \
-    node --check /tmp/ogtool-check.js; \
-    rm /tmp/ogtool-check.js; \
+    chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
+    ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
+    node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
+    test -n "$(ogtool --version)"; \
     bash -n /usr/local/bin/opengeni-terminal-up; \
     bash -n /usr/local/bin/opengeni-terminal-down
 

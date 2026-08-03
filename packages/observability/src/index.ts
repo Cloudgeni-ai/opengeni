@@ -1,4 +1,5 @@
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
+import { SandboxBackend } from "@opengeni/contracts";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
@@ -31,6 +32,35 @@ const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 
 const durationHistogramBuckets = [
   0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600,
 ];
+
+const SANDBOX_OPERATION_BACKENDS = new Set<string>([...SandboxBackend.options, "unprovisioned"]);
+
+const SANDBOX_OPERATION_NAMES = new Set([
+  "desktopInput",
+  "screenshot",
+  "exec",
+  "execCommand",
+  "writeStdin",
+  "cancelExecCommand",
+  "readFile",
+  "writeFile",
+  "listDir",
+  "pathExists",
+  "viewImage",
+  "materializeEntry",
+  "editor.createFile",
+  "editor.updateFile",
+  "editor.deleteFile",
+  "resolveExposedPort",
+  "serializeSessionState",
+]);
+
+export type SandboxOperationMetricObservation = {
+  backend: string;
+  op: string;
+  outcome: "ok" | "failed";
+  durationMs: number;
+};
 
 export function createObservability(
   settings: ObservabilitySettings,
@@ -153,7 +183,11 @@ export class Observability {
           return;
         }
         ended = true;
-        const errorAttributes = input.error ? errorToAttributes(input.error) : {};
+        const sanitizedError =
+          input.error !== undefined && input.error !== null
+            ? sanitizeSpanError(input.error)
+            : undefined;
+        const errorAttributes = sanitizedError ? errorToAttributes(sanitizedError) : {};
         this.exportSpan({
           traceId,
           spanId,
@@ -165,7 +199,7 @@ export class Observability {
             ...input.attributes,
             ...errorAttributes,
           },
-          error: input.error,
+          ...(sanitizedError ? { error: sanitizedError } : {}),
         });
       },
     };
@@ -363,7 +397,7 @@ export class Observability {
     startMs: number;
     endMs: number;
     attributes: Attributes;
-    error?: unknown;
+    error?: SanitizedSpanError;
   }): void {
     if (!this.settings.observabilityOtlpEndpoint) {
       return;
@@ -390,7 +424,7 @@ export class Observability {
                   startTimeUnixNano: millisToNanos(span.startMs),
                   endTimeUnixNano: millisToNanos(span.endMs),
                   attributes: otlpAttributes(span.attributes),
-                  status: span.error ? { code: 2, message: errorMessage(span.error) } : { code: 1 },
+                  status: span.error ? { code: 2, message: span.error.statusMessage } : { code: 1 },
                 },
               ],
             },
@@ -404,6 +438,52 @@ export class Observability {
       },
     );
   }
+}
+
+/**
+ * Convert routed sandbox-provider observations into one bounded Prometheus
+ * contract shared by API-direct and worker-turn execution. Provider/session
+ * identifiers, commands, paths, and other request data can never become labels:
+ * a future backend or operation is deliberately collapsed to `unknown` until
+ * this allowlist is reviewed.
+ *
+ * The returned callback is fail-safe. Metrics must never change the provider
+ * operation's result; a registration/exporter error is counted best-effort and
+ * then swallowed at this telemetry boundary.
+ */
+export function sandboxOperationMetricObserver(
+  observability: Observability,
+): (observation: SandboxOperationMetricObservation) => void {
+  return (observation) => {
+    const backend = SANDBOX_OPERATION_BACKENDS.has(observation.backend)
+      ? observation.backend
+      : "unknown";
+    const op = SANDBOX_OPERATION_NAMES.has(observation.op) ? observation.op : "unknown";
+    try {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_operations_total",
+        help: "Physical routed sandbox provider operations by backend, operation, and outcome.",
+        labels: { backend, op, outcome: observation.outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_sandbox_operation_duration_seconds",
+        help: "Physical routed sandbox provider-operation duration in seconds.",
+        labels: { backend, op },
+        value: Math.max(0, observation.durationMs) / 1_000,
+      });
+    } catch {
+      try {
+        observability.incrementCounter({
+          name: "opengeni_observability_observer_errors_total",
+          help: "Observability observer failures isolated from product execution.",
+          labels: { observer: "sandbox_operation" },
+        });
+      } catch {
+        // The metrics registry itself is unhealthy. Product execution remains
+        // authoritative and must not inherit an observability failure.
+      }
+    }
+  };
 }
 
 export type StartupDependencyRetryEvent = {
@@ -447,10 +527,44 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
   ) as Record<string, string | number | boolean | null>;
 }
 
-function errorToAttributes(error: unknown): Attributes {
+type SanitizedSpanError = {
+  type: string;
+  statusCode?: number;
+  statusMessage: string;
+};
+
+function sanitizeSpanError(error: unknown): SanitizedSpanError {
+  const type =
+    error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.name)
+      ? error.name
+      : "Error";
+  const statusCode = errorStatusCode(error);
   return {
-    "error.type": error instanceof Error ? error.name : "Error",
-    "error.message": errorMessage(error),
+    type,
+    ...(statusCode === undefined ? {} : { statusCode }),
+    statusMessage: statusCode === undefined ? "operation failed" : `HTTP ${statusCode}`,
+  };
+}
+
+function errorStatusCode(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const value = (error as { status?: unknown; statusCode?: unknown }).status;
+  const statusCode =
+    Number.isInteger(value) && typeof value === "number"
+      ? value
+      : (error as { statusCode?: unknown }).statusCode;
+  return Number.isInteger(statusCode) &&
+    typeof statusCode === "number" &&
+    statusCode >= 100 &&
+    statusCode <= 599
+    ? statusCode
+    : undefined;
+}
+
+function errorToAttributes(error: SanitizedSpanError): Attributes {
+  return {
+    "error.type": error.type,
+    ...(error.statusCode === undefined ? {} : { "error.status_code": error.statusCode }),
   };
 }
 
@@ -476,7 +590,13 @@ function otlpValue(
   if (typeof value === "boolean") {
     return { boolValue: value };
   }
-  return { stringValue: value === null ? "" : value };
+  return { stringValue: value === null ? "" : boundedOtlpString(value) };
+}
+
+function boundedOtlpString(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength <= 512) return value;
+  return `${new TextDecoder().decode(bytes.slice(0, 509))}…`;
 }
 
 function millisToNanos(ms: number): string {

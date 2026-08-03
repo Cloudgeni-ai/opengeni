@@ -101,6 +101,7 @@ async function fixture(): Promise<{
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
     permissions: ["sessions:read"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
   return {
@@ -165,6 +166,23 @@ describe("session event byte-bounded HTTP pages", () => {
       type: "turn.completed",
       turnGeneration: 2,
     });
+
+    const compactLatest = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?latest=terminal&resultMode=compact&payloadMode=summary`,
+      { headers: { authorization } },
+    );
+    expect(compactLatest.status).toBe(200);
+    expect(await compactLatest.json()).toMatchObject({
+      version: 1,
+      status: "completed",
+      sequence: 42,
+      semanticClass: "terminal",
+      result: "authoritative",
+      coveredSequence: { first: 42, last: 42 },
+    });
+    expect(compactLatest.headers.get("X-OpenGeni-Event-Result-Mode")).toBe("compact");
+    expect(compactLatest.headers.get("X-OpenGeni-Payload-Mode")).toBe("full");
+    expect(compactLatest.headers.get("X-OpenGeni-Covered-First")).toBe("42");
 
     const forensic = await app.request(
       `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&after=0&limit=40`,
@@ -234,6 +252,12 @@ describe("session event byte-bounded HTTP pages", () => {
       { headers: { authorization } },
     );
     expect(invalid.status).toBe(400);
+
+    const invalidResultMode = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?resultMode=compact`,
+      { headers: { authorization } },
+    );
+    expect(invalidResultMode.status).toBe(400);
   });
 
   test("compact pages expose exact bytes and advance through coalescedUntil", async () => {

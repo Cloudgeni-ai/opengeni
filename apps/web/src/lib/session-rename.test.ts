@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { actRun, registerDom, renderHook } from "../../../../packages/react/test/render-hook";
 
 import {
   SESSION_TITLE_MAX_LENGTH,
@@ -6,8 +7,11 @@ import {
   renameSeedValue,
   resolveRenameSubmission,
   sessionDisplayTitle,
+  useInlineRename,
 } from "./session-rename";
 import type { Session } from "../types";
+
+registerDom();
 
 // The three rename surfaces (header pencil, rail-row context menu, rail-row
 // hover overflow) all funnel through these pure helpers and the `useInlineRename`
@@ -27,8 +31,13 @@ function session(patch: Partial<Session> = {}): Session {
     titleSource: null,
     instructions: null,
     resources: [],
+    skills: [],
     tools: [],
+    toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    toolPolicyVersion: 1,
     metadata: {},
+    createdBy: { kind: "subject", subjectId: "user:test" },
+    createdByContext: {},
     model: "scripted-model",
     sandboxBackend: "none",
     sandboxOs: "linux",
@@ -41,7 +50,14 @@ function session(patch: Partial<Session> = {}): Session {
     variableSetId: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
+    firstPartyMcpTools: [],
     mcpServers: [],
+    rootSessionId: "session-1",
+    nestedAgentDepth: 0,
+    maxNestedAgentDepthOverride: null,
+    effectiveMaxNestedAgentDepth: 3,
+    nestedAgentDepthPolicySource: "default",
+    nestedAgentDepthPolicySessionId: null,
     createIdempotencyKey: null,
     temporalWorkflowId: null,
     activeTurnId: "turn-1",
@@ -52,6 +68,7 @@ function session(patch: Partial<Session> = {}): Session {
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
     ...patch,
+    policyRole: patch.policyRole ?? null,
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
@@ -67,6 +84,7 @@ function session(patch: Partial<Session> = {}): Session {
       override: null,
       settlement: null,
     },
+    codexCompactionMode: patch.codexCompactionMode ?? "portable",
   };
 }
 
@@ -165,6 +183,46 @@ describe("performRename (the commit every rename surface runs)", () => {
     // Unchanged from the initial-message fallback display.
     expect(await performRename(session({ title: null }), "Inspect the repo", rename.fn)).toBeNull();
     expect(rename.calls).toEqual([]);
+  });
+});
+
+describe("useInlineRename commit fencing", () => {
+  test("Enter followed by blur only persists one title while the first request is pending", async () => {
+    let resolveRename!: (result: Session | null) => void;
+    const renameResponse = new Promise<Session | null>((resolve) => {
+      resolveRename = resolve;
+    });
+    const calls: string[] = [];
+    const hook = await renderHook(
+      () =>
+        useInlineRename(session({ title: "Old" }), async (_workspaceId, _sessionId, title) => {
+          calls.push(title);
+          return await renameResponse;
+        }),
+      undefined,
+    );
+
+    await actRun(() => hook.result.current.startEditing());
+    await actRun(() => hook.result.current.setDraft("New"));
+
+    // Both handlers retain the same pre-update closure in a real Enter+blur
+    // sequence. The ref fence must win before React commits `saving=true`.
+    const commit = hook.result.current.commit;
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await actRun(() => {
+      first = commit();
+      second = commit();
+    });
+
+    expect(calls).toEqual(["New"]);
+
+    resolveRename(session({ title: "New", titleSource: "user" }));
+    await actRun(async () => {
+      await Promise.all([first, second]);
+    });
+    expect(calls).toHaveLength(1);
+    await hook.unmount();
   });
 });
 

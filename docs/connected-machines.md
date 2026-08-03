@@ -34,6 +34,19 @@ its own ssh / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them).
 
+When Toolspace is enabled, Connected Machines have the same programmatic tool
+surface as managed sandboxes. This is not an ambient platform credential: the
+runtime writes one narrow `ogd_` bearer to the Toolspace token file for the
+session. It carries only `toolspace:call`, is bound to the exact
+workspace/session, and expires after one hour; the worker renews it while an
+attempt is active. Every request resolves the session's current active turn and
+uses that turn's exact attempt fence and budget, so the same session bearer can
+serve later turns without authorizing work while no turn is running. Platform
+git and model credentials remain excluded. The stable manifest pointer is
+`$HOME/.opengeni/toolspace-token`: seed, renewal, and session commands expand it
+in the machine's own shell. OpenGeni never substitutes the Connected Machine
+descriptor root (`/`) for the user's home.
+
 ## Create a session on a machine
 
 `createSession` grows two fields for a Connected-Machine target:
@@ -142,6 +155,16 @@ issued, so cancellation cannot signal a recycled group and the requested command
 cannot exit and leave invisible same-group work behind.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
+
+The agent-facing `run_on` MCP tool is intentionally a one-off side channel to a
+specific enrolled machine and never changes the session's active route. Its
+`exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
+`deadlineMs`. A process killed at the deadline, or a response with no terminal
+exit proof, is never reported as `ok: true`; a transport loss after dispatch is
+ambiguous and is not replayed. `run_on` uses the deployment's separate
+`OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS` and
+`OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and 120
+seconds by default), while preserving the active sandbox pointer and epoch.
 
 ### Streaming exec (op-stream)
 

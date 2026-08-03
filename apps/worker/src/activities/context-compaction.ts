@@ -2,11 +2,15 @@ import {
   applyContextCompaction,
   getActiveSessionHistoryItemsPaged,
   recordSkippedContextCompaction,
+  recordStartedContextCompaction,
   type Database,
 } from "@opengeni/db";
 import {
+  EmptyCompactionSummaryError,
+  REMOTE_COMPACTION_V2_IMPLEMENTATION,
   SUMMARY_BUFFER_TOKENS,
   buildCompactionReplacementHistory,
+  buildRemoteV2ReplacementHistory,
   compactionReplacementFingerprint,
   decideCompaction,
   estimateTokens,
@@ -18,6 +22,7 @@ import {
 } from "@opengeni/runtime";
 import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import type { SessionEvent } from "@opengeni/contracts";
+import { applyCodexHistoryStrip, type TurnCodexAccount } from "./run-input";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
 export type MaybeCompactResult =
@@ -40,24 +45,22 @@ export type MaybeCompactResult =
     };
 
 /**
- * Durable portable context compaction, following Codex CLI's local path.
+ * Durable context compaction.
  *
- * Runs before a fresh model call and on a same-turn compaction recovery.
- * Reads the active history rows + the most recent provider-reported input
- * tokens, applies the single Codex-parity threshold, and - when it should -
- * summarizes the active history with the Codex checkpoint prompt. The write
- * supersedes the old active rows and inserts replacement active rows:
- * all real user messages plus one summary.
+ * Portable path: Codex CLI local plaintext checkpoint for every provider and
+ * for Codex sessions frozen on `portable`.
  *
- * Before sampling, a temporary copy is fitted by minimizing old tool outputs
- * and then removing whole oldest work units if necessary. One authoritative
- * provider overflow permits one smaller refit. Other failures propagate. There
- * is no non-model fallback or mutation of canonical history before success.
- *
- * There is no kept assistant/tool tail. Assistant messages,
- * tool calls/results, reasoning, and images stay only in inactive audit rows.
+ * Remote v2 path: when the session is frozen on `remote_v2` and the turn is
+ * Codex, call Codex `/codex/responses` with `compaction_trigger` and persist the
+ * opaque compaction item. Fail closed — never silently fall back to portable.
  */
 export type CompactionSummarizer = (settings: Settings, input: CompactionItem[]) => Promise<string>;
+
+/** Returns the opaque Codex remote compaction v2 item. */
+export type RemoteCompactionV2Requester = (
+  settings: Settings,
+  input: CompactionItem[],
+) => Promise<CompactionItem>;
 
 export async function maybeCompactContext(
   db: Database,
@@ -82,11 +85,36 @@ export async function maybeCompactContext(
     force?: boolean;
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
+    codexAccount?: TurnCodexAccount;
+    /** Frozen session mode; remote_v2 selects the Codex opaque path. */
+    codexCompactionMode?: "remote_v2" | "portable";
+    /** True when this turn's resolved provider is codex-subscription. */
+    isCodexSubscriptionTurn?: boolean;
+    /** Injected remote requester; required for the remote_v2 branch. */
+    requestRemoteCompactionV2?: RemoteCompactionV2Requester;
+    /** Tag persisted history with the Codex credential that produced it. */
+    producerCodexCredentialId?: string | null;
+    /**
+     * Live fanout for the attempt-fenced `compaction.started` event so the
+     * timeline can show progress before the provider call returns. Must never
+     * append again — the event is already durable.
+     */
+    publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+    /** Turn-scoped attachment/modality view; canonical persisted rows stay untouched. */
+    projectModelInput?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
   } = {},
 ): Promise<MaybeCompactResult> {
-  // The logical result remains the complete ordered active transcript. Read it
-  // in small keyset pages so the Postgres driver never stages a second,
-  // transcript-sized JSONB result frame beside the decoded history.
+  if (options.codexCompactionMode === "remote_v2" && options.isCodexSubscriptionTurn !== true) {
+    // Fail closed: a V2-locked session must never silently take the portable path
+    // (mixed history shapes). Admission should have blocked this already.
+    throw new Error(
+      "session is locked to Codex remote compaction v2 but this turn is not a Codex subscription turn",
+    );
+  }
+  const useRemoteV2 = options.codexCompactionMode === "remote_v2";
+
+  // Preserve the complete ordered transcript while bounding each Postgres
+  // driver result frame beside the decoded history already held by this turn.
   const active = await getActiveSessionHistoryItemsPaged(db, scope.workspaceId, scope.sessionId);
   if (active.length === 0) {
     let requestConsumed = false;
@@ -110,10 +138,24 @@ export async function maybeCompactContext(
         requestConsumed,
       };
     }
-    return { compacted: false, reason: "no_history", events: [], requestConsumed };
+    return {
+      compacted: false,
+      reason: "no_history",
+      events: [],
+      requestConsumed,
+    };
   }
 
-  const items = sanitizeHistoryItemsForModel(active.map((row) => row.item) as CompactionItem[]);
+  const canonicalItems = applyCodexHistoryStrip(
+    active,
+    options.codexAccount ?? { currentCodexCredentialId: null },
+  ) as CompactionItem[];
+  const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> =>
+    sanitizeHistoryItemsForModel(
+      options.projectModelInput ? await options.projectModelInput(input) : input,
+      settings.modelToolOutputTruncationTokens,
+    ) as CompactionItem[];
+  const items = await projectForWire(canonicalItems);
   const decision = decideCompaction({
     items,
     lastInputTokens,
@@ -132,79 +174,249 @@ export async function maybeCompactContext(
     };
   }
 
+  const trigger = options.trigger ?? "auto";
+  const estimatedTokensBefore = estimateTokens(items);
+  const started = await recordStartedContextCompaction(db, {
+    ...scope,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    trigger,
+    estimatedTokensBefore,
+    ...(useRemoteV2 ? { implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION } : {}),
+  });
+  if (!started.recorded) {
+    throw new TurnAttemptFencedError(
+      `turn attempt was fenced while recording context compaction start: ${started.reason}`,
+    );
+  }
+  await options.publishLiveEvents?.(started.events);
+
+  if (useRemoteV2) {
+    const outcome = await compactContextRemoteV2(
+      db,
+      settings,
+      scope,
+      canonicalItems,
+      items,
+      decision,
+      options,
+      projectForWire,
+    );
+    return prependCompactionEvents(started.events, outcome);
+  }
+
+  const outcome = await compactContextPortable(
+    db,
+    settings,
+    scope,
+    canonicalItems,
+    items,
+    decision,
+    summarize,
+    options,
+    projectForWire,
+  );
+  return prependCompactionEvents(started.events, outcome);
+}
+
+/**
+ * After `compaction.started`, record a visible skip so the timeline cannot
+ * stick on "Compacting…". Used when the provider/summarizer throws a terminal
+ * (non-retryable) failure — including auto/overflow paths that never set
+ * `compactRequested`.
+ */
+export async function settleFailedContextCompactionLandmark(
+  db: Database,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  options: {
+    clearRequestedCompaction?: boolean;
+    publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+  } = {},
+): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
+  const settled = await settleSkippedAfterStart(db, scope, options, "summarization_failed");
+  await options.publishLiveEvents?.(settled.events);
+  return settled;
+}
+
+function prependCompactionEvents(
+  prefix: SessionEvent[],
+  outcome: MaybeCompactResult,
+): MaybeCompactResult {
+  if (prefix.length === 0) return outcome;
+  return { ...outcome, events: [...prefix, ...outcome.events] };
+}
+
+async function settleSkippedAfterStart(
+  db: Database,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  options: {
+    clearRequestedCompaction?: boolean;
+  },
+  reason:
+    | "no_history"
+    | "replacement_not_smaller"
+    | "replacement_unchanged"
+    | "summarization_failed",
+): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
+  const clearRequestedCompaction = options.clearRequestedCompaction === true;
+  const skipped = await recordSkippedContextCompaction(db, {
+    ...scope,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    reason,
+    // After `compaction.started`, always settle the landmark. Do not require
+    // an operator `/compact` flag — auto/overflow never set one.
+    requirePendingRequest: false,
+    clearRequestedCompaction,
+  });
+  if (!skipped.recorded) {
+    throw new TurnAttemptFencedError(
+      `turn attempt was fenced while recording a context compaction skip (${reason}): ${skipped.reason}`,
+    );
+  }
+  return {
+    compacted: false,
+    reason,
+    events: skipped.events,
+    requestConsumed: clearRequestedCompaction,
+  };
+}
+
+async function compactContextRemoteV2(
+  db: Database,
+  settings: Settings,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  canonicalItems: CompactionItem[],
+  items: CompactionItem[],
+  decision: { signalTokens: number; thresholdTokens: number },
+  options: {
+    clearRequestedCompaction?: boolean;
+    trigger?: "auto" | "operator" | "proactive" | "overflow";
+    requestRemoteCompactionV2?: RemoteCompactionV2Requester;
+    producerCodexCredentialId?: string | null;
+  },
+  projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
+): Promise<MaybeCompactResult> {
+  if (!options.requestRemoteCompactionV2) {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_requester",
+      reason: "missing_requester",
+    });
+  }
+  const estimatedTokensBefore = estimateTokens(items);
+  // Codex remote_v2: on a valid compaction item, install and recompute usage.
+  // No local "must shrink / must differ" gate — that is portable-only.
+  // Fail closed on provider/extract failure — no portable fallback.
+  const compactionItem = await options.requestRemoteCompactionV2(settings, items);
+  const replacementHistory = buildRemoteV2ReplacementHistory(canonicalItems, compactionItem);
+  const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
+  const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
+  const tailItem = replacementHistory.at(-1);
+  if (!tailItem) {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_replacement",
+      reason: "no_replacement_history",
+    });
+  }
+  const applied = await applyContextCompaction(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    turnId: scope.turnId,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    replacementItems: replacementHistory.slice(0, -1),
+    summaryItem: tailItem as Record<string, unknown>,
+    replacementInputTokens: estimatedTokensAfter,
+    ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    ...(options.producerCodexCredentialId
+      ? { producerCodexCredentialId: options.producerCodexCredentialId }
+      : {}),
+    eventPayload: {
+      trigger: options.trigger ?? "auto",
+      implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+      estimatedTokensBefore,
+      estimatedTokensAfter,
+    },
+  });
+  if (!applied.applied) {
+    throw new TurnAttemptFencedError(
+      `turn attempt was fenced during remote context compaction: ${applied.reason}`,
+    );
+  }
+  return {
+    compacted: true,
+    supersededFrom: applied.supersededFrom,
+    summaryPosition: applied.summaryPosition,
+    signalTokens: decision.signalTokens,
+    thresholdTokens: decision.thresholdTokens,
+    estimatedTokensBefore,
+    estimatedTokensAfter,
+    replacementFingerprint,
+    events: applied.events,
+  };
+}
+
+async function compactContextPortable(
+  db: Database,
+  settings: Settings,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  canonicalItems: CompactionItem[],
+  items: CompactionItem[],
+  decision: { signalTokens: number; thresholdTokens: number },
+  summarize: CompactionSummarizer,
+  options: {
+    clearRequestedCompaction?: boolean;
+    trigger?: "auto" | "operator" | "proactive" | "overflow";
+  },
+  projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
+): Promise<MaybeCompactResult> {
   const estimatedTokensBefore = estimateTokens(items);
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const summaryBody = summarized.summaryBody;
-  const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
-  const estimatedTokensAfter = estimateTokens(replacementHistory);
+  const replacementHistory = buildCompactionReplacementHistory(canonicalItems, summaryBody);
+  const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
-  const previousReplacementFingerprint = latestCompactionReplacementFingerprint(items);
+  const previousReplacementFingerprint = latestCompactionReplacementFingerprint(canonicalItems);
   const summaryItem = replacementHistory.at(-1);
   if (!summaryItem) {
-    return {
-      compacted: false,
-      reason: "compaction produced no replacement history",
-      events: [],
-      requestConsumed: false,
-    };
+    // Started already fanout; settle visibly so the landmark cannot stick on
+    // "Compacting…". This is not an operator-request clear path.
+    return await settleSkippedAfterStart(db, scope, options, "summarization_failed");
   }
   if (previousReplacementFingerprint === replacementFingerprint) {
-    let requestConsumed = false;
-    if (options.clearRequestedCompaction) {
-      const skipped = await recordSkippedContextCompaction(db, {
-        ...scope,
-        expectedExecutionGeneration: scope.executionGeneration,
-        expectedAttemptId: scope.attemptId,
-        reason: "replacement_unchanged",
-      });
-      if (!skipped.recorded) {
-        throw new TurnAttemptFencedError(
-          "turn attempt was fenced while consuming an unchanged context compaction request",
-        );
-      }
-      requestConsumed = true;
-      return {
-        compacted: false,
-        reason: "replacement_unchanged",
-        events: skipped.events,
-        requestConsumed,
-      };
-    }
-    return {
-      compacted: false,
-      reason: "replacement_unchanged",
-      events: [],
-      requestConsumed,
-    };
+    return await settleSkippedAfterStart(db, scope, options, "replacement_unchanged");
   }
   if (estimatedTokensAfter >= estimatedTokensBefore) {
-    let requestConsumed = false;
-    if (options.clearRequestedCompaction) {
-      const skipped = await recordSkippedContextCompaction(db, {
-        ...scope,
-        expectedExecutionGeneration: scope.executionGeneration,
-        expectedAttemptId: scope.attemptId,
-        reason: "replacement_not_smaller",
-      });
-      if (!skipped.recorded) {
-        throw new TurnAttemptFencedError(
-          "turn attempt was fenced while consuming a non-shrinking context compaction request",
-        );
-      }
-      requestConsumed = true;
-      return {
-        compacted: false,
-        reason: "replacement_not_smaller",
-        events: skipped.events,
-        requestConsumed,
-      };
-    }
-    return {
-      compacted: false,
-      reason: "replacement_not_smaller",
-      events: [],
-      requestConsumed,
-    };
+    return await settleSkippedAfterStart(db, scope, options, "replacement_not_smaller");
   }
   const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,

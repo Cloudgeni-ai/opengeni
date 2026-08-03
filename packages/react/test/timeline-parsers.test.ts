@@ -334,4 +334,15 @@ describe("MCP output unwrap", () => {
   test("unwrapMcpOutput handles nullish output", () => {
     expect(unwrapMcpOutput(null)).toEqual({ text: "", isError: false });
   });
+
+  test("unwrapMcpOutput uses the shared normalizer for structured and nested envelopes", () => {
+    expect(
+      unwrapMcpOutput({
+        result: {
+          structuredContent: { id: "record-1" },
+          content: [{ type: "text", text: "Record updated" }],
+        },
+      }),
+    ).toEqual({ text: "Record updated", isError: false });
+  });
 });

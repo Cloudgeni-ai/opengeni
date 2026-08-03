@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { createObservability, logStartupDependencyRetry, parseHeaders } from "../src";
+import { SandboxBackend } from "@opengeni/contracts";
+import {
+  createObservability,
+  logStartupDependencyRetry,
+  parseHeaders,
+  sandboxOperationMetricObserver,
+} from "../src";
 
 const settings = {
   serviceName: "opengeni",
@@ -76,6 +82,64 @@ describe("observability", () => {
     ).toThrow("already registered");
   });
 
+  test("records routed sandbox operations with bounded labels", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const observe = sandboxOperationMetricObserver(obs);
+    observe({ backend: "modal", op: "execCommand", outcome: "ok", durationMs: 250 });
+    observe({
+      backend: "sb-user-controlled-provider-id",
+      op: "readFile:/private/path",
+      outcome: "failed",
+      durationMs: 10,
+    });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="execCommand"[^}]*outcome="ok"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="unknown"[^}]*op="unknown"[^}]*outcome="failed"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toContain("sb-user-controlled-provider-id");
+    expect(metrics).not.toContain("/private/path");
+    expect(metrics).toContain("opengeni_sandbox_operation_duration_seconds_bucket");
+  });
+
+  test("recognizes every public sandbox backend without collapsing it", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const observe = sandboxOperationMetricObserver(obs);
+    for (const backend of SandboxBackend.options) {
+      observe({ backend, op: "exec", outcome: "ok", durationMs: 1 });
+    }
+
+    const metrics = await obs.prometheusMetrics();
+    for (const backend of SandboxBackend.options) {
+      expect(metrics).toContain(`backend="${backend}"`);
+    }
+  });
+
+  test("counts observer failures without leaking them into sandbox execution", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    obs.incrementCounter({
+      name: "opengeni_sandbox_operations_total",
+      labels: { incompatible_test_label: "seed" },
+    });
+
+    expect(() =>
+      sandboxOperationMetricObserver(obs)({
+        backend: "modal",
+        op: "exec",
+        outcome: "ok",
+        durationMs: 1,
+      }),
+    ).not.toThrow();
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_observability_observer_errors_total\{[^}]*observer="sandbox_operation"[^}]*\} 1\b/,
+    );
+  });
+
   test("exports OTLP JSON spans", async () => {
     const exported: Array<{ url: string; body: any; headers: Record<string, string> }> = [];
     const obs = createObservability(settings, {
@@ -96,6 +160,41 @@ describe("observability", () => {
     expect(exported[0]!.body.resourceSpans[0].scopeSpans[0].spans[0].name).toBe(
       "worker.run_agent_segment",
     );
+  });
+
+  test("sanitizes and bounds span errors before OTLP export", async () => {
+    const exported: Array<{ body: any }> = [];
+    const obs = createObservability(settings, {
+      component: "api",
+      exporter: async (_url, body) => {
+        exported.push({ body });
+      },
+    });
+    const error = Object.assign(
+      new Error("PRIVATE proxy body Bearer super-secret-provider-token"),
+      { status: 502 },
+    );
+
+    const span = obs.startSpan("HTTP POST /v1/sessions", {});
+    span.end({ error, attributes: { "custom.large": "x".repeat(2_000) } });
+    await Bun.sleep(0);
+
+    expect(exported).toHaveLength(1);
+    const body = exported[0]!.body;
+    expect(JSON.stringify(body)).not.toContain("PRIVATE");
+    expect(JSON.stringify(body)).not.toContain("super-secret-provider-token");
+    const spanBody = body.resourceSpans[0].scopeSpans[0].spans[0];
+    expect(spanBody.status).toEqual({ code: 2, message: "HTTP 502" });
+    expect(spanBody.attributes).toContainEqual({
+      key: "error.type",
+      value: { stringValue: "Error" },
+    });
+    expect(spanBody.attributes).toContainEqual({
+      key: "error.status_code",
+      value: { intValue: 502 },
+    });
+    const large = spanBody.attributes.find((entry: any) => entry.key === "custom.large");
+    expect(large.value.stringValue.length).toBeLessThanOrEqual(512);
   });
 
   test("parses OTLP headers", () => {

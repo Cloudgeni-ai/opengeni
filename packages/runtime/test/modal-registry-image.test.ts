@@ -9,12 +9,14 @@ import {
 } from "../src/sandbox/providers/modal";
 
 const IMAGE_REF = "acr.example.com/cloudgeni-sandbox@sha256:abc";
+const IMAGE_ID = "im-1234567890123456789012";
 const SECRET_NAME = "acr-credentials-gecko";
 
 /** A fake modal module capturing the fromRegistry(tag, secret) call shape. */
 function fakeModal() {
   const fakeImage = { imageId: "im-fake", objectId: "im-fake" };
   const fromRegistry = mock((_tag: string, _secret: unknown) => fakeImage);
+  const clientOptions: unknown[] = [];
   // The Secret is resolved via the AUTHENTICATED client (client.secrets.fromName),
   // never the static modal.Secret.fromName (which uses getDefaultClient).
   const secretFromName = mock(async (_name: string, _params?: unknown) => ({
@@ -25,9 +27,13 @@ function fakeModal() {
       ModalClient: class {
         images = { fromRegistry };
         secrets = { fromName: secretFromName };
+
+        constructor(options: unknown) {
+          clientOptions.push(options);
+        }
       },
     }) as unknown as Awaited<ReturnType<ModalModuleLoader>>;
-  return { loadModal, fromRegistry, secretFromName, fakeImage };
+  return { loadModal, fromRegistry, secretFromName, clientOptions, fakeImage };
 }
 
 afterEach(() => {
@@ -45,6 +51,18 @@ describe("resolveModalImageSelector", () => {
     const selector = resolveModalImageSelector(settings);
     expect(selector?.kind).toBe("tag");
     expect(selector?.value).toBe(IMAGE_REF);
+  });
+
+  test("provider-native image ID wins while retaining the logical image ref", () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: IMAGE_REF,
+      modalImageId: IMAGE_ID,
+      modalImageRegistrySecret: SECRET_NAME,
+    });
+    const selector = resolveModalImageSelector(settings);
+    expect(selector?.kind).toBe("id");
+    expect(selector?.value).toBe(IMAGE_ID);
   });
 
   test("registry secret set but NOT yet resolved (cold) → falls back to fromTag", () => {
@@ -65,10 +83,18 @@ describe("resolveModalImageSelector", () => {
       modalImageRegistrySecret: SECRET_NAME,
       modalEnvironment: "main",
     });
-    const { loadModal, fromRegistry, secretFromName, fakeImage } = fakeModal();
+    const { loadModal, fromRegistry, secretFromName, clientOptions, fakeImage } = fakeModal();
 
     await ensureModalRegistryImage(settings, loadModal);
 
+    expect(clientOptions).toEqual([
+      {
+        tokenId: settings.modalTokenId,
+        tokenSecret: settings.modalTokenSecret,
+        environment: "main",
+      },
+    ]);
+    expect(clientOptions[0]).not.toHaveProperty("timeoutMs");
     expect(secretFromName).toHaveBeenCalledTimes(1);
     expect(secretFromName.mock.calls[0]?.[0]).toBe(SECRET_NAME);
     expect(secretFromName.mock.calls[0]?.[1]).toEqual({ environment: "main" });
@@ -83,6 +109,20 @@ describe("resolveModalImageSelector", () => {
 });
 
 describe("ensureModalRegistryImage", () => {
+  test("provider-native image ID bypasses registry loading", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: IMAGE_REF,
+      modalImageId: IMAGE_ID,
+      modalImageRegistrySecret: SECRET_NAME,
+    });
+    const loadModal = mock(async () => {
+      throw new Error("modal registry loader must not run for a provider-native image ID");
+    });
+    await ensureModalRegistryImage(settings, loadModal as unknown as ModalModuleLoader);
+    expect(loadModal).not.toHaveBeenCalled();
+  });
+
   test("no-op (never loads modal) when the registry secret is unset", async () => {
     const settings = testSettings({ sandboxBackend: "modal", modalImageRef: IMAGE_REF });
     const loadModal = mock(async () => {
@@ -119,6 +159,27 @@ describe("ensureModalRegistryImage", () => {
 });
 
 describe("modalProvider.build with a resolved registry image", () => {
+  test("build accepts a provider-native image ID with logical provenance", () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: IMAGE_REF,
+      modalImageId: IMAGE_ID,
+    });
+    const client = modalProvider.build({ settings, environment: {}, exposedPorts: [] });
+    expect(client).toBeDefined();
+  });
+
+  test("provider-native image ID fails closed without a logical image ref", () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: undefined,
+      modalImageId: IMAGE_ID,
+    });
+    expect(() => modalProvider.validateCredentials(settings)).toThrow(
+      "OPENGENI_MODAL_IMAGE_ID requires OPENGENI_MODAL_IMAGE_REF",
+    );
+  });
+
   test("build attaches the pulled image (no throw) once resolved", async () => {
     const settings = testSettings({
       sandboxBackend: "modal",

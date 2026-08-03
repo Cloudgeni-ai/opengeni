@@ -51,6 +51,7 @@ import type {
   SessionListResponse,
   SessionEvent,
   SessionGoal,
+  SessionHumanInputRequest,
   SessionLineageResponse,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
@@ -59,8 +60,11 @@ import type {
   SessionTurn,
   SteerMessageResult,
   StreamSessionEventsOptions,
+  SubmitHumanInputResponseRequest,
   UploadFileInput,
   UpdateSessionGoalRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionRequest,
   UpdateSessionPinRequest,
   UpdateWorkspaceEnvironmentRequest,
@@ -174,6 +178,26 @@ export class MockOpenGeniClient implements SessionClientLike {
     return CLIENT_CONFIG;
   }
 
+  async getWorkspaceModelCatalog(_workspaceId: string) {
+    return {
+      models: (CLIENT_CONFIG.models ?? []).map((model) => ({
+        ...model,
+        credentialReadiness: {
+          status: "ready" as const,
+          reason: null,
+          basis: "configuration" as const,
+          checkedAt: null,
+        },
+        availability: {
+          status: "available" as const,
+          selectable: true,
+          reason: null,
+          checkedAt: null,
+        },
+      })),
+    };
+  }
+
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
     return this.fabricateSession(
       sessionId,
@@ -209,6 +233,26 @@ export class MockOpenGeniClient implements SessionClientLike {
       "Ops channel — manager session",
     );
     return { ...session, title: request.title, titleSource: "user" };
+  }
+
+  async updateSessionMcpApprovalPolicy(
+    _workspaceId: string,
+    _sessionId: string,
+    serverId: string,
+    request: UpdateSessionMcpApprovalPolicyRequest,
+  ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
+    return {
+      server: {
+        id: serverId,
+        name: serverId,
+        url: "https://tools.example.test/mcp",
+        headerNames: [],
+        credentialVersion: 1,
+        requireApproval: request.requireApproval,
+        connectionRef: null,
+      },
+      effectiveFrom: "next_attempt",
+    };
   }
 
   async updateSessionPin(
@@ -380,7 +424,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       revision: 1,
       text: turn.prompt,
       resources: turn.resources,
-      tools: turn.tools,
       model: turn.model,
       reasoningEffort: turn.reasoningEffort,
       sourceTurnId: turn.id,
@@ -412,7 +455,6 @@ export class MockOpenGeniClient implements SessionClientLike {
         revision: 0,
         text: "",
         resources: [],
-        tools: [],
         model: "gpt-5.2",
         reasoningEffort: "medium",
         sourceTurnId: null,
@@ -453,8 +495,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     return {
       version: this.queueVersions.get(sessionId) ?? 0,
       effectiveControl: this.effectiveControl(sessionId),
+      activePersonalConnections: [],
       stoppingPreviousAttempt: false,
       items: this.sessionTurns(sessionId).filter((turn) => turn.status === "queued"),
+      pendingInputs: [],
+      pendingInputAttachment: null,
     };
   }
 
@@ -535,6 +580,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       effectiveControl: this.effectiveControl(sessionId),
       interruptionCount: 0,
       wakeCount: 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
     };
   }
 
@@ -601,7 +648,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     sessionId: string,
   ): Promise<{ status: "completed" | "noop"; message: string }> {
-    this.bus(sessionId).append("session.context.compacted", { trigger: "operator" });
+    this.bus(sessionId).append("session.context.compaction.started", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+    });
+    this.bus(sessionId).append("session.context.compacted", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+      estimatedTokensAfter: 24_000,
+    });
     return { status: "completed", message: "Context compacted." };
   }
 
@@ -611,6 +666,27 @@ export class MockOpenGeniClient implements SessionClientLike {
     decision: { approvalId: string; decision: "approve" | "reject"; message?: string },
   ): Promise<SessionEvent> {
     return this.bus(sessionId).append("user.approvalDecision", decision);
+  }
+
+  async listHumanInputRequests(): Promise<SessionHumanInputRequest[]> {
+    return [];
+  }
+
+  async getHumanInputRequest(
+    _workspaceId: string,
+    _sessionId: string,
+    requestId: string,
+  ): Promise<SessionHumanInputRequest> {
+    throw new Error(`No demo human-input request ${requestId}`);
+  }
+
+  async submitHumanInputResponse(
+    _workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    response: SubmitHumanInputResponseRequest,
+  ): Promise<SessionEvent> {
+    return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
   }
 
   // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
@@ -1090,6 +1166,9 @@ export class MockOpenGeniClient implements SessionClientLike {
       os: "linux",
       liveness: "warm",
       leaseEpoch: 1,
+      workspaceGeneration: null,
+      archiveGeneration: null,
+      archiveComplete: false,
       viewerHeartbeatIntervalMs: 30_000,
       FileSystem: {
         available: true,
@@ -1139,6 +1218,9 @@ export class MockOpenGeniClient implements SessionClientLike {
       sandboxGroupId: "00000000-0000-4000-8000-0000000000aa",
       liveness: "cold",
       leaseEpoch: 0,
+      workspaceGeneration: null,
+      archiveGeneration: null,
+      archiveComplete: false,
       viewerHeartbeatIntervalMs: 30_000,
       dataPlaneUrl: null,
       streamToken: null,
@@ -1429,6 +1511,9 @@ export class MockOpenGeniClient implements SessionClientLike {
           name: "Cloud sandbox",
           kind: "modal",
           state: "online",
+          workspaceGeneration: null,
+          archiveGeneration: null,
+          archiveComplete: false,
           active: true,
           isSessionGroup: true,
           os: "linux",
@@ -1515,9 +1600,15 @@ export class MockOpenGeniClient implements SessionClientLike {
       title: null,
       titleSource: null,
       instructions: null,
+      policyRole: null,
       resources: [],
+      skills: [],
       tools: [],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      toolPolicyVersion: 1,
       metadata: { title },
+      createdBy: { kind: "subject", subjectId: "user:demo" },
+      createdByContext: {},
       model: "gpt-5.2",
       sandboxBackend: "modal",
       sandboxOs: "linux",
@@ -1529,8 +1620,15 @@ export class MockOpenGeniClient implements SessionClientLike {
       rigId: null,
       rigVersionId: null,
       firstPartyMcpPermissions: null,
+      firstPartyMcpTools: [],
       mcpServers: [],
       parentSessionId: sessionId === WORKER_SESSION_ID ? MANAGER_SESSION_ID : null,
+      rootSessionId: sessionId === WORKER_SESSION_ID ? MANAGER_SESSION_ID : sessionId,
+      nestedAgentDepth: sessionId === WORKER_SESSION_ID ? 1 : 0,
+      maxNestedAgentDepthOverride: null,
+      effectiveMaxNestedAgentDepth: 3,
+      nestedAgentDepthPolicySource: "default",
+      nestedAgentDepthPolicySessionId: null,
       createIdempotencyKey: null,
       temporalWorkflowId: null,
       activeTurnId: null,
@@ -1539,6 +1637,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       queueTailPosition: 0,
       effectiveControl: this.effectiveControl(sessionId),
       lastSequence: this.bus(sessionId).events.length,
+      codexCompactionMode: "portable",
       pinned: false,
       pinnedAt: null,
       pinVersion: 0,
@@ -1794,7 +1893,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-07-session-control-v1",
+  apiContractRevision: "2026-07-workspace-artifacts-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [
@@ -1815,11 +1914,12 @@ const CLIENT_CONFIG: ClientConfig = {
     },
   ],
   defaultReasoningEffort: "medium",
-  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
   fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
   productAccessMode: "managed",
   auth: { mode: "none" },
+  analytics: { consentRequired: true, providers: {} },
   structuredServices: { fileSystem: true, git: true, terminalEvents: true },
 };
 
@@ -1837,8 +1937,10 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     prompt,
     resources: [],
     tools: [],
+    toolsProvided: false,
     model: "gpt-5.2",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     sandboxOs: "linux",
     metadata: {},
@@ -1846,6 +1948,8 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:demo" },
+    initiatorContext: {},
     startedAt: null,
     finishedAt: null,
     createdAt: now,
@@ -1872,6 +1976,14 @@ function fabricateGoal(sessionId: string): SessionGoal {
     noProgressStreak: 0,
     maxAutoContinuations: 25,
     metadata: {},
+    continuation: {
+      state: "running",
+      reason: "goal_turn_running",
+      wakeRevision: 2,
+      observedRevision: 2,
+      nextAttemptAt: null,
+      lastError: null,
+    },
     createdAt: now,
     updatedAt: now,
   };
@@ -1908,10 +2020,10 @@ function fabricatePack(manifest: RegisterCapabilityPackRequest): CapabilityPack 
     category: manifest.category,
     version: manifest.version,
     skills: (manifest.skills ?? []).map((skill) => ({ name: skill.name, files: skill.files })),
-    tools: manifest.tools ?? [],
     connectors: [],
     knowledge: [],
     scheduledTaskTemplates: [],
+    tools: manifest.tools ?? [],
     metadata: manifest.metadata ?? {},
   };
 }

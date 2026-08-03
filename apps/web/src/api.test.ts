@@ -165,7 +165,7 @@ describe("createOpenGeniClient", () => {
     expect(request!.init?.credentials).toBe("include");
     expect(new Headers(request!.init?.headers).get("x-opengeni-access-key")).toBe("secret-key");
     expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
-      "2026-07-session-control-v1",
+      "2026-07-workspace-artifacts-v1",
     );
   });
 
@@ -193,5 +193,58 @@ describe("createOpenGeniClient", () => {
     }
 
     expect(seenKeys).toEqual(["first-key", "second-key"]);
+  });
+
+  test("preserves credential-free signed object-storage uploads", async () => {
+    const restoreLocalStorage = installTestLocalStorage();
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requests.push({ input, init });
+      const url = String(input);
+      if (url.endsWith("/files/uploads")) {
+        return Response.json(
+          {
+            fileId: "55555555-5555-4555-8555-555555555555",
+            uploadId: "66666666-6666-4666-8666-666666666666",
+            putUrl: "https://storage.example.test/container/file.txt?sig=opaque",
+            requiredHeaders: { "content-type": "text/plain" },
+            expiresAt: "2026-08-01T12:00:00.000Z",
+            maxSizeBytes: 1024,
+          },
+          { status: 201 },
+        );
+      }
+      if (url.startsWith("https://storage.example.test/")) {
+        return new Response(null, { status: 201 });
+      }
+      if (url.endsWith("/files/uploads/66666666-6666-4666-8666-666666666666/complete")) {
+        return Response.json({
+          file: {
+            id: "55555555-5555-4555-8555-555555555555",
+            status: "ready",
+            filename: "file.txt",
+          },
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const client = createOpenGeniClient();
+      await client.uploadFile("workspace-id", {
+        filename: "file.txt",
+        contentType: "text/plain",
+        data: "hello",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreLocalStorage();
+    }
+
+    expect(requests).toHaveLength(3);
+    expect(requests[0]!.init?.credentials).toBe("include");
+    expect(requests[1]!.init?.credentials).toBe("omit");
+    expect(requests[2]!.init?.credentials).toBe("include");
   });
 });

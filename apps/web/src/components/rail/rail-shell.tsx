@@ -3,7 +3,8 @@
 // overlay drawer (<1024px), and the slim canvas top strip that carries
 // session-contextual actions on session routes. The rail itself is composed
 // from the brand, switcher, workspace nav, session list, and footer sections.
-import { useSessionLineage } from "@opengeni/react";
+import { findPickerRow, useLastStartedTurnPolicy, useSessionLineage } from "@opengeni/react";
+import type { SessionSummary } from "@opengeni/sdk";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon, XIcon } from "lucide-react";
 
@@ -28,13 +29,21 @@ import {
 } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
-import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
+import {
+  SessionSandboxSwitcher,
+  sessionSupportsFleetSwitching,
+} from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { matchesShortcut, NEW_SESSION_SHORTCUT } from "@/lib/keyboard-shortcuts";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useAppContext } from "@/context";
+import { isCodexProductModel } from "@/lib/session-model";
+import { isIntelligenceEffort } from "@/lib/session-tools";
+import type { Session } from "@/types";
 import { cn } from "@/lib/utils";
 
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
@@ -283,20 +292,10 @@ export function RailShell({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
-  // Global `c` shortcut → new session. Ignored while typing in a field or with
-  // a modifier held, so it never steals keystrokes from the composer.
+  // Global chords (⌘/Ctrl+⇧O → new session). Modifier chords work in inputs too.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "c" || event.metaKey || event.ctrlKey || event.altKey) {
-        return;
-      }
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
-      ) {
-        return;
-      }
+      if (!matchesShortcut(event, NEW_SESSION_SHORTCUT.chord)) return;
       event.preventDefault();
       rail.startNewSession();
     }
@@ -343,7 +342,7 @@ export function RailShell({ children }: { children: ReactNode }) {
             >
               <SheetTitle className="sr-only">Session navigation</SheetTitle>
               <SheetDescription className="sr-only">
-                Browse workspace sessions or open workspace settings.
+                Browse workspace sessions or open Workspace.
               </SheetDescription>
               <nav aria-label="Primary" className="h-full">
                 <RailBody />
@@ -414,39 +413,13 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
-    const session = context.session;
     return (
-      <SessionHeader
-        session={session}
+      <SessionRouteHeader
+        session={context.session}
         ancestors={ancestors}
+        lineageLoading={lineage.loading}
         lineageError={lineage.error}
-        connectionState={context.connectionState}
-        status={session.status}
-        keyAuthRequired={context.keyAuthRequired}
-        onForgetAccessKey={context.forgetAccessKey}
-        inspectorOpen={context.inspectorOpen}
-        onToggleInspector={() => {
-          if (!context.inspectorOpen && rail.isMobile) rail.setDrawerOpen(false);
-          context.setInspectorOpen((open) => !open);
-        }}
-        onRename={context.updateSessionTitle}
-        onPin={(target, pinned) =>
-          context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
-        }
-        leading={hamburger}
-        sandboxSlot={
-          <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
-        }
-        // Codex-prefix-gated inside the component: absent for host-credit sessions.
-        codexSlot={
-          <CodexAccountIndicator
-            workspaceId={session.workspaceId}
-            sessionId={session.id}
-            model={session.model}
-          />
-        }
-        // The "N agents" indicator now lives above the composer (front and
-        // center) as ComposerAgentsPill, not in this header — see session.tsx.
+        hamburger={hamburger}
       />
     );
   }
@@ -466,5 +439,82 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         OpenGeni
       </Link>
     </header>
+  );
+}
+
+/** Session-route header: last-admitted model·effort, not the composer next pick. */
+function SessionRouteHeader({
+  session,
+  ancestors,
+  lineageLoading,
+  lineageError,
+  hamburger,
+}: {
+  session: Session;
+  ancestors: SessionSummary[];
+  lineageLoading: boolean;
+  lineageError: Error | null;
+  hamburger: ReactNode;
+}) {
+  const rail = useRail();
+  const context = useAppContext();
+  // Header is outside the session route event feed — poll instead of a second SSE.
+  // Updates when a new turn admits (`turn.started`); composer picker changes do not.
+  const lastStarted = useLastStartedTurnPolicy(session.id, { pollIntervalMs: 15_000 });
+  const lastStartedModel = lastStarted.policy?.model;
+  const lastStartedReasoningEffort = isIntelligenceEffort(lastStarted.policy?.reasoningEffort)
+    ? lastStarted.policy.reasoningEffort
+    : undefined;
+  const lastStartedLatencyMode = lastStarted.policy?.latencyMode;
+  // Wait for last-started fetch before trusting session.model — creation default
+  // can be a different rail than the newest admitted turn.
+  const policyReady = !lastStarted.loading;
+  const displayModelId = policyReady ? lastStartedModel || session.model : session.model;
+  const catalog = useWorkspaceModelCatalog(session.workspaceId);
+  const selectedRow = findPickerRow(catalog.rows, displayModelId);
+  const policyLoading = lastStarted.loading || catalog.loading;
+
+  return (
+    <SessionHeader
+      session={session}
+      ancestors={ancestors}
+      lineageLoading={lineageLoading}
+      lineageError={lineageError}
+      connectionState={context.connectionState}
+      status={session.status}
+      keyAuthRequired={context.keyAuthRequired}
+      onForgetAccessKey={context.forgetAccessKey}
+      inspectorOpen={context.inspectorOpen}
+      onToggleInspector={() => {
+        if (!context.inspectorOpen && rail.isMobile) rail.setDrawerOpen(false);
+        context.setInspectorOpen((open) => !open);
+      }}
+      onRename={context.updateSessionTitle}
+      onPin={(target, pinned) =>
+        context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
+      }
+      leading={hamburger}
+      lastStartedModel={lastStartedModel}
+      lastStartedReasoningEffort={lastStartedReasoningEffort}
+      lastStartedLatencyMode={lastStartedLatencyMode}
+      billingClass={selectedRow?.billingClass}
+      modelLabel={selectedRow?.label}
+      policyLoading={policyLoading}
+      sandboxSlot={
+        sessionSupportsFleetSwitching(session.sandboxBackend) ? (
+          <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
+        ) : null
+      }
+      codexSlot={
+        policyReady && isCodexProductModel(displayModelId) ? (
+          <CodexAccountIndicator
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            model={displayModelId}
+            modelReady={policyReady}
+          />
+        ) : null
+      }
+    />
   );
 }

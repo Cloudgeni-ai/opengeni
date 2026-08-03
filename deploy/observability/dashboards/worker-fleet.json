@@ -521,71 +521,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Turn slot saturation",
-      "description": "Used runAgentTurn slots divided by the memory-safe per-pod capacity. The maximum exposes one saturated pod; the fleet ratio weights by safe capacity.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 8,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": ["last", "max"]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(opengeni_turn_slots_used{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) / clamp_min(sum(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}), 1)",
-          "legendFormat": "fleet weighted",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "range": true
-        },
-        {
-          "refId": "B",
-          "expr": "max(opengeni_turn_slot_saturation_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
-          "legendFormat": "most saturated pod",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "id": 16,
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 27
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Sandbox leases by liveness",
-      "description": "",
+      "title": "Sandbox lease inventory by liveness",
+      "description": "Fresh database projection. Cold is durable history, not active capacity; warming/warm/draining are live lifecycle states.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -616,7 +553,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (liveness) (opengeni_sandbox_leases{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "expr": "opengeni:sandbox_leases:fresh_max",
           "legendFormat": "{{liveness}}",
           "datasource": {
             "type": "prometheus",

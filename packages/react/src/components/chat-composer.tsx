@@ -4,6 +4,7 @@ import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import type { SlashCommandContext } from "../hooks/use-slash-commands";
+import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import {
   Actions,
   AttachButton,
@@ -17,7 +18,6 @@ import {
   Hint,
   Input,
   ModelPicker,
-  OPEN_WORKSTREAM_CONTROL_EVENT,
   PauseButton,
   PausedState,
   RestoredResources,
@@ -29,6 +29,10 @@ import {
   type ChatComposerMessages,
   type ComposerControlLinks,
 } from "./composer";
+import {
+  ComposerTranscriptionControl,
+  type ComposerTranscriptionControlProps,
+} from "./composer-transcription-control";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
@@ -47,8 +51,16 @@ export type ChatComposerProps = {
   autoFocus?: boolean | undefined;
   /** Replaces the default keyboard hint under the field. */
   hint?: string | undefined;
+  /** App controls ahead of attach (e.g. mobile “+” overflow). */
+  controlsLeading?: ReactNode | undefined;
   /** App controls in the footer row, replacing the hint. */
   controlsStart?: ReactNode | undefined;
+  /** App actions beside Pause/Send, ordered before the built-in actions. */
+  actionsStart?: ReactNode | undefined;
+  /** Extra classes for the built-in attach control (e.g. `max-sm:hidden`). */
+  attachButtonClassName?: string | undefined;
+  /** Provider-neutral speech capability. Provider configuration stays in workspace settings. */
+  transcription?: ComposerTranscriptionControlProps | undefined;
   /** Content rendered above the textarea, inside the field chrome. */
   header?: ReactNode | undefined;
   /** Paste hook composed with the attachment paste path. */
@@ -82,7 +94,11 @@ export function ChatComposer({
   disabled,
   autoFocus,
   hint,
+  controlsLeading,
   controlsStart,
+  actionsStart,
+  attachButtonClassName,
+  transcription,
   header,
   onPaste,
   attachments,
@@ -111,7 +127,10 @@ export function ChatComposer({
     onPaste,
     messages,
   });
-  const hasControls = Boolean(attachments || models || controlsStart);
+  const hasControls = Boolean(
+    attachments || models || controlsLeading || controlsStart || transcription,
+  );
+  const stackActions = hasControls && Boolean(actionsStart);
 
   return (
     <Root controller={controller} className={className}>
@@ -126,10 +145,12 @@ export function ChatComposer({
           {controller.confirmState ? (
             <Confirmation />
           ) : (
-            <Footer>
+            <Footer className={stackActions ? "flex-wrap" : undefined}>
               {hasControls ? (
-                <Controls>
-                  <AttachButton />
+                <Controls className={stackActions ? "w-full sm:w-auto" : undefined}>
+                  {controlsLeading}
+                  <AttachButton className={attachButtonClassName} />
+                  {transcription ? <ComposerTranscriptionControl {...transcription} /> : null}
                   {models ? (
                     <ModelPicker models={models} value={selectedModel} onChange={onSelectModel} />
                   ) : null}
@@ -138,7 +159,8 @@ export function ChatComposer({
               ) : (
                 <Hint>{hint}</Hint>
               )}
-              <Actions>
+              <Actions className={stackActions ? "w-full justify-end sm:w-auto" : undefined}>
+                {actionsStart}
                 <PauseButton />
                 <SendButton />
               </Actions>

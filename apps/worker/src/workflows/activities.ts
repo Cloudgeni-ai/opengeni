@@ -3,15 +3,17 @@ import type * as activities from "../activities";
 
 type WorkflowControlActivities = Pick<
   typeof activities,
-  | "dispatchScheduledTaskRun"
   | "enqueueGoalRetryWake"
+  | "expireSessionHumanInput"
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"
   | "peekSessionWork"
   | "persistSessionAttemptQuiescence"
+  | "reconcileSessionAttemptQuiescence"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
+  | "recoverEscapedMcpTimeout"
   | "settleSessionInterruptions"
 >;
 
@@ -33,9 +35,26 @@ export const activity = proxyActivities<WorkflowControlActivities>({
   },
 });
 
-/** Goal continuation is advisory at an idle boundary. A transient failure gets
- * a short retry window, then records an explicit delayed outbox wake instead
- * of relying on an unrelated future mutation. */
+/** One schedule occurrence is bounded. Transient control-plane failures get a
+ * short retry window, but a revoked binding or other permanent task error must
+ * not leave a Temporal activity retrying forever; the next scheduled occurrence
+ * is an independent workflow and will re-evaluate current state. */
+export const scheduledTaskActivity = proxyActivities<
+  Pick<typeof activities, "dispatchScheduledTaskRun">
+>({
+  startToCloseTimeout: "2 minutes",
+  retry: {
+    initialInterval: "1 second",
+    backoffCoefficient: 2,
+    maximumInterval: "30 seconds",
+    maximumAttempts: 5,
+  },
+});
+
+/** Goal continuation evaluates a durable Postgres obligation at an idle
+ * boundary. A transient failure gets a short retry window, then records an
+ * explicit delayed outbox wake instead of relying on an unrelated mutation or
+ * keeping workflow history alive with polling. */
 export const goalActivity = proxyActivities<Pick<typeof activities, "maybeContinueGoal">>({
   startToCloseTimeout: "30 seconds",
   retry: {

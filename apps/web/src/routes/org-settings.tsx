@@ -19,6 +19,7 @@ import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
 import {
   entitlementEntries,
@@ -137,7 +138,7 @@ export function OrgSettingsRoute({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage width="standard">
       <section className="grid gap-5 text-left">
         <PageHeader
           icon={<BuildingIcon className="size-4" />}
@@ -177,7 +178,7 @@ export function OrgSettingsRoute({
             <Button asChild type="button" variant="ghost" size="sm">
               <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
                 <SettingsIcon className="size-3.5" />
-                Workspace settings
+                Workspace
               </Link>
             </Button>
           </div>
@@ -289,7 +290,7 @@ export function OrgSettingsRoute({
           role={accountGrant?.role ?? null}
         />
       </section>
-    </div>
+    </ContentPage>
   );
 }
 
@@ -514,7 +515,7 @@ function MembersSection(props: {
         </span>
       </div>
       <p className="text-xs text-fg-subtle">
-        Access is granted per workspace. Manage members in Workspace settings → People with access.
+        Access is granted per workspace. Manage members in Workspace → People with access.
         {props.canManage ? "" : " Only organization admins can change organization-level roles."}
       </p>
     </section>

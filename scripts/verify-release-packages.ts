@@ -30,10 +30,6 @@ export function parseExpectedPackages(value: string): PublishablePackage[] {
     .map((item) => item.trim())
     .filter(Boolean);
 
-  if (specs.length === 0) {
-    throw new Error("expected_packages must name at least one @opengeni package version");
-  }
-
   const seen = new Set<string>();
   return specs.map((spec) => {
     const separator = spec.lastIndexOf("@");
@@ -50,6 +46,36 @@ export function parseExpectedPackages(value: string): PublishablePackage[] {
   });
 }
 
+export function deriveExpectedReleasePackages(
+  publishable: PublishablePackage[],
+  registry: Map<string, RegistryPackage | null>,
+): PublishablePackage[] {
+  return publishable.filter((pkg) => {
+    const remote = registry.get(pkg.name);
+    if (remote === undefined) {
+      throw new Error(`registry state was not loaded for ${pkg.name}`);
+    }
+    return remote === null;
+  });
+}
+
+export function resolveExpectedReleasePackages(options: {
+  phase: "plan" | "verify";
+  deriveExpected: boolean;
+  declaredExpected: PublishablePackage[];
+  publishable: PublishablePackage[];
+  registry: Map<string, RegistryPackage | null>;
+}): PublishablePackage[] {
+  if (!options.deriveExpected) return options.declaredExpected;
+  if (options.phase !== "plan") {
+    throw new Error("automatic package derivation is valid only during planning");
+  }
+  if (options.declaredExpected.length !== 0) {
+    throw new Error("automatic package derivation cannot be combined with a declared package set");
+  }
+  return deriveExpectedReleasePackages(options.publishable, options.registry);
+}
+
 export function reconcileReleasePackages(options: {
   sourceSha: string;
   phase: "plan" | "verify";
@@ -60,6 +86,7 @@ export function reconcileReleasePackages(options: {
   needsPublish: boolean;
   releaseReady: boolean;
   packages: ReleasePackageReceipt[];
+  bomPackages: ReleasePackageReceipt[];
 } {
   const { sourceSha, phase, publishable, expected, registry } = options;
   if (!sourceShaPattern.test(sourceSha)) {
@@ -92,18 +119,27 @@ export function reconcileReleasePackages(options: {
     );
   }
 
-  const packages = expected.map<ReleasePackageReceipt>((item) => {
+  const receiptFor = (
+    item: PublishablePackage,
+    expectedInThisRelease: boolean,
+  ): ReleasePackageReceipt => {
     const remote = registry.get(item.name);
     if (remote === undefined) {
       throw new Error(`registry state was not loaded for ${item.name}`);
     }
     if (remote === null) {
+      if (!expectedInThisRelease) {
+        throw new Error(`unlisted unpublished package version: ${item.name}@${item.version}`);
+      }
       return { ...item, state: "pending", gitHead: null, integrity: null };
     }
     if (remote.name !== item.name || remote.version !== item.version) {
       throw new Error(`registry returned the wrong identity for ${item.name}@${item.version}`);
     }
-    if (remote.gitHead !== sourceSha) {
+    if (!remote.gitHead || !sourceShaPattern.test(remote.gitHead)) {
+      throw new Error(`registry gitHead is missing or invalid for ${item.name}@${item.version}`);
+    }
+    if (expectedInThisRelease && remote.gitHead !== sourceSha) {
       throw new Error(
         `version collision: ${item.name}@${item.version} belongs to gitHead ${remote.gitHead ?? "missing"}, not ${sourceSha}`,
       );
@@ -111,8 +147,19 @@ export function reconcileReleasePackages(options: {
     if (!remote.integrity?.startsWith("sha512-")) {
       throw new Error(`registry integrity is missing or invalid for ${item.name}@${item.version}`);
     }
-    return { ...item, state: "published", gitHead: remote.gitHead, integrity: remote.integrity };
-  });
+    return {
+      ...item,
+      state: "published",
+      gitHead: remote.gitHead,
+      integrity: remote.integrity,
+    };
+  };
+
+  const bomPackages = [...publishable]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map<ReleasePackageReceipt>((item) => receiptFor(item, expectedByName.has(item.name)));
+  const bomByName = new Map(bomPackages.map((item) => [item.name, item]));
+  const packages = expected.map<ReleasePackageReceipt>((item) => bomByName.get(item.name)!);
 
   const needsPublish = packages.some((pkg) => pkg.state === "pending");
   if (phase === "verify" && needsPublish) {
@@ -124,7 +171,7 @@ export function reconcileReleasePackages(options: {
     );
   }
 
-  return { needsPublish, releaseReady: !needsPublish, packages };
+  return { needsPublish, releaseReady: !needsPublish, packages, bomPackages };
 }
 
 export function loadPublishablePackages(): PublishablePackage[] {
@@ -198,14 +245,18 @@ async function readRegistryPackage(
 async function main(): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const sourceSha = process.env.OPENGENI_RELEASE_SOURCE_SHA ?? "";
-  const expected = parseExpectedPackages(process.env.OPENGENI_EXPECTED_PACKAGES ?? "");
   const phaseValue = process.env.OPENGENI_RELEASE_PACKAGE_PHASE ?? "";
   if (phaseValue !== "plan" && phaseValue !== "verify") {
     throw new Error("OPENGENI_RELEASE_PACKAGE_PHASE must be plan or verify");
   }
 
   const publishable = loadPublishablePackages();
-  const expectedNames = new Set(expected.map((pkg) => pkg.name));
+  const declaredExpected = parseExpectedPackages(process.env.OPENGENI_EXPECTED_PACKAGES ?? "");
+  const deriveExpectedValue = process.env.OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED ?? "";
+  if (deriveExpectedValue !== "" && deriveExpectedValue !== "true") {
+    throw new Error("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED must be true or unset");
+  }
+  const expectedNames = new Set(declaredExpected.map((pkg) => pkg.name));
   const registryEntries = await Promise.all(
     publishable.map(
       async (pkg) =>
@@ -215,12 +266,20 @@ async function main(): Promise<void> {
         ] as const,
     ),
   );
+  const registry = new Map(registryEntries);
+  const expected = resolveExpectedReleasePackages({
+    phase: phaseValue,
+    deriveExpected: deriveExpectedValue === "true",
+    declaredExpected,
+    publishable,
+    registry,
+  });
   const result = reconcileReleasePackages({
     sourceSha,
     phase: phaseValue,
     publishable,
     expected,
-    registry: new Map(registryEntries),
+    registry,
   });
 
   const receipt = {
@@ -230,6 +289,7 @@ async function main(): Promise<void> {
     needsPublish: result.needsPublish,
     releaseReady: result.releaseReady,
     packages: result.packages,
+    bomPackages: result.bomPackages,
   };
   const receiptPath = resolve(
     root,
@@ -246,6 +306,7 @@ async function main(): Promise<void> {
         `needs_publish=${String(result.needsPublish)}`,
         `release_ready=${String(result.releaseReady)}`,
         `verified_packages=${JSON.stringify(result.packages)}`,
+        `bom_packages=${JSON.stringify(result.bomPackages)}`,
       ].join("\n") + "\n",
       "utf8",
     );

@@ -73,6 +73,10 @@
   --color-accent-foreground: var(--color-fg);
 
   --color-destructive: var(--og-color-danger);
+  /* Danger is tuned as a readable foreground token. Filled destructive
+     controls need a darker opaque surface to preserve AA white-text contrast
+     in both themes. */
+  --color-destructive-filled: color-mix(in oklch, var(--og-color-danger) 70%, black);
   --color-destructive-foreground: var(--og-color-accent-fg);
 
   --color-input: var(--color-surface-2);
@@ -103,8 +107,13 @@
 /* ---------------------------------------------------------------------------
    Base
    --------------------------------------------------------------------------- */
-:root {
+:root,
+[data-og-theme="dark"] {
   color-scheme: dark;
+}
+
+[data-og-theme="light"] {
+  color-scheme: light;
 }
 
 html,
@@ -113,8 +122,8 @@ body {
   padding: 0;
   background-color: var(--color-bg);
   color: var(--color-fg);
-  min-height: 100vh;
-  overflow-x: hidden;
+  height: 100%;
+  overflow: hidden;
   font-family: var(--font-sans);
   font-feature-settings: "cv11", "ss01", "ss03";
   -webkit-font-smoothing: antialiased;
@@ -155,13 +164,23 @@ body {
    edge). Kept clearly visible for keyboard users while reading as designed, not
    as a default browser outline.
 
-   Two exclusions:
+   Exclusions:
    - the composer textarea (`.og-root textarea`) already shows a whole-composer
      focus affordance (focus-within border + soft glow), so a second outline
      bounded to the textarea box would double it;
    - shadcn buttons (`[data-slot="button"]`) carry their own offset ring in
-     button.tsx — excluding them here avoids stacking two rings on one control. */
-:where(button, a, input, textarea, [role="button"], [tabindex]):focus-visible:not(.og-root textarea):not([data-slot="button"]) {
+     button.tsx — excluding them here avoids stacking two rings on one control;
+   - `[tabindex="-1"]` is for programmatic focus only (timeline scroller, etc.).
+     Mouse-click + any key (e.g. Shift) flips keyboard modality and would paint
+     a huge ring around the whole pane — skip those; real tab stops use 0+. */
+:where(
+  button,
+  a,
+  input,
+  textarea,
+  [role="button"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible:not(.og-root textarea):not([data-slot="button"]) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
@@ -258,4 +277,9 @@ body {
 
 .pending-dot {
   animation: pending-dot 1.2s infinite ease-in-out both;
+}
+
+/* Workspace Insights — tabular figures for meter columns */
+[data-insights] {
+  font-feature-settings: "cv11", "ss01", "ss03", "tnum";
 }

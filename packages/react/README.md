@@ -25,6 +25,33 @@ animation. Override the tokens to rebrand everything.
 
 ## Install & styles
 
+Hosts that render their own UI should import the session-only surface:
+
+```tsx
+import {
+  useComposer,
+  useSessionControl,
+  useSessionEvents,
+  useTurnQueue,
+} from "@opengeni/react/session";
+```
+
+That subpath contains session hooks, approval helpers, and the pure timeline
+projection only. It does not load the styled composer, timeline, workbench,
+CSS, or their optional editor/terminal peers. Pass `{ client, workspaceId }` to
+each hook when the host intentionally does not mount `OpenGeniProvider`. The
+exported `SessionClientLike` is deliberately narrow: a tenant-safe proxy needs
+only session events, composer draft/send, queue, pause/resume, and approval
+operations. Hooks outside that baseline expose exact refinements rather than
+requiring the full SDK client: `SessionReadClientLike`, `GoalClientLike`,
+`SessionLineageClientLike`, `FileAttachmentClientLike`,
+`HumanInputSessionClientLike`, and `SessionMcpApprovalPolicyClientLike`. A host
+can therefore implement only the methods used by each hook. A shared event feed
+also avoids requiring a client-owned event stream at runtime. Workspace-level
+Resume is an optional authority.
+
+The styled root surface uses Tailwind v4 and the package CSS entries:
+
 The package ships TypeScript source plus two CSS entries. In your Tailwind v4
 entry CSS:
 
@@ -56,9 +83,12 @@ import {
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" }); // proxy through your API
 
 function OpsChannel({ sessionId }: { sessionId: string }) {
-  const { timeline, sessionStatus, hasOlder, loadingOlder, loadOlder } = useSessionEvents(sessionId);
+  const { timeline, sessionStatus, hasOlder, loadingOlder, loadOlder } =
+    useSessionEvents(sessionId);
   const queue = useTurnQueue(sessionId);
-  const composer = useComposer(sessionId, { effectiveControl: queue.effectiveControl });
+  const composer = useComposer(sessionId, {
+    effectiveControl: queue.effectiveControl,
+  });
   return (
     <div className="flex h-full flex-col">
       {sessionStatus ? <SessionStatus status={sessionStatus} /> : null}
@@ -71,7 +101,10 @@ function OpsChannel({ sessionId }: { sessionId: string }) {
         className="min-h-0 flex-1"
       />
       <QueueSurface queue={queue} composer={composer} />
-      <ChatComposer composer={composer} effectiveControl={queue.effectiveControl} />
+      <ChatComposer
+        composer={composer}
+        effectiveControl={queue.effectiveControl}
+      />
     </div>
   );
 }
@@ -185,7 +218,8 @@ state remains application-owned; durable draft and session state remain in
   `steerTurn`, and `removeTurn`. Mutations carry observed revisions and conflicts
   refetch server truth. Live-updates on `turn.*` and `session.queue.*` events — pass the
   `events` log from `useSessionEvents` to reuse its stream, or let it tail the
-  session itself.
+  session itself. Providerless self-streams reconcile authoritative queue/draft
+  state after the SSE connection opens, closing the initial-read handoff race.
 - `useGoal(sessionId, { events })` — goal state + autonomy counters
   (`autoContinuations`, `noProgressStreak`) with `pause(rationale?)` /
   `resume()`. Goal-less sessions yield `goal: null`. Live-updates on `goal.*`
@@ -256,6 +290,10 @@ intentional changes should regenerate those snapshots and review the diff.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
   host-exposed models by provider.
+- `ModelPolicyPicker` — the full model policy control used by the OpenGeni web
+  app: provider/billing rails, model availability, reasoning effort, and
+  runnable latency modes such as Fast. It accepts either `ClientModel[]` or
+  catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
 - `CommandPalette` — the slash-command palette UI over `useSlashCommands`.
 
@@ -263,6 +301,38 @@ The timeline is extensible: `createToolRegistry` / `defaultToolRegistry` plug
 per-tool renderers, and the rendering primitives (`ActivityDisclosure`,
 `ScreenshotFigure`, `TermBlock`, `LightboxProvider`, …) compose custom rows with
 the same semantics.
+
+Collapsed turn summaries can also be customized per `MessageTimeline` instance.
+Omit `turnSummary` to keep the built-in facets unchanged, use `add`/`remove` for
+small modifications, or `replace` for a complete ordered summary:
+
+```tsx
+import type { TurnSummaryFacet } from "@opengeni/react";
+
+const updatedRecordsFacet: TurnSummaryFacet = {
+  id: "updated-records",
+  summarize: ({ toolCalls }) => {
+    const count = toolCalls.filter((call) => call.name === "records.update").length;
+    return count > 0 ? { content: `${count} records updated` } : null;
+  },
+};
+
+<MessageTimeline
+  items={timeline}
+  turnSummary={{
+    facets: {
+      remove: ["memories"],
+      add: [updatedRecordsFacet],
+    },
+  }}
+/>;
+```
+
+Custom facets receive an immutable normalized activity snapshot, including
+ordered tool arguments, outputs, status, and timing. Added facets follow the
+remaining built-ins in supplied order. Duplicate IDs keep their first
+definition; remove a built-in before adding a custom facet with the same ID.
+`replace` is type-exclusive with `add` and `remove`.
 
 ## Sandbox surfacing
 

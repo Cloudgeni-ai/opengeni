@@ -1,6 +1,5 @@
 import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
 import { useForcedDefaultOpen } from "./disclosure-context";
@@ -164,7 +163,7 @@ export function ActivityDisclosure({
   const inner = (
     <>
       {hasBody ? (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
+        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-[var(--og-duration-disclose)] ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
       ) : (
         <span className="size-3.5 shrink-0" />
       )}
@@ -207,35 +206,38 @@ export function ActivityDisclosure({
     );
   }
 
+  // Native disclosure (not radix-ui Collapsible): importing `radix-ui` from the
+  // timeline registry pulls Popper into the session share-graph and crashes
+  // lazy workspace settings (`createPopperScope is not a function`).
   return (
-    <Collapsible.Root open={open} onOpenChange={setOpen}>
-      <Collapsible.Trigger asChild>
-        <div
-          role="button"
-          tabIndex={0}
-          // Space/Enter activate a native button; Radix doesn't add this for a
-          // non-button asChild child, so we toggle here. preventDefault on Space
-          // stops the page from scrolling.
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              setOpen((prev) => !prev);
-            }
-          }}
-          data-status={dataStatus}
-          className={cn(
-            rowClass,
-            "cursor-pointer outline-none hover:bg-og-surface-1 hover:text-og-fg",
-            "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
-          )}
-        >
-          {inner}
+    <div>
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        data-state={open ? "open" : "closed"}
+        onClick={() => setOpen((prev) => !prev)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((prev) => !prev);
+          }
+        }}
+        data-status={dataStatus}
+        className={cn(
+          rowClass,
+          "cursor-pointer outline-none hover:bg-og-surface-1 hover:text-og-fg",
+          "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
+        )}
+      >
+        {inner}
+      </div>
+      {open ? (
+        <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand">
+          {children}
         </div>
-      </Collapsible.Trigger>
-      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
-        <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2">{children}</div>
-      </Collapsible.Content>
-    </Collapsible.Root>
+      ) : null}
+    </div>
   );
 }
 

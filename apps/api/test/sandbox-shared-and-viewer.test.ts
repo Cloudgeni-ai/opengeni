@@ -11,10 +11,15 @@ import {
 import { MemoryEventBus } from "@opengeni/testing";
 import {
   acquireLease,
+  claimSessionWorkForAttempt,
   commitWarmingToWarm,
   createDb,
   createSession,
+  forceDrainOverLimitViewerOnlyBoxes,
   getSession,
+  listSessionEvents,
+  listSessionMcpServersForRun,
+  listSessionTurns,
   reapStaleLeaseHolders,
   readLease,
   type Database,
@@ -22,8 +27,21 @@ import {
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { createSessionForRequest } from "@opengeni/core";
-import { attachViewer, detachViewer, heartbeatViewer } from "../src/sandbox/viewer";
+import {
+  establishSandboxSessionFromEnvelope,
+  SandboxResumeStateUnavailableError,
+  serializeEstablishedSandboxEnvelope,
+  type EstablishedSandboxSession,
+} from "@opengeni/runtime";
+import {
+  attachViewer,
+  detachViewer,
+  ensureSessionGroupReady,
+  heartbeatViewer,
+} from "../src/sandbox/viewer";
+import { withChannelA } from "../src/sandbox/channel-a";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { HTTPException } from "hono/http-exception";
 
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
 // API-direct viewer-holder lifecycle, driven through the REAL packages/db lease
@@ -48,6 +66,7 @@ let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
+const seededLocalBoxes: EstablishedSandboxSession[] = [];
 
 // The settings the create path + the viewer path read. sandboxBackend:"none"
 // keeps the resolution tests box-free (no real provider); the warm-box viewer
@@ -119,7 +138,9 @@ function grant(accountId: string, workspaceId: string, fromSessionId?: string): 
     workspaceId,
     subjectId: "subject",
     permissions: ["sessions:create", "sessions:read"],
-    ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
+    ...(fromSessionId
+      ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
+      : {}),
   };
 }
 
@@ -137,6 +158,9 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  for (const established of seededLocalBoxes.splice(0)) {
+    await closeSeedBox(established);
+  }
   try {
     await client?.close();
   } catch {
@@ -161,6 +185,30 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     // Singleton group: sandbox_group_id == the new session's own id.
     expect(session.sandboxGroupId).toBe(session.id);
     expect(session.parentSessionId).toBeNull();
+    expect(session.initialTurnId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    // Queued work is not yet the session's active execution pointer.
+    expect(session.activeTurnId).toBeNull();
+  }, 60_000);
+
+  test("realtime-first create returns an idle session without fabricating an initial turn", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSessionForRequest(
+      deps(new MemoryEventBus()),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { startMode: "realtime" },
+    );
+
+    expect(session.status).toBe("idle");
+    expect(session.initialTurnId).toBeNull();
+    expect(session.activeTurnId).toBeNull();
+    expect(await listSessionTurns(db, workspaceId, session.id)).toEqual([]);
+    expect(
+      (await listSessionEvents(db, workspaceId, session.id)).map((event) => event.type),
+    ).toEqual(["session.created"]);
   }, 60_000);
 
   test("from-inside-a-session (parent claim) ⇒ default 'shared' (joins the creator's group)", async () => {
@@ -183,8 +231,368 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     );
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
     expect(b.parentSessionId).toBe(a.id);
+    // The parent uses capability-first defaults, but this worker-signed grant
+    // is narrower. Persist the intersection so runtime null-default handling
+    // cannot let the child out-rank its actual creator.
+    expect(b.firstPartyMcpPermissions).toEqual(["sessions:read", "sessions:create"]);
     // Distinct sessions, same group (one box, two conversations).
     expect(b.id).not.toBe(a.id);
+  }, 60_000);
+
+  test("a child inherits omitted mixed-provider repositories, tools, and encrypted MCP context", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parentGrant: AccessGrant = {
+      ...grant(accountId, workspaceId),
+      permissions: ["sessions:create", "sessions:read", "mcp_servers:attach"],
+    };
+    const parent = await createSessionForRequest(deps(bus), parentGrant, workspaceId, {
+      initialMessage: "manager with provider context",
+      resources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/frontend.git",
+          ref: "main",
+          provider: "github",
+          credentialBindingId: "github-primary",
+          access: "write",
+        },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/backend.git",
+          ref: "main",
+          provider: "gitlab",
+          credentialBindingId: "gitlab-primary",
+          access: "write",
+        },
+        {
+          kind: "repository",
+          uri: "https://dev.azure.com/acme/platform/_git/infra.git",
+          ref: "main",
+          provider: "azure_devops",
+          credentialBindingId: "azure-primary",
+          access: "read",
+        },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/docs.git",
+          ref: "release",
+          provider: "github",
+          credentialBindingId: "github-secondary",
+          access: "read",
+        },
+      ],
+      skills: [
+        {
+          name: "release",
+          files: [{ path: "SKILL.md", content: "# Release\n" }],
+        },
+      ],
+      mcpServers: [
+        {
+          id: "provider-github",
+          name: "Host GitHub",
+          url: "https://mcp.example.test/github",
+          allowedTools: ["get_pull_request", "create_comment"],
+          timeoutMs: 17_000,
+          cacheToolsList: true,
+          requireApproval: ["create_comment"],
+          connectionRef: {
+            connectionId: "github-primary",
+            providerDomain: "github.com",
+            kind: "app_install",
+          },
+        },
+        {
+          id: "private-api",
+          url: "https://mcp.example.test/private",
+          headers: { Authorization: "Bearer inherited-secret" },
+        },
+      ],
+      tools: [
+        { kind: "mcp", id: "provider-github" },
+        { kind: "mcp", id: "private-api" },
+      ],
+    });
+
+    // The child grant deliberately lacks mcp_servers:attach. Omission delegates
+    // only the parent's already-authorized snapshot; it cannot attach a new MCP.
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "worker using the manager context" },
+    );
+
+    expect(child.parentSessionId).toBe(parent.id);
+    expect(child.resources).toEqual(parent.resources);
+    expect(child.skills).toEqual(parent.skills);
+    expect(child.tools).toEqual(parent.tools);
+    expect([...child.mcpServers].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      {
+        id: "private-api",
+        name: null,
+        url: "https://mcp.example.test/private",
+        headerNames: ["Authorization"],
+        credentialVersion: 1,
+        requireApproval: false,
+        connectionRef: null,
+      },
+      {
+        id: "provider-github",
+        name: "Host GitHub",
+        url: "https://mcp.example.test/github",
+        headerNames: [],
+        credentialVersion: 1,
+        requireApproval: ["create_comment"],
+        connectionRef: {
+          connectionId: "github-primary",
+          providerDomain: "github.com",
+          kind: "app_install",
+        },
+      },
+    ]);
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: child.id,
+      workflowId: child.temporalWorkflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    const inheritedForRun = await listSessionMcpServersForRun(
+      db,
+      workspaceId,
+      child.id,
+      attemptId,
+      Buffer.alloc(32, 7),
+    );
+    expect([...inheritedForRun].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      expect.objectContaining({
+        id: "private-api",
+        headers: { Authorization: "Bearer inherited-secret" },
+      }),
+      expect.objectContaining({
+        id: "provider-github",
+        allowedTools: ["get_pull_request", "create_comment"],
+        timeoutMs: 17_000,
+        cacheToolsList: true,
+        requireApproval: ["create_comment"],
+        headers: {},
+      }),
+    ]);
+  }, 60_000);
+
+  test("explicit empty child execution-context arrays opt out of inheritance", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      {
+        ...grant(accountId, workspaceId),
+        permissions: ["sessions:create", "sessions:read", "mcp_servers:attach"],
+      },
+      workspaceId,
+      {
+        initialMessage: "manager",
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://gitlab.com/acme/service.git",
+            ref: "main",
+            provider: "gitlab",
+            credentialBindingId: "gitlab-primary",
+          },
+        ],
+        mcpServers: [{ id: "provider-gitlab", url: "https://mcp.example.test/gitlab" }],
+        tools: [{ kind: "mcp", id: "provider-gitlab" }],
+      },
+    );
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "isolated worker",
+        resources: [],
+        tools: [],
+        mcpServers: [],
+        sandbox: "new",
+      },
+    );
+    expect(child.resources).toEqual([]);
+    expect(child.mcpServers).toEqual([]);
+    expect(child.tools).not.toContainEqual({
+      kind: "mcp",
+      id: "provider-gitlab",
+    });
+    expect(child.sandboxGroupId).toBe(child.id);
+  }, 60_000);
+
+  test("explicit child execution-context fields override independently", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      {
+        ...grant(accountId, workspaceId),
+        permissions: ["sessions:create", "sessions:read", "mcp_servers:attach"],
+      },
+      workspaceId,
+      {
+        initialMessage: "manager",
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://dev.azure.com/acme/platform/_git/service.git",
+            ref: "main",
+            provider: "azure_devops",
+            credentialBindingId: "azure-primary",
+          },
+        ],
+        mcpServers: [{ id: "provider-azure", url: "https://mcp.example.test/azure" }],
+        tools: [{ kind: "mcp", id: "provider-azure" }],
+        skills: [
+          {
+            name: "release",
+            files: [{ path: "SKILL.md", content: "# Release\n" }],
+          },
+        ],
+      },
+    );
+
+    const withoutRepositories = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "no repositories", resources: [] },
+    );
+    expect(withoutRepositories.resources).toEqual([]);
+    expect(withoutRepositories.mcpServers).toEqual(parent.mcpServers);
+    expect(withoutRepositories.tools).toEqual(parent.tools);
+    expect(withoutRepositories.skills).toEqual(parent.skills);
+
+    const withoutSelectedTools = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "no selected provider tools or skills", tools: [], skills: [] },
+    );
+    expect(withoutSelectedTools.resources).toEqual(parent.resources);
+    expect(withoutSelectedTools.mcpServers).toEqual(parent.mcpServers);
+    expect(withoutSelectedTools.tools).not.toContainEqual({
+      kind: "mcp",
+      id: "provider-azure",
+    });
+    expect(withoutSelectedTools.skills).toEqual([]);
+  }, 60_000);
+
+  test("a child still needs mcp_servers:attach to replace inheritance with a new endpoint", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "worker",
+        mcpServers: [{ id: "invented", url: "https://mcp.example.test/invented" }],
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+  }, 60_000);
+
+  test("an exact worker-signed caller inherits the frozen initiating subject", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    const [parentTurn] = await listSessionTurns(db, workspaceId, parent.id);
+    if (!parentTurn) throw new Error("Parent turn was not created");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const childGrant: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      subjectLabel: "OpenGeni worker",
+      permissions: ["sessions:create", "sessions:read"],
+      metadata: {
+        sessionId: parent.id,
+        turnId: parentTurn.id,
+        attemptId,
+        executionGeneration: 1,
+      },
+    };
+    const child = await createSessionForRequest(deps(bus), childGrant, workspaceId, {
+      initialMessage: "worker",
+    });
+    expect(child.createdBy).toEqual(parentTurn.initiator);
+    expect(child.createdBy.kind).toBe("subject");
+    expect(child.createdByContext.via).toEqual([
+      {
+        kind: "agent",
+        sessionId: parent.id,
+        turnId: parentTurn.id,
+        attemptId,
+        executionGeneration: 1,
+      },
+    ]);
+    const [childTurn] = await listSessionTurns(db, workspaceId, child.id);
+    expect(childTurn?.initiator).toEqual(parentTurn.initiator);
+  }, 60_000);
+
+  test("an agent session create rejects a caller attempt that no longer owns the turn", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    const [parentTurn] = await listSessionTurns(db, workspaceId, parent.id);
+    if (!parentTurn) throw new Error("Parent turn was not created");
+    const staleGrant: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      subjectLabel: "OpenGeni worker",
+      permissions: ["sessions:create", "sessions:read"],
+      metadata: {
+        sessionId: parent.id,
+        turnId: parentTurn.id,
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+      },
+    };
+    await expect(
+      createSessionForRequest(deps(bus), staleGrant, workspaceId, {
+        initialMessage: "must not be created",
+      }),
+    ).rejects.toMatchObject({ status: 403 });
   }, 60_000);
 
   test("explicit 'new' from inside a session opts OUT of sharing", async () => {
@@ -366,8 +774,15 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     // Simulate a LEGACY env-blind share: force an env-carrying member row into
     // A's group directly (the env-aware check would refuse this today).
     await admin`
-      insert into sessions (account_id, workspace_id, initial_message, variable_set_id, sandbox_group_id, model, sandbox_backend)
-      values (${accountId}, ${workspaceId}, 'legacy env-blind member', ${environmentId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
+      insert into sessions (
+        account_id, workspace_id, initial_message, variable_set_id,
+        sandbox_group_id, model, sandbox_backend, tool_policy
+      )
+      values (
+        ${accountId}, ${workspaceId}, 'legacy env-blind member', ${environmentId},
+        ${a.sandboxGroupId}, 'gpt-test', 'modal',
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )`;
     const g = {
       ...grant(accountId, workspaceId),
       permissions: [
@@ -447,6 +862,58 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
+  test("a worker-signed child freezes its narrowed parent's effective first-party permissions", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "narrow manager",
+        firstPartyMcpPermissions: ["sessions:create", "sessions:read"],
+      },
+    );
+
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "inherit without widening" },
+    );
+    expect(child.firstPartyMcpPermissions).toEqual(["sessions:create", "sessions:read"]);
+
+    // Even an internally inconsistent grant carrying a wider permission cannot
+    // use the signed parent id to exceed the parent's durable effective grant.
+    await expect(
+      createSessionForRequest(
+        deps(bus),
+        {
+          ...grant(accountId, workspaceId, parent.id),
+          permissions: ["sessions:create", "sessions:read", "sessions:control"],
+        },
+        workspaceId,
+        {
+          initialMessage: "attempted wider child",
+          firstPartyMcpPermissions: ["sessions:create", "sessions:control"],
+        },
+      ),
+    ).rejects.toThrow(/only narrow the parent session grant/);
+  }, 60_000);
+
+  test("top-level omission retains capability-first runtime defaults", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSessionForRequest(
+      deps(new MemoryEventBus()),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "top-level defaults" },
+    );
+    expect(session.firstPartyMcpPermissions).toBeNull();
+  }, 60_000);
+
   test("cross-workspace {groupId} join ⇒ 404 (the mandatory-workspaceId boundary, stress e)", async () => {
     if (!available) return;
     const ws1 = await freshWorkspace();
@@ -520,13 +987,19 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
   }, 60_000);
 });
 
-// Seed a WARM lease row directly (cold->warming CAS, then commit warm) so the
-// viewer attaches via the ATTACHED path — no provider establish needed (backend
-// 'none' has no box). Returns the group id (== a real session's group).
+// Seed a real local WARM lease (cold->warming, provider establish, serialized
+// resume state, then commit), then remove only its modern recovery projection to
+// model a legacy warm row. The viewer ATTACHED path must prove provider existence
+// and command readiness rather than trusting either `warm` or a provider id.
 async function seedWarmBox(
   accountId: string,
   workspaceId: string,
-): Promise<{ sandboxGroupId: string; leaseEpoch: number; sessionId: string }> {
+): Promise<{
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  sessionId: string;
+  established: EstablishedSandboxSession;
+}> {
   const session = await createSession(db, {
     accountId,
     workspaceId,
@@ -534,7 +1007,7 @@ async function seedWarmBox(
     resources: [],
     metadata: {},
     model: "m",
-    sandboxBackend: "none",
+    sandboxBackend: "local",
   });
   const sandboxGroupId = session.sandboxGroupId;
   // Spawner acquires (cold->warming), then commit warm with a (null) envelope.
@@ -545,22 +1018,32 @@ async function seedWarmBox(
     kind: "turn",
     holderId: "seed-turn",
     subjectId: session.id,
-    backend: "none",
+    backend: "local",
     leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
+  const established = await establishSandboxSessionFromEnvelope(settings, null, {
+    sessionId: session.id,
+    recovery: "create-or-restore",
+    backendOverride: "local",
+  });
+  seededLocalBoxes.push(established);
+  const resumeState = await serializeEstablishedSandboxEnvelope(established);
   const committed = await commitWarmingToWarm(db, {
     accountId,
     workspaceId,
     sandboxGroupId,
     expectedEpoch: acquired.lease.leaseEpoch,
-    instanceId: "inst-warm",
+    instanceId: established.instanceId,
     dataPlaneUrl: null,
-    resumeBackendId: "none",
-    resumeState: { backendId: "none" },
+    resumeBackendId: established.backendId,
+    resumeState,
     leaseTtlMs: 5_000,
   });
   expect(committed.committed).toBe(true);
+  await admin`update sandbox_leases
+    set resume_state = resume_state - 'opengeniRecovery'
+    where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}`;
   // Drop the seed turn holder so the box is warm with NO turn — a viewer-only
   // candidate for draining once no viewer holds it.
   // (Use release via a fresh acquire/release would re-warm; instead delete the
@@ -570,16 +1053,102 @@ async function seedWarmBox(
     and kind = 'turn' and holder_id = 'seed-turn'`;
   await admin`update sandbox_leases set refcount = 0, turn_holders = 0
     where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}`;
-  return { sandboxGroupId, leaseEpoch: committed.lease!.leaseEpoch, sessionId: session.id };
+  return {
+    sandboxGroupId,
+    leaseEpoch: committed.lease!.leaseEpoch,
+    sessionId: session.id,
+    established,
+  };
+}
+
+async function closeSeedBox(established: EstablishedSandboxSession): Promise<void> {
+  const session = established.session as { close?: () => Promise<void>; closed?: boolean };
+  if (session.close && !session.closed) await session.close().catch(() => undefined);
 }
 
 describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => {
+  test("attached Channel-A path with instance_id but null resume_state fails closed and preserves the keeper", async () => {
+    if (!available) return;
+    const localSettings = testSettings({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      sandboxLeaseTtlMs: 5_000,
+      sandboxIdleGraceMs: 500,
+    });
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "channel-a null resume",
+      resources: [],
+      metadata: {},
+      model: "m",
+      sandboxBackend: "local",
+    });
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "channel-a-keeper",
+      subjectId: session.id,
+      backend: "local",
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(acquired.role).toBe("spawner");
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "channel-a-box-null-resume",
+      resumeBackendId: "unix_local",
+      resumeState: null,
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(committed.committed).toBe(true);
+
+    let caught: unknown;
+    try {
+      await withChannelA(
+        { db, settings: localSettings, bus: new MemoryEventBus() },
+        {
+          accountId,
+          workspaceId,
+          session: session as never,
+          subjectId: "channel-a-test",
+        },
+        async () => "unreachable",
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SandboxResumeStateUnavailableError);
+    const after = await readLease(db, workspaceId, session.sandboxGroupId);
+    expect(after).toMatchObject({
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      viewerHolders: 0,
+      leaseEpoch: committed.lease!.leaseEpoch,
+      instanceId: "channel-a-box-null-resume",
+    });
+    const [keeper] = await admin<{ holder_id: string }[]>`
+      select holder_id from sandbox_lease_holders
+      where lease_id = ${committed.lease!.id}`;
+    expect(keeper?.holder_id).toBe("channel-a-keeper");
+  }, 60_000);
+
   test("a viewer holder keeps a WARM box alive with NO turn running; the reaper does NOT terminate it", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     expect(session).toBeTruthy();
+    const legacy = await readLease(db, workspaceId, sandboxGroupId);
+    expect(legacy?.liveness).toBe("warm");
+    expect(legacy?.recovery.provider.status).toBe("unknown");
+    expect(legacy?.recovery.workspace.status).toBe("unknown");
 
     const attached = await attachViewer(
       { db, settings },
@@ -593,6 +1162,12 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const lease0 = await readLease(db, workspaceId, sandboxGroupId);
     expect(lease0?.viewerHolders).toBe(1);
     expect(lease0?.turnHolders).toBe(0);
+    expect(lease0?.leaseEpoch).toBe(legacy?.leaseEpoch);
+    expect(lease0?.recovery).toMatchObject({
+      provider: { status: "exists", instanceId: legacy?.instanceId },
+      restore: { status: "not_required" },
+      workspace: { status: "ready", verifiedRevision: null },
+    });
 
     // Refresh the viewer holder so its heartbeat stays fresh across the sweep,
     // then run the reaper. With a live viewer holder the box must NOT drain.
@@ -615,6 +1190,79 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const lease1 = await readLease(db, workspaceId, sandboxGroupId);
     expect(lease1?.liveness).toBe("warm");
     expect(lease1?.viewerHolders).toBe(1);
+  }, 60_000);
+
+  test("an over-limit viewer receives the typed billing response and cannot re-arm until a fresh evaluation clears the gate", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+
+    await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId,
+      balanceMicros: 0,
+      enforceBalance: true,
+      maxWarmSecondsPerWorkspace: 0,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+
+    let blocked: unknown;
+    try {
+      await attachViewer({ db, settings }, { accountId, workspaceId, session: session! });
+    } catch (error) {
+      blocked = error;
+    }
+    expect(blocked).toBeInstanceOf(HTTPException);
+    expect((blocked as HTTPException).status).toBe(402);
+    expect((blocked as Error).message).toContain("insufficient OpenGeni credits");
+    expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
+      liveness: "draining",
+      refcount: 0,
+      viewerHolders: 0,
+    });
+
+    await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId,
+      balanceMicros: 1,
+      enforceBalance: true,
+      maxWarmSecondsPerWorkspace: 0,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+    const attached = await attachViewer(
+      { db, settings },
+      { accountId, workspaceId, session: session! },
+    );
+    expect(attached.liveness).toBe("warm");
+    expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
+      liveness: "warm",
+      refcount: 1,
+      viewerHolders: 1,
+    });
+  }, 60_000);
+
+  test("fleet readiness returns a live viewer hold until its route owner releases it", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+    const hold = await ensureSessionGroupReady(
+      { db, settings },
+      { accountId, workspaceId, session: session! },
+    );
+
+    expect(hold.lease.liveness).toBe("warm");
+    const held = await readLease(db, workspaceId, sandboxGroupId);
+    expect(held).toMatchObject({
+      liveness: "warm",
+      viewerHolders: 1,
+      refcount: 1,
+      recovery: { provider: { status: "exists" }, workspace: { status: "ready" } },
+    });
+
+    await hold.release();
+    await hold.release();
+    const released = await readLease(db, workspaceId, sandboxGroupId);
+    expect(released).toMatchObject({ liveness: "draining", viewerHolders: 0, refcount: 0 });
   }, 60_000);
 
   test("releasing the viewer → the reaper drains the box (liveness = turn OR viewer)", async () => {

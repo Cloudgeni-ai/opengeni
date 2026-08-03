@@ -1,7 +1,9 @@
+import { DocumentSearchResponse } from "@opengeni/contracts";
 import {
   getDocumentChunk,
   listDocumentBases,
-  searchDocuments,
+  searchEffectiveDocuments,
+  type DocumentAccessFilter,
   type DocumentServices,
 } from "@opengeni/documents";
 import { createKnowledgeMemory, listKnowledgeMemories, type Database } from "@opengeni/db";
@@ -44,12 +46,23 @@ export function buildDocumentsMcpServer(
   accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
-  options: { createdBySessionId?: string | undefined } = {},
+  options: {
+    createdBySessionId?: string | undefined;
+    /** Immutable human subject whose agent is making this retrieval request. */
+    initiatingSubjectId: string;
+  },
 ): McpServer {
   const server = new McpServer({
     name: "opengeni-documents",
     version: "1.0.0",
   });
+  // This server is the agent retrieval surface. Agent-disabled documents are
+  // never reachable. Workspace-visible documents are shared; private
+  // documents are available only to the creating subject's agent.
+  const agentAccess: DocumentAccessFilter = {
+    agentOnly: true,
+    viewerSubjectId: options.initiatingSubjectId,
+  };
 
   server.registerTool(
     "list_document_bases",
@@ -68,17 +81,35 @@ export function buildDocumentsMcpServer(
       description: "Search indexed documents with hybrid, vector, or keyword retrieval.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input),
+    async (input) =>
+      searchContent(
+        db,
+        accountId,
+        workspaceId,
+        documentServices,
+        input,
+        options.initiatingSubjectId,
+        false,
+      ),
   );
 
   server.registerTool(
     "knowledge_search",
     {
       description:
-        "Search company knowledge sources with optional base, source-kind, ACL, and retrieval-mode filters.",
+        "Search the effective authorized organization, current-workspace, and immutable initiating-user personal document scope. Authorization is applied before ranking and every result retains source and authority provenance.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input),
+    async (input) =>
+      searchContent(
+        db,
+        accountId,
+        workspaceId,
+        documentServices,
+        input,
+        options.initiatingSubjectId,
+        true,
+      ),
   );
 
   server.registerTool(
@@ -90,7 +121,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId);
+      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -109,7 +140,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId);
+      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -193,6 +224,7 @@ export function buildDocumentsMcpServer(
 
 async function searchContent(
   db: Database,
+  accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
   input: {
@@ -214,26 +246,30 @@ async function searchContent(
       | undefined;
     aclTags?: string[] | undefined;
   },
+  initiatingSubjectId: string,
+  wrapResponse: boolean,
 ) {
+  const results = await searchEffectiveDocuments(
+    db,
+    {
+      accountId,
+      workspaceId,
+      query: input.query,
+      ...(input.baseIds ? { baseIds: input.baseIds } : {}),
+      ...(input.limit ? { limit: input.limit } : {}),
+      ...(input.mode ? { mode: input.mode } : {}),
+      ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
+      ...(input.aclTags ? { aclTags: input.aclTags } : {}),
+      initiatingSubjectId,
+      surface: "agent",
+    },
+    documentServices,
+  );
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(
-          await searchDocuments(
-            db,
-            {
-              workspaceId,
-              query: input.query,
-              ...(input.baseIds ? { baseIds: input.baseIds } : {}),
-              ...(input.limit ? { limit: input.limit } : {}),
-              ...(input.mode ? { mode: input.mode } : {}),
-              ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
-              ...(input.aclTags ? { aclTags: input.aclTags } : {}),
-            },
-            documentServices,
-          ),
-        ),
+        text: JSON.stringify(wrapResponse ? DocumentSearchResponse.parse({ results }) : results),
       },
     ],
   };

@@ -7,6 +7,7 @@ import {
   acquireSharedTestDatabase,
   freePort,
   MemoryEventBus,
+  runCommand,
   startProcess,
   testSettings,
   waitFor,
@@ -19,6 +20,7 @@ import {
   type BrowserContext,
   type BrowserContextOptions,
   type Page,
+  type Response as PlaywrightResponse,
 } from "playwright";
 import postgres from "postgres";
 
@@ -78,12 +80,24 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
     const webPort = await freePort();
     webBaseUrl = `http://127.0.0.1:${webPort}`;
+    const webEnv = {
+      NODE_ENV: "production",
+      VITE_API_BASE_URL: apiBaseUrl,
+    };
+    const build = await runCommand(["bun", "run", "build"], {
+      cwd: `${repoRoot}/apps/web`,
+      env: webEnv,
+      timeoutMs: 120_000,
+    });
+    if (build.exitCode !== 0) {
+      throw new Error(`Production web build failed:\n${build.stdout}\n${build.stderr}`);
+    }
     web = await startProcess(
       [
         "bun",
         "run",
         "vite",
-        "dev",
+        "preview",
         "--port",
         String(webPort),
         "--strictPort",
@@ -92,7 +106,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       ],
       {
         cwd: `${repoRoot}/apps/web`,
-        env: { VITE_API_BASE_URL: apiBaseUrl },
+        env: webEnv,
         ready: async () =>
           (
             await fetch(webBaseUrl, {
@@ -138,14 +152,79 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     );
 
     const targetUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`;
+    const initialCommits = await reactCommitCount(pageA);
+    expect(initialCommits).toBeGreaterThan(0);
+    const successfulTargetPinMutation = (response: PlaywrightResponse): boolean => {
+      const url = new URL(response.url());
+      return (
+        response.ok() &&
+        response.request().method() === "PUT" &&
+        url.pathname === `/v1/workspaces/${workspaceId}/sessions/${target.id}/pin`
+      );
+    };
     await pageA.goto(targetUrl);
     // Pin from the ordinary list-row action, not just the header. The header
     // must reconcile from the same server-authoritative member relation.
-    await pageA.getByRole("button", { name: /^Actions for Master pin target/ }).click();
-    await pageA.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    const targetActions = pageA.getByRole("button", { name: /^Actions for Master pin target/ });
+    await targetActions.focus();
+    await pageA.keyboard.press("Enter");
+    const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
+    await pinMenuItem.waitFor();
+    await pinMenuItem.focus();
+    const initialPinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
+      timeout: 10_000,
+    });
+    await pageA.keyboard.press("Enter");
+    await initialPinMutation;
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    // Session navigation now starts the real capture-backed workbench while the
+    // session record is still loading. Keep a bounded render budget that includes
+    // that intentional parallel surface instead of measuring the rail alone.
+    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(72);
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
-    await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pinnedA.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
+    await pageA.waitForFunction(() =>
+      document.activeElement?.getAttribute("aria-label")?.startsWith("Actions for Master"),
+    );
+    expect(
+      await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+    ).toStartWith("Actions for Master pin target");
+
+    // A sibling tab in the same browser context must reconcile through the
+    // document-scoped invalidation channel without a reload or the 15s poll.
+    // Wait for its actual rail row so the subscription is mounted before the
+    // mutation, then require an observable list GET inside a strict 10s bound.
+    const sameDeviceTab = await deviceA.newPage();
+    await sameDeviceTab.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+    const sameTabPinned = sameDeviceTab.getByRole("group", { name: "Pinned" });
+    const sameTabPinnedTarget = sameTabPinned.getByRole("link", {
+      name: /^Open Master pin target/,
+    });
+    await sameTabPinnedTarget.waitFor();
+    const sameTabUnpinRefresh = sameDeviceTab.waitForResponse(
+      (response) => successfulSessionPageResponse(response, workspaceId),
+      { timeout: 10_000 },
+    );
+    const unpinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
+      timeout: 10_000,
+    });
+    await pageA.getByRole("button", { name: "Unpin session" }).click();
+    await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await Promise.all([unpinMutation, sameTabUnpinRefresh]);
+    await sameTabPinnedTarget.waitFor({ state: "detached" });
+
+    const sameTabRepinRefresh = sameDeviceTab.waitForResponse(
+      (response) => successfulSessionPageResponse(response, workspaceId),
+      { timeout: 10_000 },
+    );
+    const repinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
+      timeout: 10_000,
+    });
+    await pageA.getByRole("button", { name: "Pin session" }).click();
+    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await Promise.all([repinMutation, sameTabRepinRefresh]);
+    await sameTabPinnedTarget.waitFor();
+    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(128);
 
     // A genuinely separate browser context represents another device: it owns
     // independent document, cache, BroadcastChannel, and focus state, while the
@@ -161,10 +240,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageB.reload();
     await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedB = pageB.getByRole("group", { name: "Pinned" });
-    await pinnedB.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     expect(
       await pinnedB
-        .getByRole("button", { name: /^Open / })
+        .getByRole("link", { name: /^Open / })
         .first()
         .getAttribute("aria-label"),
     ).toStartWith("Open Master pin target");
@@ -186,13 +265,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const search = pageB.getByRole("searchbox", { name: "Search sessions" });
     await search.fill("Master pin target");
     await pageB.getByText("1 matching session.").waitFor();
-    await pinnedB.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
-    expect(
-      await pageB.getByRole("button", { name: /^Open Newer unrelated activity/ }).count(),
-    ).toBe(0);
+    await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
+    expect(await pageB.getByRole("link", { name: /^Open Newer unrelated activity/ }).count()).toBe(
+      0,
+    );
     await search.fill("");
     await pageB
-      .getByRole("button", { name: /^Open Newer unrelated activity/ })
+      .getByRole("link", { name: /^Open Newer unrelated activity/ })
       .waitFor({ timeout: 10_000 });
 
     // Pagination is also exercised through the normal authenticated browser API
@@ -217,9 +296,30 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
     // The rail uses real roving focus. Arrow navigation changes document focus,
     // Home returns to the pin, and Enter activates the currently focused row.
-    const targetRow = pinnedB.getByRole("button", {
+    const targetRow = pinnedB.getByRole("link", {
       name: /^Open Master pin target/,
     });
+
+    // A boundary key is a navigation no-op. If it records the already-current
+    // row as an intent, moving to that row's actions and then refreshing the
+    // list incorrectly steals focus back to the row.
+    const boundaryRow = pageB.locator("[data-sessionpin-session-list] a[data-session-row]").first();
+    const boundarySessionId = await boundaryRow.getAttribute("data-session-row");
+    if (!boundarySessionId) throw new Error("expected a visible boundary session row");
+    await boundaryRow.focus();
+    await pageB.keyboard.press("Home");
+    const boundaryActions = pageB.locator(`button[data-session-actions="${boundarySessionId}"]`);
+    await boundaryActions.focus();
+    const boundaryRefresh = pageB.waitForResponse(
+      (response) => successfulSessionPageResponse(response, workspaceId),
+      { timeout: 10_000 },
+    );
+    await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await boundaryRefresh;
+    expect(
+      await pageB.evaluate(() => document.activeElement?.getAttribute("data-session-actions")),
+    ).toBe(boundarySessionId);
+
     await targetRow.focus();
     await pageB.keyboard.press("ArrowDown");
     expect(
@@ -244,7 +344,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await createSessionThroughApi(pageB, apiBaseUrl, workspaceId, "Refresh-only activity");
     await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
     await pageB
-      .getByRole("button", { name: /^Open Refresh-only activity/ })
+      .getByRole("link", { name: /^Open Refresh-only activity/ })
       .waitFor({ timeout: 10_000 });
     expect(await pageB.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
       focusedBeforeRefresh,
@@ -256,10 +356,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     for (const theme of ["light", "dark"] as const) {
       await setTheme(pageB, theme);
       await expectNoPageOverflow(pageB);
-      await expectNoAxeViolations(pageB, [
-        "[data-sessionpin-session-header]",
-        "[data-sessionpin-session-list]",
-      ]);
+      await expectNoAxeViolations(pageB, ["header", "[data-sessionpin-session-list]"]);
       await pageB.screenshot({
         path: `/tmp/sessionpin-session-pin-desktop-${theme}.png`,
         fullPage: true,
@@ -277,9 +374,22 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageB.getByRole("button", { name: "Unpin session" }).click();
     await pageB.getByRole("button", { name: "Pin session" }).waitFor();
 
-    // Unpin is immediate and reconciles back to the first device on refresh.
-    await pageA.reload();
+    // A different device has no shared browser channel. Returning focus must
+    // trigger a real server reconciliation without reloading the document.
+    const crossDeviceRefresh = pageA.waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("pinsOnly") === "true"
+        );
+      },
+      { timeout: 10_000 },
+    );
+    await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await crossDeviceRefresh;
     await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA.getByRole("group", { name: "Pinned" }).waitFor({ state: "detached" });
     expect(await pageA.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Pin from the header as a fresh OCC revision, then prove both the second
@@ -292,10 +402,430 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await otherPage.getByRole("button", { name: "Pin session" }).waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
+    expect(browserPageErrors.get(deviceA)).toEqual([]);
+    expect(browserPageErrors.get(deviceB)).toEqual([]);
+    expect(browserPageErrors.get(otherMember)).toEqual([]);
+
     await otherMember.close();
     await deviceB.close();
     await deviceA.close();
   }, 150_000);
+
+  test("restores row-actions focus after a failed unpin while allowing authoritative GET", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Failed row-menu rollback target",
+      );
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, target, true);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      const actions = page.getByRole("button", { name: /^Actions for Failed row-menu rollback/ });
+      await actions.focus();
+      await page.keyboard.press("Enter");
+      const unpin = page.getByRole("menuitem", { name: "Unpin", exact: true });
+      await unpin.waitFor();
+      await unpin.focus();
+
+      let putAttempts = 0;
+      let authoritativeGets = 0;
+      const pinUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/pin`;
+      await page.route(pinUrl, async (route) => {
+        if (route.request().method() === "PUT") {
+          putAttempts += 1;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "synthetic row-menu failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      const sessionUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`;
+      await page.route(sessionUrl, async (route) => {
+        if (route.request().method() === "GET") authoritativeGets += 1;
+        await route.continue();
+      });
+
+      await page.keyboard.press("Enter");
+      await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "Unpin session" }).waitFor();
+      await page.waitForFunction(
+        (sessionId) => document.activeElement?.getAttribute("data-session-actions") === sessionId,
+        target.id,
+      );
+      expect(putAttempts).toBe(1);
+      expect(authoritativeGets).toBeGreaterThan(0);
+      expect(
+        await page.evaluate(() => document.activeElement?.getAttribute("data-session-actions")),
+      ).toBe(target.id);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  test("rebases one expired cursor while retaining rows and leaves unrelated failures retryable", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const batch = `Expired cursor batch ${Date.now()}`;
+      let sentinel: BrowserSession | null = null;
+      for (let index = 0; index < 106; index += 1) {
+        const created = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          `${batch} ${index === 0 ? "oldest sentinel" : `row ${index + 1}`}`,
+        );
+        if (index === 0) sentinel = created;
+      }
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const search = page.getByRole("searchbox", { name: "Search sessions" });
+      const firstPageResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, {
+            search: batch,
+            cursor: null,
+          }),
+        { timeout: 10_000 },
+      );
+      await search.fill(batch);
+      const firstPage = (await (await firstPageResponse).json()) as BrowserSessionPage;
+      expect(firstPage.sessions).toHaveLength(50);
+      expect(firstPage.nextCursor).toBeTruthy();
+
+      const loadOlder = page.getByRole("button", { name: "Load older sessions" });
+      await loadOlder.waitFor({ timeout: 15_000 });
+      const secondPageResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, {
+            search: batch,
+            cursor: firstPage.nextCursor,
+          }),
+        { timeout: 10_000 },
+      );
+      await loadOlder.click();
+      const secondPage = (await (await secondPageResponse).json()) as BrowserSessionPage;
+      expect(secondPage.sessions).toHaveLength(50);
+      expect(secondPage.nextCursor).toBeTruthy();
+      const retainedId = secondPage.sessions[0]!.id;
+      const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
+      expect(await visibleRows.count()).toBe(100);
+
+      // A generic 500 is not treated as cursor expiry: loaded rows stay put and
+      // the exact current cursor remains explicitly retryable.
+      let injectedFailure = false;
+      await page.route(`${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions?**`, async (route) => {
+        const url = new URL(route.request().url());
+        if (
+          !injectedFailure &&
+          url.searchParams.get("cursor") === secondPage.nextCursor &&
+          url.searchParams.get("search") === batch
+        ) {
+          injectedFailure = true;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "synthetic unrelated failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      await loadOlder.click();
+      const retryOlder = page.getByRole("button", { name: "Retry older sessions" });
+      await retryOlder.waitFor({ timeout: 10_000 });
+      expect(injectedFailure).toBe(true);
+      expect(await visibleRows.count()).toBe(100);
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
+
+      // Delete the exact server-owned snapshot named by the live continuation.
+      // The API must type that response as 410; the client then creates one new
+      // snapshot and immediately continues from its page-two cursor.
+      const expiredCursor = secondPage.nextCursor!;
+      const expiredSnapshotId = decodeBrowserSessionCursor(expiredCursor).snapshotId;
+      const deleted = await shared.admin<{ id: string }[]>`
+        delete from session_list_snapshots where id = ${expiredSnapshotId} returning id`;
+      expect(deleted.map((row) => row.id)).toEqual([expiredSnapshotId]);
+
+      const expiredResponse = page.waitForResponse(
+        (response) =>
+          sessionPageResponse(response, workspaceId, { search: batch, cursor: expiredCursor }),
+        { timeout: 10_000 },
+      );
+      const freshFirstResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, { search: batch, cursor: null }),
+        { timeout: 10_000 },
+      );
+      const rebasedSecondResponse = page.waitForResponse(
+        (response) => {
+          const cursor = new URL(response.url()).searchParams.get("cursor");
+          return (
+            cursor !== null &&
+            cursor !== expiredCursor &&
+            successfulSessionPageResponse(response, workspaceId, { search: batch, cursor })
+          );
+        },
+        { timeout: 10_000 },
+      );
+      await retryOlder.click();
+      expect((await expiredResponse).status()).toBe(410);
+      const freshFirst = (await (await freshFirstResponse).json()) as BrowserSessionPage;
+      const rebasedSecond = (await (await rebasedSecondResponse).json()) as BrowserSessionPage;
+      expect(freshFirst.nextCursor).toBeTruthy();
+      expect(decodeBrowserSessionCursor(freshFirst.nextCursor!).snapshotId).not.toBe(
+        expiredSnapshotId,
+      );
+      expect(rebasedSecond.sessions).toHaveLength(50);
+      expect(await visibleRows.count()).toBe(100);
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
+
+      // The rebased page-two response exposes the last cursor. All 106 matching
+      // rows remain reachable exactly once, including the oldest sentinel.
+      expect(rebasedSecond.nextCursor).toBeTruthy();
+      const finalPageResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, {
+            search: batch,
+            cursor: rebasedSecond.nextCursor,
+          }),
+        { timeout: 10_000 },
+      );
+      await page.getByRole("button", { name: "Load older sessions" }).click();
+      const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
+      expect(finalPage.sessions).toHaveLength(6);
+      expect(finalPage.nextCursor).toBeNull();
+      await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor();
+      const visibleIds = await visibleRows.evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-session-row")),
+      );
+      expect(visibleIds).toHaveLength(106);
+      expect(new Set(visibleIds).size).toBe(106);
+    } finally {
+      await context.close();
+    }
+  }, 180_000);
+
+  test("keeps lazy hierarchy, nested pins, keyboard order, and nested-list semantics truthful", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const manager = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Pinned hierarchy manager",
+      );
+      const ordinaryChild = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Ordinary manager child",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: manager.id,
+      });
+      const intermediary = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Lazy hierarchy intermediary",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: manager.id,
+      });
+      const intermediarySibling = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Ordinary intermediary child",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: intermediary.id,
+      });
+      const descendant = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Pinned hierarchy descendant",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: intermediary.id,
+      });
+      const leaf = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Descendant-owned leaf",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: descendant.id,
+      });
+
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, manager, true);
+      await Bun.sleep(10);
+      const pinnedDescendant = await setSessionPinThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        descendant,
+        true,
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`);
+
+      const pinnedList = page.getByRole("list", { name: "Pinned sessions" });
+      await pinnedList.waitFor();
+      const topLevelPin = (sessionId: string) =>
+        pinnedList.locator(`:scope > [role="listitem"] > div > a[data-session-row="${sessionId}"]`);
+      const topLevelPinItem = (sessionId: string) => topLevelPin(sessionId).locator("xpath=../..");
+      await topLevelPin(descendant.id).waitFor();
+      await topLevelPin(manager.id).waitFor();
+      const hierarchyPinOrder = await pinnedList
+        .locator(':scope > [role="listitem"] > div > a[data-session-row]')
+        .evaluateAll(
+          (rows, hierarchyIds) =>
+            rows
+              .map((row) => row.getAttribute("data-session-row"))
+              .filter((id): id is string => id !== null && hierarchyIds.includes(id)),
+          [descendant.id, manager.id],
+        );
+      // Other scenarios deliberately retain their own pins in this real
+      // workspace. Assert the deterministic order of this hierarchy's two
+      // explicit pin roots without assuming the authenticated member has no
+      // unrelated personal pins.
+      expect(hierarchyPinOrder).toEqual([descendant.id, manager.id]);
+
+      // The manager arrives with only a server hierarchy summary. Expanding it
+      // loads the two direct children, but the explicit nested pin remains an
+      // independent top-level shortcut and is pruned from the manager branch.
+      const managerItem = topLevelPinItem(manager.id);
+      await managerItem.getByRole("button", { name: "Expand spawned sessions" }).click();
+      const managerChildren = managerItem.getByRole("list", {
+        name: "Spawned sessions from Pinned hierarchy manager",
+      });
+      await managerChildren.getByRole("link", { name: /^Open Ordinary manager child/ }).waitFor();
+      await managerChildren
+        .getByRole("link", { name: /^Open Lazy hierarchy intermediary/ })
+        .waitFor();
+      expect(await topLevelPin(descendant.id).count()).toBe(1);
+      expect(await managerChildren.locator(`a[data-session-row="${descendant.id}"]`).count()).toBe(
+        0,
+      );
+
+      // The intermediary retains an expand affordance for its ordinary child
+      // even while pin ownership prunes the direct pinned child. Its lazy page
+      // returns both projections, which puts the descendant's positive pin in
+      // the child-page cache without rendering it twice. A later remote unpin
+      // must reconcile that cached revision rather than leave a permanent stale
+      // top-level shortcut.
+      const intermediaryChildPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("parentSessionId") === intermediary.id
+        );
+      });
+      await managerChildren.getByRole("button", { name: "Expand spawned sessions" }).click();
+      await intermediaryChildPage;
+      const intermediaryChildren = managerChildren.getByRole("list", {
+        name: "Spawned sessions from Lazy hierarchy intermediary",
+      });
+      await intermediaryChildren
+        .locator(`a[data-session-row="${intermediarySibling.id}"]`)
+        .waitFor();
+      expect(
+        await intermediaryChildren.locator(`a[data-session-row="${descendant.id}"]`).count(),
+      ).toBe(0);
+
+      // The descendant shortcut owns its unpinned leaf. Its nested list is
+      // explicit to assistive technology, and keyboard order includes every
+      // expanded descendant once before advancing to the next pin root.
+      const descendantItem = topLevelPinItem(descendant.id);
+      await descendantItem.getByRole("button", { name: "Expand spawned sessions" }).click();
+      const descendantChildren = descendantItem.getByRole("list", {
+        name: "Spawned sessions from Pinned hierarchy descendant",
+      });
+      await descendantChildren.locator(`a[data-session-row="${leaf.id}"]`).waitFor();
+      const descendantRow = topLevelPin(descendant.id);
+      await descendantRow.focus();
+      await page.keyboard.press("ArrowDown");
+      expect(
+        await page.evaluate(() => document.activeElement?.getAttribute("data-session-row")),
+      ).toBe(leaf.id);
+      await page.keyboard.press("ArrowDown");
+      expect(
+        await page.evaluate(() => document.activeElement?.getAttribute("data-session-row")),
+      ).toBe(manager.id);
+      const visiblePinIds = await pinnedList
+        .locator("a[data-session-row]")
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
+      expect(new Set(visiblePinIds).size).toBe(visiblePinIds.length);
+      await expectNoAxeViolations(page, ["[data-sessionpin-session-list]"]);
+
+      // Unpin from a different device/API context while the manager—not the
+      // descendant—is the active route. Focus reconciliation refreshes the
+      // complete pins-only page, then point-reads the absent cached pin revision.
+      const pinsOnlyRefresh = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("pinsOnly") === "true"
+        );
+      });
+      const descendantPointRead = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          response.ok() &&
+          response.request().method() === "GET" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions/${descendant.id}`
+        );
+      });
+      // Install both observers before the remote mutation. The ordinary 15s
+      // pin poll may otherwise reconcile between the mutation response and the
+      // explicit focus refresh, making a truthful point read invisible to the
+      // acceptance harness.
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, pinnedDescendant, false);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await Promise.all([pinsOnlyRefresh, descendantPointRead]);
+      const topLevelPinnedDescendant = page.locator(
+        `[role="list"][aria-label="Pinned sessions"] > [role="listitem"] > div > a[data-session-row="${descendant.id}"]`,
+      );
+      await waitFor(async () => (await topLevelPinnedDescendant.count()) === 0, {
+        timeoutMs: 10_000,
+      });
+      await intermediaryChildren.locator(`a[data-session-row="${descendant.id}"]`).waitFor();
+      expect(ordinaryChild.id).toBeTruthy();
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
 
   test("renders one truthful queue, goal, and agents stack above the composer", async () => {
     const desktop = await configuredContext(browser, {
@@ -367,26 +897,33 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
       const managerUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`;
       await desktopPage.goto(managerUrl);
-      const queue = desktopPage.getByTestId("queue-surface");
-      const goal = desktopPage.getByTestId("goal-surface");
-      const agents = desktopPage.getByTestId("composer-agents-pill");
+      const chrome = desktopPage.getByTestId("session-chrome");
+      const queueChip = desktopPage.getByTestId("session-chrome-queue");
+      const goalChip = desktopPage.getByTestId("session-chrome-goal");
+      const agentsChip = desktopPage.getByTestId("session-chrome-agents");
       const composer = desktopPage.getByLabel("Message the agent");
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
-      await goal.waitFor();
-      await agents.waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await goalChip.waitFor();
+      await agentsChip.waitFor();
       await composer.waitFor();
-      expect(await desktopPage.getByTestId("queue-surface").count()).toBe(1);
-      expect(await desktopPage.getByTestId("composer-agents-pill").count()).toBe(1);
+      expect(await desktopPage.getByTestId("session-chrome").count()).toBe(1);
+      expect(await desktopPage.getByTestId("session-chrome-agents").count()).toBe(1);
 
       // Enter appends an ordinary human prompt to the one visible queue. The
       // inert workflow client keeps both rows waiting so the browser can inspect
       // the exact server-authoritative order.
       await composer.fill("A second prompt queued from the composer");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
-      await queue.getByRole("button", { name: /2 queued prompts/ }).click();
-      await queue.getByRole("list", { name: "Queued prompts" }).waitFor();
-      const queuedRows = queue.getByRole("listitem");
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
+      await queueChip.click();
+      await chrome.getByRole("list", { name: "Queued prompts" }).waitFor();
+      const queuePanel = chrome.locator('[data-og-session-chrome-panel-frame="queue"]');
+      await waitFor(
+        async () =>
+          (await queuePanel.evaluate((element) => Number(getComputedStyle(element).opacity))) >= 1,
+        { timeoutMs: 2_000 },
+      );
+      const queuedRows = chrome.getByRole("list", { name: "Queued prompts" }).getByRole("listitem");
       expect(await queuedRows.count()).toBe(2);
       expect(await queuedRows.nth(0).innerText()).toContain(
         "Inspect the full session-control surface",
@@ -401,36 +938,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
         await expectNoPageOverflow(desktopPage);
-        await expectNoAxeViolations(desktopPage, ["[data-testid=queue-surface]"]);
+        await expectNoAxeViolations(desktopPage, ["[data-testid=session-chrome]"]);
         await desktopPage.screenshot({
           path: `/tmp/opengeni-session-control-queue-expanded-${theme}.png`,
           fullPage: true,
         });
       }
 
-      // Menu reorder and keyboard drag both mutate the one durable queue. The
-      // server remains the order authority after every operation.
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Move to top" }).click();
+      // Move controls mutate the one durable queue. The server remains the
+      // order authority after every operation.
+      await chrome.getByRole("button", { name: "Move queued prompt 2 up" }).click();
       await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer");
-      const secondHandle = queue.getByRole("button", {
-        name: "Reorder queued prompt 2",
-      });
-      await secondHandle.focus();
-      await desktopPage.keyboard.press("Space");
-      await queue
-        .getByText(
-          "Lifted queued prompt 2 of 2. Use arrow keys to move it, then press Space to drop.",
-          { exact: true },
-        )
-        .waitFor();
-      // Keep focus on the lifted handle for the full gesture. The projected
-      // order is visible immediately, but remains local until Space commits
-      // the move to the durable server-owned queue.
-      await desktopPage.keyboard.press("ArrowUp");
-      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
-      await desktopPage.keyboard.press("Space");
-      await queue.getByText("Queued prompt moved to position 1.", { exact: true }).waitFor();
+      await chrome.getByRole("button", { name: "Move queued prompt 1 down" }).click();
       await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 
       // Edit is a checkout: it removes the exact queue row and restores the
@@ -438,40 +957,43 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // A pre-existing draft is never silently destroyed: the queue row stays
       // put until the user explicitly confirms replacement.
       await composer.fill("Unsent local draft that must not be overwritten");
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
-      await queue.getByText("Replace it with this queued prompt?").waitFor();
+      await chrome.getByRole("button", { name: "Edit queued prompt 2" }).click();
+      await chrome.getByText("Replace it with this queued prompt?").waitFor();
       expect(await queuedRows.count()).toBe(2);
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
-      await queue.getByRole("button", { name: "Keep current draft" }).click();
+      await chrome.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
       await composer.fill("");
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
+      await waitForComposerDraftText(desktopPage, apiBaseUrl, workspaceId, manager.id, "");
+      await chrome.getByRole("button", { name: "Edit queued prompt 2" }).click();
       await waitFor(
         async () => (await composer.inputValue()) === "A second prompt queued from the composer",
         { timeoutMs: 10_000 },
       );
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
-      // it preserves that row, moves it to the head, and resumes the branch.
+      // it moves that row to the head and resumes the branch. The accepted row
+      // is presented separately as the active direction, never as still queued.
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
-      await queue.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
-      await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer (edited)");
+      await chrome.getByText("Changing direction…", { exact: true }).waitFor();
+      await chrome.getByText("A second prompt queued from the composer (edited)").waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 
-      // Delete removes only the selected waiting prompt. Add one final prompt so
-      // the same two-row surface can still be exercised in the mobile pass.
-      await queue.getByRole("button", { name: "Delete queued prompt 2" }).click();
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      // Remove deletes only the selected waiting prompt. Add one final prompt so
+      // the queue surface can still be exercised in the mobile pass.
+      await chrome.getByRole("button", { name: "Remove queued prompt 1" }).click();
+      await queueChip.waitFor({ state: "detached" });
       await composer.fill("A replacement prompt after delete");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       const timeline = desktopPage.getByTestId("session-timeline");
       expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
       expect(await timeline.getByText("A second prompt queued from the composer").count()).toBe(0);
@@ -503,7 +1025,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await deepComposer.press("Enter");
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       await desktopPage
-        .getByTestId("queue-surface")
+        .getByTestId("session-chrome-queue")
         .getByText("1 queued prompt", { exact: true })
         .waitFor();
 
@@ -513,25 +1035,22 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
+      // The session record and lineage tree are independent reads. Navigation
+      // must not require one to block the other, so await the lineage-owned chip
+      // before asserting the settled control stack.
+      await agentsChip.waitFor();
 
-      const boxes = await Promise.all([
-        queue.boundingBox(),
-        goal.boundingBox(),
-        agents.boundingBox(),
-        composer.boundingBox(),
-      ]);
+      const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();
       expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
-      expect(boxes[1]!.y).toBeLessThan(boxes[2]!.y);
-      expect(boxes[2]!.y).toBeLessThan(boxes[3]!.y);
+      expect(await goalChip.count()).toBe(1);
+      expect(await agentsChip.count()).toBe(1);
 
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
         await expectNoPageOverflow(desktopPage);
         await expectNoAxeViolations(desktopPage, [
-          "[data-testid=queue-surface]",
-          "[data-testid=goal-surface]",
-          "[data-testid=composer-agents-pill]",
+          "[data-testid=session-chrome]",
           "textarea[aria-label='Message the agent']",
         ]);
         await desktopPage.screenshot({
@@ -556,14 +1075,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await expectContainedInViewport(mobileAncestry, 390);
       await expectNoPageOverflow(mobilePage);
       await mobilePage.goto(managerUrl);
-      await mobilePage.getByTestId("queue-surface").waitFor();
-      await mobilePage.getByTestId("goal-surface").waitFor();
-      await mobilePage.getByTestId("composer-agents-pill").waitFor();
+      await mobilePage.getByTestId("session-chrome").waitFor();
+      await mobilePage.getByTestId("session-chrome-goal").waitFor();
+      await mobilePage.getByTestId("session-chrome-agents").waitFor();
       await expectNoPageOverflow(mobilePage);
-      await expectTouchTarget(
-        mobilePage.getByTestId("queue-surface").getByRole("button", { name: /2 queued prompts/ }),
-      );
-      await expectTouchTarget(mobilePage.getByTestId("composer-agents-pill"));
+      await expectTouchTarget(mobilePage.getByTestId("session-chrome-queue"));
+      await expectTouchTarget(mobilePage.getByTestId("session-chrome-agents"));
       await mobilePage.screenshot({
         path: "/tmp/opengeni-session-control-stack-mobile.png",
         fullPage: true,
@@ -574,9 +1091,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 150_000);
 
-  test("keeps the pin/header/rail usable at 320px in light and dark themes", async () => {
+  test("keeps the pin/header/rail usable at 320px and 375px in light and dark themes", async () => {
+    const mobileViewports = [
+      { width: 320, height: 740, artifactSuffix: "" },
+      { width: 375, height: 812, artifactSuffix: "-375" },
+    ] as const;
     const context = await configuredContext(browser, {
-      viewport: { width: 320, height: 740 },
+      viewport: mobileViewports[0],
       hasTouch: true,
       isMobile: true,
       extraHTTPHeaders: ownerHeaders,
@@ -591,8 +1112,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       `Mobile pin ${"long title ".repeat(20)}`.slice(0, 200),
     );
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+    // Wait for the session shell before sampling React commits — a cold goto can
+    // read the probe at 0 before the first paint registers.
+    await page.getByRole("button", { name: "Pin session" }).waitFor();
+    const initialCommits = await reactCommitCount(page);
+    expect(initialCommits).toBeGreaterThan(0);
     await page.getByRole("button", { name: "Pin session" }).click();
     await page.getByRole("button", { name: "Unpin session" }).waitFor();
+    expect((await reactCommitCount(page)) - initialCommits).toBeLessThanOrEqual(64);
 
     // Stress the compact pinned section with many long rows through the normal
     // browser-authenticated API. No direct DB mutation is used.
@@ -612,61 +1139,64 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await page.reload();
     await page.getByRole("button", { name: "Unpin session" }).waitFor();
 
-    for (const theme of ["light", "dark"] as const) {
-      await setTheme(page, theme);
-      await expectNoPageOverflow(page);
-      const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
-      const inspector = page.getByRole("button", { name: /session panel$/ });
-      const hamburger = page.getByRole("button", { name: "Open navigation" });
-      for (const control of [pin, inspector, hamburger]) {
-        const box = await control.boundingBox();
-        expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    for (const viewport of mobileViewports) {
+      await page.setViewportSize(viewport);
+      for (const theme of ["light", "dark"] as const) {
+        await setTheme(page, theme);
+        await expectNoPageOverflow(page);
+        const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
+        const inspector = page.getByRole("button", { name: /session panel$/ });
+        const hamburger = page.getByRole("button", { name: "Open navigation" });
+        for (const control of [pin, inspector, hamburger]) {
+          const box = await control.boundingBox();
+          expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+          expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+        }
+
+        // Capture the actual opened drawer and pinned section in each theme, not
+        // merely the header behind a closed drawer.
+        await page.getByRole("button", { name: "Open navigation" }).click();
+        const navigation = page.getByRole("navigation", { name: "Primary" });
+        await navigation.waitFor();
+        expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe(
+          "Session navigation",
+        );
+        const targetRow = navigation.getByRole("link", { name: /^Open Mobile pin/ });
+        await targetRow.waitFor();
+        // The active route row can render from its point read before the global
+        // pin page arrives. Wait for a seeded shortcut so the count below
+        // measures the fully loaded pinned section rather than that transient.
+        await navigation.getByRole("link", { name: /^Open Pinned mobile stress 7/ }).waitFor();
+        expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
+        expect(
+          await navigation.getByRole("link", { name: /^Open Pinned mobile stress/ }).count(),
+        ).toBe(7);
+        await expectTouchTarget(targetRow);
+        await expectTouchTarget(
+          navigation.getByRole("button", { name: /^Actions for Mobile pin/ }),
+        );
+        await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
+        await expectContainedInViewport(navigation, viewport.width);
+        await expectNoPageOverflow(page);
+        await expectNoAxeViolations(page, ["header", "[data-sessionpin-session-list]"]);
+        await page.screenshot({
+          path: `/tmp/sessionpin-session-pin-mobile${viewport.artifactSuffix}-${theme}.png`,
+          fullPage: true,
+        });
+
+        await page.keyboard.press("Escape");
+        await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
+        // Radix restores focus after the drawer's close animation settles. Wait
+        // for that observable contract rather than racing the animation frame.
+        await page.waitForFunction(
+          () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
+        );
+        expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+          "Open navigation",
+        );
       }
-
-      // Capture the actual opened drawer and pinned section in each theme, not
-      // merely the header behind a closed drawer.
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      const navigation = page.getByRole("navigation", { name: "Primary" });
-      await navigation.waitFor();
-      expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe("Session navigation");
-      const targetRow = navigation.getByRole("button", {
-        name: /^Open Mobile pin/,
-      });
-      await targetRow.waitFor();
-      // The active route row can render from its point read before the pinned
-      // page arrives. Wait for one seeded shortcut so this assertion measures
-      // the loaded global pin section rather than that intermediate state.
-      await navigation.getByRole("button", { name: /^Open Pinned mobile stress 7/ }).waitFor();
-      expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
-      expect(
-        await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
-      ).toBe(7);
-      await expectTouchTarget(targetRow);
-      await expectTouchTarget(navigation.getByRole("button", { name: /^Actions for Mobile pin/ }));
-      await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
-      await expectContainedInViewport(navigation, 320);
-      await expectNoPageOverflow(page);
-      await expectNoAxeViolations(page, [
-        "[data-sessionpin-session-header]",
-        "[data-sessionpin-session-list]",
-      ]);
-      await page.screenshot({
-        path: `/tmp/sessionpin-session-pin-mobile-${theme}.png`,
-        fullPage: true,
-      });
-
-      await page.keyboard.press("Escape");
-      await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
-      // Radix restores focus after the drawer's close animation settles. Wait
-      // for that observable contract rather than racing the animation frame.
-      await page.waitForFunction(
-        () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
-      );
-      expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-        "Open navigation",
-      );
     }
+    expect(browserPageErrors.get(context)).toEqual([]);
     await context.close();
   }, 90_000);
 
@@ -715,6 +1245,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         subjectId: raceSubject,
         permissions: ["sessions:read"],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
 
@@ -744,7 +1275,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           headers: { authorization: `Bearer ${token}` },
         },
       );
-      await waitForDatabaseQueryWait(barrier, "workspace_memberships");
+      await waitForDatabaseQueryWait(barrier, "pg_advisory_xact_lock_shared");
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 
@@ -831,6 +1362,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         subjectId: raceSubject,
         permissions: ["sessions:read"],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
 
@@ -865,7 +1397,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           body: JSON.stringify({ pinned: true, expectedVersion: 0 }),
         },
       );
-      await waitForDatabaseQueryWait(barrier, "workspace_memberships");
+      await waitForDatabaseQueryWait(barrier, "pg_advisory_xact_lock");
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 
@@ -915,7 +1447,53 @@ type BrowserSessionPage = {
   nextCursor: string | null;
 };
 
+function sessionPageResponse(
+  response: PlaywrightResponse,
+  workspaceId: string,
+  filters: { search?: string; cursor?: string | null } = {},
+): boolean {
+  const url = new URL(response.url());
+  if (
+    response.request().method() !== "GET" ||
+    url.pathname !== `/v1/workspaces/${workspaceId}/sessions` ||
+    url.searchParams.get("view") !== "page"
+  ) {
+    return false;
+  }
+  if (filters.search !== undefined && url.searchParams.get("search") !== filters.search) {
+    return false;
+  }
+  if (
+    filters.cursor !== undefined &&
+    (filters.cursor === null
+      ? url.searchParams.has("cursor")
+      : url.searchParams.get("cursor") !== filters.cursor)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function successfulSessionPageResponse(
+  response: PlaywrightResponse,
+  workspaceId: string,
+  filters: { search?: string; cursor?: string | null } = {},
+): boolean {
+  return response.ok() && sessionPageResponse(response, workspaceId, filters);
+}
+
+function decodeBrowserSessionCursor(cursor: string): { snapshotId: string } {
+  const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+    snapshotId?: unknown;
+  };
+  if (typeof parsed.snapshotId !== "string") {
+    throw new Error("session cursor did not contain a snapshot id");
+  }
+  return { snapshotId: parsed.snapshotId };
+}
+
 const browserDiagnostics = new WeakMap<BrowserContext, string[]>();
+const browserPageErrors = new WeakMap<BrowserContext, string[]>();
 
 async function configuredContext(
   browser: Browser,
@@ -923,7 +1501,9 @@ async function configuredContext(
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
   const diagnostics: string[] = [];
+  const pageErrors: string[] = [];
   browserDiagnostics.set(context, diagnostics);
+  browserPageErrors.set(context, pageErrors);
   context.on("requestfailed", (request) => {
     diagnostics.push(
       `request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText ?? "unknown"})`,
@@ -941,15 +1521,52 @@ async function configuredContext(
       diagnostics.push(`console ${message.type()}: ${message.text()}`);
     }
   });
+  context.on("page", (page) => {
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+  });
+  await context.addInitScript(() => {
+    const windowWithReactProbe = window as Window & {
+      __opengeniReactCommitCount?: number;
+      __REACT_DEVTOOLS_GLOBAL_HOOK__?: {
+        supportsFiber?: boolean;
+        inject?: (renderer: unknown) => number;
+        onCommitFiberRoot?: (...args: unknown[]) => void;
+        onCommitFiberUnmount?: (...args: unknown[]) => void;
+      };
+    };
+    windowWithReactProbe.__opengeniReactCommitCount = 0;
+    const hook = windowWithReactProbe.__REACT_DEVTOOLS_GLOBAL_HOOK__ ?? {};
+    hook.supportsFiber = true;
+    hook.inject ??= () => 1;
+    hook.onCommitFiberRoot = () => {
+      windowWithReactProbe.__opengeniReactCommitCount =
+        (windowWithReactProbe.__opengeniReactCommitCount ?? 0) + 1;
+    };
+    hook.onCommitFiberUnmount ??= () => undefined;
+    windowWithReactProbe.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
+  });
   // The console's configured-token panel stores the supplied value under this
   // key. In this test-only configured deployment there is intentionally no
   // delegation secret, so the API uses its supported x-opengeni-subject
   // principal fallback; the placeholder merely satisfies the real console
   // gate and is never treated as a credential or persisted outside context.
   await context.addInitScript(() => {
+    // Playwright runs init scripts for the initial opaque about:blank document
+    // too. That document has no storage origin; avoid turning this test-owned
+    // setup into a pageerror that obscures application failures.
+    if (window.location.origin === "null") {
+      return;
+    }
     localStorage.setItem("opengeni.accessKey", "configured-test-placeholder");
   });
   return context;
+}
+
+async function reactCommitCount(page: Page): Promise<number> {
+  return await page.evaluate(
+    () =>
+      (window as Window & { __opengeniReactCommitCount?: number }).__opengeniReactCommitCount ?? 0,
+  );
 }
 
 async function workspaceFromPage(page: Page): Promise<string> {
@@ -1045,6 +1662,41 @@ async function setSessionPinThroughApi(
   );
 }
 
+async function waitForComposerDraftText(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+  sessionId: string,
+  expectedText: string,
+): Promise<void> {
+  // Let the 500 ms client debounce settle first. Clearing an unsaved local
+  // draft is an idempotent no-op and correctly emits no PUT; if an earlier
+  // autosave did start, poll until its serialized follow-up is authoritative.
+  await page.waitForTimeout(600);
+  await waitFor(
+    async () => {
+      if (await page.getByText("Saving draft…", { exact: true }).isVisible()) return false;
+      return await page.evaluate(
+        async ({
+          apiBaseUrl: browserApiBaseUrl,
+          workspaceId: targetWorkspaceId,
+          sessionId: targetSessionId,
+          expectedText: targetText,
+        }) => {
+          const response = await fetch(
+            `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}/composer-draft`,
+          );
+          if (!response.ok) return false;
+          const draft = (await response.json()) as { text?: unknown };
+          return draft.text === targetText;
+        },
+        { apiBaseUrl, workspaceId, sessionId, expectedText },
+      );
+    },
+    { timeoutMs: 10_000 },
+  );
+}
+
 async function listPageFromBrowser(
   page: Page,
   apiBaseUrl: string,
@@ -1094,11 +1746,23 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     } else {
       document.documentElement.removeAttribute("data-og-theme");
     }
-    // Theme tokens affect independently composited panels. Wait for two paint
-    // frames so retained visual evidence cannot mix layers from both themes.
+    // Theme tokens affect independently composited panels. Let the browser
+    // start their CSS transitions, then wait for the session chrome transitions
+    // themselves so neither Axe nor retained evidence sees mixed-theme colors.
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
+    const transitions = document.getAnimations().filter((animation) => {
+      const target = animation.effect instanceof KeyframeEffect ? animation.effect.target : null;
+      return (
+        animation.constructor.name === "CSSTransition" &&
+        target instanceof Element &&
+        target.closest('[data-testid="session-chrome"]') !== null
+      );
+    });
+    await Promise.all(
+      transitions.map(async (transition) => await transition.finished.catch(() => undefined)),
+    );
   }, theme);
 }
 

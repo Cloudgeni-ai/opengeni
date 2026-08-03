@@ -1,5 +1,624 @@
 # @opengeni/documents
 
+## 0.3.0
+
+### Minor Changes
+
+- d1f0c3d: Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.
+- 1d0f2ae: Expose one effective document retrieval contract across REST, SDK, and MCP that binds the immutable initiating subject outside caller input, filters organization/workspace/personal authority before ranking, and preserves source plus authorization provenance in typed results.
+
+### Patch Changes
+
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [088d7cb]
+- Updated dependencies [74bd3a5]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/db@0.24.0
+  - @opengeni/config@0.10.4
+  - @opengeni/storage@0.2.57
+
+## 0.2.72
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [acfcf38]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/db@0.23.0
+  - @opengeni/config@0.10.3
+  - @opengeni/storage@0.2.56
+
+## 0.2.71
+
+### Patch Changes
+
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/config@0.10.2
+  - @opengeni/db@0.22.3
+  - @opengeni/storage@0.2.55
+
+## 0.2.70
+
+### Patch Changes
+
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+  - @opengeni/db@0.22.2
+  - @opengeni/storage@0.2.54
+
+## 0.2.69
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+  - @opengeni/db@0.22.1
+  - @opengeni/storage@0.2.53
+
+## 0.2.68
+
+### Patch Changes
+
+- 4fcb6af: Add a bounded, resumable Google Drive inventory and deterministic export planner with
+  tenant- and permission-bound versioned checkpoints.
+- Updated dependencies [e07eb52]
+  - @opengeni/db@0.22.0
+
+## 0.2.67
+
+### Patch Changes
+
+- 6500589: Automatically restore and list each workspace's Default document collection so uploads no longer require creating a base first, while preserving existing base-specific APIs and optional collection organization.
+
+## 0.2.66
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+  - @opengeni/db@0.21.0
+  - @opengeni/config@0.9.3
+  - @opengeni/storage@0.2.52
+
+## 0.2.65
+
+### Patch Changes
+
+- Updated dependencies [dd71248]
+- Updated dependencies [03ed7eb]
+  - @opengeni/contracts@0.29.0
+  - @opengeni/db@0.20.0
+  - @opengeni/config@0.9.2
+  - @opengeni/storage@0.2.51
+
+## 0.2.64
+
+### Patch Changes
+
+- Updated dependencies [1a2d41f]
+  - @opengeni/db@0.19.0
+
+## 0.2.63
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/db@0.18.1
+  - @opengeni/config@0.9.1
+  - @opengeni/storage@0.2.50
+
+## 0.2.62
+
+### Patch Changes
+
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/db@0.18.0
+  - @opengeni/config@0.9.0
+  - @opengeni/storage@0.2.49
+
+## 0.2.61
+
+### Patch Changes
+
+- Updated dependencies [8243ffe]
+  - @opengeni/config@0.8.1
+  - @opengeni/db@0.17.1
+  - @opengeni/storage@0.2.48
+
+## 0.2.60
+
+### Patch Changes
+
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/config@0.8.0
+  - @opengeni/contracts@0.27.0
+  - @opengeni/db@0.17.0
+  - @opengeni/storage@0.2.47
+
+## 0.2.59
+
+### Patch Changes
+
+- Updated dependencies [c52acc0]
+  - @opengeni/config@0.7.22
+  - @opengeni/contracts@0.26.1
+  - @opengeni/db@0.16.2
+  - @opengeni/storage@0.2.46
+
+## 0.2.58
+
+### Patch Changes
+
+- Updated dependencies [02fb98c]
+  - @opengeni/db@0.16.1
+
+## 0.2.57
+
+### Patch Changes
+
+- Updated dependencies [b5175a8]
+- Updated dependencies [f413e6c]
+  - @opengeni/db@0.16.0
+  - @opengeni/contracts@0.26.0
+  - @opengeni/config@0.7.21
+  - @opengeni/storage@0.2.45
+
+## 0.2.56
+
+### Patch Changes
+
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [7b65614]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/db@0.15.6
+  - @opengeni/config@0.7.20
+  - @opengeni/storage@0.2.44
+
+## 0.2.55
+
+### Patch Changes
+
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+  - @opengeni/db@0.15.5
+  - @opengeni/storage@0.2.43
+
+## 0.2.54
+
+### Patch Changes
+
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/db@0.15.4
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+  - @opengeni/storage@0.2.42
+
+## 0.2.53
+
+### Patch Changes
+
+- Updated dependencies [510eae3]
+  - @opengeni/db@0.15.3
+
+## 0.2.52
+
+### Patch Changes
+
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/db@0.15.2
+  - @opengeni/config@0.7.17
+  - @opengeni/storage@0.2.41
+
+## 0.2.51
+
+### Patch Changes
+
+- Updated dependencies [6d167f4]
+  - @opengeni/db@0.15.1
+  - @opengeni/config@0.7.16
+  - @opengeni/storage@0.2.40
+
+## 0.2.50
+
+### Patch Changes
+
+- Updated dependencies [a19971e]
+- Updated dependencies [1f6f13f]
+  - @opengeni/config@0.7.15
+  - @opengeni/contracts@0.24.0
+  - @opengeni/db@0.15.0
+  - @opengeni/storage@0.2.39
+
+## 0.2.49
+
+### Patch Changes
+
+- Updated dependencies [848287f]
+  - @opengeni/db@0.14.7
+
+## 0.2.48
+
+### Patch Changes
+
+- Updated dependencies [2aca964]
+  - @opengeni/db@0.14.6
+
+## 0.2.47
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/db@0.14.5
+  - @opengeni/config@0.7.14
+  - @opengeni/storage@0.2.38
+
+## 0.2.46
+
+### Patch Changes
+
+- Updated dependencies [ea38a4c]
+  - @opengeni/db@0.14.4
+
+## 0.2.45
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+- Updated dependencies [36451c6]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/config@0.7.13
+  - @opengeni/db@0.14.3
+  - @opengeni/storage@0.2.37
+
+## 0.2.44
+
+### Patch Changes
+
+- Updated dependencies [1c4018e]
+  - @opengeni/config@0.7.12
+  - @opengeni/contracts@0.22.1
+  - @opengeni/db@0.14.2
+  - @opengeni/storage@0.2.36
+
+## 0.2.43
+
+### Patch Changes
+
+- Updated dependencies [6908a7a]
+  - @opengeni/db@0.14.1
+
+## 0.2.42
+
+### Patch Changes
+
+- Updated dependencies [29ad09b]
+- Updated dependencies [b2e23f3]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/db@0.14.0
+  - @opengeni/config@0.7.11
+  - @opengeni/storage@0.2.35
+
+## 0.2.41
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/config@0.7.10
+  - @opengeni/db@0.13.4
+  - @opengeni/storage@0.2.34
+
+## 0.2.40
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+  - @opengeni/db@0.13.3
+  - @opengeni/storage@0.2.33
+
+## 0.2.39
+
+### Patch Changes
+
+- Updated dependencies [8b8545e]
+  - @opengeni/db@0.13.2
+
+## 0.2.38
+
+### Patch Changes
+
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+  - @opengeni/config@0.7.8
+  - @opengeni/db@0.13.1
+  - @opengeni/storage@0.2.32
+
+## 0.2.37
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [9326255]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/db@0.13.0
+  - @opengeni/config@0.7.7
+  - @opengeni/storage@0.2.31
+
+## 0.2.36
+
+### Patch Changes
+
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/db@0.12.6
+  - @opengeni/config@0.7.6
+  - @opengeni/storage@0.2.30
+
+## 0.2.35
+
+### Patch Changes
+
+- Updated dependencies [a0f2442]
+  - @opengeni/contracts@0.19.3
+  - @opengeni/config@0.7.5
+  - @opengeni/db@0.12.5
+  - @opengeni/storage@0.2.29
+
+## 0.2.34
+
+### Patch Changes
+
+- Updated dependencies [85cb323]
+  - @opengeni/config@0.7.4
+  - @opengeni/contracts@0.19.2
+  - @opengeni/db@0.12.4
+  - @opengeni/storage@0.2.28
+
+## 0.2.33
+
+### Patch Changes
+
+- Updated dependencies [1386679]
+- Updated dependencies [b7290a3]
+- Updated dependencies [dcde939]
+- Updated dependencies [5685f32]
+- Updated dependencies [de20184]
+  - @opengeni/db@0.12.3
+  - @opengeni/config@0.7.3
+  - @opengeni/contracts@0.19.1
+  - @opengeni/storage@0.2.27
+
+## 0.2.32
+
+### Patch Changes
+
+- Updated dependencies [7c6aa7c]
+  - @opengeni/config@0.7.2
+  - @opengeni/db@0.12.2
+  - @opengeni/storage@0.2.26
+
+## 0.2.31
+
+### Patch Changes
+
+- Updated dependencies [55c6559]
+  - @opengeni/config@0.7.1
+  - @opengeni/db@0.12.1
+  - @opengeni/storage@0.2.25
+
+## 0.2.30
+
+### Patch Changes
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+  - @opengeni/db@0.12.0
+  - @opengeni/config@0.7.0
+  - @opengeni/storage@0.2.24
+
+## 0.2.29
+
+### Patch Changes
+
+- Updated dependencies [744a93d]
+- Updated dependencies [0ed0f01]
+- Updated dependencies [b32938f]
+  - @opengeni/config@0.6.10
+  - @opengeni/contracts@0.18.1
+  - @opengeni/db@0.11.0
+  - @opengeni/storage@0.2.23
+
+## 0.2.28
+
+### Patch Changes
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+  - @opengeni/config@0.6.9
+  - @opengeni/contracts@0.18.0
+  - @opengeni/db@0.10.7
+  - @opengeni/storage@0.2.22
+
+## 0.2.27
+
+### Patch Changes
+
+- Updated dependencies [524599e]
+  - @opengeni/config@0.6.8
+  - @opengeni/contracts@0.17.3
+  - @opengeni/db@0.10.6
+  - @opengeni/storage@0.2.21
+
+## 0.2.26
+
+### Patch Changes
+
+- Updated dependencies [229902b]
+  - @opengeni/db@0.10.5
+  - @opengeni/config@0.6.7
+  - @opengeni/storage@0.2.20
+
+## 0.2.25
+
+### Patch Changes
+
+- Updated dependencies [4966649]
+- Updated dependencies [cb188f9]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/db@0.10.4
+  - @opengeni/config@0.6.6
+  - @opengeni/storage@0.2.19
+
+## 0.2.24
+
+### Patch Changes
+
+- Updated dependencies [495c62c]
+  - @opengeni/db@0.10.3
+
+## 0.2.23
+
+### Patch Changes
+
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+  - @opengeni/db@0.10.2
+  - @opengeni/storage@0.2.18
+  - @opengeni/config@0.6.5
+
+## 0.2.22
+
+### Patch Changes
+
+- Updated dependencies [eed3438]
+  - @opengeni/db@0.10.1
+
+## 0.2.21
+
+### Patch Changes
+
+- Updated dependencies [d1dee7a]
+  - @opengeni/contracts@0.17.0
+  - @opengeni/config@0.6.4
+  - @opengeni/db@0.10.0
+  - @opengeni/storage@0.2.17
+
+## 0.2.20
+
+### Patch Changes
+
+- Updated dependencies [b9cec61]
+- Updated dependencies [c978676]
+  - @opengeni/contracts@0.16.0
+  - @opengeni/config@0.6.3
+  - @opengeni/db@0.9.4
+  - @opengeni/storage@0.2.16
+
+## 0.2.19
+
+### Patch Changes
+
+- Updated dependencies [9f84cc9]
+  - @opengeni/contracts@0.15.0
+  - @opengeni/db@0.9.3
+  - @opengeni/config@0.6.2
+  - @opengeni/storage@0.2.15
+
+## 0.2.18
+
+### Patch Changes
+
+- Updated dependencies [136227e]
+- Updated dependencies [3aee519]
+  - @opengeni/contracts@0.14.0
+  - @opengeni/config@0.6.1
+  - @opengeni/db@0.9.2
+  - @opengeni/storage@0.2.14
+
+## 0.2.17
+
+### Patch Changes
+
+- Updated dependencies [1f0ed18]
+- Updated dependencies [00e1cdc]
+  - @opengeni/db@0.9.1
+
+## 0.2.16
+
+### Patch Changes
+
+- Updated dependencies [1fcd83d]
+- Updated dependencies [32011f1]
+- Updated dependencies [3983021]
+- Updated dependencies [4401ce7]
+- Updated dependencies [c389adc]
+- Updated dependencies [1f9305b]
+- Updated dependencies [8c66185]
+- Updated dependencies [334b63f]
+- Updated dependencies [d249403]
+- Updated dependencies [a11a7fc]
+- Updated dependencies [44ff327]
+- Updated dependencies [dda6398]
+- Updated dependencies [5529945]
+- Updated dependencies [e8ca4f6]
+- Updated dependencies [736f4fe]
+  - @opengeni/contracts@0.13.0
+  - @opengeni/config@0.6.0
+  - @opengeni/db@0.9.0
+  - @opengeni/storage@0.2.13
+
+## 0.2.15
+
+### Patch Changes
+
+- Updated dependencies [77d65f9]
+- Updated dependencies
+- Updated dependencies [dbb6232]
+- Updated dependencies [3e65c23]
+  - @opengeni/db@0.8.0
+  - @opengeni/config@0.5.3
+  - @opengeni/contracts@0.12.0
+  - @opengeni/storage@0.2.12
+
 ## 0.2.14
 
 ### Patch Changes

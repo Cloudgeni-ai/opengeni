@@ -188,6 +188,7 @@ export async function listMachines(
   // null active pointer routes to. Only present in an in-session view.
   if (session) {
     const groupActive = activeSandboxId === null;
+    const groupLease = await readLease(db, workspaceId, session.sandboxGroupId);
     machines.push(
       MachineView.parse({
         sandboxId: session.sandboxGroupId,
@@ -197,6 +198,9 @@ export async function listMachines(
         state: "online",
         active: groupActive,
         isSessionGroup: true,
+        workspaceGeneration: groupLease?.workspaceGeneration ?? null,
+        archiveGeneration: groupLease?.archiveGeneration ?? null,
+        archiveComplete: groupLease?.archiveComplete ?? false,
         // The Modal group box is a cloud Linux box; its precise OS/arch is not
         // surfaced as a metric, so the dashboard shows the canonical linux/x86_64.
         os: "linux",
@@ -249,6 +253,9 @@ export async function listMachines(
         state,
         active: activeSandboxId === sandbox.id,
         isSessionGroup: false,
+        workspaceGeneration: null,
+        archiveGeneration: null,
+        archiveComplete: false,
         os: enrollment.os,
         arch: enrollment.arch,
         hasDisplay: enrollment.hasDisplay,

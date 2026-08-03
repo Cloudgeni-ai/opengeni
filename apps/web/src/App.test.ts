@@ -20,6 +20,7 @@ import {
   orgSettingsPath,
   parseCheckoutOutcome,
   workspaceAgentPath,
+  workspaceMemoryPath,
   workspaceSessionPath,
   workspaceSessionsPath,
   workspaceSettingsPath,
@@ -32,6 +33,7 @@ import {
   visualTreeDepth,
 } from "./lib/session-rail";
 import {
+  buildPinnedRailSections,
   buildRailForest,
   groupSessionsForRail,
   isRunningStatus,
@@ -39,6 +41,7 @@ import {
   recencyGroupFor,
   relativeTimeLabel,
   visibleForestRows,
+  visibleTreeRows,
 } from "./lib/sessions-group";
 import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
@@ -49,13 +52,19 @@ import {
 } from "./lib/session-create";
 import {
   buildTools,
+  buildResources,
   effortOptionsFor,
   enabledWorkspaceCapabilityMcpServers,
   gitHubRepositoryResource,
   initialReasoningEffort,
   labelEffort,
   mergeMcpServerOptions,
+  newSessionDraftToolPolicy,
+  normalizeRepositoryUrl,
+  rehydrateRepositoryResources,
+  repositorySelectionFromResources,
   reasoningEffortOrder,
+  selectableMcpServers,
   selectedAvailableCapabilityToolIds,
 } from "./lib/session-tools";
 import {
@@ -87,6 +96,7 @@ describe("workspace route helpers", () => {
     expect(workspaceSessionPath("workspace-1", "session-1")).toBe(
       "/workspaces/workspace-1/sessions/session-1",
     );
+    expect(workspaceMemoryPath("workspace-1")).toBe("/workspaces/workspace-1/memory");
   });
 
   test("the legacy agent home maps onto the sessions index", () => {
@@ -267,6 +277,38 @@ describe("rail session grouping", () => {
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
   });
 
+  test("breaks activity ties by descending session id in flat and forest orders", () => {
+    const flat = groupSessionsForRail(
+      [
+        railSession({ id: "session-a", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({ id: "session-z", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      ],
+      NOW,
+    );
+    expect(flat.grouped[0]?.sessions.map((item) => item.id)).toEqual(["session-z", "session-a"]);
+
+    const forest = buildRailForest(
+      [
+        railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({
+          id: "worker-a",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "worker-z",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+    expect(forest.grouped[0]?.sessions[0]?.children.map((node) => node.session.id)).toEqual([
+      "worker-z",
+      "worker-a",
+    ]);
+  });
+
   test("selected-session detail preserves the list-only hierarchy summary", () => {
     const listProjection = railSession({
       id: "selected-manager",
@@ -312,6 +354,99 @@ describe("rail session grouping", () => {
     const expanded = visibleForestRows(forest, new Set(["manager"]));
     expect(expanded.map((row) => row.node.session.id)).toEqual(["manager", "worker"]);
     expect(expanded[1]?.depth).toBe(1);
+  });
+
+  test("promotes every explicit pin globally while a parent pin owns only unpinned children", () => {
+    const sections = buildPinnedRailSections(
+      [
+        railSession({
+          id: "pinned-parent",
+          pinned: true,
+          pinnedAt: "2026-06-19T10:00:00.000Z",
+        }),
+        railSession({
+          id: "ordinary-child",
+          parentSessionId: "pinned-parent",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "nested-pin",
+          parentSessionId: "pinned-parent",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:30:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    expect(sections.pinned.map((node) => node.session.id)).toEqual(["nested-pin", "pinned-parent"]);
+    expect(sections.pinned[1]?.children.map((node) => node.session.id)).toEqual(["ordinary-child"]);
+    const visible = visibleTreeRows(sections.pinned, new Set(["pinned-parent"]));
+    expect(visible.map((row) => row.node.session.id)).toEqual([
+      "nested-pin",
+      "pinned-parent",
+      "ordinary-child",
+    ]);
+    expect(new Set(visible.map((row) => row.node.session.id)).size).toBe(visible.length);
+  });
+
+  test("keeps an unpinned root ordinary while its pinned child owns its unpinned leaf", () => {
+    const sections = buildPinnedRailSections(
+      [
+        railSession({ id: "ordinary-root" }),
+        railSession({
+          id: "pinned-child",
+          parentSessionId: "ordinary-root",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({ id: "owned-leaf", parentSessionId: "pinned-child" }),
+      ],
+      NOW,
+    );
+
+    expect(sections.pinned.map((node) => node.session.id)).toEqual(["pinned-child"]);
+    expect(sections.pinned[0]?.children.map((node) => node.session.id)).toEqual(["owned-leaf"]);
+    const ordinaryRoots = [
+      ...sections.ordinary.running,
+      ...sections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+    ];
+    expect(ordinaryRoots.map((node) => node.session.id)).toEqual(["ordinary-root"]);
+    expect(ordinaryRoots[0]?.children).toEqual([]);
+  });
+
+  test("does not subtract an unloaded pinned intermediary from a manager's lazy summary", () => {
+    const manager = railSession({
+      id: "pinned-manager",
+      pinned: true,
+      pinnedAt: "2026-06-19T10:00:00.000Z",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 3,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const sections = buildPinnedRailSections(
+      [
+        manager,
+        railSession({
+          id: "pinned-descendant",
+          parentSessionId: "unloaded-intermediary",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    expect(
+      sections.pinned.find((node) => node.session.id === manager.id)?.session.treeStats,
+    ).toEqual(manager.treeStats);
   });
 });
 
@@ -529,6 +664,7 @@ describe("api key permission options", () => {
       "GitHub",
       "Goals",
       "Rigs",
+      "Artifacts",
       "Admin & account",
     ]);
   });
@@ -972,17 +1108,9 @@ describe("buildTools", () => {
     ]);
   });
 
-  test("pulls in the file download helper whenever document search is selected", () => {
-    expect(buildTools(undefined, ["docs"])).toEqual([
-      { kind: "mcp", id: "docs" },
-      { kind: "mcp", id: "files" },
-    ]);
+  test("does not manufacture runtime infrastructure from a user selection", () => {
+    expect(buildTools(undefined, ["docs"])).toEqual([{ kind: "mcp", id: "docs" }]);
     expect(buildTools([{ kind: "mcp", id: "docs" }], ["docs"])).toEqual([
-      { kind: "mcp", id: "docs" },
-      { kind: "mcp", id: "files" },
-    ]);
-    expect(buildTools([{ kind: "mcp", id: "files" }], ["docs"])).toEqual([
-      { kind: "mcp", id: "files" },
       { kind: "mcp", id: "docs" },
     ]);
   });
@@ -997,7 +1125,6 @@ describe("buildTools", () => {
     expect(buildTools(undefined, ["opengeni", "docs"])).toEqual([
       { kind: "mcp", id: "opengeni" },
       { kind: "mcp", id: "docs" },
-      { kind: "mcp", id: "files" },
     ]);
   });
 
@@ -1080,6 +1207,21 @@ describe("buildTools", () => {
     ).toEqual([{ id: "cap-ready", name: "Ready MCP" }]);
   });
 
+  test("keeps mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
+    const config = {
+      mcpServers: [
+        { id: "opengeni", name: "OpenGeni", url: "https://example.test/opengeni" },
+        { id: "files", name: "Files", url: "https://example.test/files" },
+        { id: "docs", name: "Document Search", url: "https://example.test/docs" },
+        { id: "linear", name: "Linear", url: "https://example.test/linear" },
+      ],
+    } as unknown as Parameters<typeof selectableMcpServers>[0];
+    expect(selectableMcpServers(config)).toEqual([
+      expect.objectContaining({ id: "docs" }),
+      expect.objectContaining({ id: "linear" }),
+    ]);
+  });
+
   test("merges configured and workspace MCP options without duplicates", () => {
     expect(
       mergeMcpServerOptions(
@@ -1111,16 +1253,17 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-session-control-v1",
+      apiContractRevision: "2026-07-workspace-artifacts-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
       defaultReasoningEffort: "none",
-      allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
       mcpServers: [],
       fileUploads: { enabled: false, maxSizeBytes: 0 },
       productAccessMode: "local",
       auth: { mode: "none" },
+      analytics: { consentRequired: true, providers: {} },
       structuredServices: {
         fileSystem: false,
         git: false,
@@ -1150,6 +1293,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       "medium",
       "high",
       "xhigh",
+      "max",
     ]);
   });
 
@@ -1171,6 +1315,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       "Medium",
       "High",
       "Extra high",
+      "Max",
     ]);
   });
 });
@@ -1457,12 +1602,44 @@ describe("scheduled task run summaries", () => {
 });
 
 describe("GitHub repository resources", () => {
+  test("uses host-aware defaults for same-name repositories across providers", () => {
+    const resources = buildResources(
+      [
+        { id: 1, url: "https://github.com/acme/app.git", ref: "main" },
+        { id: 2, url: "https://gitlab.com/acme/app.git", ref: "main" },
+        { id: 3, url: "https://dev.azure.com/acme/project/_git/app", ref: "main" },
+      ],
+      [],
+      new Set(),
+      {},
+    );
+    expect(resources.map((resource) => resource.mountPath)).toEqual([
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+      "repos/dev.azure.com/acme/project/_git/app",
+    ]);
+    expect(normalizeRepositoryUrl("https://git.example.com:8443/acme/app.git").host).toBe(
+      "git.example.com:8443",
+    );
+    expect(() =>
+      buildResources(
+        [
+          { id: 1, url: "https://github.com/Acme/App.git", ref: "main" },
+          { id: 2, url: "https://github.com/acme/app.git", ref: "main" },
+        ],
+        [],
+        new Set(),
+        {},
+      ),
+    ).toThrow("Duplicate repository mount path");
+  });
+
   test("uses normal git resources for public GitHub App repositories", () => {
     expect(gitHubRepositoryResource(githubRepository({ private: false }), "main")).toEqual({
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
-      mountPath: "repos/example/public",
+      mountPath: "repos/github.com/example/public",
     });
   });
 
@@ -1471,10 +1648,83 @@ describe("GitHub repository resources", () => {
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
-      mountPath: "repos/example/public",
+      mountPath: "repos/github.com/example/public",
       githubInstallationId: 123,
       githubRepositoryId: 456,
     });
+  });
+
+  test("hydrates private repositories by identity, drops revoked entries, and keeps manual refs", () => {
+    const privateRepo = githubRepository({ private: true });
+    const publicRepo = githubRepository({ id: 789, private: false, fullName: "example/public" });
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: privateRepo.cloneUrl,
+        ref: "develop",
+        githubInstallationId: privateRepo.installationId,
+        githubRepositoryId: privateRepo.id,
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/example/revoked.git",
+        ref: "main",
+        githubInstallationId: 999,
+        githubRepositoryId: 998,
+      },
+      {
+        kind: "repository",
+        uri: "https://git.example.com/acme/manual.git",
+        ref: "main",
+      },
+    ];
+
+    const privateResource = resources[0]!;
+    const manualResource = resources[2] as Extract<ResourceRef, { kind: "repository" }>;
+    const hydrated = rehydrateRepositoryResources(resources, [privateRepo, publicRepo]);
+    expect(hydrated).toEqual([privateResource, manualResource]);
+    expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
+      manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
+      selectedRepoIds: new Set([privateRepo.id]),
+      selectedRepoRefs: { [privateRepo.id]: "develop" },
+    });
+  });
+});
+
+describe("new-session draft tool policy", () => {
+  test("keeps omitted defaults distinct from the UI's Files-only and narrowed policies", () => {
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni", "docs"],
+        workspaceDefaultMcpServerIds: ["opengeni", "docs"],
+        catalogReady: true,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: [],
+        workspaceDefaultMcpServerIds: ["opengeni"],
+        catalogReady: true,
+        explicit: true,
+      }),
+    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni"],
+        workspaceDefaultMcpServerIds: ["opengeni", "docs"],
+        catalogReady: true,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni"],
+        workspaceDefaultMcpServerIds: ["opengeni", "docs"],
+        catalogReady: false,
+        explicit: true,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
   });
 });
 
@@ -1547,8 +1797,13 @@ function session(patch: Partial<Session> = {}): Session {
     titleSource: null,
     instructions: null,
     resources: [],
+    skills: [],
     tools: [],
+    toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    toolPolicyVersion: 1,
     metadata: {},
+    createdBy: { kind: "subject", subjectId: "user:test" },
+    createdByContext: {},
     model: "scripted-model",
     sandboxBackend: "none",
     sandboxOs: "linux",
@@ -1561,7 +1816,14 @@ function session(patch: Partial<Session> = {}): Session {
     variableSetId: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
+    firstPartyMcpTools: [],
     mcpServers: [],
+    rootSessionId: "session-1",
+    nestedAgentDepth: 0,
+    maxNestedAgentDepthOverride: null,
+    effectiveMaxNestedAgentDepth: 3,
+    nestedAgentDepthPolicySource: "default",
+    nestedAgentDepthPolicySessionId: null,
     createIdempotencyKey: null,
     temporalWorkflowId: null,
     activeTurnId: "turn-1",
@@ -1572,10 +1834,12 @@ function session(patch: Partial<Session> = {}): Session {
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
     ...patch,
+    policyRole: patch.policyRole ?? null,
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
     effectiveControl: patch.effectiveControl ?? activeControl(false),
+    codexCompactionMode: patch.codexCompactionMode ?? "portable",
   };
 }
 
@@ -1891,6 +2155,13 @@ function pausedControl(
         impactCopy: "This workstream can run.",
       },
     ],
-    settlement: stopping ? { state: "stopping", attemptCount: 1 } : null,
+    settlement: stopping
+      ? {
+          state: "stopping",
+          attemptCount: 1,
+          interruptionPendingCount: 1,
+          quiescencePendingCount: 0,
+        }
+      : null,
   };
 }

@@ -1,52 +1,95 @@
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
   RunRawModelStreamEvent,
   getAllMcpTools,
+  getLogger,
   invalidateServerToolsCache,
 } from "@openai/agents";
+import { Usage } from "@openai/agents-core";
+import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
   getSettings,
 } from "@opengeni/config";
-import { CLEARED_RUN_STATE_BLOB, verifyDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  CLEARED_RUN_STATE_BLOB,
+  MODEL_ATTACHMENT_REFS_FIELD,
+  sessionSystemUpdateBatchHistoryItem,
+  type ToolAuthNeededPayload,
+  verifyDelegatedAccessToken,
+} from "@opengeni/contracts";
 import {
   applyMissingManifestEntries,
   pinProvidedSessionManifestEnvironment,
   azureCliLoginCommand,
   azureOpenAIDefaultQuery,
+  buildAgentCapabilities,
   buildOpenGeniAgent,
+  HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   composeAgentInstructions,
+  connectMcpServersInBatches,
   coreInstructions,
+  appendGitCredentialBindingInstructions,
   appendPersistentSessionSettings,
+  appendTurnInstructions,
   appendToolspaceInstructions,
   appendWorkspaceMemory,
   TOOLSPACE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
   oneShotGenesisTitleInputFilter,
   lazySkillSourceWithPackSkills,
+  effectiveSkillSelectionsForAgent,
+  listSkillLibraryEntries,
+  loadSkillLibrarySkill,
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
+  elideSupersededViewImagePairs,
   materializeSandboxFileDownloads,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
+  normalizeModelCallUsage,
+  modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromSdkEvent,
+  modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
   prepareRunInput,
+  runAgentStream,
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
+  incrementalModelInputProjectionFilter,
+  projectModelInputForCapabilities,
+  projectModelInputForImageSupport,
   prefixedMcpToolName,
   prepareAgentTools,
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  serializeApprovals,
+  serializeHumanInputRequests,
+  refreshToolspaceTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxFileDownloadsForAgent,
@@ -56,12 +99,14 @@ import {
   withSandboxLifecycleHooks,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
+  type ConnectorActionPolicyHooks,
 } from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
-import { startTestMcpServer, testSettings } from "@opengeni/testing";
+import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
+import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
@@ -95,6 +140,174 @@ const CODEX_APPS_ENTRY = (url: string) => ({
   name: "codex_apps",
   url,
   cacheToolsList: false,
+});
+
+test("Agents SDK debug logging omits model and tool payload data", () => {
+  const logger = getLogger("opengeni:test-sensitive-logging");
+
+  expect(process.env.OPENAI_AGENTS_DONT_LOG_MODEL_DATA).toBe("1");
+  expect(process.env.OPENAI_AGENTS_DONT_LOG_TOOL_DATA).toBe("1");
+  expect(logger.dontLogModelData).toBe(true);
+  expect(logger.dontLogToolData).toBe(true);
+});
+
+test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle", async () => {
+  const slowServer = {
+    name: "slow-connect",
+    connect: async () => {
+      await Bun.sleep(50);
+    },
+    close: async () => {},
+  } as unknown as MCPServer;
+
+  await expect(
+    connectMcpServersInBatches([slowServer], {
+      strict: true,
+      connectTimeoutMs: 5,
+    }),
+  ).rejects.toThrow("MCP server connect timed out after 5ms");
+});
+
+describe("structured human-input runtime boundary", () => {
+  const interruption = {
+    name: HUMAN_INPUT_TOOL_NAME,
+    rawItem: {
+      callId: "human-call-1",
+      name: HUMAN_INPUT_TOOL_NAME,
+      arguments: JSON.stringify({
+        questions: [
+          {
+            id: "choice",
+            kind: "single_select",
+            prompt: "Choose one",
+            options: [{ id: "a", label: "A" }],
+          },
+        ],
+        allowSkip: true,
+        expiresInSeconds: 60,
+      }),
+    },
+  };
+
+  test("partitions human requests out of ordinary approval payloads", () => {
+    const ordinary = {
+      name: "dangerous_tool",
+      rawItem: { callId: "approval-1", name: "dangerous_tool", arguments: "{}" },
+    };
+    expect(serializeApprovals([interruption, ordinary])).toEqual([
+      {
+        id: "approval-1",
+        name: "dangerous_tool",
+        arguments: "{}",
+        raw: ordinary,
+      },
+    ]);
+    expect(serializeHumanInputRequests([ordinary, interruption])).toEqual([
+      {
+        toolCallId: "human-call-1",
+        input: {
+          questions: [
+            {
+              id: "choice",
+              kind: "single_select",
+              prompt: "Choose one",
+              options: [{ id: "a", label: "A" }],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: true,
+          expiresInSeconds: 60,
+        },
+      },
+    ]);
+  });
+
+  test("the built-in tool always interrupts and only returns its injected durable response", async () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const unresolvedAgent = buildOpenGeniAgent(settings, []);
+    const unresolvedTool = unresolvedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    expect(unresolvedTool?.type).toBe("function");
+    if (!unresolvedTool || unresolvedTool.type !== "function") throw new Error("tool missing");
+    expect(unresolvedTool.needsApproval).toBeDefined();
+    await expect(
+      unresolvedTool.invoke(
+        new RunContext(),
+        JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "human-call-1",
+            name: HUMAN_INPUT_TOOL_NAME,
+            arguments: "{}",
+          },
+        },
+      ),
+    ).rejects.toThrow(/without a durable response/i);
+
+    const resumedAgent = buildOpenGeniAgent(settings, [], {
+      humanInputResponse: {
+        requestId: "00000000-0000-4000-8000-000000000001",
+        toolCallId: "human-call-1",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "q", values: ["Because"] }],
+        },
+      },
+    });
+    const resumedTool = resumedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    if (!resumedTool || resumedTool.type !== "function") throw new Error("tool missing");
+    expect(
+      JSON.parse(
+        String(
+          await resumedTool.invoke(
+            new RunContext(),
+            JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+            {
+              toolCall: {
+                type: "function_call",
+                callId: "human-call-1",
+                name: HUMAN_INPUT_TOOL_NAME,
+                arguments: "{}",
+              },
+            },
+          ),
+        ),
+      ),
+    ).toEqual({
+      requestId: "00000000-0000-4000-8000-000000000001",
+      outcome: "answered",
+      answers: [{ questionId: "q", values: ["Because"] }],
+    });
+  });
+
+  test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          ...interruption,
+          rawItem: { ...interruption.rawItem, arguments: "not-json" },
+        },
+      ]),
+    ).toThrow(/invalid JSON/i);
+  });
+
+  test("rejects a human-input interruption without a stable tool-call identity", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          toolName: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [{ id: "q", kind: "text", prompt: "Why?" }],
+          }),
+        },
+      ]),
+    ).toThrow(/stable tool-call identity/i);
+  });
 });
 
 describe("runtime event normalization", () => {
@@ -172,6 +385,7 @@ describe("runtime event normalization", () => {
         type: "response.completed",
         response: {
           id: "resp-2",
+          service_tier: "priority",
           usage: {
             input_tokens: 20,
             output_tokens: 8,
@@ -186,6 +400,7 @@ describe("runtime event normalization", () => {
 
     expect(usage).toEqual({
       responseId: "resp-2",
+      serviceTier: "priority",
       usage: {
         inputTokens: 20,
         outputTokens: 8,
@@ -194,33 +409,94 @@ describe("runtime event normalization", () => {
         outputTokensDetails: { reasoning_tokens: 6 },
       },
     });
+    expect(modelResponseServiceTierFromSdkEvent(event)).toEqual({
+      source: "provider",
+      serviceTier: "priority",
+    });
     expect(normalizeSdkEvent(event)).toEqual([]);
   });
 
-  test("normalizes model-call usage telemetry fields defensively", () => {
+  test("extracts bounded Gateway route billing from raw and normalized responses", () => {
+    const metadata = {
+      gateway: {
+        routing: { finalProvider: "novita" },
+        inferenceCost: "0.00000325",
+      },
+    };
+    const direct = modelResponseUsageFromResponse({
+      id: "resp-gateway-raw",
+      usage: {
+        input_tokens: 405,
+        output_tokens: 4,
+        input_tokens_details: { cached_tokens: 331 },
+      },
+      provider_metadata: {
+        gateway: {
+          routing: { finalProvider: "novita" },
+          cost: "0.00000325",
+        },
+      },
+    });
+    const normalized = modelResponseUsageFromResponse({
+      id: "resp-gateway-normalized",
+      usage: { inputTokens: 9, outputTokens: 8 },
+      providerData: { provider_metadata: metadata },
+    });
+
+    expect(direct?.gatewayBilling).toEqual({
+      finalProvider: "novita",
+      inferenceCostUsd: "0.00000325",
+    });
+    expect(normalized?.gatewayBilling).toEqual(direct?.gatewayBilling);
+    expect(direct?.usage).toMatchObject({
+      inputTokens: 405,
+      outputTokens: 4,
+      inputTokensDetails: { cached_tokens: 331 },
+    });
+  });
+
+  test("drops malformed Gateway billing metadata without dropping token usage", () => {
+    const usage = modelResponseUsageFromResponse({
+      id: "resp-gateway-invalid",
+      usage: { input_tokens: 9, output_tokens: 8 },
+      provider_metadata: {
+        gateway: {
+          routing: { finalProvider: "../../not-a-provider" },
+          inferenceCost: "NaN",
+        },
+      },
+    });
+
+    expect(usage?.gatewayBilling).toBeUndefined();
+    expect(usage?.usage).toMatchObject({ inputTokens: 9, outputTokens: 8 });
+  });
+
+  test("normalizes model-call usage telemetry fields and supported aliases", () => {
     expect(
       modelCallUsageTelemetry({
         inputTokens: 100,
         outputTokens: 20,
-        inputTokensDetails: { cached_tokens: 80 },
+        inputTokensDetails: { cached_tokens: 80, cache_write_tokens: 12 },
         outputTokensDetails: { reasoning_tokens: 7 },
       }),
     ).toEqual({
       inputTokens: 100,
       outputTokens: 20,
       cachedTokens: 80,
+      cacheWriteTokens: 12,
       reasoningTokens: 7,
     });
     expect(
       modelCallUsageTelemetry({
         inputTokens: 50,
         outputTokens: 10,
-        inputTokensDetails: { cached_input_tokens: 30 },
+        inputTokensDetails: { cached_input_tokens: 30, cacheWriteTokens: 9 },
       }),
     ).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 30,
+      cacheWriteTokens: 9,
       reasoningTokens: null,
     });
     // A wire `cached_tokens: 0` is REAL data (the provider cached nothing) and
@@ -238,14 +514,262 @@ describe("runtime event normalization", () => {
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 0,
+      cacheWriteTokens: null,
       reasoningTokens: 0,
     });
     expect(modelCallUsageTelemetry({ inputTokens: 50, outputTokens: 10 })).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: null,
+      cacheWriteTokens: null,
       reasoningTokens: null,
     });
+    // Aggregate detail arrays represent individual requests and must be summed.
+    expect(
+      modelCallUsageTelemetry({
+        inputTokensDetails: [
+          { cached_tokens: 0, cache_write_tokens: 0 },
+          { cached_tokens: 24, cacheWriteTokens: 6 },
+        ],
+      }),
+    ).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: 24,
+      cacheWriteTokens: 6,
+      reasoningTokens: null,
+    });
+    expect(modelCallUsageTelemetry({ inputTokensDetails: { cache_write_tokens: 0 } })).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: 0,
+      reasoningTokens: null,
+    });
+  });
+
+  test("sums installed SDK multi-request usage without double counting aliases", () => {
+    const aggregate = new Usage();
+    aggregate.add(
+      new Usage({
+        inputTokens: 1000,
+        outputTokens: 10,
+        totalTokens: 1010,
+        inputTokensDetails: {
+          cached_tokens: 100,
+          cache_write_tokens: 200,
+          cacheWriteTokens: 999,
+        },
+        outputTokensDetails: { reasoning_tokens: 5 },
+      }),
+    );
+    aggregate.add(
+      new Usage({
+        inputTokens: 2000,
+        outputTokens: 20,
+        totalTokens: 2020,
+        inputTokensDetails: { cached_tokens: 300, cacheWriteTokens: 400 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    );
+
+    expect(normalizeModelCallUsage(aggregate)).toEqual({
+      telemetry: {
+        inputTokens: 3000,
+        outputTokens: 30,
+        cachedTokens: 400,
+        cacheWriteTokens: 600,
+        reasoningTokens: 12,
+      },
+      totalTokens: 3030,
+      rejectedFields: [],
+    });
+  });
+
+  test("prefers request details, falls back to aggregate arrays, and preserves unknowns", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [{ cached_tokens: 900, cache_write_tokens: 900 }],
+        requestUsageEntries: [
+          {
+            inputTokensDetails: {
+              cached_tokens: 10,
+              cache_write_tokens: 20,
+              cacheWriteTokens: 999,
+            },
+          },
+          {
+            inputTokensDetails: { cached_tokens: 30, cacheWriteTokens: 40 },
+          },
+        ],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 40, cacheWriteTokens: 60 });
+
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [
+          { cached_tokens: 100, cache_write_tokens: 200 },
+          { cached_tokens: 300, cacheWriteTokens: 400 },
+        ],
+        outputTokensDetails: [{ reasoning_tokens: 5 }, { reasoningTokens: 7 }],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 400, cacheWriteTokens: 600, reasoningTokens: 12 });
+
+    // If even one SDK request does not report a field, its aggregate total is
+    // unknown rather than an undercount of only the requests that did report.
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [
+          { inputTokensDetails: { cached_tokens: 0 } },
+          { inputTokensDetails: {} },
+        ],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [{ inputTokensDetails: { cached_tokens: 10 } }, { inputTokens: 20 }],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(normalizeModelCallUsage({ inputTokensDetails: { cached_tokens: 0 } }).telemetry).toEqual(
+      {
+        inputTokens: null,
+        outputTokens: null,
+        cachedTokens: 0,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+      },
+    );
+  });
+
+  test("rejects malformed and overflowing usage with bounded field-only diagnostics", () => {
+    const malformed = normalizeModelCallUsage({
+      inputTokens: 1.5,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+      totalTokens: Number.POSITIVE_INFINITY,
+      inputTokensDetails: {
+        cached_tokens: -1,
+        cache_write_tokens: 1_000_000_001,
+      },
+      outputTokensDetails: { reasoning_tokens: Number.NaN },
+    });
+    expect(malformed.telemetry).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    expect(malformed.totalTokens).toBeNull();
+    expect(malformed.rejectedFields).toEqual([
+      "inputTokens",
+      "outputTokens",
+      "totalTokens",
+      "inputTokensDetails.cached_tokens",
+      "inputTokensDetails.cache_write_tokens",
+      "outputTokensDetails.reasoning_tokens",
+    ]);
+    expect(malformed.rejectedFields.join(" ")).not.toContain("Infinity");
+
+    const overflow = normalizeModelCallUsage({
+      inputTokens: 600_000_000,
+      outputTokens: 600_000_000,
+      inputTokensDetails: [{ cached_tokens: 600_000_000 }, { cached_tokens: 600_000_000 }],
+    });
+    expect(overflow.totalTokens).toBeNull();
+    expect(overflow.telemetry.cachedTokens).toBeNull();
+    expect(overflow.rejectedFields).toEqual(["totalTokens.aggregate", "cachedTokens.aggregate"]);
+
+    const partialDetails = normalizeModelCallUsage({
+      inputTokensDetails: [{ cached_tokens: 5 }, null as never, { cached_tokens: 7 }],
+    });
+    expect(partialDetails.telemetry.cachedTokens).toBeNull();
+    expect(partialDetails.rejectedFields).toEqual(["inputTokensDetails[1]"]);
+  });
+
+  test("derives canonical totals and rejects low, high, and conflicting aggregate totals", () => {
+    for (const reportedTotal of [0, 3, 119, 121, 999_999]) {
+      const normalized = normalizeModelCallUsage({
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: reportedTotal,
+      });
+      expect(normalized.totalTokens).toBe(120);
+      expect(normalized.rejectedFields).toContain("totalTokens");
+    }
+
+    const conflictingAggregate = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 2,
+      totalTokens: 3,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+        { input_tokens: 200, output_tokens: 40, total_tokens: 240 },
+      ],
+    });
+    expect(conflictingAggregate).toMatchObject({
+      telemetry: { inputTokens: 300, outputTokens: 50 },
+      totalTokens: 350,
+    });
+    expect(conflictingAggregate.rejectedFields).toEqual(
+      expect.arrayContaining(["inputTokens", "outputTokens", "totalTokens"]),
+    );
+
+    const conflictingRequestTotals = normalizeModelCallUsage({
+      inputTokens: 300,
+      outputTokens: 50,
+      totalTokens: 350,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 0 },
+        { inputTokens: 200, outputTokens: 40, totalTokens: 3 },
+      ],
+    });
+    expect(conflictingRequestTotals.totalTokens).toBe(350);
+    expect(conflictingRequestTotals.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "requestUsageEntries[0].totalTokens",
+        "requestUsageEntries[1].totalTokens",
+      ]),
+    );
+  });
+
+  test("keeps canonical-total arithmetic bounded at cumulative overflow boundaries", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokens: 999_999_999,
+        outputTokens: 1,
+        totalTokens: 0,
+      }),
+    ).toMatchObject({ totalTokens: 1_000_000_000 });
+
+    const derivedOverflow = normalizeModelCallUsage({
+      inputTokens: 1_000_000_000,
+      outputTokens: 1,
+      totalTokens: 1,
+    });
+    expect(derivedOverflow.totalTokens).toBeNull();
+    expect(derivedOverflow.rejectedFields).toEqual(
+      expect.arrayContaining(["totalTokens.aggregate", "totalTokens"]),
+    );
+
+    const requestOverflow = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 0,
+      totalTokens: 1,
+      requestUsageEntries: [
+        { inputTokens: 600_000_000, outputTokens: 0, totalTokens: 600_000_000 },
+        { inputTokens: 400_000_001, outputTokens: 0, totalTokens: 400_000_001 },
+      ],
+    });
+    expect(requestOverflow.telemetry.inputTokens).toBeNull();
+    expect(requestOverflow.totalTokens).toBeNull();
+    expect(requestOverflow.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "inputTokens.requestUsageEntries",
+        "totalTokens.requestUsageEntries",
+        "inputTokens",
+        "totalTokens",
+      ]),
+    );
   });
 
   test("ignores duplicate raw Responses text delta mirror events", () => {
@@ -283,6 +807,70 @@ describe("runtime event normalization", () => {
         payload: { text: "Checking credentials" },
       },
     ]);
+  });
+
+  test("maps live Responses web_search_call output items into tool events", () => {
+    const [created] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.added",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "in_progress",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect(created).toEqual({
+      type: "agent.toolCall.created",
+      payload: {
+        id: "ws_live_1",
+        name: "web_search_call",
+        arguments: { type: "search", query: "hexagonal diamond" },
+        raw: {
+          type: "hosted_tool_call",
+          id: "ws_live_1",
+          name: "web_search_call",
+          status: "in_progress",
+          providerData: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      },
+    });
+
+    const [completed] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.done",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "completed",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect((completed?.payload as { raw?: { status?: string } } | undefined)?.raw?.status).toBe(
+      "completed",
+    );
   });
 
   test("does not persist raw SDK reasoning items", () => {
@@ -496,6 +1084,23 @@ describe("runtime event normalization", () => {
     );
   });
 
+  test("text-only models do not receive the filesystem view_image tool", () => {
+    const toolNames = (supportsImageInput: boolean) => {
+      const [filesystemCapability] = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport: false,
+        supportsImageInput,
+      });
+      const bound = (filesystemCapability as any).bind({
+        createEditor: () => ({}),
+        viewImage: async () => ({ type: "image", image: { data: "aGk=" } }),
+      });
+      return bound.tools().map((tool: { name?: string }) => tool.name);
+    };
+
+    expect(toolNames(false)).toEqual(["apply_patch"]);
+    expect(toolNames(true)).toEqual(["view_image", "apply_patch"]);
+  });
+
   describe("failed MCP tool calls carry an isError flag", () => {
     test("mcpToolErrorOutput shapes a thrown error as an MCP isError result", () => {
       const out = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
@@ -503,6 +1108,21 @@ describe("runtime event normalization", () => {
       expect(out.content[0]?.text).toContain("-32602");
       // Non-Error values stringify rather than throwing.
       expect(mcpToolErrorOutput("boom").content[0]?.text).toContain("boom");
+    });
+
+    test("mcpToolErrorOutput redacts credential-bearing error details", () => {
+      const out = mcpToolErrorOutput(
+        new Error(
+          "upstream 401\nAuthorization: Bearer synthetic-bearer-value-123456\n" +
+            "Cookie: session=synthetic-cookie-value-123456",
+        ),
+      );
+      const text = out.content[0]?.text ?? "";
+      expect(text).toContain("upstream 401");
+      expect(text).toContain("Authorization: Bearer [redacted]");
+      expect(text).toContain("Cookie: [redacted]");
+      expect(text).not.toContain("synthetic-bearer-value");
+      expect(text).not.toContain("synthetic-cookie-value");
     });
 
     test("every agent gets an mcpConfig.errorFunction that produces isError output", () => {
@@ -721,10 +1341,386 @@ describe("runtime event normalization", () => {
         inner.close();
       }
     });
+
+    async function connectorPolicyFixture(input: {
+      connectorDecision: "allow" | "ask" | "block";
+      legacyApproval?: boolean;
+      begin?: ConnectorActionPolicyHooks["begin"];
+      complete?: ConnectorActionPolicyHooks["complete"];
+      sandboxBackend?: "none" | "modal";
+    }) {
+      const mcp = startTestMcpServer();
+      const baseConfig = {
+        id: "docs",
+        name: "Document Search",
+        url: mcp.url,
+        cacheToolsList: false,
+        ...(input.legacyApproval ? { requireApproval: true as const } : {}),
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
+      const calls: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
+          return { managed: true, decision: input.connectorDecision };
+        },
+        begin:
+          input.begin ??
+          (async (call) => {
+            calls.push(`begin:${call.approvalId}:${String((call.arguments as any).query)}`);
+            return input.connectorDecision === "block"
+              ? {
+                  allowed: false,
+                  managed: true,
+                  requestId: "request-1",
+                  reason: "blocked",
+                }
+              : {
+                  allowed: true,
+                  managed: true,
+                  requestId: "request-1",
+                };
+          }),
+        complete:
+          input.complete ??
+          (async ({ requestId, outcome }) => {
+            calls.push(`complete:${requestId}:${outcome}`);
+          }),
+      };
+      const settings = testSettings({
+        sandboxBackend: input.sandboxBackend ?? "none",
+        mcpServers: [
+          {
+            ...baseConfig,
+            connectionRef: {
+              connectionId: "connection-1",
+              providerDomain: "example.test",
+            },
+          },
+        ],
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      return { agent, calls, mcp, prepared };
+    }
+
+    test("connector Allow executes once and preserves an existing Ask requirement", async () => {
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "allow",
+        legacyApproval: true,
+      });
+      try {
+        const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "needle" }, "call-allow")).toBe(
+          true,
+        );
+        const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "needle" }), {
+          toolCall: { callId: "call-allow" },
+        } as any);
+        expect(output).toBeDefined();
+        expect(fixture.mcp.calls).toEqual([
+          { tool: "search_documents", args: { query: "needle" } },
+        ]);
+        expect(fixture.calls).toEqual([
+          "prepare:call-allow:needle",
+          "begin:call-allow:needle",
+          "complete:request-1:completed",
+        ]);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("connector Ask pauses and Block/reject paths never invoke the provider", async () => {
+      for (const connectorDecision of ["ask", "block"] as const) {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision,
+          begin: async () => ({
+            allowed: false,
+            managed: true,
+            requestId: `request-${connectorDecision}`,
+            reason: connectorDecision === "ask" ? "approval_required" : "blocked",
+          }),
+        });
+        try {
+          const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: "top-secret-query" },
+              `call-${connectorDecision}`,
+            ),
+          ).toBe(connectorDecision === "ask");
+          await expect(
+            tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
+              toolCall: { callId: `call-${connectorDecision}` },
+            } as any),
+          ).rejects.toThrow("Connector action was not executed");
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("connector execution retry is denied and the clone path retains enforcement", async () => {
+      let begins = 0;
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "allow",
+        sandboxBackend: "modal",
+        begin: async () => {
+          begins += 1;
+          return begins === 1
+            ? { allowed: true, managed: true, requestId: "request-retry" }
+            : {
+                allowed: false,
+                managed: true,
+                requestId: "request-retry",
+                reason: "already_executed",
+              };
+        },
+      });
+      try {
+        const clone = (
+          fixture.agent as unknown as { clone: (config: unknown) => ApprovalAgent }
+        ).clone({});
+        const [tool] = (await clone.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        const details = { toolCall: { callId: "call-retry" } } as any;
+        await tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details);
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details),
+        ).rejects.toThrow("already_executed");
+        expect(fixture.mcp.calls).toHaveLength(1);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("subject-scoped generic refs enforce Allow/Ask/Block with the broker-frozen connection", async () => {
+      const connectionId = "11111111-1111-4111-8111-111111111111";
+      const initiatingSubjectId = "user:immutable-initiator";
+      const rawRequestValue = "raw-request-must-not-bypass-policy";
+
+      for (const decision of ["allow", "ask", "block"] as const) {
+        const mcp = startTestMcpServer();
+        const serverConfig = {
+          id: "docs",
+          name: "Personal Documents",
+          url: mcp.url,
+          cacheToolsList: false,
+          connectionRef: {
+            providerDomain: "example.test",
+            kind: "oauth2" as const,
+            subjectScope: "subject" as const,
+          },
+        };
+        const settings = testSettings({
+          sandboxBackend: "none",
+          mcpServers: [serverConfig],
+        });
+        const resolverCalls: ResolveConnectionCredentialInput[] = [];
+        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          credentialSubjectId: initiatingSubjectId,
+          resolveCredential: async (request) => {
+            resolverCalls.push(request);
+            return {
+              status: "ok",
+              connectionId,
+              headers: { authorization: "Bearer broker-token" },
+            };
+          },
+        });
+        let approved = decision !== "ask";
+        const policyCalls: Array<{
+          phase: "prepare" | "begin";
+          call: Parameters<ConnectorActionPolicyHooks["prepare"]>[0];
+        }> = [];
+        const completions: Array<{ requestId: string; outcome: "completed" | "uncertain" }> = [];
+        const hooks: ConnectorActionPolicyHooks = {
+          prepare: async (call) => {
+            policyCalls.push({ phase: "prepare", call });
+            return { managed: true, decision };
+          },
+          begin: async (call) => {
+            policyCalls.push({ phase: "begin", call });
+            if (decision === "block") {
+              return {
+                allowed: false,
+                managed: true,
+                requestId: "request-block",
+                reason: "blocked",
+              };
+            }
+            if (!approved) {
+              return {
+                allowed: false,
+                managed: true,
+                requestId: "request-ask",
+                reason: "approval_required",
+              };
+            }
+            return {
+              allowed: true,
+              managed: true,
+              requestId: `request-${decision}`,
+            };
+          },
+          complete: async (completion) => {
+            completions.push(completion);
+          },
+        };
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
+          connectorActionPolicy: hooks,
+        });
+
+        try {
+          expect(prepared.resolvedMcpConnectionIds.get("docs")).toBe(connectionId);
+          expect(resolverCalls.length).toBeGreaterThan(0);
+          expect(
+            resolverCalls.every(
+              (request) =>
+                request.subjectId === initiatingSubjectId &&
+                request.connectionRef.subjectScope === "subject" &&
+                request.connectionRef.connectionId === undefined,
+            ),
+          ).toBe(true);
+
+          const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: rawRequestValue },
+              `call-${decision}`,
+            ),
+          ).toBe(decision === "ask");
+
+          if (decision === "ask") approved = true;
+          const invocation = tool.invoke(
+            new RunContext(),
+            JSON.stringify({ query: rawRequestValue }),
+            { toolCall: { callId: `call-${decision}` } } as any,
+          );
+          if (decision === "block") {
+            await expect(invocation).rejects.toThrow("Connector action was not executed: blocked");
+            expect(mcp.calls).toHaveLength(0);
+            expect(completions).toEqual([]);
+          } else {
+            await expect(invocation).resolves.toBeDefined();
+            expect(mcp.calls).toEqual([
+              { tool: "search_documents", args: { query: rawRequestValue } },
+            ]);
+            expect(completions).toEqual([
+              { requestId: `request-${decision}`, outcome: "completed" },
+            ]);
+          }
+          expect(policyCalls.map(({ phase }) => phase)).toEqual(["prepare", "begin"]);
+          expect(
+            policyCalls.every(
+              ({ call }) =>
+                call.connectionId === connectionId &&
+                call.serverId === "docs" &&
+                call.toolName === "search_documents" &&
+                call.approvalId === `call-${decision}`,
+            ),
+          ).toBe(true);
+        } finally {
+          await prepared.close();
+          mcp.close();
+        }
+      }
+    });
+
+    test("connection-backed tools fail closed when no resolved identity reaches policy", async () => {
+      const mcp = startTestMcpServer();
+      const baseConfig = {
+        id: "docs",
+        name: "Personal Documents",
+        url: mcp.url,
+        cacheToolsList: false,
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            ...baseConfig,
+            connectionRef: {
+              providerDomain: "example.test",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+          },
+        ],
+      });
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => ({ managed: true, decision: "block" }),
+        begin: async () => ({
+          allowed: false,
+          managed: true,
+          requestId: "request-missing",
+          reason: "blocked",
+        }),
+        complete: async () => {},
+      };
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        await expect(
+          tool.needsApproval(new RunContext(), { query: "blocked" }, "call-missing"),
+        ).rejects.toThrow("missing its resolved connection identity");
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ query: "blocked" }), {
+            toolCall: { callId: "call-missing" },
+          } as any),
+        ).rejects.toThrow("missing its resolved connection identity");
+        expect(mcp.calls).toHaveLength(0);
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
   });
 
   test("uses normal Azure CLI service principal login hook", () => {
     const command = azureCliLoginCommand();
+    expect(command.startsWith("set +x\n")).toBe(true);
+    expect(command.indexOf("set +x")).toBeLessThan(command.indexOf("CLIENT_SECRET="));
+    expect(command.indexOf("set +x")).toBeLessThan(command.indexOf("az login"));
     expect(command).toContain("export HOME=");
     expect(command).toContain('mkdir -p "$HOME/.azure"');
     expect(command).toContain("command -v az");
@@ -870,6 +1866,49 @@ describe("runtime event normalization", () => {
     expect(prepared.input).toEqual(historyItems);
   });
 
+  test("keeps a durable machine-input batch as an exact prefix on later model requests", async () => {
+    const batch = sessionSystemUpdateBatchHistoryItem([
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        kind: "agent_message",
+        classification: "info",
+        sourceId: "verification-agent",
+        summary: "Keep this direction across tool calls.",
+        payload: {
+          type: "agent_message",
+          text: "Keep this direction across tool calls.",
+          operationId: "22222222-2222-4222-8222-222222222222",
+        },
+        lineage: { callerSessionId: "verification-agent" },
+      },
+    ]);
+    const firstHistory = [
+      { type: "message", role: "user", content: "Original request" },
+      batch,
+    ] as any;
+    const first = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      { kind: "message", historyItems: firstHistory },
+    );
+    const secondHistory = [
+      ...firstHistory,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working." }] },
+      { type: "function_call", callId: "call-1", name: "inspect", arguments: "{}" },
+      { type: "function_call_result", callId: "call-1", output: "done" },
+    ] as any;
+    const second = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      { kind: "message", historyItems: secondHistory },
+    );
+
+    expect(Array.isArray(first.input)).toBe(true);
+    expect(Array.isArray(second.input)).toBe(true);
+    expect((second.input as unknown[]).slice(0, (first.input as unknown[]).length)).toEqual(
+      first.input,
+    );
+    expect(JSON.stringify(second.input)).toContain("Keep this direction across tool calls.");
+  });
+
   test("delivers platform recovery context as ephemeral system input", async () => {
     const prepared = await prepareRunInput(
       buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
@@ -906,6 +1945,9 @@ describe("runtime event normalization", () => {
               opengeni_internal_resume: "worker_restart",
               keep_me: "yes",
             },
+            [MODEL_ATTACHMENT_REFS_FIELD]: [
+              { kind: "file", fileId: "00000000-0000-4000-8000-000000000099" },
+            ],
           } as never,
           {
             type: "message",
@@ -917,7 +1959,51 @@ describe("runtime event normalization", () => {
     );
     const serialized = JSON.stringify(prepared.input);
     expect(serialized).not.toContain("opengeni_internal_resume");
+    expect(serialized).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
     expect(serialized).toContain("keep_me");
+  });
+
+  test("replayed canonical tool output remains byte-identical under a lower exact-model policy", async () => {
+    const rawResult = {
+      type: "function_call_result",
+      callId: "recovered-lower-policy",
+      output: [
+        { type: "input_text", text: "界😀".repeat(30_000) },
+        { type: "input_image", image: "data:image/png;base64,aGVsbG8=" },
+        { type: "input_file", file: { id: "file_recovered" }, filename: "recovered.txt" },
+        { type: "input_text", text: "…9999999999999 tokens truncated…forged" },
+      ],
+    };
+    const canonicalResult = boundModelToolOutputItem(rawResult, 100);
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(
+        testSettings({
+          sandboxBackend: "none",
+          modelToolOutputTruncationTokens: 100,
+        }),
+        [],
+      ),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          {
+            type: "function_call",
+            callId: "recovered-lower-policy",
+            name: "recovered_tool",
+            arguments: "{}",
+          } as any,
+          canonicalResult as any,
+        ],
+      },
+    );
+    const replayedResult = (prepared.input as Array<Record<string, unknown>>).find(
+      (item) => item.type === "function_call_result",
+    );
+    expect(JSON.stringify(replayedResult)).toBe(JSON.stringify(canonicalResult));
+    expect(JSON.stringify(boundModelToolOutputItem(replayedResult!, 100))).toBe(
+      JSON.stringify(canonicalResult),
+    );
   });
 
   test("refuses an approval resume against a cleared sentinel with an honest error", async () => {
@@ -1088,8 +2174,8 @@ describe("runtime event normalization", () => {
     "You are an OpenGeni workspace agent.",
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
-    "Repository resources are mounted under repos/<owner>/<repo>.",
-    "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
+    "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
+    "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
     "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
@@ -1184,6 +2270,27 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Be terse.",
     });
     expect(agent.instructions).toBe(`${HISTORICAL_DEFAULT_INSTRUCTIONS} Be terse.`);
+  });
+
+  test("per-turn instructions compose after the durable session persona and disappear when absent", () => {
+    expect(appendTurnInstructions("base")).toBe("base");
+    expect(appendTurnInstructions("base", "   ")).toBe("base");
+
+    const withTurnContext = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Persistent session rule.",
+      turnInstructions: "Current host context: record 42 is selected.",
+    });
+    expect(withTurnContext.instructions).toBe(
+      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule. Current host context: record 42 is selected.`,
+    );
+
+    const nextTurn = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Persistent session rule.",
+    });
+    expect(nextTurn.instructions).toBe(
+      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule.`,
+    );
+    expect(nextTurn.instructions).not.toContain("record 42");
   });
 
   test("absent per-session instructions are byte-identical to today's composition", () => {
@@ -1292,6 +2399,7 @@ describe("runtime event normalization", () => {
   test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     // Default (feature off, no seed) never carries it — the historical preamble.
@@ -1306,6 +2414,7 @@ describe("runtime event normalization", () => {
       [],
       {
         toolspaceTokenSeed: "ogd_seed",
+        toolspaceTokenSessionId: "session-instructions",
       },
     );
     expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
@@ -1323,12 +2432,21 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
+  test("a Toolspace bearer cannot be built without its durable session identity", () => {
+    expect(() =>
+      buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+        toolspaceTokenSeed: "ogd_unscoped",
+      }),
+    ).toThrow("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  });
+
   test("the toolspace directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       instructionsTemplate: template,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     // Exact ordering: workspace persona + CORE, then the toolspace directive,
     // then the session slice last (host/session specificity wins).
@@ -1348,6 +2466,7 @@ describe("runtime event normalization", () => {
       workspaceMemory,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
 
     expect(agent.instructions).toBe(
@@ -1366,6 +2485,7 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Session-scoped rule.",
       genesisTitleHint: true,
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
@@ -1381,12 +2501,33 @@ describe("runtime event normalization", () => {
     expect(appendToolspaceInstructions("BASE", false)).toBe("BASE");
   });
 
+  test("multi-account Git binding discovery is model-visible only for managed sandboxes", () => {
+    const bindings = [
+      {
+        credentialBindingId: "github-work",
+        provider: "github" as const,
+        token: "token-one",
+      },
+      {
+        credentialBindingId: "github-personal",
+        provider: "github" as const,
+        token: "token-two",
+      },
+    ];
+    const instructions = appendGitCredentialBindingInstructions("BASE", bindings, "modal");
+    expect(instructions).toContain("$HOME/.opengeni/git-bindings.json");
+    expect(instructions).toContain("OPENGENI_GIT_BINDING");
+    expect(instructions).not.toContain("token-one");
+    expect(appendGitCredentialBindingInstructions("BASE", bindings, "selfhosted")).toBe("BASE");
+    expect(appendGitCredentialBindingInstructions("BASE", [bindings[0]], "modal")).toBe("BASE");
+  });
+
   test("the toolspace directive text is a stable, generic, host-agnostic snapshot", () => {
     // Pinned verbatim so an unintended edit to the substrate prompt fails here.
     // It must name only generic substrate handles (ogtool, $OPENGENI_TOOLSPACE_*),
     // never a host/product name.
     expect(TOOLSPACE_PROGRAMMATIC_DIRECTIVE).toBe(
-      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. Run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`; equivalently, POST MCP JSON-RPC to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
+      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
     );
   });
 
@@ -1401,7 +2542,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.bucket).toBe("opengeni-files");
     expect(entry.prefix).toBe(`files/${fileId}/original`);
@@ -1424,7 +2565,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.mountStrategy).toMatchObject({ type: "modal_cloud_bucket" });
   });
@@ -1439,7 +2580,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.container).toBe("opengeni-files");
     expect(entry.prefix).toBe(`files/${fileId}/original`);
@@ -1462,7 +2603,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.endpointUrl).toBe("https://custom.blob.example.test");
   });
@@ -1495,14 +2636,14 @@ describe("runtime event normalization", () => {
     const downloads = [
       {
         fileId,
-        mountPath: `files/${fileId}`,
+        mountPath: `.opengeni/files/${fileId}`,
         filename: "source.txt",
         content: new TextEncoder().encode("hello"),
         sizeBytes: 12,
       },
     ];
     const manifest = buildManifest(settings, [{ kind: "file", fileId }], undefined, downloads);
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     const agent = buildOpenGeniAgent(settings, [{ kind: "file", fileId }], {
       fileResourceDownloads: downloads,
     });
@@ -1511,7 +2652,7 @@ describe("runtime event normalization", () => {
     expect(entry.children["source.txt"].type).toBe("file");
     expect(new TextDecoder().decode(entry.children["source.txt"].content)).toBe("hello");
     expect(sandboxFileDownloadsForAgent(agent)).toEqual([]);
-    expect((agent as any).defaultManifest.entries[`files/${fileId}`].type).toBe("dir");
+    expect((agent as any).defaultManifest.entries[`.opengeni/files/${fileId}`].type).toBe("dir");
   });
 
   test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
@@ -1548,13 +2689,94 @@ describe("runtime event normalization", () => {
     );
 
     expect(commands).toHaveLength(1);
+    expect(commands[0]?.startsWith("set +x\n")).toBe(true);
+    expect(commands[0]?.indexOf("set +x")).toBeLessThan(
+      commands[0]?.indexOf("https://storage.example/input.txt?sig=secret") ?? -1,
+    );
     expect(commands[0]).toContain("set -eu");
     expect(commands[0]).not.toContain("pipefail");
     expect(commands[0]).toContain("curl --fail");
+    expect(commands[0]).toContain("mktemp");
+    expect(commands[0]).toContain("Refusing symlinked attachment directory");
+    expect(commands[0]).toContain("Refusing non-file attachment target");
     expect(commands[0]).toContain("chmod a-w");
     expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
     expect(events.join("\n")).not.toContain("sig=secret");
     expect(events.join("\n")).toContain("file-resource-download");
+  });
+
+  test("atomically repairs tampered attachment files and rejects corrupt downloads", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-attachment-"));
+    const workspace = join(root, "workspace");
+    const source = join(root, "source.txt");
+    const target = join(workspace, ".opengeni", "files", "file-1", "input.txt");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(source, "hello");
+    const sha256 = createHash("sha256").update("hello").digest("hex");
+    const events: string[] = [];
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      exec: async ({ cmd }: { cmd: string }) => {
+        const process = Bun.spawn(["/bin/sh", "-c", cmd], {
+          cwd: workspace,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(process.stdout).text(),
+          new Response(process.stderr).text(),
+          process.exited,
+        ]);
+        return { stdout, stderr, output: `${stdout}${stderr}`, exitCode };
+      },
+    };
+    const download = {
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename: "input.txt",
+      url: pathToFileURL(source).href,
+      sizeBytes: 5,
+      sha256,
+    };
+
+    try {
+      expect(
+        (
+          await materializeSandboxFileDownloads(session as any, [download], {
+            onRuntimeEvent: (event) => events.push(JSON.stringify(event)),
+          })
+        ).failures,
+      ).toEqual([]);
+      expect(readFileSync(target, "utf8")).toBe("hello");
+
+      chmodSync(target, 0o644);
+      writeFileSync(target, "wrong");
+      expect((await materializeSandboxFileDownloads(session as any, [download])).failures).toEqual(
+        [],
+      );
+      expect(readFileSync(target, "utf8")).toBe("hello");
+
+      chmodSync(target, 0o644);
+      writeFileSync(target, "wrong");
+      writeFileSync(source, "bad!!");
+      const corrupt = await materializeSandboxFileDownloads(session as any, [download]);
+      expect(corrupt.failures).toHaveLength(1);
+      expect(corrupt.failures[0]?.reason).toContain("failed size or SHA-256 verification");
+      expect(readFileSync(target, "utf8")).toBe("wrong");
+      expect(events.join("\n")).not.toContain(pathToFileURL(source).href);
+
+      rmSync(join(workspace, ".opengeni"), { recursive: true, force: true });
+      const escaped = join(root, "outside");
+      mkdirSync(escaped);
+      symlinkSync(escaped, join(workspace, ".opengeni"), "dir");
+      writeFileSync(source, "hello");
+      const symlinked = await materializeSandboxFileDownloads(session as any, [download]);
+      expect(symlinked.failures).toHaveLength(1);
+      expect(symlinked.failures[0]?.reason).toContain("Refusing symlinked attachment directory");
+      expect(() => statSync(join(escaped, "files", "file-1", "input.txt"))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("reports signed file download failures without throwing", async () => {
@@ -1678,12 +2900,89 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
       type: "git_repo",
       host: "github.com",
       repo: "acme/app",
       ref: "main",
     });
+  });
+
+  test("materializes same-name cross-provider repositories at distinct default paths", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/app",
+        ref: "main",
+      },
+    ]);
+    expect(Object.keys(manifest.entries).sort()).toEqual([
+      "repos/dev.azure.com/acme/project/_git/app",
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+    ]);
+  });
+
+  test("preserves a custom Git HTTPS port in the manifest remote", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://git.example.com:8443/acme/app.git",
+        ref: "main",
+      },
+    ]);
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+      type: "git_repo",
+      host: "git.example.com:8443",
+      repo: "acme/app",
+    });
+  });
+
+  test("fails before sandbox execution on case-folded explicit mount collisions", () => {
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://github.com/acme/one.git",
+        ref: "main",
+        mountPath: "repos/Shared/App",
+      },
+      {
+        kind: "repository" as const,
+        uri: "https://gitlab.com/acme/two.git",
+        ref: "main",
+        mountPath: "repos/shared/app",
+      },
+    ];
+    expect(() => buildManifest(testSettings(), resources)).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand(resources)).toThrow(
+      "resource mount path is already attached",
+    );
+  });
+
+  test("fails before sandbox execution on a repeated identical resource", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    expect(() => buildManifest(testSettings(), [resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand([resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
   });
 
   test("keeps GitHub App repository resources out of SDK git repo materialization", () => {
@@ -1696,7 +2995,7 @@ describe("runtime event normalization", () => {
         githubRepositoryId: 456,
       },
     ]);
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -1717,7 +3016,7 @@ describe("runtime event normalization", () => {
       },
     ]);
 
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -1763,7 +3062,7 @@ describe("runtime event normalization", () => {
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain(
-      "clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+      "clone_repository '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
@@ -2030,6 +3329,10 @@ describe("runtime event normalization", () => {
     // askpass into $GIT_ASKPASS whose Password branch reads the token file — so a warm
     // box on ANY image gets a correct askpass at setup, no baked script required.
     const cmd = String(calls[0]?.cmd);
+    expect(cmd.startsWith("set +x\n")).toBe(true);
+    expect(cmd.indexOf("set +x")).toBeLessThan(
+      cmd.indexOf("export OPENGENI_GIT_GITHUB_TOKEN_SEED="),
+    );
     expect(cmd).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(cmd).toContain('chmod 0755 "$git_askpass.tmp.$$"');
     expect(cmd).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
@@ -2073,6 +3376,7 @@ describe("runtime event normalization", () => {
 
     const cmd = String(calls[0]?.cmd);
     expect(calls[0]?.environment).toBeUndefined();
+    expect(cmd.startsWith("set +x\n")).toBe(true);
     expect(cmd).toContain("export OPENGENI_GIT_GITLAB_TOKEN_SEED='glpat_liveToken123'");
     expect(cmd).toContain("export OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED='azdo_liveToken456'");
     expect(cmd).not.toContain("GITLAB_TOKEN='glpat_liveToken123'");
@@ -2110,7 +3414,7 @@ describe("runtime event normalization", () => {
 
     expect(calls).toHaveLength(1);
     expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
-    expect(String(calls[0]?.cmd).startsWith("set -eu")).toBe(true);
+    expect(String(calls[0]?.cmd).startsWith("set +x\nset -eu")).toBe(true);
   });
 
   test("TOOLSPACE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
@@ -2146,16 +3450,53 @@ describe("runtime event normalization", () => {
         },
         runAs: "sandbox",
         toolspaceTokenSeed: "ogd_toolspace_live",
+        toolspaceTokenFile:
+          "/workspace/.opengeni/toolspace-tokens/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       } as any,
     );
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.environment).toBeUndefined();
     const cmd = String(calls[0]?.cmd);
+    expect(cmd.startsWith("set +x\n")).toBe(true);
     expect(cmd).toContain("export OPENGENI_TOOLSPACE_TOKEN_SEED='ogd_toolspace_live'");
+    expect(cmd.indexOf("set +x")).toBeLessThan(
+      cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED="),
+    );
     expect(cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED=")).toBeLessThan(
       cmd.indexOf("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\""),
     );
+  });
+
+  test("TOOLSPACE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opengeni-toolspace-refresh-"));
+    try {
+      const session = {
+        exec: async (args: { cmd: string }) => {
+          const proc = Bun.spawn(["sh", "-lc", args.cmd], {
+            cwd: home,
+            env: { ...process.env, HOME: home },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+            proc.exited,
+          ]);
+          return { exitCode, stdout, stderr };
+        },
+      };
+
+      await refreshToolspaceTokenFile(session as never, "ogd_renewed");
+      const tokenDir = join(home, ".opengeni");
+      const tokenFile = join(tokenDir, "toolspace-token");
+      expect(readFileSync(tokenFile, "utf8")).toBe("ogd_renewed");
+      expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+      expect(readdirSync(tokenDir)).toEqual(["toolspace-token"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("fails repository clone hook when sandbox command is still running", async () => {
@@ -2243,7 +3584,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -2415,7 +3756,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -2481,7 +3822,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {
@@ -2621,6 +3962,10 @@ describe("runtime event normalization", () => {
         {
           accountId: "11111111-1111-4111-8111-111111111111",
           workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
         },
       );
       try {
@@ -2648,6 +3993,51 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("signs an explicit empty first-party tool selection without default widening", async () => {
+    const seenSelections: unknown[] = [];
+    const seenPrincipalKinds: unknown[] = [];
+    const mcp = startTestMcpServer({
+      validateAuthorization: async (authorization) => {
+        if (!authorization?.startsWith("Bearer ")) return false;
+        const payload = await verifyDelegatedAccessToken(
+          "test-delegation-secret",
+          authorization.slice("Bearer ".length),
+        );
+        if (!payload) return false;
+        seenSelections.push(payload.firstPartyMcpTools);
+        seenPrincipalKinds.push(payload.principalKind);
+        return true;
+      },
+    });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `${mcp.url}?ws={workspaceId}`,
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "opengeni" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        firstPartyTools: [],
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      expect(seenSelections.length).toBeGreaterThan(0);
+      expect(seenSelections.every((selection) => JSON.stringify(selection) === "[]")).toBe(true);
+      expect(seenPrincipalKinds.every((kind) => kind === "service")).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("a genuinely-broken first-party bearer still fails loud (no masking, no retry loop)", async () => {
     // The dynamic refresh must NOT mask a real breakage: if the endpoint rejects
     // every bearer (e.g. a server-side secret mismatch), the required first-party
@@ -2671,11 +4061,65 @@ describe("runtime event normalization", () => {
           {
             accountId: "11111111-1111-4111-8111-111111111111",
             workspaceId: "22222222-2222-4222-8222-222222222222",
+            sessionId: "33333333-3333-4333-8333-333333333333",
+            turnId: "44444444-4444-4444-8444-444444444444",
+            attemptId: "55555555-5555-4555-8555-555555555555",
+            executionGeneration: 1,
           },
         ),
       ).rejects.toThrow();
     } finally {
       mcp.close();
+    }
+  });
+
+  test("degrades a subject-owned MCP without human authority instead of failing the turn", async () => {
+    let resolverCalls = 0;
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "personal-slack",
+            name: "Personal Slack",
+            url: "https://mcp.slack.com/mcp",
+            connectionRef: {
+              providerDomain: "slack.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "personal-slack", optional: true }],
+      {
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        resolveCredential: async (request) => {
+          resolverCalls += 1;
+          expect(request.subjectId).toBeUndefined();
+          return {
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "slack.com",
+          };
+        },
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(resolverCalls).toBeGreaterThan(0);
+      expect(authNeeded).toEqual([
+        expect.objectContaining({
+          serverId: "personal-slack",
+          providerDomain: "slack.com",
+          reason: "missing_connection",
+          toolName: null,
+        }),
+      ]);
+    } finally {
+      await prepared.close();
     }
   });
 
@@ -2983,8 +4427,15 @@ describe("runtime event normalization", () => {
       const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", {
         query: "auth",
       });
-      expect(result).toMatchObject({ isError: true });
-      expect(JSON.stringify(result)).toContain("Authentication required");
+      expect(result).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Authentication required - a connection link was posted to the session.",
+          },
+        ],
+      });
       expect(mcp.calls).toEqual([]);
       expect(authNeeded).toContainEqual(
         expect.objectContaining({
@@ -2999,6 +4450,66 @@ describe("runtime event normalization", () => {
       mcp.close();
     }
   });
+
+  test("never classifies the MCP SDK request-timeout code as connection auth", async () => {
+    let markStarted: (() => void) | null = null;
+    let releaseCall: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const mcp = startTestMcpServer({
+      beforeToolCall: async () => {
+        markStarted?.();
+        await gate;
+      },
+    });
+    const authNeeded: unknown[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "request-timeout",
+            name: "Request timeout",
+            url: mcp.url,
+            cacheToolsList: false,
+            timeoutMs: 1_000,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "request-timeout" }],
+      {
+        onAuthNeeded: (payload) => {
+          authNeeded.push(payload);
+        },
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      const pending = prepared.mcpServers[0]!.callTool("request-timeout__search_documents", {
+        query: "wait",
+      });
+      await started;
+      let failure: unknown;
+      try {
+        await pending;
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({ code: ErrorCode.RequestTimeout });
+      expect((failure as Error).message).toBe(
+        `MCP error ${ErrorCode.RequestTimeout}: Request timed out`,
+      );
+      expect(authNeeded).toEqual([]);
+    } finally {
+      releaseCall?.();
+      await prepared.close();
+      mcp.close();
+    }
+  }, 10_000);
 
   test("skips brokered MCP servers at connect time when auth is missing and emits auth-needed", async () => {
     const authNeeded: unknown[] = [];
@@ -3265,6 +4776,60 @@ describe("runtime event normalization", () => {
     } finally {
       console.warn = originalWarn;
       broken.close();
+    }
+  });
+
+  test("MCP connect logging never emits raw response bodies or credential material", async () => {
+    const syntheticCredential = "synthetic-mcp-log-secret-123456";
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(
+          JSON.stringify({
+            error: "unauthorized",
+            echoed: `Authorization: Bearer ${syntheticCredential}`,
+            retry: `https://objects.example/file?X-Amz-Signature=${syntheticCredential}`,
+          }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "synthetic-optional",
+              name: "Synthetic optional MCP",
+              url: `http://127.0.0.1:${server.port}/mcp`,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "synthetic-optional", optional: true }],
+      );
+      await prepared.close();
+
+      const renderedLogs = [...warnings, ...errors]
+        .flat()
+        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) => JSON.stringify(value))
+        .join("\n");
+      expect(renderedLogs).toContain("synthetic-optional");
+      expect(renderedLogs).toContain("401");
+      expect(renderedLogs).not.toContain(syntheticCredential);
+      expect(renderedLogs).not.toContain("Authorization: Bearer");
+      expect(renderedLogs).not.toContain("X-Amz-Signature");
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+      server.stop(true);
     }
   });
 
@@ -3969,6 +5534,33 @@ describe("pack skills in the sandbox skill index", () => {
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("checkov");
     expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
+    expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
+  });
+
+  test("an explicit curated library selection is materialized and indexed", () => {
+    const entry = listSkillLibraryEntries().find(
+      (candidate) => candidate.id === "azure-verified-modules",
+    );
+    expect(entry).toBeDefined();
+    const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
+    const source = lazySkillSourceWithPackSkills(
+      [],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.children[loaded.skill.name].type).toBe("dir");
+    expect(sourceDir.children[loaded.skill.name].children["SKILL.md"].content).toContain(
+      "Azure Verified Modules",
+    );
+    expect((source.getIndex?.(emptyManifest, ".agents") ?? []).map((item) => item.name)).toContain(
+      "azure-verified-modules",
+    );
   });
 
   test("pack skills join the bundled skills in one lazy skill index", () => {
@@ -4026,6 +5618,31 @@ describe("pack skills in the sandbox skill index", () => {
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
     expect(checkovEntries).toHaveLength(1);
     expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
+  });
+
+  test("a pack skill has precedence over an explicitly selected curated skill", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const source = lazySkillSourceWithPackSkills(
+      [
+        {
+          name: loaded.skill.name,
+          description: "Pack override.",
+          files: [{ path: "SKILL.md", content: "# Pack override\n" }],
+        },
+      ],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const entries = (source.getIndex?.(emptyManifest, ".agents") ?? []).filter(
+      (entry) => entry.name === loaded.skill.name,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.description).toBe("Pack override.");
   });
 
   test("rejects unsafe pack skill content instead of mounting it", () => {
@@ -4089,6 +5706,102 @@ describe("pack skills in the sandbox skill index", () => {
       }>
     ).find((capability) => capability.type === "skills");
     expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+  });
+
+  test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+      skillLibrarySkills: [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+      skillLibrarySelections: [
+        {
+          id: loaded.entry.id,
+          name: loaded.entry.name,
+          source: "library",
+          version: loaded.entry.version,
+          contentSha256: loaded.entry.contentSha256,
+          reason: "enabled workspace capability installation",
+        },
+      ],
+    });
+    expect(effectiveSkillSelectionsForAgent(agent)).toContainEqual({
+      id: loaded.entry.id,
+      name: loaded.entry.name,
+      source: "library",
+      version: loaded.entry.version,
+      contentSha256: loaded.entry.contentSha256,
+      reason: "enabled workspace capability installation",
+    });
+  });
+});
+
+describe("curated skill-library artifact integrity", () => {
+  function withArtifact(run: (root: string) => void): void {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-skill-library-"));
+    try {
+      mkdirSync(join(root, "references"));
+      writeFileSync(join(root, "SKILL.md"), "# Reviewed skill\n", "utf8");
+      writeFileSync(join(root, "references", "runbook.md"), "Runbook bytes.\n", "utf8");
+      run(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function baseline(root: string): string {
+    return readSkillLibraryArtifact(root).contentSha256;
+  }
+
+  test("hashes and verifies every recursively materialized file", () => {
+    withArtifact((root) => {
+      const artifact = readSkillLibraryArtifact(root);
+      expect(artifact.files.map((file) => file.path)).toEqual([
+        "SKILL.md",
+        "references/runbook.md",
+      ]);
+      expect(verifySkillLibraryArtifact(root, artifact.contentSha256)).toEqual(artifact);
+    });
+  });
+
+  test("rejects an added file under an unchanged reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "injected.md"), "Unreviewed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a modified file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "runbook.md"), "Changed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a deleted file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      rmSync(join(root, "references", "runbook.md"));
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects unsafe paths and symbolic links before hashing", () => {
+    withArtifact((root) => {
+      writeFileSync(join(root, "unsafe\\path.md"), "Unsafe path.\n", "utf8");
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/unsafe path/);
+    });
+
+    withArtifact((root) => {
+      symlinkSync("SKILL.md", join(root, "linked.md"));
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/symbolic link/);
+    });
   });
 });
 
@@ -4183,6 +5896,285 @@ describe("provider item id stripping", () => {
     expect("actions" in preserved).toBe(true);
     expect("action" in preserved).toBe(false);
     expect(preserved.id).toBe("cu_abc");
+  });
+
+  test("exports the deprecated view_image elision helper as an identity no-op", () => {
+    const prefix = [
+      { type: "message", role: "user", content: "inspect twice" },
+      {
+        type: "function_call",
+        callId: "view-old",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      { type: "function_call_result", callId: "view-old", output: "old" },
+      {
+        type: "function_call",
+        callId: "view-new",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      { type: "function_call_result", callId: "view-new", output: "new" },
+    ];
+
+    expect(elideSupersededViewImagePairs(prefix)).toBe(prefix);
+  });
+
+  test("text-only projection keeps ordinary tool pairs and removes only hosted computer pairs", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "What is shown?" },
+          { type: "input_image", image: "data:image/png;base64,USER" },
+        ],
+      },
+      { type: "reasoning", content: [{ type: "input_text", text: "inspect" }] },
+      {
+        type: "function_call",
+        callId: "view-1",
+        name: "view_image",
+        arguments: '{"path":"/tmp/a.png"}',
+      },
+      {
+        type: "function_call_result",
+        callId: "view-1",
+        output: [{ type: "input_image", image: "data:image/png;base64,TOOL" }],
+      },
+      {
+        type: "function_call",
+        callId: "metadata-1",
+        name: "read_metadata",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "metadata-1",
+        output: [
+          { type: "input_text", text: "width=10" },
+          { type: "input_image", image: "data:image/png;base64,PREVIEW" },
+        ],
+      },
+      { type: "computer_call", callId: "computer-1", actions: [{ type: "screenshot" }] },
+      {
+        type: "computer_call_result",
+        callId: "computer-1",
+        output: { type: "computer_screenshot", image_url: "data:image/png;base64,SCREEN" },
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_image", image: "data:image/png;base64,ONLY" }],
+      },
+    ] as Array<Record<string, unknown>>;
+    const durableJson = JSON.stringify(input);
+
+    const projected = projectModelInputForImageSupport(input, false);
+
+    expect(JSON.stringify(projected)).not.toContain("data:image");
+    expect(projected.some((item) => item.name === "view_image")).toBe(true);
+    expect(projected.some((item) => item.type === "computer_call")).toBe(false);
+    expect(projected.find((item) => item.callId === "view-1" && "output" in item)).toEqual({
+      type: "function_call_result",
+      callId: "view-1",
+      output: [
+        {
+          type: "input_text",
+          text: "[Image content omitted because the selected model does not support image input.]",
+        },
+      ],
+    });
+    expect(projected.some((item) => item.type === "reasoning")).toBe(true);
+    expect(projected.find((item) => item.callId === "metadata-1" && "output" in item)).toEqual({
+      type: "function_call_result",
+      callId: "metadata-1",
+      output: [
+        { type: "input_text", text: "width=10" },
+        {
+          type: "input_text",
+          text: "[Image content omitted because the selected model does not support image input.]",
+        },
+      ],
+    });
+    expect(JSON.stringify(projected)).toContain("Image content omitted");
+    expect(JSON.stringify(input)).toBe(durableJson);
+    expect(projectModelInputForImageSupport(input, true)).toBe(input);
+    expect(JSON.stringify(projectModelInputForImageSupport(input, true))).toBe(durableJson);
+  });
+
+  test("text-only projection does not reapply a tool-output bound", () => {
+    const output = "x".repeat(100_000);
+    const input = [
+      {
+        type: "function_call",
+        callId: "large-result",
+        name: "read_file",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "large-result",
+        output,
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const projected = projectModelInputForImageSupport(input, false);
+
+    expect(projected[1]?.output).toBe(output);
+  });
+
+  test("typed file projection is independent from image support and MIME-specific", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_image", image: "data:image/png;base64,IMAGE" },
+          {
+            type: "input_file",
+            file: "data:application/pdf;base64,PDF",
+            filename: "kept.pdf",
+          },
+          {
+            type: "input_file",
+            file: "data:text/plain;base64,TEXT",
+            filename: "hidden.txt",
+          },
+        ],
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const projected = projectModelInputForCapabilities(input, {
+      supportsImageInput: true,
+      inputFileMediaTypes: ["application/pdf"],
+    });
+    const json = JSON.stringify(projected);
+
+    expect(json).toContain("data:image/png;base64,IMAGE");
+    expect(json).toContain("data:application/pdf;base64,PDF");
+    expect(json).not.toContain("data:text/plain;base64,TEXT");
+    expect(json).toContain("File content omitted");
+    expect(JSON.stringify(input)).toContain("data:text/plain;base64,TEXT");
+  });
+
+  test("preprojected giant prefixes inspect only new tool-result suffixes", async () => {
+    const prefix = Array.from({ length: 100_000 }, (_, index) => ({
+      type: "message",
+      role: "user",
+      content: `history ${index}`,
+    }));
+    const filter = incrementalModelInputProjectionFilter(
+      { supportsImageInput: false, inputFileMediaTypes: [] },
+      true,
+    )!;
+    const run = async (input: Array<Record<string, unknown>>) =>
+      await filter({
+        modelData: { input: input as never },
+        agent: {} as never,
+        context: undefined,
+      });
+
+    const first = await run(prefix);
+    expect(first.input).toBe(prefix);
+
+    const next = [
+      ...prefix,
+      { type: "function_call", callId: "image-tool", name: "mcp_image", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "image-tool",
+        output: [{ type: "input_image", image: "data:image/png;base64,NEW" }],
+      },
+    ];
+    const second = await run(next);
+    const output = second.input as unknown as Array<Record<string, unknown>>;
+
+    expect(output.slice(0, prefix.length)).toEqual(prefix);
+    expect(JSON.stringify(output.slice(prefix.length))).not.toContain("data:image");
+    expect(JSON.stringify(output.slice(prefix.length))).toContain("Image content omitted");
+  });
+
+  test("defensive RunState projection scans its giant prefix only once", async () => {
+    let prefixInspections = 0;
+    const prefix = Array.from({ length: 100_000 }, (_, index) => ({
+      get type() {
+        prefixInspections += 1;
+        return "message";
+      },
+      role: "user",
+      content: `history ${index}`,
+    }));
+    const filter = incrementalModelInputProjectionFilter(
+      { supportsImageInput: false, inputFileMediaTypes: [] },
+      false,
+    )!;
+    const run = async (input: Array<Record<string, unknown>>) =>
+      await filter({
+        modelData: { input: input as never },
+        agent: {} as never,
+        context: undefined,
+      });
+
+    const first = await run(prefix);
+    expect(first.input).toBe(prefix);
+    expect(prefixInspections).toBeGreaterThan(0);
+    const firstPassInspections = prefixInspections;
+
+    const next = [
+      ...prefix,
+      { type: "function_call", callId: "image-tool", name: "mcp_image", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "image-tool",
+        output: [{ type: "input_image", image: "data:image/png;base64,NEW" }],
+      },
+    ];
+    const second = await run(next);
+
+    expect(prefixInspections).toBe(firstPassInspections);
+    expect(JSON.stringify(second.input).slice(-500)).not.toContain("data:image");
+    expect(JSON.stringify(second.input).slice(-500)).toContain("Image content omitted");
+  });
+
+  test("text-only projection runs before context accounting in the real agent loop", async () => {
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+      contextWindowTokens: 20_000,
+      contextAutoCompactThresholdTokens: 10_000,
+      contextReservedOutputTokens: 0,
+    });
+    const model = new ScriptedModel("done");
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      supportsImageInput: false,
+      hostedWebSearch: false,
+    });
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Describe these if supported." },
+          ...["A", "B", "C"].map((value) => ({
+            type: "input_image",
+            image: `data:image/png;base64,${value.repeat(80_000)}`,
+          })),
+        ],
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const result = await runAgentStream(agent, { input: input as any }, settings, {
+      contextCompactionRequested: () => false,
+    });
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(model.calls).toBe(1);
+    expect(JSON.stringify(model.requests[0]?.input)).not.toContain("data:image");
+    expect(JSON.stringify(result.state.history)).toContain("data:image");
+    expect(JSON.stringify(input)).toContain("data:image");
   });
 
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
@@ -4324,6 +6316,8 @@ describe("provider item id stripping", () => {
     });
     const expected = boundModelToolOutputItem(item, settings.modelToolOutputTruncationTokens);
     expect(result.input[0]).toEqual(expected);
+    const serializedProviderItem = JSON.stringify(result.input[0]);
+    expect(serializedProviderItem).toBe(JSON.stringify(expected));
     expect(JSON.stringify(result.input[0])).toContain("structured object properties");
     expect(Buffer.byteLength(JSON.stringify(result.input[0]), "utf8")).toBeLessThan(100_000);
 
@@ -4333,6 +6327,58 @@ describe("provider item id stripping", () => {
       context: undefined,
     });
     expect(replayed.input).toEqual(result.input);
+    expect(JSON.stringify(replayed.input[0])).toBe(serializedProviderItem);
+  });
+
+  test("final model-input filtering preserves an established view_image prefix exactly", async () => {
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const firstInput = [
+      { type: "message", role: "user", content: "inspect it twice" },
+      {
+        type: "function_call",
+        callId: "view-old",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      {
+        type: "function_call_result",
+        callId: "view-old",
+        output: [{ type: "input_image", image: "data:image/png;base64,AAAA" }],
+      },
+    ] as any;
+    const firstInputSerialized = JSON.stringify(firstInput);
+    const first = await filter({
+      modelData: { input: firstInput },
+      agent: {} as any,
+      context: undefined,
+    });
+    const secondInput = [
+      ...firstInput,
+      {
+        type: "function_call",
+        callId: "view-new",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      {
+        type: "function_call_result",
+        callId: "view-new",
+        output: [{ type: "input_image", image: "data:image/png;base64,BBBB" }],
+      },
+    ] as any;
+    const secondInputSerialized = JSON.stringify(secondInput);
+    const second = await filter({
+      modelData: { input: secondInput },
+      agent: {} as any,
+      context: undefined,
+    });
+
+    expect(JSON.stringify(first.input)).toBe(firstInputSerialized);
+    expect(second.input.slice(0, first.input.length)).toEqual(first.input);
+    expect(JSON.stringify(second.input.slice(0, first.input.length))).toBe(firstInputSerialized);
+    expect(second.input).toHaveLength(first.input.length + 2);
+    expect(JSON.stringify(firstInput)).toBe(firstInputSerialized);
+    expect(JSON.stringify(secondInput)).toBe(secondInputSerialized);
   });
 
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {
@@ -4498,6 +6544,63 @@ describe("provider item id stripping", () => {
         context: undefined,
       }),
     ).rejects.toBeInstanceOf(CompactionNeededError);
+  });
+
+  test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
+    let selectedSchemaAccountingDeferred = false;
+    let mandatorySchemaAccountingDeferred = false;
+    const selectedMcp = {
+      name: "selected",
+      cacheToolsList: true,
+      connect: async () => undefined,
+      close: async () => undefined,
+      listTools: async () => [],
+      callTool: async () => ({ content: [] }),
+      modelToolSchemaTokens: () => (selectedSchemaAccountingDeferred ? 0 : 300_000),
+      deferModelToolSchemaAccounting: () => {
+        selectedSchemaAccountingDeferred = true;
+      },
+    } as unknown as MCPServer;
+    const mandatoryMcp = {
+      name: "opengeni",
+      cacheToolsList: true,
+      connect: async () => undefined,
+      close: async () => undefined,
+      listTools: async () => [],
+      callTool: async () => ({ content: [] }),
+      modelToolSchemaTokens: () => (mandatorySchemaAccountingDeferred ? 0 : 500),
+      deferModelToolSchemaAccounting: () => {
+        mandatorySchemaAccountingDeferred = true;
+      },
+    } as unknown as MCPServer;
+    const settings = testSettings({
+      codexToolSearchEnabled: true,
+      contextWindowTokens: 272_000,
+      contextAutoCompactThresholdTokens: 244_800,
+      webSearchEnabled: false,
+    });
+    const agent = buildOpenGeniAgent(settings, [], {
+      structuredToolTransport: false,
+      mcpServers: [selectedMcp, mandatoryMcp],
+    });
+    const filter = contextRobustnessFilterForSettings(settings, {
+      throwOnCompactionNeeded: true,
+    });
+
+    expect(selectedSchemaAccountingDeferred).toBe(true);
+    expect(mandatorySchemaAccountingDeferred).toBe(false);
+    await expect(
+      filter({
+        modelData: {
+          input: [{ type: "message", role: "user", content: "small" }] as any,
+          instructions: "system",
+        },
+        agent,
+        context: undefined,
+      }),
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
   test("callModelInputFilterForSettings observes an operator compaction request before each model call", async () => {

@@ -1,4 +1,4 @@
-import type { ResourceRef, SessionStatus, ToolRef } from "@opengeni/sdk";
+import type { ResourceRef, SessionStatus, ToolAuthNeededPayload, ToolRef } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
    Timeline item types
@@ -13,6 +13,11 @@ export type UserMessageItem = {
   kind: "user-message";
   id: string;
   text: string;
+  presentation?: {
+    kind: "realtime_voice" | "realtime_voice_handoff";
+    /** Full bounded execution context sent with this visible voice request. */
+    context: string;
+  };
   /** Resources attached to this message (file uploads, repositories). */
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */
@@ -140,6 +145,66 @@ export type MemoryItem = {
   occurredAt: string;
 };
 
+export type FleetDecisionScoreItem = {
+  candidateKey: string;
+  eligible: boolean;
+  rejectionReason:
+    | "allocator_disabled"
+    | "unavailable"
+    | "cooling"
+    | "quota_ceiling"
+    | "overlay_isolation"
+    | null;
+  total: number;
+  confidence: "unknown" | "low" | "medium" | "high";
+};
+
+/**
+ * One production-vs-shadow placement explanation. Candidate keys are
+ * event-local aliases only; no credential/account identity reaches this item.
+ */
+export type FleetDecisionItem = {
+  kind: "fleet-decision";
+  id: string;
+  turnId: string | null;
+  policyVersion: "adaptive-shadow-v1";
+  actualOutcome: "selected" | "waiting" | "none";
+  actualCandidateKey: string | null;
+  actualReason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  shadowOutcome: "selected" | "paced" | "none";
+  shadowCandidateKey: string | null;
+  shadowReason:
+    | "fenced_in_flight"
+    | "fenced_candidate_missing"
+    | "admission_paced"
+    | "no_eligible_candidate"
+    | "overlay_isolated_empty"
+    | "best_score"
+    | "affinity_best"
+    | "hysteresis_hold";
+  comparison: "match" | "different_candidate" | "different_outcome" | "not_comparable_truncated";
+  confidence: "unknown" | "low" | "medium" | "high";
+  admissionOutcome: "admit" | "pace";
+  admissionReason:
+    | "fenced_in_flight"
+    | "pacing_disabled"
+    | "capacity_unknown"
+    | "capacity_available"
+    | "work_conserving_borrow"
+    | "manager_priority"
+    | "standard_starvation_bound"
+    | "capacity_saturated"
+    | "emergency_fuse";
+  borrowedIdleCapacity: boolean;
+  borrowedOverlayCapacity: boolean;
+  strandedEligibleCount: number;
+  candidateCount: number;
+  truncatedCandidateCount: number;
+  scoreRowsTruncatedCount: number;
+  scores: FleetDecisionScoreItem[];
+  occurredAt: string;
+};
+
 export type SessionStatusItem = {
   kind: "session-status";
   id: string;
@@ -158,7 +223,7 @@ export type GoalItem = {
 export type NoticeItem = {
   kind: "notice";
   id: string;
-  tone: "waiting" | "cancelled" | "failed";
+  tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
@@ -167,13 +232,57 @@ export type NoticeItem = {
 };
 
 /**
- * A tool call hit a connection whose credential lapsed — the broker asked the
- * user to reconnect the provider before the turn can continue. Carries the
- * structured `tool.auth_needed` payload so the renderer can draw a clean inline
- * reconnect affordance (provider logo + one human line + a Reconnect button)
- * and the app can start the right recovery flow (OAuth reconnect for the
- * surviving connection, or credential re-entry for an api-key one). The `reason`
- * shapes the human copy but is never shown raw.
+ * First-class conversation-memory checkpoint. Stays outside collapsed turns so
+ * auto-compaction cannot vanish behind a chevron. Chat bubbles are unchanged.
+ */
+export type ContextCompactionItem = {
+  kind: "context-compaction";
+  id: string;
+  turnId: string | null;
+  phase: "started" | "compacted" | "skipped";
+  trigger: "auto" | "operator" | "proactive" | "overflow" | null;
+  estimatedTokensBefore: number | null;
+  estimatedTokensAfter: number | null;
+  skipReason: string | null;
+  /** Provider implementation id for debug disclosure only. */
+  implementation: string | null;
+  occurredAt: string;
+};
+
+export type MachineInputMember = {
+  id: string;
+  kind:
+    | "scheduled_occurrence"
+    | "goal_continuation"
+    | "agent_message"
+    | "agent_steer_instruction"
+    | "child_terminal_result";
+  classification: "success" | "failure" | "action_required" | "info";
+  sourceId: string;
+  summary: string;
+};
+
+/**
+ * One or more durable non-human inputs that joined the following agent turn.
+ * This is communication, not a warning or a protocol-debug payload.
+ */
+export type MachineInputBatchItem = {
+  kind: "machine-input-batch";
+  id: string;
+  turnId: string | null;
+  members: MachineInputMember[];
+  occurredAt: string;
+};
+
+/**
+ * A tool call hit a missing or lapsed connection. The broker reports that
+ * condition as a tool error and the turn continues; reconnecting never resumes
+ * or replays the original call. Carries the structured `tool.auth_needed`
+ * payload so the renderer can draw a clean inline recovery affordance (provider
+ * logo + one human line + a Connect/Reconnect button) and the app can start the
+ * right flow (OAuth reconnect for the surviving connection, or credential
+ * re-entry for an api-key one). The `reason` shapes the human copy but is never
+ * shown raw.
  */
 export type AuthNeededItem = {
   kind: "auth-needed";
@@ -183,7 +292,7 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
-  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed" | null;
+  reason: ToolAuthNeededPayload["reason"] | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
   scopes: string[];
   /** The OAuth `resource` (RFC 8707) the reconnect should target, when supplied. */
@@ -217,12 +326,21 @@ export type TimelineItem =
   | SessionStatusItem
   | GoalItem
   | NoticeItem
+  | ContextCompactionItem
+  | MachineInputBatchItem
   | AuthNeededItem
   | MemoryItem
+  | FleetDecisionItem
   | TurnEndItem;
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
-export type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxItem | MemoryItem;
+export type ActivityItem =
+  | ReasoningItem
+  | ToolCallItem
+  | WorkerItem
+  | SandboxItem
+  | MemoryItem
+  | FleetDecisionItem;
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
@@ -241,4 +359,6 @@ export type TimelineGroup =
       startedAt: string;
       endedAt: string;
       groups: TimelineGroup[];
+      /** Adjacent compaction landmark just before this fold (secondary chip facet). */
+      contextCompactionCount?: number;
     };

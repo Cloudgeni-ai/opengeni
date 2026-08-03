@@ -27,9 +27,172 @@ import {
   buildOpenAIClientFromSettings,
   buildProviderClient,
   CodexSubscriptionUnavailableError,
+  HUMAN_INPUT_TOOL_NAME,
   MultiProviderModelProvider,
   resolveTurnModel,
+  vercelGatewayRoutingFetch,
 } from "../src/index";
+
+describe("Vercel AI Gateway request fence", () => {
+  test("replaces caller routing for both Gateway billing paths", async () => {
+    for (const kind of ["vercel-gateway-managed", "vercel-gateway-workspace"] as const) {
+      let captured: Record<string, unknown> | null = null;
+      const inner = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch;
+      const routed = vercelGatewayRoutingFetch(kind, inner);
+      await routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "deepseek/deepseek-v4-flash-0731",
+          providerOptions: {
+            gateway: { only: ["somewhere-else"], models: ["fallback/model"] },
+            deepseek: { includeReasoning: true },
+          },
+        }),
+      });
+      expect(captured?.providerOptions).toEqual({
+        gateway: {
+          only: ["baseten", "novita", "deepinfra"],
+          order: ["baseten", "novita", "deepinfra"],
+          caching: "auto",
+        },
+        deepseek: { includeReasoning: true },
+      });
+    }
+  });
+
+  test("orders normal Kimi across only the approved Baseten and Fireworks routes", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "moonshotai/kimi-k3" }),
+    });
+    expect(captured?.providerOptions).toEqual({
+      gateway: {
+        only: ["baseten", "fireworks"],
+        order: ["baseten", "fireworks"],
+        caching: "auto",
+      },
+    });
+  });
+
+  test("pairs only complete Kimi parallel call/result batches without changing their fields", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+    const callA = {
+      type: "function_call",
+      call_id: "call-a",
+      name: "alpha",
+      arguments: "{}",
+      status: "completed",
+    };
+    const callB = {
+      type: "function_call",
+      call_id: "call-b",
+      name: "beta",
+      arguments: "{}",
+      status: "completed",
+    };
+    const resultA = {
+      type: "function_call_output",
+      call_id: "call-a",
+      output: "alpha-result",
+      status: "completed",
+    };
+    const resultB = {
+      type: "function_call_output",
+      call_id: "call-b",
+      output: "beta-result",
+      status: "completed",
+    };
+    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "moonshotai/kimi-k3",
+        parallel_tool_calls: true,
+        input: [{ type: "reasoning", summary: [] }, callA, callB, resultA, resultB],
+      }),
+    });
+
+    expect(captured?.parallel_tool_calls).toBe(true);
+    expect(captured?.input).toEqual([
+      { type: "reasoning", summary: [] },
+      callA,
+      resultA,
+      callB,
+      resultB,
+    ]);
+  });
+
+  test("does not alter incomplete Kimi or complete DeepSeek call/result batches", async () => {
+    for (const value of [
+      {
+        model: "moonshotai/kimi-k3",
+        input: [
+          { type: "function_call", call_id: "a", name: "alpha", arguments: "{}" },
+          { type: "function_call", call_id: "b", name: "beta", arguments: "{}" },
+          { type: "function_call_output", call_id: "a", output: "done" },
+        ],
+      },
+      {
+        model: "deepseek/deepseek-v4-flash-0731",
+        input: [
+          { type: "function_call", call_id: "a", name: "alpha", arguments: "{}" },
+          { type: "function_call", call_id: "b", name: "beta", arguments: "{}" },
+          { type: "function_call_output", call_id: "a", output: "one" },
+          { type: "function_call_output", call_id: "b", output: "two" },
+        ],
+      },
+    ]) {
+      let captured: Record<string, unknown> | null = null;
+      const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (
+        _input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch);
+      await routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify(value),
+      });
+      expect(captured?.input).toEqual(value.input);
+    }
+  });
+
+  test("unknown models fail before network I/O", async () => {
+    let calls = 0;
+    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async () => {
+      calls += 1;
+      return new Response("{}");
+    }) as typeof fetch);
+    await expect(
+      routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "unreviewed/model" }),
+      }),
+    ).rejects.toThrow("approved catalogue");
+    expect(calls).toBe(0);
+  });
+});
 
 // The synthetic codex-subscription provider the worker overlay
 // (settingsWithCodexCredential → withCodexProvider) injects into runSettings for
@@ -458,7 +621,7 @@ describe("buildProviderClient", () => {
     expect(buildProviderClient(provider, settings)).toBe(client);
   });
 
-  test("Codex disables blind SDK retries and leaves retry classification to its transport", () => {
+  test("Codex disables blind SDK retries and leaves timeout ownership to its transport", () => {
     const settings = multiProviderSettings();
     const provider: ResolvedModelProvider = {
       id: "codex-subscription-no-retry-test",
@@ -472,12 +635,40 @@ describe("buildProviderClient", () => {
     const client = buildProviderClient(provider, settings);
     expect(settings.openaiMaxRetries).toBeGreaterThan(0);
     expect(client.maxRetries).toBe(0);
+    expect(client.timeout).toBe(35 * 60_000);
   });
 });
 
 describe("resolveTurnModel", () => {
   test("returns null for a model not in any provider (legacy global-client fallback)", () => {
     expect(resolveTurnModel(multiProviderSettings(), "model-that-does-not-exist")).toBeNull();
+  });
+
+  test("keeps the canonical product id in configuration while binding the provider model to the upstream slug", () => {
+    const settings = multiProviderSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "acme",
+          api: "responses",
+          baseUrl: "https://api.acme.test/v1",
+          apiKey: "acme-test-key",
+          models: [
+            {
+              id: "acme/product-model",
+              upstreamModelId: "provider-deployment-slug",
+            },
+          ],
+        },
+      ]),
+    });
+
+    const resolved = resolveTurnModel(settings, "acme/product-model");
+    expect(resolved).not.toBeNull();
+    expect(resolved!.configured.id).toBe("acme/product-model");
+    expect(resolved!.configured.upstreamModelId).toBe("provider-deployment-slug");
+    expect((resolved!.model as unknown as { _model: string })._model).toBe(
+      "provider-deployment-slug",
+    );
   });
 
   test("resolves a registry model to its provider, client, chat Model, and configured shape", () => {
@@ -524,9 +715,12 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
     });
-    // hostedWebSearch off → no web_search tool and no explicit tools field at all.
+    // hostedWebSearch off removes only web search; structured human input is a
+    // provider-neutral built-in on every agent.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
-    expect((agent as { tools?: unknown[] }).tools ?? []).toHaveLength(0);
+    expect(
+      ((agent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
+    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
     // encryptedReasoning off (chat wire API) → no providerData.include.
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,
@@ -849,9 +1043,9 @@ describe("registry model shadowing is closed — the built-in never claims a nam
     expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
   });
 
-  test("a BARE id a registry merely redeclares (e.g. the built-in default) still resolves to the built-in — precedence preserved", () => {
-    // The registry below redeclares "gpt-5.6-sol"; the built-in must still win it
-    // (only namespaced `<provider>/<model>` ids are ceded to the registry).
+  test("fails loud when a registry redeclares a bare built-in product id", () => {
+    // Ambiguous canonical ownership must never depend on declaration order or
+    // silently choose a provider/billing path.
     const settings = multiProviderSettings({
       openaiProvider: "azure",
       azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
@@ -866,8 +1060,8 @@ describe("registry model shadowing is closed — the built-in never claims a nam
         },
       ]),
     });
-    const resolved = resolveTurnModel(settings, "gpt-5.6-sol")!;
-    expect(resolved.provider.builtin).toBe(true);
-    expect(resolved.provider.id).toBe("azure");
+    expect(() => resolveTurnModel(settings, "gpt-5.6-sol")).toThrow(
+      'model id "gpt-5.6-sol" is declared by both azure and shadow',
+    );
   });
 });

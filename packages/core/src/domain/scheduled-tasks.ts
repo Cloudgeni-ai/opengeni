@@ -1,27 +1,45 @@
 import type { Settings } from "@opengeni/config";
 import type {
   AccessGrant,
+  McpPersonalConnectionDelegation,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
 } from "@opengeni/contracts";
+import { OPENGENI_SLACK_BOT_SESSION_METADATA_KEY } from "@opengeni/contracts";
 import {
   createScheduledTask,
   deleteScheduledTask,
+  getNestedAgentDepthDeploymentPolicy,
   getRig,
   getScheduledTask,
+  getScheduledTaskPersonalConnectionDelegations,
+  requireWorkspace,
   updateScheduledTask,
   type Database,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { requirePermission } from "../access";
+import { hasPermission, requirePermission } from "../access";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
-import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "./sessions";
+import {
+  freezePersonalConnectionDelegations,
+  personalConnectionDelegationSourceForGrant,
+  personalConnectionDelegationsEqual,
+} from "./personal-connection-delegations";
+import {
+  assertWorkspaceModelPolicyAllows,
+  canonicalConfiguredModel,
+  creationInitiatorForGrant,
+} from "./sessions";
+import {
+  hasReservedOpenGeniSlackBotSessionMetadata,
+  validateOpenGeniSlackBotConnectionSelection,
+} from "./slack-bot";
 import {
   normalizeResources,
   validateFileResources,
@@ -86,6 +104,19 @@ export async function createValidatedScheduledTask(input: {
   if (input.payload.rigId) {
     await requireScheduledTaskRig(input.db, input.grant.workspaceId, input.payload.rigId);
   }
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    input.db,
+    input.grant.workspaceId,
+    input.settings,
+  );
+  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+    db: input.db,
+    workspaceId: input.grant.workspaceId,
+    settings: runtimeSettings,
+    tools: agentConfig.tools,
+    source: personalConnectionDelegationSourceForGrant(input.grant),
+  });
+  const creationInitiator = creationInitiatorForGrant(input.grant);
   return await createScheduledTask(input.db, {
     id,
     accountId: input.grant.accountId,
@@ -97,6 +128,10 @@ export async function createValidatedScheduledTask(input: {
     runMode: input.payload.runMode,
     overlapPolicy: input.payload.overlapPolicy,
     agentConfig,
+    ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
+    ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
+    createdByActor: creationInitiator.actor ?? null,
+    personalConnectionDelegations,
     variableSetId: input.payload.variableSetId ?? null,
     rigId: input.payload.rigId ?? null,
     metadata: input.payload.metadata,
@@ -195,14 +230,53 @@ export async function validatedScheduledTaskUpdate(input: {
     if (willHaveVariableSet) {
       requirePermission(input.grant, "variable-sets:use");
     }
-    update.agentConfig = await validateScheduledTaskAgentConfig({
+    const nextAgentConfig = await validateScheduledTaskAgentConfig({
       settings: input.settings,
       db: input.db,
       objectStorage: input.objectStorage,
+      grant: input.grant,
       workspaceId: input.existing.workspaceId,
       payload: { agentConfig: input.payload.agentConfig },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
     });
+    if (
+      input.existing.reusableSessionId &&
+      input.existing.runMode === "reusable_session" &&
+      (input.existing.agentConfig.slackBotConnectionId ?? null) !==
+        (nextAgentConfig.slackBotConnectionId ?? null)
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "cannot change the OpenGeni Slack bot connection of a task with a live reusable session; recreate the task",
+      });
+    }
+    update.agentConfig = nextAgentConfig;
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+      input.db,
+      input.existing.workspaceId,
+      input.settings,
+    );
+    const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+      db: input.db,
+      workspaceId: input.existing.workspaceId,
+      settings: runtimeSettings,
+      tools: nextAgentConfig.tools,
+      source: personalConnectionDelegationSourceForGrant(input.grant),
+    });
+    if (input.existing.reusableSessionId && input.existing.runMode === "reusable_session") {
+      const existingDelegations = await getScheduledTaskPersonalConnectionDelegations(
+        input.db,
+        input.existing.workspaceId,
+        input.existing.id,
+      );
+      if (!personalConnectionDelegationsEqual(existingDelegations, personalConnectionDelegations)) {
+        throw new HTTPException(409, {
+          message:
+            "cannot change personal MCP connections of a task with a live reusable session; recreate the task",
+        });
+      }
+    }
+    update.personalConnectionDelegations = personalConnectionDelegations;
   }
   return update;
 }
@@ -219,10 +293,30 @@ export async function requireScheduledTaskForApi(
   return task;
 }
 
-export async function restoreScheduledTask(
+export type ScheduledTaskRestoreState = {
+  task: ScheduledTask;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+};
+
+export async function captureScheduledTaskRestoreState(
   db: Database,
   task: ScheduledTask,
+): Promise<ScheduledTaskRestoreState> {
+  return {
+    task,
+    personalConnectionDelegations: await getScheduledTaskPersonalConnectionDelegations(
+      db,
+      task.workspaceId,
+      task.id,
+    ),
+  };
+}
+
+export async function restoreScheduledTask(
+  db: Database,
+  previous: ScheduledTaskRestoreState,
 ): Promise<ScheduledTask> {
+  const { task } = previous;
   return await updateScheduledTask(db, task.workspaceId, task.id, {
     name: task.name,
     status: task.status,
@@ -230,8 +324,10 @@ export async function restoreScheduledTask(
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
     agentConfig: task.agentConfig,
+    personalConnectionDelegations: previous.personalConnectionDelegations,
     reusableSessionId: task.reusableSessionId,
     variableSetId: task.variableSetId,
+    rigId: task.rigId,
     metadata: task.metadata,
   });
 }
@@ -254,7 +350,7 @@ export async function syncCreatedScheduledTask(input: {
 export async function syncUpdatedScheduledTask(input: {
   db: Database;
   workflowClient: SessionWorkflowClient;
-  previous: ScheduledTask;
+  previous: ScheduledTaskRestoreState;
   task: ScheduledTask;
 }): Promise<void> {
   try {
@@ -318,6 +414,7 @@ async function validateScheduledTaskAgentConfig(input: {
   settings: Settings;
   db: Database;
   objectStorage: ObjectStorageDependency;
+  grant: AccessGrant;
   payload: { agentConfig: ScheduledTaskAgentConfig };
   workspaceId: string;
   toolsProvided?: boolean;
@@ -327,15 +424,10 @@ async function validateScheduledTaskAgentConfig(input: {
   // session choke points (a `scheduled_tasks:manage` holder could otherwise set
   // a model the host does not expose). An omitted model inherits the host
   // default downstream, which is always configured.
-  assertConfiguredModel(input.settings, input.payload.agentConfig.model);
+  const model = canonicalConfiguredModel(input.settings, input.payload.agentConfig.model);
   // Same policy vetting as the session choke points; an omitted model flows
   // through session creation later, where the effective default is vetted.
-  await assertWorkspaceModelPolicyAllows(
-    input.db,
-    input.settings,
-    input.workspaceId,
-    input.payload.agentConfig.model,
-  );
+  await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     input.db,
@@ -356,13 +448,45 @@ async function validateScheduledTaskAgentConfig(input: {
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });
   }
+  if (hasReservedOpenGeniSlackBotSessionMetadata(input.payload.agentConfig.metadata)) {
+    throw new HTTPException(422, {
+      message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
+    });
+  }
   await validateGitHubRepositorySelection(input.db, input.workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !input.objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
   await validateFileResources(input.db, input.workspaceId, resources);
+  if (input.payload.agentConfig.slackBotConnectionId) {
+    await validateOpenGeniSlackBotConnectionSelection(
+      input.db,
+      input.grant,
+      input.workspaceId,
+      input.payload.agentConfig.slackBotConnectionId,
+    );
+  }
+  const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
+  if (requestedMaxDepth !== undefined) {
+    const workspace = await requireWorkspace(input.db, input.workspaceId);
+    const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
+    const deploymentPolicy = await getNestedAgentDepthDeploymentPolicy(input.db);
+    const inheritedMaxDepth =
+      typeof workspaceMaxDepth === "number"
+        ? workspaceMaxDepth
+        : deploymentPolicy.maxNestedAgentDepth;
+    if (
+      requestedMaxDepth > inheritedMaxDepth &&
+      !hasPermission(input.grant.permissions, "workspace:admin")
+    ) {
+      throw new HTTPException(403, {
+        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; workspace:admin is required to increase it`,
+      });
+    }
+  }
   return {
     ...input.payload.agentConfig,
+    ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,
     tools,

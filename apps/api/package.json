@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/api-router",
-  "version": "0.5.9",
+  "version": "0.18.0",
   "description": "OpenGeni HTTP surface: the Hono adapter/router (createApp), routes, MCP HTTP transport, and HTTP access adapters over @opengeni/core. An engine-distribution surface — its runtime closure includes engine-internal packages.",
   "license": "Apache-2.0",
   "repository": {
@@ -33,8 +33,8 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
@@ -51,6 +51,7 @@
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
     "@opengeni/github": "workspace:*",
+    "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",
@@ -67,7 +68,7 @@
     "@types/pg": "^8.20.0",
     "postgres": "^3.4.7",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=18"

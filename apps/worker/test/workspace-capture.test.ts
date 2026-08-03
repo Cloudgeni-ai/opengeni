@@ -18,7 +18,7 @@ import {
   WorkspaceRevisionDegradedPayload,
 } from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
-import type { ChannelASession } from "@opengeni/runtime/sandbox";
+import { ChannelAUnavailableError, type ChannelASession } from "@opengeni/runtime/sandbox";
 import {
   blobKey,
   BoxExitingError,
@@ -27,8 +27,10 @@ import {
   isUnderResidueDir,
   joinRepoPath,
   KEEP_LATEST_REVISIONS,
+  openFreshWorkspaceCaptureSession,
   PER_FILE_CONTENT_GUARD_BYTES,
   PER_FILE_DIFF_GUARD_BYTES,
+  readCaptureRepository,
   RESIDUE_DIRS,
   WHOLE_CAPTURE_GUARD_BYTES,
 } from "../src/activities/workspace-capture";
@@ -48,7 +50,9 @@ function forbiddenStorage(): ObjectStorage {
     createPutUrl: boom as never,
     createGetUrl: boom as never,
     headFile: boom as never,
+    fileExists: boom as never,
     getFileBytes: boom as never,
+    getFileRange: boom as never,
     getObjectBytes: boom as never,
     putObject: boom as never,
     deleteObject: boom as never,
@@ -164,6 +168,81 @@ describe("workspace-capture — box-exit vs vanished-file classification (S2)", 
     const e = new BoxExitingError("container exiting");
     expect(e).toBeInstanceOf(Error);
     expect(e.name).toBe("BoxExitingError");
+  });
+});
+
+describe("workspace-capture — repository read authority", () => {
+  const status = {
+    isRepo: true as const,
+    head: "main",
+    detached: false,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    files: [],
+    revision: 0,
+  };
+
+  test("a diff transport failure degrades instead of becoming an authoritative empty diff", async () => {
+    const result = await readCaptureRepository(
+      {
+        gitStatus: async () => status,
+        gitDiff: async () => {
+          throw new Error("provider retained-output prefix was truncated");
+        },
+      },
+      "api",
+    );
+
+    expect(result).toEqual({
+      complete: false,
+      degradedReason: "repository_read_unavailable",
+    });
+    expect(result).not.toHaveProperty("diff");
+  });
+
+  test("a partial Git frame remains typed and non-authoritative", async () => {
+    const result = await readCaptureRepository(
+      {
+        gitStatus: async () => status,
+        gitDiff: async () => {
+          throw new ChannelAUnavailableError("partial untracked-file frame");
+        },
+      },
+      "api",
+    );
+
+    expect(result).toEqual({
+      complete: false,
+      degradedReason: "repository_read_unavailable",
+    });
+    expect(result).not.toHaveProperty("status");
+    expect(result).not.toHaveProperty("diff");
+  });
+
+  test("a successful repository read keeps the exact structured diff", async () => {
+    const diff = {
+      files: [
+        {
+          path: "server.ts",
+          oldPath: null,
+          status: "modified" as const,
+          isBinary: false,
+          isImage: false,
+          additions: 1,
+          deletions: 1,
+          hunks: [],
+          truncated: false,
+        },
+      ],
+      revision: 0,
+    };
+    const result = await readCaptureRepository(
+      { gitStatus: async () => status, gitDiff: async () => diff },
+      "api",
+    );
+
+    expect(result).toEqual({ complete: true, status, diff });
   });
 });
 
@@ -381,6 +460,15 @@ describe("workspace-capture — manifest & event serialization", () => {
         reason: "repository_discovery_result_limit_exceeded",
       }),
     ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 5,
+        turnId: "t3",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 8,
+        reason: "repository_read_unavailable",
+      }),
+    ).not.toThrow();
   });
 });
 
@@ -432,6 +520,77 @@ describe("workspace-capture — pre-service skip gates", () => {
         session: throwingSession,
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("workspace-capture — fresh provider read handle", () => {
+  test("resumes the same instance with the current exact provider state", async () => {
+    const state = { sandboxId: "sb-exact" };
+    const original = { state } as unknown as ChannelASession;
+    const reopened = { state: { sandboxId: "sb-exact" } } as unknown as ChannelASession;
+    let receivedState: unknown;
+    const selected = await openFreshWorkspaceCaptureSession({
+      backendId: "modal",
+      client: {
+        resume: async (value: unknown) => {
+          receivedState = value;
+          return reopened;
+        },
+      },
+      session: original,
+      expectedInstanceId: "sb-exact",
+    });
+    expect(receivedState).toEqual({ sandboxId: "sb-exact", ownsSandbox: false });
+    expect(receivedState).not.toBe(state);
+    expect(selected).toBe(reopened);
+  });
+
+  test("fails closed when resume returns a different provider instance", async () => {
+    const original = {
+      state: { sandboxId: "sb-expected" },
+    } as unknown as ChannelASession;
+    await expect(
+      openFreshWorkspaceCaptureSession({
+        backendId: "modal",
+        client: {
+          resume: async () => ({ state: { sandboxId: "sb-rival" } }),
+        },
+        session: original,
+        expectedInstanceId: "sb-expected",
+      }),
+    ).rejects.toThrow(
+      "workspace capture reopened provider instance sb-rival, expected sb-expected",
+    );
+  });
+
+  test("uses the existing handle when its provider cannot resume", async () => {
+    const original = {} as ChannelASession;
+    await expect(
+      openFreshWorkspaceCaptureSession({
+        backendId: "modal",
+        client: {},
+        session: original,
+        expectedInstanceId: "selfhosted-agent",
+      }),
+    ).resolves.toBe(original);
+  });
+
+  test("never invokes a non-Modal provider's potentially mutating resume contract", async () => {
+    const original = { state: { containerId: "container-exact" } } as unknown as ChannelASession;
+    let resumeCalled = false;
+    const selected = await openFreshWorkspaceCaptureSession({
+      backendId: "docker",
+      client: {
+        resume: async () => {
+          resumeCalled = true;
+          return { state: { containerId: "container-replacement" } };
+        },
+      },
+      session: original,
+      expectedInstanceId: "container-exact",
+    });
+    expect(selected).toBe(original);
+    expect(resumeCalled).toBe(false);
   });
 });
 

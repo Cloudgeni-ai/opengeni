@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { SessionClientLike } from "../client";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { EmbeddedSessionEventClientLike } from "../client";
 
 export type AsyncListState<T> = {
   data: T | null;
@@ -24,7 +24,9 @@ export function usePolledValue<T>(
   const [error, setError] = useState<Error | null>(null);
   const generation = useRef(0);
   const activeLoadRef = useRef(load);
-  activeLoadRef.current = load;
+  useLayoutEffect(() => {
+    activeLoadRef.current = load;
+  }, [load]);
   const requestAbortRef = useRef<AbortController | null>(null);
   const [stateIdentity, setStateIdentity] = useState<{ load: typeof load }>(() => ({ load }));
 
@@ -123,11 +125,12 @@ export function useMutationRunner(identity: unknown = undefined): MutationState 
   const inFlight = useRef(0);
   const generation = useRef(0);
   const identityRef = useRef(identity);
-  if (!Object.is(identityRef.current, identity)) {
+  useLayoutEffect(() => {
+    if (Object.is(identityRef.current, identity)) return;
     identityRef.current = identity;
     generation.current += 1;
     inFlight.current = 0;
-  }
+  }, [identity]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -153,7 +156,15 @@ export function useMutationRunner(identity: unknown = undefined): MutationState 
         setMutationError(null);
       }
       try {
-        return await operation();
+        const result = await operation();
+        if (
+          !mounted.current ||
+          generation.current !== ownedGeneration ||
+          !Object.is(identityRef.current, ownedIdentity)
+        ) {
+          return null;
+        }
+        return result;
       } catch (cause) {
         if (
           mounted.current &&
@@ -204,22 +215,28 @@ export type SessionEventFeedOptions = {
  * `events` log or tails the stream directly (reconnect handled by the SDK).
  */
 export function useSessionEventTrigger(
-  client: SessionClientLike,
+  client: EmbeddedSessionEventClientLike,
   workspaceId: string,
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,
   onEvent: (event: SessionEvent) => void,
   options: SessionEventFeedOptions = {},
+  reconcileBeforeLive?: (() => void | Promise<void>) | undefined,
 ): void {
   const enabled = options.enabled ?? true;
   const events = options.events;
   const sharedFeed = events !== undefined;
   const matchRef = useRef(match);
-  matchRef.current = match;
   const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
+  const reconcileBeforeLiveRef = useRef(reconcileBeforeLive);
+  useLayoutEffect(() => {
+    matchRef.current = match;
+    onEventRef.current = onEvent;
+    reconcileBeforeLiveRef.current = reconcileBeforeLive;
+  }, [match, onEvent, reconcileBeforeLive]);
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
+  const sharedFeedHasEventsRef = useRef(false);
 
   // Shared-log mode: scan only the unseen tail on every append.
   useEffect(() => {
@@ -228,12 +245,37 @@ export function useSessionEventTrigger(
     }
     const feedKey = `${workspaceId}\u0000${sessionId}`;
     const firstSequence = events[0]?.sequence ?? 0;
-    // A new session target or a log reset (sequence restarted below the
-    // cursor) restarts consumption from the top of the shared log.
-    if (feedKeyRef.current !== feedKey || firstSequence > consumedRef.current + 1) {
+    if (feedKeyRef.current !== feedKey) {
       feedKeyRef.current = feedKey;
-      consumedRef.current = 0;
+      sharedFeedHasEventsRef.current = events.length > 0;
+      // The caller has already loaded its authoritative initial projection.
+      // Seed from the shared log's current tail so mounting a large historical
+      // session cannot replay every old event as a new live trigger.
+      consumedRef.current = events.at(-1)?.sequence ?? 0;
+      return;
     }
+    const firstNonEmptyBatch = !sharedFeedHasEventsRef.current && events.length > 0;
+    if (firstNonEmptyBatch || firstSequence > consumedRef.current + 1) {
+      // The usual shared feed mounts empty, then receives a historical tail.
+      // A later discontinuity can likewise replace the retained browser
+      // window. In either case, reconcile once from the latest relevant event
+      // instead of replaying the whole retained window as live traffic.
+      sharedFeedHasEventsRef.current = events.length > 0;
+      consumedRef.current = events.at(-1)?.sequence ?? consumedRef.current;
+      let latestMatch: SessionEvent | undefined;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (event && matchRef.current(event)) {
+          latestMatch = event;
+          break;
+        }
+      }
+      if (latestMatch) {
+        onEventRef.current(latestMatch);
+      }
+      return;
+    }
+    sharedFeedHasEventsRef.current ||= events.length > 0;
     for (const event of events) {
       if (event.sequence <= consumedRef.current) {
         continue;
@@ -260,6 +302,7 @@ export function useSessionEventTrigger(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: session.lastSequence,
           signal: controller.signal,
+          beforeLive: async () => await reconcileBeforeLiveRef.current?.(),
         });
         for await (const event of stream) {
           if (matchRef.current(event)) {
@@ -280,7 +323,9 @@ export function useSessionEventTrigger(
 /** Debounce rapid event bursts into one trailing call (default 150ms). */
 export function useDebouncedCallback(callback: () => void, delayMs = 150): () => void {
   const callbackRef = useRef(callback);
-  callbackRef.current = callback;
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     return () => {

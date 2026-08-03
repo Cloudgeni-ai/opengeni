@@ -11,6 +11,7 @@ import {
   createDb,
   createSession,
   createWorkspace,
+  getSession,
   migrate,
   type Database,
   type DbClient,
@@ -96,6 +97,7 @@ async function bearer(
     workspaceId,
     subjectId,
     permissions: ["sessions:read", "sessions:control"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   });
   return `Bearer ${token}`;
@@ -156,6 +158,43 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session queue delete lookup", () => {
+  test("terminal control cancels a session and rejects a later Resume", async () => {
+    if (!available) return;
+    const owner = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId: owner.accountId,
+      workspaceId: owner.workspaceId,
+      initialMessage: "terminal control",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const authorization = await bearer(owner.accountId, owner.workspaceId);
+    const control = async (action: "cancel" | "resume") =>
+      await app.request(
+        `http://x/v1/workspaces/${owner.workspaceId}/sessions/${session.id}/control`,
+        {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: JSON.stringify({ action, clientEventId: crypto.randomUUID() }),
+        },
+      );
+
+    const cancelled = await control("cancel");
+    expect(cancelled.status).toBe(200);
+    expect(await cancelled.json()).toMatchObject({
+      effectiveControl: { state: "paused" },
+      cancelledSessionCount: 1,
+      cancelledTurnCount: 0,
+    });
+    expect((await getSession(db, owner.workspaceId, session.id))?.status).toBe("cancelled");
+
+    const resumed = await control("resume");
+    expect(resumed.status).toBe(409);
+    expect(await resumed.text()).toContain("Cancelled session subtree cannot accept work");
+  });
+
   test("session control rejects oversized reason and actor before mutation", async () => {
     if (!available) return;
     const owner = await freshWorkspace();
@@ -207,6 +246,8 @@ describe("session queue delete lookup", () => {
     if (!available) return;
     const owner = await freshWorkspace();
     const other = await freshWorkspace();
+    const publishedBefore = published;
+    const wakesBefore = wakes;
     const otherSession = await createSession(db, {
       accountId: other.accountId,
       workspaceId: other.workspaceId,
@@ -224,8 +265,8 @@ describe("session queue delete lookup", () => {
       expect(await response.text()).toContain("session not found");
     }
 
-    expect(published).toBe(0);
-    expect(wakes).toBe(0);
+    expect(published).toBe(publishedBefore);
+    expect(wakes).toBe(wakesBefore);
   });
 
   test("a committed Delete publishes its durable queue invalidation", async () => {
@@ -237,7 +278,7 @@ describe("session queue delete lookup", () => {
       initialMessage: "queue invalidation",
       resources: [],
       metadata: {},
-      model: "test-model",
+      model: settings.openaiModel,
       sandboxBackend: "none",
     });
     const authorization = await bearer(owner.accountId, owner.workspaceId);

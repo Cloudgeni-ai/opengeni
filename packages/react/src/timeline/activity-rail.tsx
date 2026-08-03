@@ -5,14 +5,20 @@ import {
   BrainIcon,
   SquareTerminalIcon,
 } from "lucide-react";
+import { lazy, Suspense, useLayoutEffect, useRef } from "react";
+import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
+import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
-import { useEntranceAnimation } from "./entrance";
+import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { ToolRegistry } from "./registry";
+import { useSeenActivityIds } from "./seen-activity-ids";
 import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
-import { toolDisplayName } from "./projection";
+import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
+
+const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 
 /* ----------------------------------------------------------------------------
    Activity rail
@@ -62,7 +68,34 @@ export function ActivityRail({
   bare,
   className,
 }: ActivityRailProps) {
-  const enter = useEntranceAnimation();
+  const enterMounted = useEntranceAnimation();
+  // Live gate: rails born during bulk capture enter=false forever; with a
+  // seen-id map we still want later live appends to fade (ids gate remounts).
+  const enterLive = useEntranceAnimationLive();
+  const seenIds = useSeenActivityIds();
+  const enter = seenIds ? enterLive : enterMounted;
+  const previousIdsRef = useRef<Set<string> | null>(null);
+  const enteringIds = new Set<string>();
+  if (enter) {
+    for (const item of items) {
+      if (seenIds) {
+        if (!seenIds.has(item.id)) {
+          enteringIds.add(item.id);
+        }
+      } else if (previousIdsRef.current !== null && !previousIdsRef.current.has(item.id)) {
+        // Standalone ActivityRail (tests / demo): append-only, no remount map.
+        enteringIds.add(item.id);
+      }
+    }
+  }
+  useLayoutEffect(() => {
+    previousIdsRef.current = new Set(items.map((item) => item.id));
+    if (seenIds) {
+      for (const item of items) {
+        seenIds.add(item.id);
+      }
+    }
+  });
   return (
     <div
       className={cn(
@@ -71,7 +104,9 @@ export function ActivityRail({
         // so a long rail reads as a few clusters, not a metronome of rows.
         "flex flex-col gap-0.5",
         !bare && "border-l-2 border-og-border pl-3 sm:pl-4",
-        !bare && enter && "animate-og-enter",
+        // Whole-rail enter: standalone rails only (no seen-id map). Inside
+        // MessageTimeline, unknown ids take per-row enter — remounts stay quiet.
+        !bare && enter && !seenIds && previousIdsRef.current === null && "animate-og-enter",
         className,
       )}
     >
@@ -79,7 +114,11 @@ export function ActivityRail({
         const newFamily = index > 0 && familyOf(item) !== familyOf(items[index - 1]!);
         const row = renderActivity(item, toolRegistry, onOpenSession, onMemoryClick);
         return (
-          <div key={item.id} className={cn(newFamily && "mt-3")}>
+          <div
+            key={item.id}
+            data-og-timeline-row-anchor=""
+            className={cn(newFamily && "mt-3", enteringIds.has(item.id) && "animate-og-row-enter")}
+          >
             {row}
           </div>
         );
@@ -112,6 +151,18 @@ function renderActivity(
       return <SandboxRow item={item} />;
     case "memory":
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
+    case "fleet-decision":
+      return (
+        <Suspense fallback={null}>
+          <LazyFleetDecisionRow
+            item={item}
+            d={ActivityDisclosure}
+            b={BodyNote}
+            j={rowJsx}
+            s={rowJsxs}
+          />
+        </Suspense>
+      );
     default:
       return assertNever(item);
   }
@@ -119,7 +170,9 @@ function renderActivity(
 
 function ReasoningRow({ item }: { item: ReasoningItem }) {
   // Reasoning recedes: a dimmer, lighter-weight title so action rows lead and
-  // thought rows sit a half-step back in the hierarchy.
+  // thought rows sit a half-step back in the hierarchy. Body uses the same
+  // GFM markdown path as agent messages — Codex reasoning often carries
+  // headings/lists/bold that were previously shown as raw plaintext.
   return (
     <ActivityDisclosure
       icon={<BrainIcon className="size-3.5" />}
@@ -134,7 +187,9 @@ function ReasoningRow({ item }: { item: ReasoningItem }) {
       running={item.streaming}
       preview={truncate(item.text, 110)}
     >
-      <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.text}</p>
+      <div className="text-og-base leading-6 text-og-fg-muted [&_strong]:text-og-fg-muted">
+        <Markdown streaming={item.streaming}>{item.text}</Markdown>
+      </div>
     </ActivityDisclosure>
   );
 }

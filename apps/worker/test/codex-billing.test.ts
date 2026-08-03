@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
@@ -56,6 +57,90 @@ describe("worker ensureRunAllowed — codex bypass", () => {
 });
 
 describe("worker recordModelUsageAndDebitCredits — codex usage recording", () => {
+  test("managed Gateway uses exact reported cost and records the serving provider", async () => {
+    const recorded: Array<{ eventType: string; quantity: number }> = [];
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({ eventType: input.eventType, quantity: input.quantity });
+      },
+    );
+    const debitInputs: Array<Record<string, any>> = [];
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async (_db, input) => {
+        debitInputs.push(input);
+        return {
+          balance: {
+            accountId: ACCOUNT,
+            balanceMicros: 1_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          },
+          debitedMicros: input.requestedAmountMicros,
+        };
+      },
+    );
+    try {
+      const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-gateway",
+        turnId: "turn-gateway",
+        turnAttemptId: "attempt-gateway",
+        model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        externallyBilled: false,
+        gatewayManaged: true,
+        gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
+        usage: {
+          inputTokens: 9,
+          outputTokens: 8,
+          totalTokens: 17,
+          inputTokensDetails: { cached_tokens: 3 },
+        },
+        sourceKey: "response-gateway",
+      });
+
+      expect(recorded).toContainEqual({ eventType: "model.cost", quantity: 5 });
+      expect(debitInputs).toHaveLength(1);
+      expect(debitInputs[0]).toMatchObject({
+        requestedAmountMicros: 5,
+        metadata: { gatewayProvider: "baseten", cachedTokens: 3 },
+      });
+      expect(billing).toMatchObject({ pricedCostMicros: 5, upstreamProvider: "baseten" });
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("managed Gateway rejects an unapproved reported provider before recording usage", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue(
+      undefined as never,
+    );
+    try {
+      await expect(
+        recordModelUsageAndDebitCredits(billedSettings(), db, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-gateway",
+          turnId: "turn-gateway-rejected",
+          turnAttemptId: "attempt-gateway-rejected",
+          model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
+          externallyBilled: false,
+          gatewayManaged: true,
+          gatewayBilling: { finalProvider: "unapproved", inferenceCostUsd: "0.01" },
+          usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
+          sourceKey: "response-gateway-rejected",
+        }),
+      ).rejects.toThrow("AI Gateway reported unapproved provider");
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
   test("(d) codex turn records model.cost=0, does NOT throw 'Missing model pricing', and never debits", async () => {
     const recorded: Array<{ eventType: string; quantity: number; unit: string }> = [];
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
@@ -74,8 +159,9 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         workspaceId: WORKSPACE,
         sessionId: "sess-1",
         turnId: "turn-1",
+        turnAttemptId: "attempt-1",
         model: "codex/gpt-5.6-sol", // has NO OpenGeni pricing
-        isCodexTurn: true,
+        externallyBilled: true,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
@@ -108,8 +194,9 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         workspaceId: WORKSPACE,
         sessionId: "sess-1",
         turnId: "turn-2",
+        turnAttemptId: "attempt-2",
         model: "scripted-model",
-        isCodexTurn: false,
+        externallyBilled: false,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
@@ -117,6 +204,224 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         true,
       );
       expect(recorded.some((r) => r.eventType === "model.cost")).toBe(true);
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("malformed token counts cannot create token, cost, or debit quantities", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("malformed usage must not debit credits");
+      },
+    );
+    try {
+      const malformedUsages = [
+        {
+          inputTokens: 1.5,
+          outputTokens: Number.POSITIVE_INFINITY,
+          totalTokens: Number.NaN,
+        },
+        {
+          inputTokens: Number.MAX_SAFE_INTEGER,
+          outputTokens: Number.MAX_SAFE_INTEGER,
+          totalTokens: Number.MAX_SAFE_INTEGER,
+        },
+        {
+          inputTokens: 1_000_000_001,
+          outputTokens: 1_000_000_001,
+          totalTokens: 1_000_000_001,
+          inputTokensDetails: { cached_tokens: 1_000_000_001 },
+        },
+        { inputTokens: -1, outputTokens: -2, totalTokens: -3 },
+      ];
+      for (const [index, usage] of malformedUsages.entries()) {
+        await recordModelUsageAndDebitCredits(billedSettings(), db, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-1",
+          turnId: "turn-malformed",
+          turnAttemptId: `attempt-malformed-${index}`,
+          model: "gpt-5.6-sol",
+          externallyBilled: false,
+          usage,
+          sourceKey: `response-${index}`,
+        });
+      }
+
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("valid SDK aggregates are billed once with one canonical cached-token total", async () => {
+    const recorded: Array<{ eventType: string; quantity: number }> = [];
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({ eventType: input.eventType, quantity: input.quantity });
+      },
+    );
+    const debitInputs: Array<Record<string, any>> = [];
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async (_db, input) => {
+        debitInputs.push(input);
+        return {
+          balance: {
+            accountId: ACCOUNT,
+            balanceMicros: 1_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          },
+          debitedMicros: input.requestedAmountMicros,
+        };
+      },
+    );
+    try {
+      await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-aggregate",
+        turnAttemptId: "attempt-aggregate",
+        model: "gpt-5.6-sol",
+        externallyBilled: false,
+        usage: {
+          inputTokens: 3000,
+          outputTokens: 30,
+          totalTokens: 3030,
+          requestUsageEntries: [
+            {
+              inputTokens: 1000,
+              outputTokens: 10,
+              totalTokens: 1010,
+              inputTokensDetails: {
+                cached_tokens: 100,
+                cachedInputTokens: 999,
+              },
+            },
+            {
+              inputTokens: 2000,
+              outputTokens: 20,
+              totalTokens: 2020,
+              inputTokensDetails: { cached_tokens: 300 },
+            },
+          ],
+        },
+        sourceKey: "aggregate",
+      });
+
+      expect(recorded).toContainEqual({ eventType: "model.tokens", quantity: 3030 });
+      expect(recorded.some((record) => record.eventType === "model.cost")).toBe(true);
+      expect(debitInputs).toHaveLength(1);
+      expect(debitInputs[0]?.metadata).toMatchObject({
+        inputTokens: 3000,
+        outputTokens: 30,
+        totalTokens: 3030,
+        cachedTokens: 400,
+      });
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("inconsistent reported totals cannot suppress token rows, cost, or debit metadata", async () => {
+    const settings = testSettings({
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      modelPricingJson: JSON.stringify({
+        "scripted-model": {
+          inputMicrosPerMillionTokens: 1_000_000,
+          outputMicrosPerMillionTokens: 1_000_000,
+        },
+      }),
+    });
+    const recorded: Array<{ eventType: string; quantity: number; sourceResourceId: string }> = [];
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({
+          eventType: input.eventType,
+          quantity: input.quantity,
+          sourceResourceId: input.sourceResourceId,
+        });
+      },
+    );
+    const debitInputs: Array<Record<string, any>> = [];
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async (_db, input) => {
+        debitInputs.push(input);
+        return {
+          balance: {
+            accountId: ACCOUNT,
+            balanceMicros: 1_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          },
+          debitedMicros: input.requestedAmountMicros,
+        };
+      },
+    );
+    try {
+      const cases = [
+        {
+          sourceKey: "zero-total",
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 0 },
+          expectedTotal: 120,
+        },
+        {
+          sourceKey: "low-total",
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 3 },
+          expectedTotal: 120,
+        },
+        {
+          sourceKey: "request-authority",
+          usage: {
+            inputTokens: 1,
+            outputTokens: 2,
+            totalTokens: 3,
+            requestUsageEntries: [
+              { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+              { inputTokens: 200, outputTokens: 40, totalTokens: 240 },
+            ],
+          },
+          expectedTotal: 350,
+        },
+      ];
+      for (const value of cases) {
+        await recordModelUsageAndDebitCredits(settings, db, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-1",
+          turnId: "turn-inconsistent",
+          turnAttemptId: `attempt-inconsistent-${value.expectedTotal}`,
+          model: "scripted-model",
+          externallyBilled: false,
+          usage: value.usage,
+          sourceKey: value.sourceKey,
+        });
+      }
+
+      for (const value of cases) {
+        expect(recorded).toContainEqual({
+          eventType: "model.tokens",
+          quantity: value.expectedTotal,
+          sourceResourceId: `turn-inconsistent:${value.sourceKey}`,
+        });
+      }
+      expect(debitInputs).toHaveLength(cases.length);
+      expect(debitInputs.map((input) => input.metadata.totalTokens)).toEqual(
+        cases.map((value) => value.expectedTotal),
+      );
+      expect(debitInputs[2]?.metadata).toMatchObject({
+        inputTokens: 300,
+        outputTokens: 50,
+        totalTokens: 350,
+      });
     } finally {
       recordSpy.mockRestore();
       debitSpy.mockRestore();

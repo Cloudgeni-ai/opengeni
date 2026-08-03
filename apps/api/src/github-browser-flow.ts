@@ -3,6 +3,12 @@ import type { AccessGrant } from "@opengeni/contracts";
 import { hasPermission } from "@opengeni/core";
 import type { GitHubSignedStatePayload } from "@opengeni/github";
 
+/**
+ * Bounded configured-token browser handoff. These signed claims preserve only
+ * the exact OpenGeni github:manage grant across GitHub redirects; the callback
+ * independently proves current GitHub personal/organization ownership. This
+ * state must never be interpreted as GitHub installation authority.
+ */
 export const githubBrowserGrantMaxAgeSeconds = 10 * 60;
 
 export function githubBrowserGrantClaims(

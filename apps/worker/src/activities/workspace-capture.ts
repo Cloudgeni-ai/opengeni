@@ -14,7 +14,7 @@
 //   • This module NEVER calls close()/terminate()/kill() on the session handle.
 //     session.close() == terminate() on Modal and would kill the user's box.
 //     Only the reaper terminates. We drop references, nothing more.
-//   • The whole capture is time-capped (60s) and best-effort: ANY failure logs
+//   • The whole capture is time-capped (120s) and best-effort: ANY failure logs
 //     "workspace capture failed — turn outcome unaffected" and returns; nothing
 //     throws past captureWorkspaceRevision.
 //   • The DB write is fenced on the exact attempt, accepted control requests,
@@ -62,7 +62,12 @@ import type {
 } from "@opengeni/contracts";
 
 // ─── Guards & constants for pathological cases; configurable ─────
-export const CAPTURE_TIMEOUT_MS = 60_000;
+// Production Modal captures of the acceptance workspace normally take ~30s:
+// repository diff framing deliberately trades provider round-trips for bounded
+// output and symlink-safe reads. Sixty seconds gave that healthy path only a 2x
+// margin and repeatedly timed it out under ordinary provider variance. The turn
+// holder keeps the exact lease pinned for this whole window.
+export const CAPTURE_TIMEOUT_MS = 120_000;
 export const PER_FILE_CONTENT_GUARD_BYTES = 5 * 1024 * 1024; // after-image; over → tooLarge marker
 export const PER_FILE_DIFF_GUARD_BYTES = 10 * 1024 * 1024; // per-file diff; over → truncated marker
 export const WHOLE_CAPTURE_GUARD_BYTES = 200 * 1024 * 1024; // total → skip, fall back to live
@@ -185,6 +190,14 @@ export type CaptureWorkspaceRevisionInput = {
   publish: CaptureEventPublisher | null;
   /** The un-proxied setupBoxSession (NOT the routing veneer). */
   session: ChannelASession;
+  /**
+   * Reopen the exact live provider instance as a fresh, non-owning read handle.
+   * Modal sessions keep mutable exec-process bookkeeping; reusing the handle
+   * that just drove model tools can strand a later capture command behind stale
+   * provider state. The lease still owns the box. Capture drops this handle
+   * without calling close(), which would terminate Modal's sandbox.
+   */
+  openReadSession?: () => Promise<ChannelASession>;
   leaseEpoch: number;
   sandboxGroupId: string;
   accountId: string;
@@ -203,11 +216,116 @@ export type CaptureWorkspaceRevisionInput = {
   keepLatest?: number;
 };
 
+type CaptureRepositoryReadResult =
+  | {
+      complete: true;
+      status: Awaited<ReturnType<SandboxChannelAService["gitStatus"]>>;
+      diff: Awaited<ReturnType<SandboxChannelAService["gitDiff"]>>;
+    }
+  | { complete: false; degradedReason: "repository_read_unavailable" };
+
+type ResumableCaptureClient = {
+  resume?: (state: unknown) => Promise<unknown>;
+};
+
+type StatefulCaptureSession = ChannelASession & {
+  state?: unknown;
+};
+
+function captureSessionInstanceId(session: unknown): string | null {
+  const state =
+    session && typeof session === "object"
+      ? (session as { state?: Record<string, unknown> }).state
+      : undefined;
+  if (!state || typeof state !== "object") return null;
+  for (const value of [
+    state.sandboxId,
+    state.instanceId,
+    state.id,
+    state.hostId,
+    state.containerId,
+    state.workspaceRootPath,
+  ]) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+/**
+ * Reattach a clean SDK handle to the exact already-live Modal sandbox. Modal's
+ * resume contract is a pure from-id reattach. Other providers keep the original
+ * session because their generic resume contract may restore or replace a dead
+ * instance, which capture does not own.
+ */
+export async function openFreshWorkspaceCaptureSession(input: {
+  backendId: string;
+  client: unknown;
+  session: ChannelASession;
+  expectedInstanceId: string;
+}): Promise<ChannelASession> {
+  if (input.backendId !== "modal") {
+    return input.session;
+  }
+  const client = input.client as ResumableCaptureClient;
+  const state = (input.session as StatefulCaptureSession).state;
+  if (typeof client.resume !== "function" || state === undefined) {
+    return input.session;
+  }
+  // The lease—not this temporary reader—owns provider teardown. Preserve the
+  // exact state while explicitly removing close/terminate authority from
+  // providers (Modal) that encode it in the resumed state.
+  const readState =
+    state !== null && typeof state === "object" ? { ...state, ownsSandbox: false } : state;
+  const reopened = await client.resume(readState);
+  const actualInstanceId = captureSessionInstanceId(reopened);
+  if (input.expectedInstanceId.length > 0 && actualInstanceId !== input.expectedInstanceId) {
+    throw new Error(
+      `workspace capture reopened provider instance ${actualInstanceId ?? "unknown"}, expected ${input.expectedInstanceId}`,
+    );
+  }
+  return reopened as ChannelASession;
+}
+
+/** One discovered repository is all-or-nothing capture authority. A provider
+ * transport failure must never be represented as an authoritative empty diff. */
+export async function readCaptureRepository(
+  svc: Pick<SandboxChannelAService, "gitStatus" | "gitDiff">,
+  root: string,
+): Promise<CaptureRepositoryReadResult> {
+  let status: Awaited<ReturnType<SandboxChannelAService["gitStatus"]>>;
+  try {
+    status = await svc.gitStatus({ path: root });
+  } catch (error) {
+    const boxExiting = classifyCaptureEntryError(error);
+    if (boxExiting) throw boxExiting;
+    return { complete: false, degradedReason: "repository_read_unavailable" };
+  }
+  if (!status.isRepo) {
+    return { complete: false, degradedReason: "repository_read_unavailable" };
+  }
+  try {
+    const diff = await svc.gitDiff({
+      path: root,
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
+    });
+    return { complete: true, status, diff };
+  } catch (error) {
+    const boxExiting = classifyCaptureEntryError(error);
+    if (boxExiting) throw boxExiting;
+    return { complete: false, degradedReason: "repository_read_unavailable" };
+  }
+}
+
 let loggedStorageNullOnce = false;
 
 /**
  * Turn-end entrypoint. Gates on the flag + configured object storage, races the
- * whole capture against a 60s cap, and swallows every failure ("turn outcome
+ * whole capture against a 120s cap, and swallows every failure ("turn outcome
  * unaffected"). Returns void — the caller awaits it (it self-caps) and moves on
  * to release() regardless.
  */
@@ -215,6 +333,7 @@ export async function captureWorkspaceRevision(
   input: CaptureWorkspaceRevisionInput,
 ): Promise<void> {
   const { observability } = input;
+  const stage = { value: "preflight" };
   if (input.signal?.aborted) {
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
@@ -262,6 +381,7 @@ export async function captureWorkspaceRevision(
     { ...input, objectStorage: input.objectStorage },
     startedAt,
     controller.signal,
+    stage,
   ).finally(() => {
     observability.incrementGauge({
       name: "opengeni_workspace_captures_inflight",
@@ -296,6 +416,7 @@ export async function captureWorkspaceRevision(
       "opengeni.turn_id": input.turnId ?? "",
       "error.message": error instanceof Error ? error.message : String(error),
       "workspace_capture.duration_ms": Date.now() - startedAt,
+      "workspace_capture.stage": stage.value,
     });
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
@@ -314,22 +435,28 @@ async function runCapture(
   ctx: CaptureWorkspaceRevisionInput & { objectStorage: ObjectStorage },
   startedAt: number,
   signal: AbortSignal,
+  stage: { value: string },
 ): Promise<void> {
   const { observability } = input;
   const storage = ctx.objectStorage;
   const keepN = input.keepLatest ?? KEEP_LATEST_REVISIONS;
+  stage.value = "open_read_session";
+  const readSession = input.openReadSession ? await input.openReadSession() : input.session;
+  throwIfCaptureAborted(signal);
   // Reads only — no emitter (we publish the announce ourselves after commit).
-  const svc = new SandboxChannelAService({ session: input.session, leaseEpoch: input.leaseEpoch });
+  const svc = new SandboxChannelAService({ session: readSession, leaseEpoch: input.leaseEpoch });
 
   // Resolve the previous revision before discovery so even a failed discovery
   // can commit a monotonic, explicit degraded marker. That marker becomes the
   // newest read result and prevents an older successful capture from being
   // mistaken for the current turn's authoritative workspace state.
+  stage.value = "load_previous_capture";
   const prev = await latestWorkspaceCapture(input.db, input.workspaceId, input.sessionId);
   throwIfCaptureAborted(signal);
   const revision = (prev?.revision ?? -1) + 1;
 
   // ── 1. per-repo status + diff, union the touched set ──────────────────────
+  stage.value = "repository_discovery";
   const discovery = await svc.detectReposDetailed();
   throwIfCaptureAborted(signal);
   if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
@@ -338,46 +465,15 @@ async function runCapture(
     );
   }
   if (!discovery.complete) {
-    const capturedAt = new Date();
     const reason = captureDegradedReason(discovery.degradedReason);
-    const stats = {
-      degradedReason: reason,
-      discoveredRepoCount: discovery.repos.length,
-      durationMs: Date.now() - startedAt,
-    };
-    const inserted = await insertFailedWorkspaceCapture(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      attemptId: input.attemptId,
-      sandboxGroupId: input.sandboxGroupId,
-      expectedEpoch: input.leaseEpoch,
+    await persistDegradedCapture(
+      input,
+      startedAt,
+      signal,
       revision,
-      stats,
-      capturedAt,
-    });
-    throwIfCaptureAborted(signal);
-    if (!inserted) {
-      observability.incrementCounter({
-        name: "opengeni_workspace_capture_total",
-        labels: { result: "superseded" },
-      });
-      return;
-    }
-    observability.warn("workspace capture degraded — repository discovery incomplete", {
-      "opengeni.session_id": input.sessionId,
-      "opengeni.turn_id": input.turnId ?? "",
-      "workspace_capture.degraded_reason": reason,
-      "workspace_capture.discovered_repo_count": discovery.repos.length,
-    });
-    observability.incrementCounter({
-      name: "opengeni_workspace_capture_total",
-      labels: { result: "degraded_repository_discovery" },
-    });
-    if (input.publish) {
-      await input.publish(inserted.events).catch(() => undefined);
-    }
+      reason,
+      discovery.repos.length,
+    );
     return;
   }
   const repoRoots = discovery.repos;
@@ -388,42 +484,26 @@ async function runCapture(
   let deletions = 0;
 
   for (const root of repoRoots) {
+    stage.value = "repository_read";
     throwIfCaptureAborted(signal);
-    // Per-repo resilience: a box death aborts the whole capture (BoxExitingError
-    // propagates); any other single-repo failure (a repo that vanished, a
-    // transient git error) SKIPS that repo and the capture continues with the
-    // rest. One flaky repo must never kill the capture.
-    let status: Awaited<ReturnType<typeof svc.gitStatus>>;
-    try {
-      status = await svc.gitStatus({ path: root });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      continue;
+    // Repository discovery defines the authoritative set. Once a root is in
+    // that set, status/diff failure must degrade the entire revision rather than
+    // publish a partial or false-empty change surface. Box death still aborts
+    // through the outer best-effort boundary.
+    const repository = await readCaptureRepository(svc, root);
+    throwIfCaptureAborted(signal);
+    if (!repository.complete) {
+      await persistDegradedCapture(
+        input,
+        startedAt,
+        signal,
+        revision,
+        repository.degradedReason,
+        repoRoots.length,
+      );
+      return;
     }
-    if (!status.isRepo) continue;
-    // `git diff HEAD`: combined staged+unstaged tracked changes vs HEAD (the
-    // review diff). Untracked files are absent here but present in status.files
-    // and captured as after-images. A repo with no commits yields an empty diff
-    // (git diff HEAD errors → empty numstat) and everything reads as untracked.
-    let diff: Awaited<ReturnType<typeof svc.gitDiff>>;
-    try {
-      diff = await svc.gitDiff({
-        path: root,
-        staged: false,
-        includeUntracked: true,
-        fromRef: "HEAD",
-        pathspec: [],
-        contextLines: 3,
-        maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
-      });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      diff = { files: [], revision: 0 };
-    }
+    const { status, diff } = repository;
     // Drop residue churn from the review diff too. On a desktop box the seed's
     // `git add -A` in $HOME commits ~/.config/xfce4/* into HEAD, so `git diff HEAD`
     // lists the continuously-rewritten desktop dotfiles as changed — noise the
@@ -480,6 +560,7 @@ async function runCapture(
   let binaryCount = 0;
 
   for (const [wsPath, info] of touched) {
+    stage.value = "file_read";
     throwIfCaptureAborted(signal);
     if (info.deleted) {
       files.push({
@@ -585,6 +666,7 @@ async function runCapture(
   }
 
   // ── 5. tree index (one bounded listing; residue dirs pruned at source) ─────
+  stage.value = "tree_index";
   const tree = await buildTreeIndex(svc, startedAt, signal);
   throwIfCaptureAborted(signal);
 
@@ -607,6 +689,7 @@ async function runCapture(
   let refreshedFiles = 0;
   const omittedFiles = new Set<string>();
   for (const file of files) {
+    stage.value = "content_upload";
     throwIfCaptureAborted(signal);
     if (file.deleted || file.tooLarge || !file.contentRef || !file.hash) {
       continue;
@@ -735,10 +818,12 @@ async function runCapture(
       entryCount: tree.entryCount,
     }),
   );
+  stage.value = "tree_upload";
   await storage.putObject({ key: treeKey, contentType: "application/json", body: treeBytes });
   throwIfCaptureAborted(signal);
   stats.durationMs = Date.now() - startedAt;
   const manifestBytes = utf8(JSON.stringify(manifest));
+  stage.value = "manifest_upload";
   await storage.putObject({
     key: manifestKey,
     contentType: "application/json",
@@ -748,6 +833,7 @@ async function runCapture(
   const sizeBytes = totalBytes + treeBytes.byteLength + manifestBytes.byteLength;
 
   // ── 8. epoch-fenced insert (superseded lease → zero rows) ─────────────────
+  stage.value = "database_commit";
   const inserted = await insertWorkspaceCapture(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -848,6 +934,63 @@ function captureDegradedReason(
     case "command_failed":
     default:
       return "repository_discovery_command_failed";
+  }
+}
+
+async function persistDegradedCapture(
+  input: CaptureWorkspaceRevisionInput,
+  startedAt: number,
+  signal: AbortSignal,
+  revision: number,
+  reason: WorkspaceCaptureDegradedReason,
+  discoveredRepoCount: number,
+): Promise<void> {
+  const capturedAt = new Date();
+  const stats = {
+    degradedReason: reason,
+    discoveredRepoCount,
+    durationMs: Date.now() - startedAt,
+  };
+  const inserted = await insertFailedWorkspaceCapture(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    attemptId: input.attemptId,
+    sandboxGroupId: input.sandboxGroupId,
+    expectedEpoch: input.leaseEpoch,
+    revision,
+    stats,
+    capturedAt,
+  });
+  throwIfCaptureAborted(signal);
+  if (!inserted) {
+    input.observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "superseded" },
+    });
+    return;
+  }
+  const discoveryFailure = reason.startsWith("repository_discovery_");
+  input.observability.warn(
+    discoveryFailure
+      ? "workspace capture degraded — repository discovery incomplete"
+      : "workspace capture degraded — repository read incomplete",
+    {
+      "opengeni.session_id": input.sessionId,
+      "opengeni.turn_id": input.turnId ?? "",
+      "workspace_capture.degraded_reason": reason,
+      "workspace_capture.discovered_repo_count": discoveredRepoCount,
+    },
+  );
+  input.observability.incrementCounter({
+    name: "opengeni_workspace_capture_total",
+    labels: {
+      result: discoveryFailure ? "degraded_repository_discovery" : "degraded_repository_read",
+    },
+  });
+  if (input.publish) {
+    await input.publish(inserted.events).catch(() => undefined);
   }
 }
 

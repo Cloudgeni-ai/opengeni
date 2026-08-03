@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/worker-bundle",
-  "version": "0.7.7",
-  "description": "OpenGeni worker entry: runOpenGeniWorker/createOpenGeniWorker(deps) + the un-bundled Temporal workflow source tree. An engine-distribution surface — its runtime closure includes engine-internal packages and the workflow bundle ships as on-disk TS source.",
+  "version": "0.16.1",
+  "description": "OpenGeni worker entry and reusable embedded lifecycle, shipped with a release-coherent pre-bundled Temporal workflow artifact.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -20,6 +20,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./host-export": {
+      "types": "./src/host-export.ts",
+      "default": "./src/host-export.ts"
     }
   },
   "publishConfig": {
@@ -30,11 +34,12 @@
     "dev": "bun src/index.ts",
     "dev:watch": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts && bun scripts/build-workflow-bundle.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@opengeni/agent-proto": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
@@ -42,6 +47,7 @@
     "@opengeni/db": "workspace:*",
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
+    "@opengeni/github": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",
@@ -55,7 +61,7 @@
     "@opengeni/testing": "workspace:*",
     "postgres": "^3.4.9",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=18"

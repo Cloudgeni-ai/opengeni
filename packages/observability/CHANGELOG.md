@@ -1,5 +1,68 @@
 # @opengeni/observability
 
+## 0.4.7
+
+### Patch Changes
+
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+
+## 0.4.6
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+
+## 0.4.5
+
+### Patch Changes
+
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+  - @opengeni/contracts@0.31.2
+
+## 0.4.4
+
+### Patch Changes
+
+- Updated dependencies [9c4d73d]
+  - @opengeni/contracts@0.31.1
+
+## 0.4.3
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/contracts@0.31.0
+
+## 0.4.2
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [dd71248]
+  - @opengeni/contracts@0.29.0
+
+## 0.4.0
+
+### Minor Changes
+
+- 38ba6bc: Add bounded routed-sandbox provider operation observations and the fail-safe
+  Prometheus observer used by API-direct and worker turn execution.
+
 ## 0.3.0
 
 ### Minor Changes

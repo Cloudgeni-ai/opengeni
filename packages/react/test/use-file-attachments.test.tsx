@@ -2,7 +2,7 @@
    Rendered-hook tests for useFileAttachments — the SDK-owned client-side upload
    layer: object-URL preview lifecycle, the image/* paste filter, the
    uploading->ready/failed status machine, the FileResourceRef projection, and
-   the single `uploading` boolean the composer's send-gate reads.
+   distinct progress (`uploading`) and loss-prevention (`hasUnresolved`) gates.
    -------------------------------------------------------------------------- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { FileAsset } from "@opengeni/sdk";
@@ -140,8 +140,43 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("removeReadyFiles clears only the accepted snapshot and preserves later attachments", async () => {
+    let upload = 0;
+    const client = fakeClient({
+      uploadFile: async () => {
+        upload += 1;
+        return fakeAsset({ id: upload === 1 ? "accepted-file" : "later-file" });
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("accepted.png")]));
+    await flush();
+    const acceptedIds = hook.result.current.readyResources.map((resource) => resource.fileId);
+    const acceptedPreview = hook.result.current.attachments[0]!.previewUrl!;
+
+    // This attachment was not part of the already-dispatched request and must
+    // remain available for the next message after that request succeeds.
+    await flushing(() => hook.result.current.addFiles([imageFile("later.png")]));
+    await flush();
+    const laterPreview = hook.result.current.attachments[1]!.previewUrl!;
+    await flushing(() => hook.result.current.removeReadyFiles(acceptedIds));
+
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: "later-file" }]);
+    expect(hook.result.current.attachments.map((attachment) => attachment.name)).toEqual([
+      "asset.png",
+    ]);
+    expect(revoked).toContain(acceptedPreview);
+    expect(revoked).not.toContain(laterPreview);
+    await hook.unmount();
+  });
+
   test("addFromPaste applies the default image/* filter — only the image is enqueued", async () => {
-    const client = fakeClient({ uploadFile: async () => fakeAsset() });
+    const asset = fakeAsset();
+    const client = fakeClient({ uploadFile: async () => asset });
     const hook = await renderHook(
       () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
       undefined,
@@ -153,6 +188,7 @@ describe("useFileAttachments", () => {
     await flushing(() => hook.result.current.addFromPaste({ clipboardData }));
     expect(hook.result.current.attachments).toHaveLength(1);
     expect(hook.result.current.attachments[0]?.contentType).toBe("image/png");
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
     await hook.unmount();
   });
 
@@ -194,6 +230,105 @@ describe("useFileAttachments", () => {
     expect(attachment.sizeBytes).toBe(9999);
     expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
     expect(hook.result.current.uploading).toBe(false);
+    expect(hook.result.current.hasUnresolved).toBe(false);
+    await hook.unmount();
+  });
+
+  test("drops retry source bytes once an upload finalizes", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      uploadFile: async () => {
+        calls += 1;
+        return fakeAsset();
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile()]));
+    await flush();
+    await flushing(() => hook.result.current.retry(hook.result.current.attachments[0]!.id));
+    await flush();
+    expect(calls).toBe(1);
+    await hook.unmount();
+  });
+
+  test("restores only same-workspace ready assets without previews or duplicate ids", async () => {
+    let resolveUpload!: (asset: FileAsset) => void;
+    const client = fakeClient({
+      uploadFile: () =>
+        new Promise<FileAsset>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.addFiles([imageFile("still-uploading.png")]));
+    const ready = fakeAsset({ id: "restored-ready", filename: "restored.png" });
+
+    await flushing(() =>
+      hook.result.current.restoreReadyFiles([
+        ready,
+        { ...ready },
+        fakeAsset({ id: "not-ready", status: "failed" }),
+        fakeAsset({ id: "foreign", workspaceId: "other-workspace" }),
+      ]),
+    );
+
+    expect(hook.result.current.attachments).toHaveLength(2);
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "still-uploading.png",
+      status: "uploading",
+    });
+    expect(hook.result.current.attachments[1]).toEqual({
+      id: "restored:restored-ready",
+      name: "restored.png",
+      contentType: ready.contentType,
+      sizeBytes: ready.sizeBytes,
+      status: "ready",
+      file: ready,
+    });
+    expect(hook.result.current.attachments[1]?.previewUrl).toBeUndefined();
+    expect(hook.result.current.uploading).toBe(true);
+    expect(hook.result.current.readyResources).toEqual([
+      { kind: "file", fileId: "restored-ready" },
+    ]);
+
+    await flushing(() => resolveUpload(fakeAsset({ id: "local-ready" })));
+    await hook.unmount();
+  });
+
+  test("a later server restoration replaces the ready set but preserves unresolved uploads", async () => {
+    let resolveUpload!: (asset: FileAsset) => void;
+    const client = fakeClient({
+      uploadFile: () =>
+        new Promise<FileAsset>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.addFiles([imageFile("pending.png")]));
+    const first = fakeAsset({ id: "first-ready", filename: "first.txt" });
+    const second = fakeAsset({ id: "second-ready", filename: "second.txt" });
+    await flushing(() => hook.result.current.restoreReadyFiles([first]));
+    await flushing(() => hook.result.current.restoreReadyFiles([second]));
+    expect(hook.result.current.attachments.map((attachment) => attachment.status)).toEqual([
+      "uploading",
+      "ready",
+    ]);
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: "second-ready" }]);
+
+    await flushing(() => hook.result.current.restoreReadyFiles([]));
+    expect(hook.result.current.attachments).toHaveLength(1);
+    expect(hook.result.current.attachments[0]?.status).toBe("uploading");
+    await flushing(() => resolveUpload(fakeAsset({ id: "local-ready" })));
     await hook.unmount();
   });
 
@@ -215,11 +350,20 @@ describe("useFileAttachments", () => {
     expect(attachment.error).toBe("blob storage exploded");
     expect(hook.result.current.readyResources).toEqual([]);
     expect(hook.result.current.uploading).toBe(false);
+    expect(hook.result.current.hasUnresolved).toBe(true);
+
+    await flushing(() => hook.result.current.remove(attachment.id));
+    expect(hook.result.current.attachments).toEqual([]);
+    expect(hook.result.current.hasUnresolved).toBe(false);
     await hook.unmount();
   });
 
   test("retry(id) re-uploads a failed attachment in place -> ready, clearing its error", async () => {
     let calls = 0;
+    let resolveRetry!: (value: FileAsset) => void;
+    const retryResult = new Promise<FileAsset>((resolve) => {
+      resolveRetry = resolve;
+    });
     const asset = fakeAsset({ id: "recovered", filename: "recovered.png" });
     const client = fakeClient({
       uploadFile: async () => {
@@ -227,7 +371,7 @@ describe("useFileAttachments", () => {
         if (calls === 1) {
           throw new Error("transient network error");
         }
-        return asset;
+        return await retryResult;
       },
     });
     const hook = await renderHook(
@@ -242,11 +386,17 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.attachments[0]!.error).toBe("transient network error");
 
     await flushing(() => hook.result.current.retry(id));
+    expect(hook.result.current.attachments[0]!.status).toBe("uploading");
+    expect(hook.result.current.uploading).toBe(true);
+    expect(hook.result.current.hasUnresolved).toBe(true);
+
+    await flushing(() => resolveRetry(asset));
     await flush();
     const attachment = hook.result.current.attachments[0]!;
     expect(attachment.status).toBe("ready");
     expect(attachment.error).toBeUndefined();
     expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
+    expect(hook.result.current.hasUnresolved).toBe(false);
     expect(calls).toBe(2);
     await hook.unmount();
   });
@@ -277,9 +427,11 @@ describe("useFileAttachments", () => {
 
     await flushing(() => hook.result.current.addFiles([imageFile()]));
     expect(hook.result.current.uploading).toBe(true);
+    expect(hook.result.current.hasUnresolved).toBe(true);
 
     await flushing(() => resolveUpload(fakeAsset()));
     expect(hook.result.current.uploading).toBe(false);
+    expect(hook.result.current.hasUnresolved).toBe(false);
     await hook.unmount();
   });
 });

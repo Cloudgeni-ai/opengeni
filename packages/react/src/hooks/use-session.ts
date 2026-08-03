@@ -1,6 +1,6 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useEffect, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
 import {
   useMutationRunner,
   usePolledValue,
@@ -8,7 +8,7 @@ import {
   type SessionEventFeedOptions,
 } from "./internal";
 
-export type UseSessionOptions = ClientOverride &
+export type UseSessionOptions = EmbeddedSessionReadClientOverride &
   SessionEventFeedOptions & {
     /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
     pollIntervalMs?: number | undefined;
@@ -38,7 +38,7 @@ export function useSession(
   options: UseSessionOptions = {},
 ): UseSessionResult {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
-    useOpenGeni(options);
+    useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [override, setOverride] = useState<Session | null>(null);
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
@@ -66,10 +66,13 @@ export function useSession(
   const base = data ?? null;
   // The override only ever carries title/titleSource patches; it is reset on
   // every fresh load so it can never go stale against the server snapshot.
-  const session =
-    base && override && override.id === base.id
-      ? { ...base, title: override.title, titleSource: override.titleSource }
-      : base;
+  const session = useMemo(
+    () =>
+      base && override && override.id === base.id
+        ? { ...base, title: override.title, titleSource: override.titleSource }
+        : base,
+    [base, override],
+  );
 
   // Live-patch the title on auto (agent) + cross-client (user/agent) renames so
   // the UI reflects the new title without polling or a full re-fetch.

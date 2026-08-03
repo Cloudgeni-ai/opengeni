@@ -5,13 +5,20 @@ import {
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
   startupRetryOptions,
+  temporalConnectionOptions,
 } from "@opengeni/config";
 import type {
   ScheduledTask,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
-import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  markSessionWorkflowWakeDelivered,
+  runtimeDatabaseReadyCheck,
+  type Database,
+} from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
 import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
@@ -23,10 +30,11 @@ import {
   WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
-import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
 import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
+import { startSlackInteractionPump } from "./integrations/slack-interactions";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -61,7 +69,7 @@ export async function createTemporalWorkflowClient(
   documentIndexer: DocumentIndexClient;
   close: () => Promise<void>;
 }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({
     connection,
     namespace: settings.temporalNamespace,
@@ -164,13 +172,17 @@ export async function createTemporalWorkflowClient(
         .delete()
         .catch(() => undefined);
     },
-    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey, triggerWorkflowId }) => {
+    triggerScheduledTask: async ({
+      task,
+      agentRunUsageIdempotencyKey,
+      triggerWorkflowId,
+      initiator,
+    }) => {
       // Deterministic workflowId (derived from the trigger token by the
       // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
       // the second start collides on the id and is rejected instead of
       // spawning a second run. The shared idempotency key dedupes the charge.
-      const workflowId =
-        triggerWorkflowId ?? `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`;
+      const workflowId = triggerWorkflowId;
       try {
         await temporal.workflow.start("scheduledTaskFireWorkflow", {
           taskQueue: settings.temporalTaskQueue,
@@ -183,6 +195,7 @@ export async function createTemporalWorkflowClient(
               taskId: task.id,
               triggerType: "manual",
               agentRunUsageIdempotencyKey,
+              initiator,
             },
           ],
         });
@@ -218,12 +231,13 @@ export async function createTemporalWorkflowClient(
     },
   };
   const documentIndexer: DocumentIndexClient = {
-    indexDocument: async ({ accountId, workspaceId, documentId }) => {
+    indexDocument: async (input) => {
+      const { documentId } = input;
       const workflowId = `document-index-${documentId}-${crypto.randomUUID()}`;
       await temporal.workflow.start("documentIndexWorkflow", {
         taskQueue: settings.temporalTaskQueue,
         workflowId,
-        args: [{ accountId, workspaceId, documentId }],
+        args: [input],
       });
     },
   };
@@ -252,11 +266,21 @@ export async function startApi() {
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
+  const databasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.runtimeDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+  } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
   // request `agent.*.rpc`. Null in local dev (anonymous connect — the bus default).
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   try {
+    await retryStartupDependency(
+      "PostgreSQL runtime posture",
+      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      { ...retryOptions, onRetry },
+    );
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -288,13 +312,16 @@ export async function startApi() {
     await dbClient.close();
     throw new Error("OpenGeni API startup dependencies were not initialized");
   }
-  const app = createApp({
+  const { app, routeDeps } = createAppComposition({
     settings,
     db: dbClient.db,
     bus,
     workflowClient: workflowClient.client,
     documentIndexer: workflowClient.documentIndexer,
     observability,
+    readinessChecks: {
+      db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
+    },
   });
   const server = Bun.serve({
     hostname: settings.apiHost,
@@ -302,6 +329,9 @@ export async function startApi() {
     idleTimeout: 255,
     fetch: app.fetch,
   });
+  const stopSlackInteractionPump = settings.slackSigningSecret
+    ? startSlackInteractionPump(routeDeps)
+    : undefined;
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -317,8 +347,16 @@ export async function startApi() {
   // user), separate from the privileged control-plane bus.
   let authCalloutResponder: ResponderConnection | undefined;
   if (settings.sandboxSelfhostedEnabled) {
-    stopMetricsIngestion = startMetricsIngestion({ db: dbClient.db, bus, observability });
-    stopHelloIngestion = startHelloIngestion({ db: dbClient.db, bus, observability });
+    stopMetricsIngestion = startMetricsIngestion({
+      db: dbClient.db,
+      bus,
+      observability,
+    });
+    stopHelloIngestion = startHelloIngestion({
+      db: dbClient.db,
+      bus,
+      observability,
+    });
     observability.info("OpenGeni machine-metrics + hello ingestion consumers started", {});
 
     const callout = resolveNatsCalloutConfig(settings);
@@ -350,6 +388,7 @@ export async function startApi() {
     server,
     close: async () => {
       server.stop(true);
+      stopSlackInteractionPump?.();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await Promise.allSettled([

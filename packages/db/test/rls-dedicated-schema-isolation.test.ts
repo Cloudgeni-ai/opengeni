@@ -1,10 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
+  assertRuntimeDatabasePosture,
   createApiKey,
   createDb,
+  FORCE_RLS_TABLES,
   listApiKeys,
+  PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_FULL_DML_TABLES,
   rlsStrategyFor,
   withWorkspaceRls,
   type Database,
@@ -30,7 +35,11 @@ import { provisionRoles } from "../src/provision-roles";
 //   (D) each tenant sees exactly its own rows under its own context.
 //   (E) the handle's bound strategy is "force".
 //
-// Throwaway pgvector pg17, non-default port, torn down in afterAll.
+// By default this uses a throwaway pgvector pg17 Docker container on a
+// non-default port and tears it down in afterAll. Environments without Docker
+// may point OPENGENI_TEST_THROWAWAY_DATABASE_ADMIN_URL at an equally disposable
+// PostgreSQL database with pgvector installed; this test applies every migration
+// and creates/normalizes roles, so a shared or persistent database is unsafe.
 
 // Fixed Docker listeners stay above Linux's default ephemeral client-port range;
 // the container name binds the listener contract across worktrees.
@@ -39,8 +48,13 @@ const CONTAINER = `ogverify-pg-rls-dedicated-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const SCHEMA = "tenantx";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const EXTERNAL_ADMIN_URL = process.env.OPENGENI_TEST_THROWAWAY_DATABASE_ADMIN_URL?.trim();
+const ADMIN_URL =
+  EXTERNAL_ADMIN_URL || `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const appUrl = new URL(ADMIN_URL);
+appUrl.username = "opengeni_app";
+appUrl.password = APP_PASSWORD;
+const APP_URL = appUrl.toString();
 const SEARCH_PATH = `${SCHEMA},opengeni_private,public`;
 const IMAGE = "pgvector/pgvector:pg17";
 
@@ -77,6 +91,7 @@ async function waitForReady(): Promise<void> {
 }
 
 let available = true;
+let dockerStarted = false;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -93,28 +108,32 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker([
-      "run",
-      "--rm",
-      "-d",
-      "-e",
-      `POSTGRES_PASSWORD=${PASSWORD}`,
-      "-p",
-      `${PORT}:5432`,
-      "--name",
-      CONTAINER,
-      IMAGE,
-    ]);
-  } catch (err) {
-    available = false;
-    console.warn(`[rls-dedicated] docker unavailable, skipping: ${String(err)}`);
-    return;
+  if (!EXTERNAL_ADMIN_URL) {
+    try {
+      removeContainer();
+      docker([
+        "run",
+        "--rm",
+        "-d",
+        "-e",
+        `POSTGRES_PASSWORD=${PASSWORD}`,
+        "-p",
+        `${PORT}:5432`,
+        "--name",
+        CONTAINER,
+        IMAGE,
+      ]);
+      dockerStarted = true;
+    } catch (err) {
+      available = false;
+      console.warn(`[rls-dedicated] docker unavailable, skipping: ${String(err)}`);
+      return;
+    }
   }
   await waitForReady();
 
   // (A) embedded migrate into the dedicated schema via the SDK entry point.
+  await migrate(ADMIN_URL, SCHEMA);
   await migrate(ADMIN_URL, SCHEMA);
 
   // Provision the non-owner app role via the REAL provisionRoles SDK entry, in
@@ -132,7 +151,7 @@ beforeAll(async () => {
 
   // createDb with the dedicated-schema search_path + force strategy — the exact
   // embedded handle shape (minus userLookup).
-  client = createDb(APP_URL, { searchPath: SEARCH_PATH, rlsStrategy: "force" });
+  client = createDb(APP_URL, { max: 1, searchPath: SEARCH_PATH, rlsStrategy: "force" });
   db = client.db;
 }, 180_000);
 
@@ -147,10 +166,232 @@ afterAll(async () => {
   } catch {
     /* noop */
   }
-  removeContainer();
+  if (dockerStarted) {
+    removeContainer();
+  }
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
+  test("runtime identity and every declared tenant table satisfy the exact FORCE-RLS posture", async () => {
+    if (!available) return;
+    const posture = await assertRuntimeDatabasePosture(db, {
+      rlsStrategy: "force",
+      expectedRole: "opengeni_app",
+      targetSchema: SCHEMA,
+    });
+
+    expect(posture.identity).toMatchObject({
+      currentUser: "opengeni_app",
+      sessionUser: "opengeni_app",
+      canLogin: true,
+      superuser: false,
+      inherit: false,
+      createRole: false,
+      createDatabase: false,
+      replication: false,
+      bypassRls: false,
+      canCreateInDatabase: false,
+      rowSecurity: "on",
+    });
+    expect(posture.memberships).toEqual([]);
+    expect(posture.ownedSchemas).toEqual([]);
+    expect(posture.ownedRelations).toEqual([]);
+    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
+      FORCE_RLS_TABLES.length,
+    );
+    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(FORCE_RLS_TABLES.length);
+    expect(
+      posture.tables.filter(
+        (table) => table.select && table.insert && table.update && table.delete,
+      ),
+    ).toHaveLength(RUNTIME_FULL_DML_TABLES.length);
+    expect(
+      posture.tables.find((table) => table.name === "nested_agent_depth_configuration"),
+    ).toMatchObject({ select: true, insert: false, update: false, delete: false });
+    expect(posture.tables.find((table) => table.name === "session_spawn_denials")).toMatchObject({
+      select: true,
+      insert: true,
+      update: false,
+      delete: false,
+    });
+    expect(
+      posture.tables.find((table) => table.name === "preference_registry_events"),
+    ).toMatchObject({
+      select: true,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+    expect(
+      posture.tables.find((table) => table.name === "preference_registry_snapshots"),
+    ).toMatchObject({
+      select: true,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+    for (const tableName of [
+      "preference_registry_preferences",
+      "preference_registry_revisions",
+      "workspace_instruction_policy_activation_events",
+      "workspace_instruction_policy_revisions",
+    ]) {
+      expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
+        select: true,
+        insert: true,
+        update: false,
+        delete: false,
+      });
+    }
+    expect(posture.tables.find((table) => table.name === "knowledge_memories")).toMatchObject({
+      select: true,
+      insert: true,
+      update: true,
+      delete: true,
+    });
+    for (const tableName of [
+      "knowledge_lifecycle_events",
+      "knowledge_memory_lifecycle_events",
+      "knowledge_memory_relationships",
+    ]) {
+      expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      });
+    }
+    for (const tableName of [
+      "knowledge_change_proposals",
+      "knowledge_claim_evidence",
+      "knowledge_claim_relations",
+      "knowledge_claim_reviews",
+      "knowledge_claims",
+      "knowledge_document_versions",
+      "knowledge_entities",
+      "knowledge_entity_aliases",
+      "knowledge_facts",
+      "knowledge_providers",
+      "knowledge_source_acl_versions",
+      "knowledge_source_objects",
+      "knowledge_sources",
+      "knowledge_sync_runs",
+    ]) {
+      expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
+        select: true,
+        insert: true,
+        update: false,
+        delete: false,
+      });
+    }
+    for (const tableName of PROTECTED_NO_DIRECT_DML_TABLES) {
+      expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      });
+    }
+    expect(
+      posture.tables.every((table) => !table.truncate && !table.references && !table.trigger),
+    ).toBe(true);
+    expect(posture.tables.find((table) => table.name === "schema_migrations")).toMatchObject({
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+    expect(
+      posture.tables.find((table) => table.name === "session_history_items_repair_audit"),
+    ).toMatchObject({ select: false, insert: false, update: false, delete: false });
+
+    const [preferenceFunctions] = await admin<
+      Array<{
+        lock_execute: boolean;
+        lifecycle_execute: boolean;
+        snapshot_execute: boolean;
+      }>
+    >`
+      SELECT
+        has_function_privilege(
+          'opengeni_app',
+          ${`${SCHEMA}.preference_registry_lock_heads(uuid[])`},
+          'EXECUTE'
+        ) AS lock_execute,
+        has_function_privilege(
+          'opengeni_app',
+          ${`${SCHEMA}.preference_registry_apply_lifecycle(text,uuid,integer,uuid,uuid,text,uuid,text,text)`},
+          'EXECUTE'
+        ) AS lifecycle_execute,
+        has_function_privilege(
+          'opengeni_app',
+          ${`${SCHEMA}.preference_registry_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)`},
+          'EXECUTE'
+        ) AS snapshot_execute`;
+    expect(preferenceFunctions).toEqual({
+      lock_execute: true,
+      lifecycle_execute: true,
+      snapshot_execute: true,
+    });
+
+    const knowledgeFunctions = await admin<
+      Array<{
+        name: string;
+        security_definer: boolean;
+        app_execute: boolean;
+        public_execute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        procedure.proname AS name,
+        procedure.prosecdef AS security_definer,
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS app_execute,
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) AS public_execute,
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname IN (
+          'scoped_knowledge_apply_lifecycle',
+          'scoped_knowledge_advance_source_acl',
+          'scoped_knowledge_complete_sync',
+          'scoped_knowledge_advance_object_version',
+          'scoped_knowledge_guard_acl_insert',
+          'scoped_knowledge_guard_sync_insert',
+          'scoped_knowledge_guard_version_insert'
+        )
+      ORDER BY procedure.proname`;
+    expect(knowledgeFunctions).toHaveLength(7);
+    for (const routine of knowledgeFunctions) {
+      expect(routine.security_definer).toBe(true);
+      expect(routine.public_execute).toBe(false);
+      expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
+      expect(routine.app_execute).toBe(!routine.name.includes("_guard_"));
+    }
+  });
+
+  test("the restricted runtime role can perform Better Auth table DML", async () => {
+    if (!available) return;
+    const userId = `posture-auth-${crypto.randomUUID()}`;
+    const email = `${userId}@example.test`;
+    await db.execute(sql`
+      insert into auth_users (id, name, email)
+      values (${userId}, 'Runtime posture test', ${email})
+    `);
+    const rows = (await db.execute(sql`
+      select id, email from auth_users where id = ${userId}
+    `)) as unknown as Array<{ id: string; email: string }>;
+    expect(rows).toEqual([{ id: userId, email }]);
+    await db.execute(sql`delete from auth_users where id = ${userId}`);
+  });
   test("(A) tables + policies isolate to the dedicated schema, 0 in public", async () => {
     if (!available) return;
     const tablesInSchema = (
@@ -184,18 +425,19 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
   test("(B) rows written under A's RLS context land in the DEDICATED schema, not public", async () => {
     if (!available) return;
     const wsA = await freshWorkspace();
+    const keyHash = `hashA-${crypto.randomUUID()}`;
     await createApiKey(db, {
       accountId: wsA.accountId,
       workspaceId: wsA.workspaceId,
       name: "keyA",
       prefix: "pkA",
-      keyHash: "hashA",
+      keyHash,
       permissions: ["workspace:read"],
     });
     // Superuser read of the DEDICATED schema's table — the row must be HERE.
     const inSchema = (
       await admin<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM ${admin(SCHEMA)}.api_keys WHERE key_hash = 'hashA'`
+      SELECT count(*)::int AS count FROM ${admin(SCHEMA)}.api_keys WHERE key_hash = ${keyHash}`
     )[0]!.count;
     expect(inSchema).toBe(1);
     // And public.api_keys must NOT exist at all (proves no silent public fallback).
@@ -211,12 +453,14 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     if (!available) return;
     const wsA = await freshWorkspace();
     const wsB = await freshWorkspace();
+    const keyHashA = `iso-hash-A-${crypto.randomUUID()}`;
+    const keyHashB = `iso-hash-B-${crypto.randomUUID()}`;
     await createApiKey(db, {
       accountId: wsA.accountId,
       workspaceId: wsA.workspaceId,
       name: "onlyA",
       prefix: "pA",
-      keyHash: "iso-hash-A",
+      keyHash: keyHashA,
       permissions: ["workspace:read"],
     });
     await createApiKey(db, {
@@ -224,7 +468,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       workspaceId: wsB.workspaceId,
       name: "onlyB",
       prefix: "pB",
-      keyHash: "iso-hash-B",
+      keyHash: keyHashB,
       permissions: ["workspace:read"],
     });
 
@@ -242,7 +486,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     const crossTenant = await withWorkspaceRls(db, wsB.workspaceId, async (scoped) => {
       const rows = await scoped.execute(
         // raw to bypass the helper's own workspace filter — pure RLS gate test.
-        (await import("drizzle-orm")).sql`select id from api_keys where key_hash = 'iso-hash-A'`,
+        (await import("drizzle-orm")).sql`select id from api_keys where key_hash = ${keyHashA}`,
       );
       return rows as unknown as Array<{ id: string }>;
     });
@@ -252,10 +496,50 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     // 0 above is RLS isolation, not a broken query / wrong schema returning empty).
     const ownTenant = await withWorkspaceRls(db, wsA.workspaceId, async (scoped) => {
       const rows = await scoped.execute(
-        (await import("drizzle-orm")).sql`select id from api_keys where key_hash = 'iso-hash-A'`,
+        (await import("drizzle-orm")).sql`select id from api_keys where key_hash = ${keyHashA}`,
       );
       return rows as unknown as Array<{ id: string }>;
     });
     expect(ownTenant.length).toBe(1);
+  });
+
+  test("account/workspace GUCs are transaction-local and remain empty after reconnect", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await withWorkspaceRls(db, workspace.workspaceId, async (scoped) => {
+      const [inside] = (await scoped.execute(sql`
+        select
+          current_setting('opengeni.account_id', true) as account_id,
+          current_setting('opengeni.workspace_id', true) as workspace_id
+      `)) as unknown as Array<{ account_id: string; workspace_id: string }>;
+      expect(inside).toEqual({
+        account_id: workspace.accountId,
+        workspace_id: workspace.workspaceId,
+      });
+    });
+
+    const [afterCommit] = (await db.execute(sql`
+      select
+        current_setting('opengeni.account_id', true) as account_id,
+        current_setting('opengeni.workspace_id', true) as workspace_id
+    `)) as unknown as Array<{ account_id: string; workspace_id: string }>;
+    expect(afterCommit).toEqual({ account_id: "", workspace_id: "" });
+
+    const reconnected = createDb(APP_URL, {
+      max: 1,
+      searchPath: SEARCH_PATH,
+      rlsStrategy: "force",
+    });
+    try {
+      const [afterReconnect] = (await reconnected.db.execute(sql`
+        select
+          current_setting('opengeni.account_id', true) as account_id,
+          current_setting('opengeni.workspace_id', true) as workspace_id
+      `)) as unknown as Array<{ account_id: string | null; workspace_id: string | null }>;
+      expect(afterReconnect?.account_id ?? "").toBe("");
+      expect(afterReconnect?.workspace_id ?? "").toBe("");
+    } finally {
+      await reconnected.close();
+    }
   });
 });

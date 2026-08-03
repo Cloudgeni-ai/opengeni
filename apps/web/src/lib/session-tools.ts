@@ -4,8 +4,15 @@ import type {
   GitHubRepository,
   ReasoningEffort,
   ResourceRef,
+  Session,
   ToolRef,
 } from "@/types";
+import {
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  defaultRepositoryMountPath,
+  resourceMountPathCollisionKey,
+  type FirstPartyMcpToolName,
+} from "@opengeni/contracts";
 
 export type RepoDraft = { id: number; url: string; ref: string };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
@@ -14,6 +21,39 @@ export type RepoDraft = { id: number; url: string; ref: string };
 // (billing impact — "low" beats the deployer's configured default server-side).
 export type IntelligenceEffort = ReasoningEffort;
 export type McpServerOption = { id: string; name: string };
+
+const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni", "files"]);
+
+/**
+ * Runtime infrastructure is not user policy:
+ * - `opengeni` is the mandatory carrier for the individually selected
+ *   first-party tools.
+ * - `files` is OpenGeni's hidden-on-by-default file/download capability.
+ *   The public API may still omit it from an explicit session policy.
+ */
+export function isSelectableSessionMcpServerId(id: string): boolean {
+  return !NON_SELECTABLE_SESSION_MCP_SERVER_IDS.has(id);
+}
+
+export function selectableSessionMcpServerIds(ids: Iterable<string>): Set<string> {
+  return new Set([...ids].filter(isSelectableSessionMcpServerId));
+}
+
+const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
+  set_session_title: "Rename this session",
+  set_other_session_title: "Rename another session",
+  run_on: "Choose where work runs",
+};
+
+export const firstPartySessionToolOptions = FIRST_PARTY_MCP_TOOL_NAMES.map((id) => ({
+  id,
+  name: FIRST_PARTY_ACTION_LABELS[id] ?? firstPartyToolLabel(id),
+}));
+
+function firstPartyToolLabel(id: FirstPartyMcpToolName): string {
+  const label = id.replaceAll("_", " ");
+  return label.slice(0, 1).toUpperCase() + label.slice(1);
+}
 
 // Canonical low→high ordering over the full enum; the picker renders efforts in
 // this order, filtered to whatever the host curates in `allowedReasoningEfforts`.
@@ -24,7 +64,12 @@ export const reasoningEffortOrder: IntelligenceEffort[] = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ];
+
+export function isIntelligenceEffort(value: unknown): value is IntelligenceEffort {
+  return typeof value === "string" && (reasoningEffortOrder as readonly string[]).includes(value);
+}
 
 export function labelEffort(value: IntelligenceEffort): string {
   if (value === "xhigh") {
@@ -58,18 +103,89 @@ export function buildTools(
   mcpServerIds: string[] = [],
 ): ToolRef[] {
   const out = [...(existing ?? [])];
-  const ids = [...mcpServerIds];
-  // Document Search is one user-facing tool but needs its file-download helper
-  // ("files") alongside it; pull it in whenever "docs" is selected.
-  if (ids.includes("docs") && !ids.includes("files")) {
-    ids.push("files");
-  }
-  for (const id of ids) {
+  for (const id of mcpServerIds) {
     if (id && !out.some((tool) => tool.kind === "mcp" && tool.id === id)) {
       out.push({ kind: "mcp", id });
     }
   }
   return out;
+}
+
+/**
+ * OpenGeni's product UI keeps file access enabled without exposing an
+ * implementation-level Files checkbox. This is deliberately a UI default, not
+ * a server mandate: API and embedded clients can still submit an explicit
+ * policy without `files`.
+ */
+export function buildOpenGeniUiTools(
+  existing: ToolRef[] | undefined,
+  selectedMcpServerIds: Iterable<string>,
+): ToolRef[] {
+  return buildTools(existing, ["files", ...selectableSessionMcpServerIds(selectedMcpServerIds)]);
+}
+
+function canonicalToolIds(tools: ToolRef[]): string[] {
+  return [...new Set(tools.map((tool) => `${tool.kind}:${tool.id}`))].sort();
+}
+
+/**
+ * Materialize the picker's selection only when it narrows/pins the inherited
+ * baseline. `undefined` is the wire-level omitted-tools contract. The product
+ * UI's hidden Files default is materialized when it writes an explicit policy;
+ * API clients that need a truly empty allow-list submit `[]` directly.
+ */
+export function toolsForPolicySelection(input: {
+  existing?: ToolRef[];
+  selectedMcpServerIds: Iterable<string>;
+  baselineMcpServerIds: Iterable<string>;
+  forceExplicit?: boolean;
+}): ToolRef[] | undefined {
+  const selected = buildOpenGeniUiTools(input.existing, input.selectedMcpServerIds);
+  if (input.forceExplicit === true) {
+    return selected;
+  }
+  const baseline = buildOpenGeniUiTools(undefined, input.baselineMcpServerIds);
+  return canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000")
+    ? undefined
+    : selected;
+}
+
+/** Canonical persisted new-session policy, including the omitted/explicit bit. */
+export function newSessionDraftToolPolicy(input: {
+  selectedMcpServerIds: Iterable<string>;
+  workspaceDefaultMcpServerIds: Iterable<string>;
+  catalogReady: boolean;
+  explicit: boolean;
+}): { tools: ToolRef[]; toolsProvided: boolean } {
+  if (!input.catalogReady) return { tools: [], toolsProvided: false };
+  const selected = buildOpenGeniUiTools(undefined, input.selectedMcpServerIds);
+  const baseline = buildOpenGeniUiTools(undefined, input.workspaceDefaultMcpServerIds);
+  const equal =
+    canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000");
+  return input.explicit || !equal
+    ? { tools: selected, toolsProvided: true }
+    : { tools: [], toolsProvided: false };
+}
+
+/**
+ * Project the server-authoritative session policy into currently selectable
+ * picker IDs. Workspace-default sessions follow the live capability baseline;
+ * fixed policies use their effective IDs (or their persisted refs for rolling
+ * compatibility). Unavailable IDs remain visible in policy truth/inspector but
+ * cannot be selected by a picker that cannot execute them.
+ */
+export function sessionPolicyPickerIds(
+  session: Pick<Session, "tools" | "toolPolicy" | "effectiveToolPolicy">,
+  selectableIds: Iterable<string>,
+  workspaceDefaultIds: Iterable<string>,
+): Set<string> {
+  const selectable = new Set(selectableIds);
+  const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy.mode;
+  const policyIds =
+    mode === "workspace_default"
+      ? [...workspaceDefaultIds]
+      : (session.effectiveToolPolicy?.effectiveIds ?? session.tools.map((tool) => tool.id));
+  return new Set(policyIds.filter((id) => selectable.has(id)));
 }
 
 export function buildResources(
@@ -102,14 +218,16 @@ export function buildResources(
       throw new Error("Repository ref is required.");
     }
     const parsed = normalizeRepositoryUrl(repo.url);
-    const mountPath = `repos/${parsed.repo}`;
-    if (mountPaths.has(mountPath)) {
+    const uri = `https://${parsed.host}/${parsed.repo}.git`;
+    const mountPath = defaultRepositoryMountPath(uri);
+    const mountKey = resourceMountPathCollisionKey(mountPath);
+    if (mountPaths.has(mountKey)) {
       throw new Error(`Duplicate repository mount path: ${mountPath}`);
     }
-    mountPaths.add(mountPath);
+    mountPaths.add(mountKey);
     return {
       kind: "repository",
-      uri: `https://${parsed.host}/${parsed.repo}.git`,
+      uri,
       ref: repo.ref,
       mountPath,
       ...(repo.private && repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
@@ -123,11 +241,12 @@ export function gitHubRepositoryResource(
   ref: string,
 ): Extract<ResourceRef, { kind: "repository" }> {
   const parsed = normalizeRepositoryUrl(repo.cloneUrl);
+  const uri = `https://${parsed.host}/${parsed.repo}.git`;
   return {
     kind: "repository",
-    uri: `https://${parsed.host}/${parsed.repo}.git`,
+    uri,
     ref: ref.trim() || repo.defaultBranch,
-    mountPath: `repos/${parsed.repo}`,
+    mountPath: defaultRepositoryMountPath(uri),
     ...(repo.private
       ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId }
       : {}),
@@ -138,8 +257,11 @@ export function isRepositoryResourceForGitHubRepo(
   resource: Extract<ResourceRef, { kind: "repository" }>,
   repo: GitHubRepository,
 ): boolean {
-  if (repo.private) {
+  const hasGitHubIdentity =
+    resource.githubRepositoryId !== undefined || resource.githubInstallationId !== undefined;
+  if (hasGitHubIdentity || repo.private) {
     return (
+      repo.private &&
       resource.githubRepositoryId === repo.id &&
       resource.githubInstallationId === repo.installationId
     );
@@ -149,6 +271,64 @@ export function isRepositoryResourceForGitHubRepo(
 
 export function sameRepositoryUri(resource: ResourceRef, uri: string): boolean {
   return resource.kind === "repository" && resource.uri === uri;
+}
+
+/**
+ * Revalidate repository resources against the browser's authoritative GitHub
+ * catalog. Private selections must retain both stable GitHub identities;
+ * public/manual selections are URI-based and remain usable as manual refs when
+ * the catalog no longer contains a matching public repository.
+ */
+export function rehydrateRepositoryResources(
+  resources: ResourceRef[],
+  repositories: GitHubRepository[],
+): ResourceRef[] {
+  return resources.flatMap<ResourceRef>((resource) => {
+    if (resource.kind !== "repository") return [resource];
+    const hasGitHubIdentity =
+      resource.githubRepositoryId !== undefined || resource.githubInstallationId !== undefined;
+    if (hasGitHubIdentity) {
+      return repositories.some((repo) => isRepositoryResourceForGitHubRepo(resource, repo))
+        ? [resource]
+        : [];
+    }
+    return [resource];
+  });
+}
+
+/** Project hydrated repository resources into the existing picker state. */
+export function repositorySelectionFromResources(
+  resources: ResourceRef[],
+  repositories: GitHubRepository[],
+): {
+  manualRepos: RepoDraft[];
+  selectedRepoIds: Set<number>;
+  selectedRepoRefs: Record<number, string>;
+} {
+  const manualRepos: RepoDraft[] = [];
+  const selectedRepoIds = new Set<number>();
+  const selectedRepoRefs: Record<number, string> = {};
+  let nextManualId = 1;
+
+  for (const resource of resources) {
+    if (resource.kind !== "repository") continue;
+    const matched = repositories.find((repo) => {
+      if (
+        resource.githubRepositoryId !== undefined ||
+        resource.githubInstallationId !== undefined
+      ) {
+        return isRepositoryResourceForGitHubRepo(resource, repo);
+      }
+      return sameRepositoryUri(resource, gitHubRepositoryResource(repo, repo.defaultBranch).uri);
+    });
+    if (matched) {
+      selectedRepoIds.add(matched.id);
+      selectedRepoRefs[matched.id] = resource.ref;
+    } else {
+      manualRepos.push({ id: nextManualId++, url: resource.uri, ref: resource.ref });
+    }
+  }
+  return { manualRepos, selectedRepoIds, selectedRepoRefs };
 }
 
 export function repositoryDisplayName(
@@ -171,7 +351,7 @@ export function normalizeRepositoryUrl(value: string): { host: string; repo: str
   if (parts.length < 2) {
     throw new Error("Repository URL must include owner and repo.");
   }
-  return { host: url.hostname.toLowerCase(), repo: parts.join("/") };
+  return { host: url.host.toLowerCase(), repo: parts.join("/") };
 }
 
 export type RepositoryGroup = {
@@ -202,12 +382,7 @@ export function selectableMcpServers(config: ClientConfig | null): McpServerOpti
   if (!config) {
     return [];
   }
-  // "files" is the document-search download helper, attached automatically with
-  // "docs" (see buildTools) — it is not a tool the user picks on its own, so
-  // hide it. Everything else, including the first-party "opengeni" and "docs",
-  // is selectable from the unified Tools dropdown.
-  const hidden = new Set(["files"]);
-  return config.mcpServers.filter((server) => !hidden.has(server.id));
+  return config.mcpServers.filter((server) => isSelectableSessionMcpServerId(server.id));
 }
 
 export function enabledWorkspaceCapabilityMcpServers(
@@ -222,7 +397,9 @@ export function enabledWorkspaceCapabilityMcpServers(
     ) {
       return [];
     }
-    return [{ id: item.runtime.mcpServerId, name: item.name }];
+    return isSelectableSessionMcpServerId(item.runtime.mcpServerId)
+      ? [{ id: item.runtime.mcpServerId, name: item.name }]
+      : [];
   });
 }
 
@@ -242,11 +419,12 @@ export function selectedAvailableCapabilityToolIds(
   current: Set<string>,
   availableIds: string[],
   previouslyAvailableIds: Set<string> = new Set(),
+  defaultIds: string[] = availableIds,
 ): Set<string> {
   const available = new Set(availableIds);
   const next = new Set([...current].filter((id) => available.has(id)));
-  for (const id of availableIds) {
-    if (id && !previouslyAvailableIds.has(id)) {
+  for (const id of defaultIds) {
+    if (id && available.has(id) && !previouslyAvailableIds.has(id)) {
       next.add(id);
     }
   }

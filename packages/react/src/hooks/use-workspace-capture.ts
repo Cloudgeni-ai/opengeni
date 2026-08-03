@@ -315,6 +315,12 @@ export function useWorkspaceCapture(
     if (!enabled) return;
     if (visibleAnnouncedRevision === null) return;
     if (loadedRevision !== null && visibleAnnouncedRevision <= loadedRevision) return;
+    // The mount request is already resolving the latest revision. Do not abort
+    // and replace that exact identity-equivalent read merely because the event
+    // tail announced a revision before the response arrived. When the request
+    // settles, its state update re-runs this effect and a genuinely newer
+    // announcement still refreshes immediately.
+    if (requestAbortRef.current) return;
     // A newer capture exists than the one we hold (or we hold none) — pull it.
     void refresh();
   }, [enabled, visibleAnnouncedRevision, loadedRevision, refresh]);
