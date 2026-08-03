@@ -16,7 +16,7 @@ import {
   type QueueHarnessErrorShape,
   type QueueVisibilityProbeKind,
 } from "./queue-fixtures";
-import "../../../apps/web/src/styles.css";
+import "./styles.css";
 import "./queue-harness.css";
 
 declare global {

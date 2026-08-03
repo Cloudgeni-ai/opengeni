@@ -4,6 +4,7 @@ import { extname, join, relative } from "node:path";
 
 const repositoryRoot = join(import.meta.dir, "..");
 const webSourceRoot = join(repositoryRoot, "apps/web/src");
+const reactDemoRoot = join(repositoryRoot, "packages/react/demo");
 
 async function sourceFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -60,5 +61,21 @@ describe("public realtime ownership", () => {
     );
     expect(sessionRoute).toContain('import("@opengeni/react/realtime")');
     expect(newSessionRoute).toContain('from "@opengeni/react/realtime"');
+  });
+
+  test("keeps the public React demo on published package imports", async () => {
+    const violations: string[] = [];
+    for (const file of await sourceFiles(reactDemoRoot)) {
+      const source = await readFile(file, "utf8");
+      const path = relative(repositoryRoot, file);
+      for (const [label, pattern] of [
+        ["private package source import", /(?:from\s+|import\s*)["'][^"']*\.\.\/src(?:\/|["'])/],
+        ["web application import", /(?:from\s+|import\s*)["'][^"']*apps\/web(?:\/|["'])/],
+      ] as const) {
+        if (pattern.test(source)) violations.push(`${path}: ${label}`);
+      }
+    }
+
+    expect(violations).toEqual([]);
   });
 });
