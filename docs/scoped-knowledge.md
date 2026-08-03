@@ -39,7 +39,7 @@ prevent cross-organization workspace anchors even for malformed direct SQL.
 `documents.acl_tags` remain caller-supplied retrieval filters. They are not read
 or stored by this foundation and confer no authorization.
 
-Migration 0157 projects this same authority tuple onto `documents` and
+Migration 0158 projects this same authority tuple onto `documents` and
 `document_chunks`. Legacy workspace documents deterministically remain
 workspace authority. Legacy private documents become personal authority bound
 to their original workspace and existing creator; migration 0126 already

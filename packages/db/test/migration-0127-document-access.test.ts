@@ -32,7 +32,7 @@ describe("document access migrations", () => {
 
   test("backfills immutable document and chunk authority before replacing FORCE-RLS policy", async () => {
     const sql = await readFile(
-      join(migrationsDir, "0157_document_authority_foundation.sql"),
+      join(migrationsDir, "0158_document_authority_foundation.sql"),
       "utf8",
     );
 
