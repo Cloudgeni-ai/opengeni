@@ -172,8 +172,7 @@ export function SessionToolPicker(props: {
     props.firstPartyTools,
   );
   const total = props.servers.length + props.firstPartyTools.length;
-  const selected =
-    visibleSelection.mcpServerIds.size + visibleSelection.firstPartyToolIds.size;
+  const selected = visibleSelection.mcpServerIds.size + visibleSelection.firstPartyToolIds.size;
   const menuSide = props.menuSide ?? "bottom";
   if (total === 0) return null;
 

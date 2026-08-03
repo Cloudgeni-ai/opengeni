@@ -26,10 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
-import {
-  analyticsPreferencesAvailable,
-  openAnalyticsPreferences,
-} from "@/lib/analytics-consent";
+import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
 function userInitial(label: string): string {
   return (label.trim()[0] ?? "U").toUpperCase();

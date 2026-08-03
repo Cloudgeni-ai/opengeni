@@ -36,10 +36,7 @@ const WORKSPACE_CONFIG_ICONS = {
   settings: SettingsIcon,
 } as const satisfies Record<WorkspaceConfigIcon, LucideIcon>;
 
-export function WorkspaceConfigGlyph(props: {
-  icon: WorkspaceConfigIcon;
-  className?: string;
-}) {
+export function WorkspaceConfigGlyph(props: { icon: WorkspaceConfigIcon; className?: string }) {
   const Icon = WORKSPACE_CONFIG_ICONS[props.icon];
   return <Icon className={props.className} />;
 }
@@ -65,9 +62,7 @@ export function WorkspaceConfigLink(props: {
           : { "data-active": active ? ("true" as const) : undefined })}
         aria-label={collapsed ? item.label : undefined}
         title={
-          collapsed
-            ? [item.label, item.description].filter(Boolean).join(" — ")
-            : item.description
+          collapsed ? [item.label, item.description].filter(Boolean).join(" — ") : item.description
         }
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted transition-colors pointer-coarse:h-10",
