@@ -508,6 +508,8 @@ export type SandboxFileDownload = {
   content?: Uint8Array;
   expiresAt?: Date | string;
   sizeBytes?: number;
+  /** Finalized lowercase SHA-256 hex for integrity verification when available. */
+  sha256?: string;
 };
 
 export type SandboxFileDownloadFailure = {
@@ -5614,30 +5616,30 @@ export async function runOwnedSandboxSetup(
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
     await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
-    // FILE RESOURCES: withSandboxFileDownloads has the IDENTICAL provided-session
-    // blind spot (it too wraps only create/resume), so signed-URL file
-    // materialization must also run directly against the pinned box. The download
-    // command is idempotent (skips an existing file) and atomic (tmp + rename).
-    if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
-      const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
-        ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
-        ...(runAs ? { runAs } : {}),
-        ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
-      });
-      if (opts.preparedInput) {
-        appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
-      }
-    }
   } else {
-    // SELFHOSTED TOOLSPACE (parity): the platform setup hooks and file
-    // materialization stay OFF the user's real machine — but the toolspace token
-    // seed is the ONE piece of per-turn material that must reach it (a scoped,
+    // SELFHOSTED TOOLSPACE (parity): platform setup hooks stay OFF the user's
+    // real machine. The toolspace token is one narrowly-scoped per-turn input
+    // that must reach it (a scoped,
     // own-session-bound token written to $OPENGENI_TOOLSPACE_TOKEN_FILE over the
     // same off-manifest exec channel the clone-seed uses; the machine's only path
     // to programmatic tool calling). Seed it (only) here.
     const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
     if (toolspaceHooks.length > 0) {
       await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
+    }
+  }
+  // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
+  // Deliver them on every backend, including connected machines. The command is
+  // workspace-relative, integrity-verified, read-only, and atomic; repository,
+  // rig, credential, and Azure setup remain excluded above on selfhosted.
+  if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
+    const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+      ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
+      ...(runAs ? { runAs } : {}),
+      ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
+    });
+    if (opts.preparedInput) {
+      appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
     }
   }
 }
@@ -5730,7 +5732,8 @@ export async function materializeSandboxFileDownloads(
   }
   const failures: SandboxFileDownloadFailure[] = [];
   for (const download of normalizedDownloads) {
-    const targetPath = sandboxDownloadTargetPath(download);
+    const targetRelativePath = sandboxDownloadRelativePath(download);
+    const targetPath = sandboxDownloadLogicalPath(download);
     const payload = {
       fileId: download.fileId,
       path: targetPath,
@@ -5763,7 +5766,7 @@ export async function materializeSandboxFileDownloads(
       result = await runSandboxLifecycleCommand(
         session,
         {
-          cmd: sandboxFileDownloadCommand(download, targetPath),
+          cmd: sandboxFileDownloadCommand(download, targetRelativePath),
           workdir: "/workspace",
           ...(context.runAs ? { runAs: context.runAs } : {}),
           yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
@@ -6613,9 +6616,20 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
         `File download materialization requires content or a URL for ${download.fileId}`,
       );
     }
+    if (
+      download.sizeBytes !== undefined &&
+      (!Number.isSafeInteger(download.sizeBytes) || download.sizeBytes < 0)
+    ) {
+      throw new Error(`Invalid sandbox file size for ${download.fileId}: ${download.sizeBytes}`);
+    }
+    const sha256 = download.sha256?.trim().toLowerCase();
+    if (sha256 !== undefined && !/^[a-f0-9]{64}$/.test(sha256)) {
+      throw new Error(`Invalid sandbox file SHA-256 for ${download.fileId}`);
+    }
     return {
       ...download,
       mountPath,
+      ...(sha256 ? { sha256 } : {}),
     };
   });
 }
@@ -6633,8 +6647,12 @@ function assertSafeSandboxFilename(filename: string, fileId: string): void {
   }
 }
 
-function sandboxDownloadTargetPath(download: SandboxFileDownload): string {
-  return posixPath.join("/workspace", download.mountPath, download.filename);
+function sandboxDownloadRelativePath(download: SandboxFileDownload): string {
+  return posixPath.join(download.mountPath, download.filename);
+}
+
+function sandboxDownloadLogicalPath(download: SandboxFileDownload): string {
+  return posixPath.join("/workspace", sandboxDownloadRelativePath(download));
 }
 
 function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: string): string {
@@ -6642,17 +6660,58 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
     throw new Error(`File download materialization URL is empty for ${download.fileId}`);
   }
   const targetDir = posixPath.dirname(targetPath);
-  const tmpPath = `${targetPath}.opengeni-download-$$`;
+  const canVerifyExisting = download.sizeBytes !== undefined || download.sha256 !== undefined;
+  const directoryCommands: string[] = [];
+  let directory = "";
+  for (const segment of targetDir.split("/")) {
+    directory = directory ? `${directory}/${segment}` : segment;
+    directoryCommands.push(
+      `if [ -L ${shellQuote(directory)} ]; then echo ${shellQuote(`Refusing symlinked attachment directory: ${directory}`)} >&2; exit 73; fi`,
+      `mkdir -p -- ${shellQuote(directory)}`,
+    );
+  }
+  const verificationCommands = [
+    "verify_attachment() {",
+    '  candidate="$1"',
+    '  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1',
+    ...(download.sizeBytes !== undefined
+      ? [
+          "  actual_size=$(wc -c < \"$candidate\" | tr -d '[:space:]')",
+          `  [ "$actual_size" = ${shellQuote(String(download.sizeBytes))} ] || return 1`,
+        ]
+      : []),
+    ...(download.sha256
+      ? [
+          "  if command -v sha256sum >/dev/null 2>&1; then",
+          "    actual_sha=$(sha256sum \"$candidate\" | awk '{print $1}')",
+          "  elif command -v shasum >/dev/null 2>&1; then",
+          "    actual_sha=$(shasum -a 256 \"$candidate\" | awk '{print $1}')",
+          "  else",
+          '    echo "No SHA-256 verifier is available for attachment delivery" >&2',
+          "    return 2",
+          "  fi",
+          `  [ "$actual_sha" = ${shellQuote(download.sha256)} ] || return 1`,
+        ]
+      : []),
+    "  return 0",
+    "}",
+  ];
   return [
     "set +x",
     "set -eu",
-    `mkdir -p -- ${shellQuote(targetDir)}`,
-    `if [ ! -f ${shellQuote(targetPath)} ]; then`,
-    `  tmp=${shellQuote(tmpPath)}`,
+    ...directoryCommands,
+    ...verificationCommands,
+    `if [ -L ${shellQuote(targetPath)} ]; then echo ${shellQuote("Refusing symlinked attachment target")} >&2; exit 73; fi`,
+    `if [ -e ${shellQuote(targetPath)} ] && [ ! -f ${shellQuote(targetPath)} ]; then echo ${shellQuote("Refusing non-file attachment target")} >&2; exit 73; fi`,
+    `if ${canVerifyExisting ? `verify_attachment ${shellQuote(targetPath)}` : "false"}; then`,
+    "  :",
+    "else",
+    `  tmp=$(mktemp ${shellQuote(`${targetPath}.opengeni-download.XXXXXX`)})`,
     '  cleanup() { rm -f -- "$tmp"; }',
     "  trap cleanup EXIT",
     `  curl --fail --location --silent --show-error --retry 3 --retry-delay 1 --output "$tmp" ${shellQuote(download.url)}`,
-    `  mv -- "$tmp" ${shellQuote(targetPath)}`,
+    '  if ! verify_attachment "$tmp"; then echo "Downloaded attachment failed size or SHA-256 verification" >&2; exit 74; fi',
+    `  mv -f -- "$tmp" ${shellQuote(targetPath)}`,
     "  trap - EXIT",
     "fi",
     `chmod a-w -- ${shellQuote(targetPath)} 2>/dev/null || true`,

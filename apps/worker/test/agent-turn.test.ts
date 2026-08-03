@@ -68,6 +68,7 @@ import {
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
+  requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
   safeErrorDiagnostic,
   sandboxDeadlineRotationRecoveryDelayMs,
@@ -2649,6 +2650,17 @@ describe("Codex credential lease deadline fence", () => {
 });
 
 describe("sandbox file materialization note", () => {
+  test("uses the active backend when deciding whether attachments need signed delivery", () => {
+    const modalHome = testSettings({
+      sandboxBackend: "modal",
+      objectStorageBackend: "s3-compatible",
+    });
+    expect(requiresSignedFileResourceDownloads(modalHome, "modal")).toBe(false);
+    expect(requiresSignedFileResourceDownloads(modalHome, "selfhosted")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "docker")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "none")).toBe(false);
+  });
+
   test("filters downloads already materialized on the current box", () => {
     const downloads = [
       {

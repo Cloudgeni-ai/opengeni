@@ -1,6 +1,7 @@
 import {
   MODEL_ATTACHMENT_REFS_FIELD,
   FileResourceRef,
+  resourceMountPath,
   type FileAsset,
   type ResourceRef,
 } from "@opengeni/contracts";
@@ -329,9 +330,7 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
 function attachmentUnavailableText(ref: FileResourceRef, file: FileAsset | undefined): string {
   const filename = file?.safeFilename ?? ref.fileId;
   const mediaType = file?.contentType ?? "unknown type";
-  const path = file
-    ? sandboxFilePath(ref, file)
-    : `/workspace/${ref.mountPath ?? `files/${ref.fileId}`}`;
+  const path = file ? sandboxFilePath(ref, file) : `/workspace/${resourceMountPath(ref)}`;
   return (
     `[Attachment not included directly because the selected model does not accept this input ` +
     `or it exceeded the safe inline limit: ${filename} (${mediaType}). ` +
@@ -657,5 +656,5 @@ function sandboxFilePath(
   resource: Extract<ResourceRef, { kind: "file" }>,
   file: FileAsset,
 ): string {
-  return `/workspace/${resource.mountPath ?? `files/${file.id}`}/${file.safeFilename}`;
+  return `/workspace/${resourceMountPath(resource)}/${file.safeFilename}`;
 }

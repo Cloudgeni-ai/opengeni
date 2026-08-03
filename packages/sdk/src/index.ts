@@ -211,6 +211,7 @@ export type {
   WorkspaceTranscriptionTarget,
 } from "./transcription";
 export {
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   KNOWN_PERMISSIONS,
   KNOWN_USAGE_EVENT_TYPES,
   OPENGENI_API_CONTRACT_HEADER,

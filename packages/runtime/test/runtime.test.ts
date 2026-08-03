@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -9,8 +10,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
@@ -2172,7 +2175,7 @@ describe("runtime event normalization", () => {
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
-    "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
+    "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
     "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
@@ -2539,7 +2542,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.bucket).toBe("opengeni-files");
     expect(entry.prefix).toBe(`files/${fileId}/original`);
@@ -2562,7 +2565,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.mountStrategy).toMatchObject({ type: "modal_cloud_bucket" });
   });
@@ -2577,7 +2580,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.container).toBe("opengeni-files");
     expect(entry.prefix).toBe(`files/${fileId}/original`);
@@ -2600,7 +2603,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.endpointUrl).toBe("https://custom.blob.example.test");
   });
@@ -2633,14 +2636,14 @@ describe("runtime event normalization", () => {
     const downloads = [
       {
         fileId,
-        mountPath: `files/${fileId}`,
+        mountPath: `.opengeni/files/${fileId}`,
         filename: "source.txt",
         content: new TextEncoder().encode("hello"),
         sizeBytes: 12,
       },
     ];
     const manifest = buildManifest(settings, [{ kind: "file", fileId }], undefined, downloads);
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     const agent = buildOpenGeniAgent(settings, [{ kind: "file", fileId }], {
       fileResourceDownloads: downloads,
     });
@@ -2649,7 +2652,7 @@ describe("runtime event normalization", () => {
     expect(entry.children["source.txt"].type).toBe("file");
     expect(new TextDecoder().decode(entry.children["source.txt"].content)).toBe("hello");
     expect(sandboxFileDownloadsForAgent(agent)).toEqual([]);
-    expect((agent as any).defaultManifest.entries[`files/${fileId}`].type).toBe("dir");
+    expect((agent as any).defaultManifest.entries[`.opengeni/files/${fileId}`].type).toBe("dir");
   });
 
   test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
@@ -2693,10 +2696,87 @@ describe("runtime event normalization", () => {
     expect(commands[0]).toContain("set -eu");
     expect(commands[0]).not.toContain("pipefail");
     expect(commands[0]).toContain("curl --fail");
+    expect(commands[0]).toContain("mktemp");
+    expect(commands[0]).toContain("Refusing symlinked attachment directory");
+    expect(commands[0]).toContain("Refusing non-file attachment target");
     expect(commands[0]).toContain("chmod a-w");
     expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
     expect(events.join("\n")).not.toContain("sig=secret");
     expect(events.join("\n")).toContain("file-resource-download");
+  });
+
+  test("atomically repairs tampered attachment files and rejects corrupt downloads", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-attachment-"));
+    const workspace = join(root, "workspace");
+    const source = join(root, "source.txt");
+    const target = join(workspace, ".opengeni", "files", "file-1", "input.txt");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(source, "hello");
+    const sha256 = createHash("sha256").update("hello").digest("hex");
+    const events: string[] = [];
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      exec: async ({ cmd }: { cmd: string }) => {
+        const process = Bun.spawn(["/bin/sh", "-c", cmd], {
+          cwd: workspace,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(process.stdout).text(),
+          new Response(process.stderr).text(),
+          process.exited,
+        ]);
+        return { stdout, stderr, output: `${stdout}${stderr}`, exitCode };
+      },
+    };
+    const download = {
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename: "input.txt",
+      url: pathToFileURL(source).href,
+      sizeBytes: 5,
+      sha256,
+    };
+
+    try {
+      expect(
+        (
+          await materializeSandboxFileDownloads(session as any, [download], {
+            onRuntimeEvent: (event) => events.push(JSON.stringify(event)),
+          })
+        ).failures,
+      ).toEqual([]);
+      expect(readFileSync(target, "utf8")).toBe("hello");
+
+      chmodSync(target, 0o644);
+      writeFileSync(target, "wrong");
+      expect((await materializeSandboxFileDownloads(session as any, [download])).failures).toEqual(
+        [],
+      );
+      expect(readFileSync(target, "utf8")).toBe("hello");
+
+      chmodSync(target, 0o644);
+      writeFileSync(target, "wrong");
+      writeFileSync(source, "bad!!");
+      const corrupt = await materializeSandboxFileDownloads(session as any, [download]);
+      expect(corrupt.failures).toHaveLength(1);
+      expect(corrupt.failures[0]?.reason).toContain("failed size or SHA-256 verification");
+      expect(readFileSync(target, "utf8")).toBe("wrong");
+      expect(events.join("\n")).not.toContain(pathToFileURL(source).href);
+
+      rmSync(join(workspace, ".opengeni"), { recursive: true, force: true });
+      const escaped = join(root, "outside");
+      mkdirSync(escaped);
+      symlinkSync(escaped, join(workspace, ".opengeni"), "dir");
+      writeFileSync(source, "hello");
+      const symlinked = await materializeSandboxFileDownloads(session as any, [download]);
+      expect(symlinked.failures).toHaveLength(1);
+      expect(symlinked.failures[0]?.reason).toContain("Refusing symlinked attachment directory");
+      expect(() => statSync(join(escaped, "files", "file-1", "input.txt"))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("reports signed file download failures without throwing", async () => {

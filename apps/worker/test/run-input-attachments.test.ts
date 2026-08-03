@@ -416,7 +416,7 @@ describe("turnInput attachment projection", () => {
         kind: "message",
         internalContext:
           "Attached files are available in the sandbox:\n" +
-          `- diagram.png (image/png, 5 bytes): /workspace/files/${image.id}/diagram.png`,
+          `- diagram.png (image/png, 5 bytes): /workspace/.opengeni/files/${image.id}/diagram.png`,
         historyItems: [
           {
             type: "message",

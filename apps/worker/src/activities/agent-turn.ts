@@ -345,6 +345,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
+  resourceMountPath,
   type LatencyMode,
   type ResourceRef,
   type SessionEvent,
@@ -5518,6 +5519,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           objectStorage,
           input.workspaceId,
           turnResources,
+          activeSandboxBackend ?? groupBoxBackend,
         ),
         cancellationSignal,
         undefined,
@@ -6299,20 +6301,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
       let fileDownloadsMaterializedForRun = false;
-      if (
-        resolvedSandbox &&
-        setupBoxSession &&
-        activeSandboxBackend !== "selfhosted" &&
-        fileResourceDownloads.length > 0
-      ) {
+      if (resolvedSandbox && setupBoxSession && fileResourceDownloads.length > 0) {
         const boxInstanceId = resolvedSandbox.established.instanceId;
-        const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sandboxGroupId: session.sandboxGroupId,
-          expectedEpoch: resolvedSandbox.leaseEpoch,
-          instanceId: boxInstanceId,
-        });
+        // Managed boxes are immutable platform state, so their durable lease can
+        // memoize successful downloads. A connected machine is user-owned: files
+        // can be changed or removed between turns, so verify/materialize every
+        // attached file each turn instead of trusting the managed-box cache.
+        const cacheMaterialization = resolvedSandbox.established.backendId !== "selfhosted";
+        const alreadyMaterialized = cacheMaterialization
+          ? await getMaterializedSandboxFileResources(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: session.sandboxGroupId,
+              expectedEpoch: resolvedSandbox.leaseEpoch,
+              instanceId: boxInstanceId,
+            })
+          : new Set<string>();
         const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
           fileResourceDownloads,
           alreadyMaterialized,
@@ -6346,7 +6350,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const succeededFileIds = downloadsToMaterialize
             .map((download) => download.fileId)
             .filter((fileId) => !failedFileIds.has(fileId));
-          if (succeededFileIds.length > 0) {
+          if (cacheMaterialization && succeededFileIds.length > 0) {
             await markSandboxFileResourcesMaterialized(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -9532,8 +9536,9 @@ async function sandboxFileDownloadsForRun(
   objectStorage: ObjectStorage | null,
   workspaceId: string,
   resources: ResourceRef[],
+  activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
 ): Promise<SandboxFileDownload[]> {
-  if (settings.sandboxBackend === "none" || !requiresSignedFileResourceDownloads(settings)) {
+  if (!requiresSignedFileResourceDownloads(settings, activeSandboxBackend)) {
     return [];
   }
   const fileResources = resources.filter(
@@ -9554,17 +9559,24 @@ async function sandboxFileDownloadsForRun(
     const url = await downloadStorage.createGetUrl({ key: file.objectKey });
     downloads.push({
       fileId: file.id,
-      mountPath: resource.mountPath ?? `files/${file.id}`,
+      mountPath: resourceMountPath(resource),
       filename: file.safeFilename,
       url: url.url,
       expiresAt: url.expiresAt,
       sizeBytes: file.sizeBytes,
+      ...(file.sha256 ? { sha256: file.sha256 } : {}),
     });
   }
   return downloads;
 }
 
-function requiresSignedFileResourceDownloads(settings: Settings): boolean {
+export function requiresSignedFileResourceDownloads(
+  settings: Settings,
+  activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
+): boolean {
+  if (activeSandboxBackend === "none") {
+    return false;
+  }
   // A selfhosted machine (bring-your-own-compute) can NEVER mount ANY object store
   // — it is a remote user machine reached only over NATS, so file resources are
   // ALWAYS delivered by exec-curling a pre-signed URL onto it. Without this a
@@ -9572,15 +9584,15 @@ function requiresSignedFileResourceDownloads(settings: Settings): boolean {
   // resources on an azure-blob / s3-compatible store (nativeBucketMount=false),
   // a regression from the pre-honest-label path where the same turn ran home=modal
   // and modal's descriptor forced signed downloads.
-  if (settings.sandboxBackend === "selfhosted") {
+  if (activeSandboxBackend === "selfhosted") {
     return true;
   }
   // A nativeBucketMount backend (modal) cannot mount Azure Blob entries, so it
   // needs pre-signed downloads for that store. Keying on the descriptor (not the
   // "modal" literal) keeps this correct as bucket-mount backends are added.
-  const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
+  const nativeBucketMount = CAPABILITY_DESCRIPTORS[activeSandboxBackend].nativeBucketMount;
   return (
-    (settings.sandboxBackend === "docker" && settings.objectStorageBackend === "s3-compatible") ||
+    (activeSandboxBackend === "docker" && settings.objectStorageBackend === "s3-compatible") ||
     settings.objectStorageBackend === "aws-s3" ||
     settings.objectStorageBackend === "gcs" ||
     (nativeBucketMount && settings.objectStorageBackend === "azure-blob")

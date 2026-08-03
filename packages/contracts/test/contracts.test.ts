@@ -61,6 +61,7 @@ import {
   mergeResourceRefs,
   normalizeResourceMountPath,
   readTurnExecutionPolicyV1,
+  resourceMountPath,
   resourceMountPathCollisionKey,
   turnExecutionPolicyAuditMetadata,
   TurnExecutionPolicyV1,
@@ -625,6 +626,13 @@ describe("contracts", () => {
     );
     expect(normalizeResourceMountPath("repos/github.com/acme/aux-repository")).toBe(
       "repos/github.com/acme/aux-repository",
+    );
+  });
+
+  test("keeps uploaded files in the private OpenGeni workspace directory by default", () => {
+    expect(resourceMountPath({ kind: "file", fileId: "file-1" })).toBe(".opengeni/files/file-1");
+    expect(resourceMountPath({ kind: "file", fileId: "file-1", mountPath: "inputs/current" })).toBe(
+      "inputs/current",
     );
   });
 

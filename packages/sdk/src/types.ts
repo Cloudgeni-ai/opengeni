@@ -461,10 +461,13 @@ export type RepositoryResourceRef = {
   githubRepositoryId?: number | undefined;
 };
 
+/** Value mirror of `@opengeni/contracts`; parity-tested without adding an SDK runtime dependency. */
+export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
+
 export type FileResourceRef = {
   kind: "file";
   fileId: string;
-  /** Optional workspace-relative override; defaults to `files/<file-id>`. */
+  /** Optional workspace-relative override; defaults to `.opengeni/files/<file-id>`. */
   mountPath?: string | undefined;
 };
 

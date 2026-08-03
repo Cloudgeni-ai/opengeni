@@ -3051,10 +3051,12 @@ export function defaultRepositoryMountPath(uri: string): string {
 }
 
 /** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
+export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
+
 export function resourceMountPath(resource: ResourceRef): string {
   if (resource.mountPath) return normalizeResourceMountPath(resource.mountPath);
   return resource.kind === "file"
-    ? normalizeResourceMountPath(`files/${resource.fileId}`)
+    ? normalizeResourceMountPath(`${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`)
     : defaultRepositoryMountPath(resource.uri);
 }
 
