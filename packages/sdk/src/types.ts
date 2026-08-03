@@ -3367,6 +3367,8 @@ export type KnowledgeSourceKind =
   | "other";
 export type DocumentSearchMode = "hybrid" | "vector" | "keyword";
 
+export type DocumentAuthorityKind = "organization" | "workspace" | "personal";
+
 export type DocumentVisibility = "workspace" | "private";
 
 export type DocumentCurationStatus = "none" | "pending" | "suggested" | "auto_filed" | "failed";
@@ -3408,6 +3410,9 @@ export type Document = {
   sourceUpdatedAt: string | null;
   sourceVersion: string | null;
   aclTags: string[];
+  authorityKind: DocumentAuthorityKind;
+  authorityWorkspaceId: string | null;
+  authoritySubjectId: string | null;
   visibility: DocumentVisibility;
   createdBy: string | null;
   agentAccess: boolean;
@@ -3442,6 +3447,9 @@ export type DocumentSearchResult = {
   sourceUpdatedAt: string | null;
   sourceVersion: string | null;
   aclTags: string[];
+  authorityKind: DocumentAuthorityKind;
+  authorityWorkspaceId: string | null;
+  authoritySubjectId: string | null;
 };
 
 export type CreateDocumentBaseRequest = {
@@ -3461,6 +3469,7 @@ export type AddDocumentRequest = {
   sourceUpdatedAt?: string | undefined;
   sourceVersion?: string | undefined;
   aclTags?: string[] | undefined;
+  authorityKind?: DocumentAuthorityKind | undefined;
   visibility?: DocumentVisibility | undefined;
   agentAccess?: boolean | undefined;
 };
@@ -3470,6 +3479,7 @@ export type CreateKnowledgeDropRequest = {
   fileId?: string | undefined;
   filename?: string | undefined;
   title?: string | undefined;
+  authorityKind?: DocumentAuthorityKind | undefined;
   visibility?: DocumentVisibility | undefined;
   agentAccess?: boolean | undefined;
 };

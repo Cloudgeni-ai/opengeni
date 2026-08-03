@@ -11,6 +11,7 @@ import {
   parseCurationOutcome,
   parseDocumentBytes,
   resolveDocumentAuthority,
+  searchEffectiveDocuments,
 } from "../src";
 
 describe("documents", () => {
@@ -67,6 +68,34 @@ describe("documents", () => {
         initiatingSubjectId: "subject:owner",
       }),
     ).toThrow("conflicts with legacy visibility");
+  });
+
+  test("fails before database or embedding work without an immutable initiating subject", async () => {
+    let embedderCalled = false;
+    await expect(
+      searchEffectiveDocuments(
+        {} as never,
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          query: "network policy",
+          initiatingSubjectId: "   ",
+          surface: "agent",
+        },
+        {
+          embedder: {
+            model: "test",
+            dimensions: 3,
+            embedMany: async () => [],
+            embedQuery: async () => {
+              embedderCalled = true;
+              return [0, 0, 0];
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow("effective document retrieval requires an initiating subject");
+    expect(embedderCalled).toBe(false);
   });
 
   test("parses uploaded text bytes into normalized document text", async () => {

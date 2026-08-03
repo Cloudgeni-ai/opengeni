@@ -9,16 +9,18 @@ const fakeDb = {};
 const searchInputs: unknown[] = [];
 
 const realDocuments = await import("@opengeni/documents");
-const realSearchDocuments = realDocuments.searchDocuments;
+const realSearchEffectiveDocuments = realDocuments.searchEffectiveDocuments;
 mock.module("@opengeni/documents", () => ({
   ...realDocuments,
-  searchDocuments: mock(async (...args: Parameters<typeof realSearchDocuments>) => {
-    if (args[0] !== fakeDb) {
-      return await realSearchDocuments(...args);
-    }
-    searchInputs.push(args[1]);
-    return [];
-  }),
+  searchEffectiveDocuments: mock(
+    async (...args: Parameters<typeof realSearchEffectiveDocuments>) => {
+      if (args[0] !== fakeDb) {
+        return await realSearchEffectiveDocuments(...args);
+      }
+      searchInputs.push(args[1]);
+      return [];
+    },
+  ),
 }));
 
 const { createApp } = await import("../src/app");
@@ -76,7 +78,13 @@ test("authenticated knowledge search rejects 51 with a typed envelope and accept
   const maximum = await app.request(path, {
     method: "POST",
     headers,
-    body: JSON.stringify({ query: "boundary", mode: "keyword", limit: 50 }),
+    body: JSON.stringify({
+      query: "boundary",
+      mode: "keyword",
+      limit: 50,
+      initiatingSubjectId: "user:forged",
+      access: { viewerSubjectId: "user:forged" },
+    }),
   });
   expect(maximum.status).toBe(200);
   expect(await maximum.json()).toEqual({ results: [] });
@@ -90,7 +98,8 @@ test("authenticated knowledge search rejects 51 with a typed envelope and accept
       mode: "keyword",
       sourceKinds: undefined,
       aclTags: undefined,
-      access: { viewerSubjectId: SUBJECT_ID },
+      initiatingSubjectId: SUBJECT_ID,
+      surface: "human",
     },
   ]);
 });
