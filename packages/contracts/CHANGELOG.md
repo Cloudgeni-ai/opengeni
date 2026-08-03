@@ -1,5 +1,21 @@
 # @opengeni/contracts
 
+## 0.32.0
+
+### Minor Changes
+
+- 13b961e: Add an atomic terminal session-subtree cancellation command that drains queued work, fences concurrent prompts and child creation, interrupts live attempts, durably reports cancelled children to surviving parents, and exposes the operation through the API/core/SDK control surface.
+- e03397d: Freeze workspace instruction policies and structured preference descriptors at
+  the accepted logical-turn boundary, add immutable per-session policy roles, and
+  compose the resulting exact-attempt governance into agent and compaction prompts.
+- 3baaebd: Add configurable Slack emoji-reaction summons with a least-privilege manifest, bounded thread context, and workspace-admin settings.
+
+### Patch Changes
+
+- ecc4288: Add a deterministic, fail-closed Google Drive OAuth scope-capability contract and
+  require recursive selected-source read access before callback persistence or
+  source browsing.
+
 ## 0.31.2
 
 ### Patch Changes

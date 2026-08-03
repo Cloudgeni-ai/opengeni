@@ -1,5 +1,33 @@
 # @opengeni/api-router
 
+## 0.17.0
+
+### Minor Changes
+
+- e03397d: Freeze workspace instruction policies and structured preference descriptors at
+  the accepted logical-turn boundary, add immutable per-session policy roles, and
+  compose the resulting exact-attempt governance into agent and compaction prompts.
+
+### Patch Changes
+
+- ecc4288: Add a deterministic, fail-closed Google Drive OAuth scope-capability contract and
+  require recursive selected-source read access before callback persistence or
+  source browsing.
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/core@0.19.0
+  - @opengeni/db@0.23.0
+  - @opengeni/runtime@0.18.0
+  - @opengeni/config@0.10.3
+  - @opengeni/documents@0.2.72
+  - @opengeni/events@0.3.62
+  - @opengeni/github@0.4.19
+  - @opengeni/observability@0.4.6
+  - @opengeni/storage@0.2.56
+
 ## 0.16.6
 
 ### Patch Changes
