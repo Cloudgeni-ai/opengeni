@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.31.2
+
+### Patch Changes
+
+- b4982fa: Expose GPT-5.6 Max reasoning end to end for managed and connected Codex models.
+
 ## 0.31.1
 
 ### Patch Changes

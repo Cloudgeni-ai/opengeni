@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.36.2
+
+### Patch Changes
+
+- b4982fa: Expose GPT-5.6 Max reasoning end to end for managed and connected Codex models.
+- Updated dependencies [b4982fa]
+  - @opengeni/sdk@0.36.2
+
 ## 0.36.1
 
 ### Patch Changes

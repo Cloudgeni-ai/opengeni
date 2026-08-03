@@ -1,5 +1,16 @@
 # @opengeni/config
 
+## 0.10.2
+
+### Patch Changes
+
+- b4982fa: Pin DeepSeek V4 Flash and Kimi K3 to ordered, approved Vercel AI Gateway
+  provider routes, meter managed usage from Gateway-reported cost, and preserve
+  Kimi Responses tool continuity without exposing provider details in the UI.
+- b4982fa: Expose GPT-5.6 Max reasoning end to end for managed and connected Codex models.
+- Updated dependencies [b4982fa]
+  - @opengeni/contracts@0.31.2
+
 ## 0.10.1
 
 ### Patch Changes
