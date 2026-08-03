@@ -1494,6 +1494,8 @@ describe("useSessionControl", () => {
       },
       interruptionCount: 0,
       wakeCount: controlState === "active" ? 1 : 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
     });
     const client = fakeClient({
       pauseSession: async (_ws, _session, options) => {
@@ -1641,6 +1643,8 @@ describe("useSessionControl", () => {
         },
         interruptionCount: 1,
         wakeCount: 0,
+        cancelledSessionCount: 0,
+        cancelledTurnCount: 0,
       });
       expect(await stalePause).toBeNull();
     });

@@ -217,6 +217,7 @@ import {
   serializeEffectiveSessionControl,
   type SessionDiscoveryControl,
   type SessionCommandActor,
+  SessionControlConflictError,
   SessionControlInvariantError,
   updateSessionCommandReceiptResult,
   type SessionTurnAttemptOutcome,
@@ -16890,6 +16891,9 @@ async function resolveSessionDepthDecision(
       .limit(1);
     if (!parent) {
       throw new Error(`Parent session not found: ${parentSessionId}`);
+    }
+    if (parent.status === "cancelled") {
+      throw new SessionControlConflictError("Cancelled session subtree cannot create children");
     }
   }
 
@@ -38442,15 +38446,23 @@ export async function settleSessionAttemptInterruptions(
         throw new Error(`Live interrupted attempt ${attemptId} lost its exact turn ownership`);
       }
 
-      const steer = interruptions.some((interruption) => interruption.kind === "steer");
-      const outcome: SessionTurnAttemptOutcome = steer ? "superseded" : "interrupted_recoverable";
-      const reason = steer
-        ? "steer"
-        : interruptions.some((interruption) => interruption.kind === "workspace_pause")
-          ? "workspace_pause"
-          : interruptions.some((interruption) => interruption.kind === "maintenance")
-            ? "maintenance"
-            : "session_pause";
+      const terminalCancel = session.status === "cancelled";
+      const steer =
+        !terminalCancel && interruptions.some((interruption) => interruption.kind === "steer");
+      const outcome: SessionTurnAttemptOutcome = terminalCancel
+        ? "cancelled"
+        : steer
+          ? "superseded"
+          : "interrupted_recoverable";
+      const reason = terminalCancel
+        ? "session_cancelled"
+        : steer
+          ? "steer"
+          : interruptions.some((interruption) => interruption.kind === "workspace_pause")
+            ? "workspace_pause"
+            : interruptions.some((interruption) => interruption.kind === "maintenance")
+              ? "maintenance"
+              : "session_pause";
       let sequence = session.lastSequence;
       const closedTools = await closePendingSessionToolCallsInTransaction(
         tx as unknown as Database,
@@ -38475,38 +38487,14 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = steer
+      const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = terminalCancel
         ? [
             {
               accountId: session.accountId,
               workspaceId,
               sessionId,
               sequence: ++sequence,
-              type: "turn.superseded",
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: attemptId,
-              turnAssociation: "current",
-              payload: sanitizeEventPayload({ reason: "steer" }),
-              occurredAt: now,
-            },
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: ++sequence,
-              type: "session.status.changed",
-              payload: sanitizeEventPayload({ status: "queued" }),
-              occurredAt: now,
-            },
-          ]
-        : [
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: ++sequence,
-              type: "turn.recovery.requested",
+              type: "turn.cancelled",
               turnId: turn.id,
               turnGeneration: turn.executionGeneration,
               turnAttemptId: attemptId,
@@ -38514,50 +38502,101 @@ export async function settleSessionAttemptInterruptions(
               payload: sanitizeEventPayload({ reason }),
               occurredAt: now,
             },
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: ++sequence,
-              type: "session.status.changed",
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: attemptId,
-              turnAssociation: "current",
-              payload: sanitizeEventPayload({ status: "recovering" }),
-              occurredAt: now,
-            },
-          ];
+          ]
+        : steer
+          ? [
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "turn.superseded",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attemptId,
+                turnAssociation: "current",
+                payload: sanitizeEventPayload({ reason: "steer" }),
+                occurredAt: now,
+              },
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                payload: sanitizeEventPayload({ status: "queued" }),
+                occurredAt: now,
+              },
+            ]
+          : [
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "turn.recovery.requested",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attemptId,
+                turnAssociation: "current",
+                payload: sanitizeEventPayload({ reason }),
+                occurredAt: now,
+              },
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attemptId,
+                turnAssociation: "current",
+                payload: sanitizeEventPayload({ status: "recovering" }),
+                occurredAt: now,
+              },
+            ];
       const eventRows = await tx.insert(schema.sessionEvents).values(eventValues).returning();
       await tx
         .update(schema.sessionTurns)
         .set(
-          steer
+          terminalCancel
             ? {
-                status: "superseded",
+                status: "cancelled",
                 activeAttemptId: null,
                 metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                cancelledBy: "system:session_cancelled",
+                cancelReason: reason,
                 version: turn.version + 1,
                 finishedAt: turn.finishedAt ?? now,
                 updatedAt: now,
               }
-            : {
-                status: "recovering",
-                activeAttemptId: null,
-                metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
-                cancelledBy: null,
-                cancelReason: null,
-                version: turn.version + 1,
-                finishedAt: null,
-                updatedAt: now,
-              },
+            : steer
+              ? {
+                  status: "superseded",
+                  activeAttemptId: null,
+                  metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                  version: turn.version + 1,
+                  finishedAt: turn.finishedAt ?? now,
+                  updatedAt: now,
+                }
+              : {
+                  status: "recovering",
+                  activeAttemptId: null,
+                  metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                  cancelledBy: null,
+                  cancelReason: null,
+                  version: turn.version + 1,
+                  finishedAt: null,
+                  updatedAt: now,
+                },
         )
         .where(eq(schema.sessionTurns.id, turn.id));
       await tx
         .update(schema.sessions)
         .set({
-          status: steer ? "queued" : "recovering",
-          activeTurnId: steer ? null : turn.id,
+          status: terminalCancel ? "cancelled" : steer ? "queued" : "recovering",
+          activeTurnId: terminalCancel || steer ? null : turn.id,
           lastSequence: sequence,
           updatedAt: now,
         })
