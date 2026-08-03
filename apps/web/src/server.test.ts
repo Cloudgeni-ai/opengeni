@@ -62,11 +62,14 @@ describe("production web handler", () => {
     expect(
       await (await handler(new Request("https://example.test/react-demo/realtime.html"))).text(),
     ).toContain("Realtime demo");
+    expect(
+      (await handler(new Request("https://example.test/react-demo/assets/missing.js"))).status,
+    ).toBe(404);
   });
 
   test("proxies only demo API routes and keeps credentials server-side", async () => {
     const root = await fixture();
-    const seen: { input?: string; init?: RequestInit } = {};
+    const seen: { input?: string; init?: RequestInit; body?: string } = {};
     const serverApiValue = ["server", "api", "value"].join("-");
     const serverAccessValue = ["server", "access", "value"].join("-");
     const credentialHeaders = new Headers();
@@ -79,14 +82,18 @@ describe("production web handler", () => {
         fetch: async (input, init) => {
           seen.input = String(input);
           seen.init = init;
+          seen.body = init?.body ? await new Response(init.body).text() : "";
           return Response.json({ ok: true }, { status: 201 });
         },
       },
     });
     const browserHeaders = new Headers({
       "content-type": "application/json",
+      forwarded: "for=spoofed;host=evil.example",
       origin: "https://example.test",
+      "x-forwarded-port": "4444",
       "x-opengeni-access-key": "browser-access-value-that-must-be-replaced",
+      "x-real-ip": "203.0.113.10",
     });
     browserHeaders.set("authorization", "browser-value-that-must-be-replaced");
     const response = await handler(
@@ -103,8 +110,12 @@ describe("production web handler", () => {
     const headers = new Headers(seen.init?.headers);
     expect(headers.get("authorization")).toBe(["Bearer", serverApiValue].join(" "));
     expect(headers.get("x-opengeni-access-key")).toBe(serverAccessValue);
+    expect(headers.get("forwarded")).toBeNull();
     expect(headers.get("x-forwarded-host")).toBe("example.test");
-    expect(new TextDecoder().decode(seen.init?.body as Uint8Array)).toContain("realtime");
+    expect(headers.get("x-forwarded-port")).toBeNull();
+    expect(headers.get("x-real-ip")).toBeNull();
+    expect(seen.init?.redirect).toBe("manual");
+    expect(seen.body).toContain("realtime");
 
     expect(
       (
@@ -124,10 +135,22 @@ describe("production web handler", () => {
         )
       ).status,
     ).toBe(403);
+    expect(
+      (
+        await handler(
+          new Request("https://example.test/demo-api/v1/%252e%252e/admin", {
+            headers: { origin: "https://example.test" },
+          }),
+        )
+      ).status,
+    ).toBe(400);
   });
 
   test("derives optional authority headers from environment names", () => {
     expect(demoApiProxyFromEnvironment({})).toBeUndefined();
+    expect(() =>
+      demoApiProxyFromEnvironment({ OPENGENI_DEMO_API_URL: "file:///tmp/not-an-api" }),
+    ).toThrow("must use http or https");
     const apiValue = ["api", "value"].join("-");
     const accessValue = ["access", "value"].join("-");
     const env = {
@@ -140,6 +163,30 @@ describe("production web handler", () => {
     const headers = new Headers(options?.credentialHeaders);
     expect(headers.get("authorization")).toBe(["Bearer", apiValue].join(" "));
     expect(headers.get("x-opengeni-access-key")).toBe(accessValue);
+  });
+
+  test("reads optional demo authority from a dedicated mounted secret", () => {
+    const paths: string[] = [];
+    const options = demoApiProxyFromEnvironment(
+      {
+        OPENGENI_DEMO_API_URL: "https://api.example.test",
+        OPENGENI_DEMO_CREDENTIALS_DIR: "/var/run/secrets/opengeni-demo",
+      },
+      (path) => {
+        paths.push(path);
+        if (path.endsWith("/api-key")) return "mounted-api-value";
+        if (path.endsWith("/access-key")) return "mounted-access-value";
+        return undefined;
+      },
+    );
+
+    expect(paths).toEqual([
+      "/var/run/secrets/opengeni-demo/api-key",
+      "/var/run/secrets/opengeni-demo/access-key",
+    ]);
+    const headers = new Headers(options?.credentialHeaders);
+    expect(headers.get("authorization")).toBe("Bearer mounted-api-value");
+    expect(headers.get("x-opengeni-access-key")).toBe("mounted-access-value");
   });
 });
 

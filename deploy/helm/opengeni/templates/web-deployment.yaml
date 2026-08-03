@@ -56,8 +56,18 @@ spec:
           env:
             - name: OPENGENI_DEMO_API_URL
               value: {{ default (printf "http://%s-api:%d" (include "opengeni.fullname" .) (.Values.api.service.port | int)) .Values.web.demoApiBaseUrl | quote }}
+            {{- if .Values.web.demoApiCredentialsSecret }}
+            - name: OPENGENI_DEMO_CREDENTIALS_DIR
+              value: /var/run/secrets/opengeni-demo
+            {{- end }}
           {{- else }}
           env: []
+          {{- end }}
+          {{- if .Values.web.demoApiCredentialsSecret }}
+          volumeMounts:
+            - name: demo-api-credentials
+              mountPath: /var/run/secrets/opengeni-demo
+              readOnly: true
           {{- end }}
           {{- if .Values.web.probes.startup.enabled }}
           startupProbe:
@@ -75,6 +85,12 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if .Values.web.demoApiCredentialsSecret }}
+      volumes:
+        - name: demo-api-credentials
+          secret:
+            secretName: {{ .Values.web.demoApiCredentialsSecret | quote }}
+      {{- end }}
       {{- if .Values.web.topologySpreadConstraints.enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "web" "values" .Values.web) | nindent 8 }}

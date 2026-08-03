@@ -187,7 +187,14 @@ deterministic selection/start/mute/stop/reconnect/error testing. Use
 `?mode=live&workspaceId=…&sessionId=…` against the web server's same-origin
 `/demo-api` proxy for a real local OpenGeni environment. Configure
 `OPENGENI_DEMO_API_URL` and, only on the server, optional demo API/access
-credentials; the browser receives neither credential.
+credentials; the browser receives neither credential. Prefer the deployment's
+normal browser authentication. If the proxy needs a server credential, create a
+dedicated tenant-scoped, least-privilege key for the reference demo and never
+reuse a deployment-wide runtime secret. Helm deployments can mount a Secret
+containing only `api-key` and/or `access-key` with
+`web.demoApiCredentialsSecret`; those values are mounted read-only rather than
+exposed as container environment variables. Local non-Kubernetes servers may
+instead use `OPENGENI_DEMO_API_KEY` and/or `OPENGENI_DEMO_ACCESS_KEY`.
 
 Microphone capture works on `localhost` or a secure HTTPS origin. A remote HTTP
 deployment cannot request microphone access. The live page exercises catalog

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 
 const DEFAULT_PORT = 3000;
@@ -57,7 +58,7 @@ export function createWebHandler(
     if (await requestedFile.exists()) {
       return serveFile(request, requestedPath, cacheControlFor(staticPath));
     }
-    if (pathname.startsWith("/assets/")) {
+    if (pathname.startsWith("/assets/") || pathname.startsWith("/react-demo/")) {
       return new Response("Not Found", { status: 404 });
     }
     return serveFile(request, indexPath, REVALIDATE_CACHE_CONTROL);
@@ -74,6 +75,12 @@ async function proxyDemoApi(
   if (suffix !== "/healthz" && !suffix.startsWith("/v1/")) {
     return new Response("Not Found", { status: 404 });
   }
+  // OpenGeni API route segments never require percent encoding. Reject it so
+  // a second URL parser cannot turn a double-encoded dot segment into a path
+  // outside the admitted /v1 or /healthz surface.
+  if (suffix.includes("%")) {
+    return new Response("Bad Request", { status: 400 });
+  }
   const origin = request.headers.get("origin");
   if (origin && origin !== incomingUrl.origin) {
     return new Response("Forbidden", { status: 403 });
@@ -86,12 +93,23 @@ async function proxyDemoApi(
   const headers = new Headers(request.headers);
   for (const name of [
     "authorization",
+    "connection",
     "content-length",
+    "forwarded",
     "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
     "x-forwarded-for",
     "x-forwarded-host",
+    "x-forwarded-port",
     "x-forwarded-proto",
     "x-opengeni-access-key",
+    "x-real-ip",
   ]) {
     headers.delete(name);
   }
@@ -101,13 +119,13 @@ async function proxyDemoApi(
   headers.set("x-forwarded-host", incomingUrl.host);
   headers.set("x-forwarded-proto", incomingUrl.protocol.slice(0, -1));
 
-  const body =
-    request.method === "GET" || request.method === "HEAD" ? undefined : await request.bytes();
+  const body = request.method === "GET" || request.method === "HEAD" ? undefined : request.body;
   try {
     const upstream = await (options.fetch ?? fetch)(target, {
       method: request.method,
       headers,
       ...(body ? { body } : {}),
+      redirect: "manual",
       signal: request.signal,
     });
     const responseHeaders = new Headers(upstream.headers);
@@ -133,20 +151,41 @@ function normalizedBaseUrl(value: string): string {
 
 export function demoApiProxyFromEnvironment(
   env: Record<string, string | undefined> = process.env,
+  readCredentialFile: (path: string) => string | undefined = readDemoCredentialFile,
 ): DemoApiProxyOptions | undefined {
   const targetBaseUrl = env.OPENGENI_DEMO_API_URL?.trim();
   if (!targetBaseUrl) return undefined;
+  // Validate eagerly so a malformed deployment value fails at process startup
+  // instead of turning each demo request into an unhandled URL exception.
+  normalizedBaseUrl(targetBaseUrl);
   const credentialHeaders = new Headers();
   const apiKeyName = ["OPENGENI", "DEMO", "API", "KEY"].join("_");
   const accessKeyName = ["OPENGENI", "DEMO", "ACCESS", "KEY"].join("_");
-  const bearerValue = env[apiKeyName];
-  const accessValue = env[accessKeyName];
+  const credentialsDirectory = env.OPENGENI_DEMO_CREDENTIALS_DIR?.trim();
+  const bearerValue =
+    env[apiKeyName]?.trim() ||
+    (credentialsDirectory
+      ? readCredentialFile(resolve(credentialsDirectory, "api-key"))
+      : undefined);
+  const accessValue =
+    env[accessKeyName]?.trim() ||
+    (credentialsDirectory
+      ? readCredentialFile(resolve(credentialsDirectory, "access-key"))
+      : undefined);
   if (bearerValue) credentialHeaders.set("authorization", ["Bearer", bearerValue].join(" "));
   if (accessValue) credentialHeaders.set("x-opengeni-access-key", accessValue);
   return {
     targetBaseUrl,
     ...(bearerValue || accessValue ? { credentialHeaders } : {}),
   };
+}
+
+function readDemoCredentialFile(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function safePath(root: string, pathname: string): string | null {

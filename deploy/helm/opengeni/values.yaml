@@ -329,6 +329,9 @@ web:
   # /demo-api proxy. Empty uses this release's in-cluster API service when the
   # API is enabled; set an explicit http(s) URL only for split deployments.
   demoApiBaseUrl: ""
+  # Optional dedicated Secret containing `api-key` and/or `access-key` data
+  # entries. It is mounted read-only; do not reuse the full runtime Secret.
+  demoApiCredentialsSecret: ""
   replicaCount: 2
   strategy:
     type: RollingUpdate
