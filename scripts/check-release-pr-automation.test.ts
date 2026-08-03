@@ -2626,7 +2626,13 @@ describe("workflow contracts", () => {
       "${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
-    for (const imageStep of ci.jobs.images.steps.filter((candidate: any) => candidate.with?.push))
+    expect(ci.jobs["service-images"].if).toBe(ci.jobs.deployment.if);
+    expect(ci.jobs["sandbox-image"].if).toBe(ci.jobs.deployment.if);
+    const imageSteps = ["service-images", "sandbox-image"].flatMap((jobName) =>
+      ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
+    );
+    expect(imageSteps).toHaveLength(5);
+    for (const imageStep of imageSteps)
       expect(imageStep.with.push).toBe("${{ github.event_name == 'push' }}");
   });
 
@@ -2650,6 +2656,8 @@ describe("workflow contracts", () => {
       "browser-acceptance",
       "package-contracts",
       "deployment",
+      "service-images",
+      "sandbox-image",
       "images",
     ])
       expect(
