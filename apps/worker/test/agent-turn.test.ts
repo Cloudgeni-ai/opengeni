@@ -56,9 +56,8 @@ import {
   isTransientProviderError,
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
-  modelAcceptsTypedAttachmentContentForTurn,
+  modelAttachmentInputPolicyForTurn,
   modelSupportsImageInputForTurn,
-  projectCompactionInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseUsageContextSignal,
@@ -3344,21 +3343,32 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   });
 });
 
-describe("modelAcceptsTypedAttachmentContentForTurn", () => {
-  const resolved = (api: ModelProviderApi, image: boolean) =>
+describe("modelAttachmentInputPolicyForTurn", () => {
+  const resolved = (api: ModelProviderApi, image: boolean, files: string[] = []) =>
     ({
       provider: { api },
-      configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
-    }) as Parameters<typeof modelAcceptsTypedAttachmentContentForTurn>[0];
+      configured: {
+        capabilities: {
+          inputModalities: image ? ["text", "image"] : ["text"],
+          inputFileMediaTypes: files,
+        },
+      },
+    }) as Parameters<typeof modelAttachmentInputPolicyForTurn>[0];
 
-  test("accepts image-capable built-in and registry Responses transports", () => {
-    expect(modelAcceptsTypedAttachmentContentForTurn(null)).toBe(true);
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("responses", true))).toBe(true);
+  test("keeps image and file capabilities independent on Responses", () => {
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", true, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: ["application/pdf"] });
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", false, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: ["application/pdf"] });
   });
 
-  test("keeps text-only and chat-completions models on the sandbox-path fallback", () => {
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("responses", false))).toBe(false);
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("chat", true))).toBe(false);
+  test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
+    expect(modelAttachmentInputPolicyForTurn(resolved("chat", true, ["application/pdf"]))).toEqual({
+      supportsImageInput: false,
+      inputFileMediaTypes: [],
+    });
   });
 });
 
@@ -3372,36 +3382,6 @@ describe("modelSupportsImageInputForTurn", () => {
     expect(modelSupportsImageInputForTurn(null)).toBe(true);
     expect(modelSupportsImageInputForTurn(resolved(["text", "image"]))).toBe(true);
     expect(modelSupportsImageInputForTurn(resolved(["text"]))).toBe(false);
-  });
-});
-
-describe("projectCompactionInputForTurn", () => {
-  const resolved = (inputModalities: string[]) =>
-    ({ configured: { capabilities: { inputModalities } } }) as Parameters<
-      typeof projectCompactionInputForTurn
-    >[1];
-  const input = [
-    {
-      type: "message",
-      role: "user",
-      content: [
-        { type: "input_text", text: "Describe this." },
-        { type: "input_image", image: "data:image/png;base64,TEST" },
-      ],
-    },
-  ] as Array<Record<string, unknown>>;
-
-  test("removes images before portable compaction for a text-only model", () => {
-    const projected = projectCompactionInputForTurn(input, resolved(["text"]), 1_000_000);
-
-    expect(JSON.stringify(projected)).not.toContain("data:image");
-    expect(JSON.stringify(input)).toContain("data:image");
-  });
-
-  test("preserves the exact compaction prefix for an image-capable model", () => {
-    expect(projectCompactionInputForTurn(input, resolved(["text", "image"]), 1_000_000)).toBe(
-      input,
-    );
   });
 });
 

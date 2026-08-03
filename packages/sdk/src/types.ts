@@ -2104,6 +2104,7 @@ export type ModelCapabilitiesV1 = {
     codeExecution: ModelCapabilityStateV1;
   };
   inputModalities: Array<"text" | "image" | "audio">;
+  inputFileMediaTypes?: string[] | undefined;
   outputModalities: Array<"text" | "image" | "audio">;
   transports: {
     sse: ModelCapabilityStateV1;

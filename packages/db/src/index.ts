@@ -111,6 +111,7 @@ import {
   decodeNativeSnapshotRef,
   parseWorkspaceArchiveDescriptor,
   stableJson,
+  MODEL_ATTACHMENT_REFS_FIELD,
 } from "@opengeni/contracts";
 
 import {
@@ -3878,6 +3879,39 @@ export async function requireFile(
     throw new Error(`File not found: ${fileId}`);
   }
   return file;
+}
+
+/** One RLS-scoped query for all attachment metadata needed by a model turn. */
+export async function getFiles(
+  db: Database,
+  workspaceId: string,
+  fileIds: readonly string[],
+): Promise<FileAsset[]> {
+  const ids = [...new Set(fileIds)];
+  if (ids.length === 0) return [];
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.files)
+      .where(and(eq(schema.files.workspaceId, workspaceId), inArray(schema.files.id, ids)));
+    return rows.map(mapFile);
+  });
+}
+
+/** Build the canonical user row with stable attachment refs, never inline bytes. */
+export function durableUserHistoryItem(
+  prompt: string,
+  resources: readonly ResourceRef[],
+): Record<string, unknown> {
+  const attachmentRefs = resources.filter(
+    (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
+  );
+  return sanitizeModelPayload({
+    type: "message",
+    role: "user",
+    content: prompt,
+    ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
+  });
 }
 
 export type RetainedFileArtifact = {
@@ -38173,11 +38207,10 @@ export async function claimSessionWorkForAttempt(
           sessionId,
           turnId: row.id,
           position: Number(historyPosition),
-          item: sanitizeModelPayload({
-            type: "message",
-            role: "user",
-            content: row.prompt,
-          }),
+          item: durableUserHistoryItem(
+            row.prompt,
+            Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
+          ),
           producerCodexCredentialId: null,
         });
         const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);

@@ -2957,6 +2957,14 @@ export const FileResourceRef = z.object({
 });
 export type FileResourceRef = z.infer<typeof FileResourceRef>;
 
+/**
+ * Private durable metadata carried on user history items. It contains only
+ * stable file references, never file bytes, and is removed before model wire
+ * serialization. Keeping the references beside the message lets a later turn
+ * reconstruct the same typed attachment input after a model switch or retry.
+ */
+export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
+
 export const ResourceRef = z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]);
 export type ResourceRef = z.infer<typeof ResourceRef>;
 
@@ -9525,6 +9533,7 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
       codeExecution: ModelCapabilityStateV1,
     }),
     inputModalities: z.array(z.enum(["text", "image", "audio"])),
+    inputFileMediaTypes: z.array(z.string()).optional(),
     outputModalities: z.array(z.enum(["text", "image", "audio"])),
     transports: z.object({
       sse: ModelCapabilityStateV1,

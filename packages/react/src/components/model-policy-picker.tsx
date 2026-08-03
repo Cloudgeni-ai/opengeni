@@ -452,6 +452,11 @@ export function ModelPolicyPickerMenu(
         <p className="px-2.5 pt-1 pb-1 text-xs font-medium tracking-wide text-og-fg-subtle uppercase">
           {messages.thinking}
         </p>
+        {focusModel.catalog.capabilities?.inputModalities.includes("image") === false ? (
+          <p className="px-2.5 pb-1.5 text-xs leading-relaxed text-og-fg-subtle">
+            Unsupported attachments stay in the session but are hidden from this model.
+          </p>
+        ) : null}
         <div className="flex flex-col gap-0.5">
           {effortOptionsForModel(focusModel.catalog).map((effort) => {
             const selected = activeModel && effort === props.effort;

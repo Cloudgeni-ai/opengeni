@@ -155,6 +155,7 @@ import { fileURLToPath } from "node:url";
 import {
   computerCallNormalizingFetch,
   normalizeComputerCallActions,
+  repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
@@ -271,7 +272,9 @@ setSelfhostedApplyDiff(
 
 export {
   elideSupersededViewImagePairs,
+  repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
+  stripInternalModelMetadata,
   stripReasoningEncryptedContent,
   stripReasoningIdentityFromSerializedRunState,
   neutralizeToolSearchItemsInSerializedRunState,
@@ -468,6 +471,8 @@ export type AgentSegmentInput =
       // message; ordinary messages never deserialize an SDK RunState.
       historyItems?: AgentInputItem[] | null;
       sandboxEnvelope?: Record<string, unknown> | null;
+      /** Internal proof that the caller projected the durable history clone. */
+      modelInputAlreadyProjected?: boolean;
     }
   | {
       kind: "approval";
@@ -485,6 +490,7 @@ export type AgentSegmentInput =
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   sandboxSessionState?: SandboxSessionState;
+  modelInputAlreadyProjected?: boolean;
 };
 
 export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
@@ -1779,6 +1785,8 @@ export type BuildAgentOptions = {
   // provider request without mutating OpenGeni's durable history. Omitted keeps
   // the legacy built-in path image-capable.
   supportsImageInput?: boolean;
+  /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
+  inputFileMediaTypes?: readonly string[];
   // EXPLICIT computer-use tool transport, decided where provider identity is
   // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
   // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
@@ -2220,6 +2228,7 @@ const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
 // Per-turn model modality used by the literal pre-provider input filter. The
 // durable session history remains canonical; only the request clone is shaped.
 const agentSupportsImageInput = new WeakMap<object, boolean>();
+const agentInputFileMediaTypes = new WeakMap<object, readonly string[]>();
 // The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
 // backend). Read by runStream's owned branch to keep platform box-setup hooks off
 // connected machines (a user's real computer).
@@ -2404,6 +2413,9 @@ export function buildOpenGeniAgent(
       agentsNeedingGenesisTitleDirective.add(agent);
     }
     agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
+    if (options.inputFileMediaTypes) {
+      agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
+    }
     maybeInstallCodexToolSearch(agent, settings, options);
     applyMcpApprovalPolicy(
       agent,
@@ -2463,6 +2475,9 @@ export function buildOpenGeniAgent(
     agentsNeedingGenesisTitleDirective.add(agent);
   }
   agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
+  if (options.inputFileMediaTypes) {
+    agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
+  }
   agentFileDownloads.set(
     agent,
     normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter(
@@ -4316,6 +4331,7 @@ export async function prepareRunInput(
           ? input.text
           : assembled,
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
+      ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
   }
   // An interrupted tool can only be resumed against a real saved run state. If the
@@ -4627,8 +4643,11 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
 }
 
 const IMAGE_CONTENT_TYPES = new Set(["image", "input_image", "image_url", "computer_screenshot"]);
+const FILE_CONTENT_TYPES = new Set(["file", "input_file"]);
 const IMAGE_OMITTED_TEXT =
   "[Image content omitted because the selected model does not support image input.]";
+const FILE_OMITTED_TEXT =
+  "[File content omitted because the selected model does not support this file type.]";
 
 function modelInputItemType(value: unknown): string | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -4636,115 +4655,203 @@ function modelInputItemType(value: unknown): string | null {
   return typeof type === "string" ? type : null;
 }
 
-function modelInputCallId(value: unknown): string | null {
+function modelInputFileMediaType(value: unknown): string | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  const direct = record.callId ?? record.call_id;
-  if (typeof direct === "string" && direct.length > 0) return direct;
-  if (!record.providerData || typeof record.providerData !== "object") return null;
-  const provider = record.providerData as Record<string, unknown>;
-  const nested = provider.callId ?? provider.call_id;
-  return typeof nested === "string" && nested.length > 0 ? nested : null;
+  for (const field of ["contentType", "content_type", "mediaType", "media_type", "mimeType"]) {
+    const candidate = record[field];
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.toLowerCase().split(";", 1)[0]!.trim();
+    }
+  }
+  const file = record.file;
+  if (typeof file === "string") {
+    const match = /^data:([^;,]+)[;,]/i.exec(file);
+    if (match?.[1]) return match[1].toLowerCase();
+  }
+  if (file && typeof file === "object") return modelInputFileMediaType(file);
+  return null;
 }
 
-function imageOnlyToolCall(value: unknown): boolean {
-  const type = modelInputItemType(value);
-  if (type === "computer_call") return true;
-  if (type !== "function_call" || !value || typeof value !== "object") return false;
-  const name = (value as Record<string, unknown>).name;
-  return typeof name === "string" && (name === "view_image" || name.startsWith("computer_"));
+function acceptsModelInputFile(value: unknown, accepted: readonly string[] | undefined): boolean {
+  if (accepted === undefined) return true;
+  const mediaType = modelInputFileMediaType(value);
+  if (!mediaType) return false;
+  return accepted.some(
+    (candidate) =>
+      candidate === mediaType ||
+      (candidate.endsWith("/*") && mediaType.startsWith(candidate.slice(0, -1))),
+  );
 }
 
-function stripImageContentParts(value: unknown): { value: unknown; removed: boolean } {
+export type ModelInputProjectionPolicy = {
+  supportsImageInput: boolean;
+  inputFileMediaTypes?: readonly string[];
+};
+
+function omittedContentTextPart(kind: "image" | "file"): Record<string, string> {
+  return { type: "input_text", text: kind === "image" ? IMAGE_OMITTED_TEXT : FILE_OMITTED_TEXT };
+}
+
+function unsupportedContentKind(
+  value: unknown,
+  policy: ModelInputProjectionPolicy,
+): "image" | "file" | null {
+  const type = modelInputItemType(value) ?? "";
+  if (IMAGE_CONTENT_TYPES.has(type) && !policy.supportsImageInput) return "image";
+  if (FILE_CONTENT_TYPES.has(type) && !acceptsModelInputFile(value, policy.inputFileMediaTypes)) {
+    return "file";
+  }
+  return null;
+}
+
+function stripUnsupportedContentParts(
+  value: unknown,
+  policy: ModelInputProjectionPolicy,
+): { value: unknown; removed: boolean } {
   if (Array.isArray(value)) {
     let removed = false;
     const kept: unknown[] = [];
     for (const part of value) {
-      if (IMAGE_CONTENT_TYPES.has(modelInputItemType(part) ?? "")) {
+      const kind = unsupportedContentKind(part, policy);
+      if (kind) {
         removed = true;
+        kept.push(omittedContentTextPart(kind));
         continue;
       }
       kept.push(part);
     }
     return { value: removed ? kept : value, removed };
   }
-  if (IMAGE_CONTENT_TYPES.has(modelInputItemType(value) ?? "")) {
+  if (unsupportedContentKind(value, policy)) {
     return { value: undefined, removed: true };
   }
   return { value, removed: false };
 }
 
-function omittedImageTextPart(): Record<string, string> {
-  return { type: "input_text", text: IMAGE_OMITTED_TEXT };
-}
-
-function stripImagesFromModelInputItem<T extends Record<string, unknown>>(item: T): T | null {
-  if (IMAGE_CONTENT_TYPES.has(modelInputItemType(item) ?? "")) return null;
+function stripUnsupportedContentFromModelInputItem<T extends Record<string, unknown>>(
+  item: T,
+  policy: ModelInputProjectionPolicy,
+): T | null {
+  if (unsupportedContentKind(item, policy)) return null;
   let clone: Record<string, unknown> | null = null;
   for (const field of ["content", "output"] as const) {
     if (!(field in item)) continue;
-    const projected = stripImageContentParts(item[field]);
+    const originalField = item[field];
+    const projected = stripUnsupportedContentParts(originalField, policy);
     if (!projected.removed) continue;
     clone ??= { ...item };
+    const omittedKind = unsupportedContentKind(originalField, policy) ?? "file";
     clone[field] =
       projected.value === undefined ||
       (Array.isArray(projected.value) && projected.value.length === 0)
-        ? [omittedImageTextPart()]
+        ? [omittedContentTextPart(omittedKind)]
         : projected.value;
   }
   return (clone ?? item) as T;
 }
 
+/** Build the non-mutating model-wire view for images and typed files. */
+export function projectModelInputForCapabilities<T extends Record<string, unknown>>(
+  items: readonly T[],
+  policy: ModelInputProjectionPolicy,
+): T[] {
+  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return items as T[];
+
+  let changed = false;
+  const projected: T[] = [];
+  for (const item of items) {
+    const type = modelInputItemType(item);
+    if (!policy.supportsImageInput && type === "computer_call") {
+      while (modelInputItemType(projected.at(-1)) === "reasoning") projected.pop();
+      changed = true;
+      continue;
+    }
+    if (!policy.supportsImageInput && type === "computer_call_result") {
+      changed = true;
+      continue;
+    }
+    const stripped = stripUnsupportedContentFromModelInputItem(item, policy);
+    if (!stripped) {
+      changed = true;
+      continue;
+    }
+    if (stripped !== item) changed = true;
+    projected.push(stripped);
+  }
+  return changed ? (repairHistoryProtocolItems(projected) as T[]) : (items as T[]);
+}
+
 /**
  * Build the per-request view for a model's input modalities. Image-capable
- * models receive the exact original array. Text-only models lose image payloads
- * and image-only tool pairs from this clone only. Images already present in the
- * run-state history remain there for a later image-capable request; this helper
- * does not make transient turn attachments durable.
+ * models receive the exact original array. Text-only models replace ordinary
+ * image parts with a visible text marker. Hosted computer call/result pairs are
+ * removed because `computer_call_result.output` cannot legally carry text.
+ * Durable history is never mutated.
  */
 export function projectModelInputForImageSupport<T extends Record<string, unknown>>(
   items: readonly T[],
   supportsImageInput: boolean,
-  toolOutputTruncationTokens?: number,
 ): T[] {
-  if (supportsImageInput) return items as T[];
+  return projectModelInputForCapabilities(items, { supportsImageInput });
+}
 
-  const imageOnlyCallIds = new Set<string>();
-  const imageOnlyCallIndexes = new Set<number>();
-  items.forEach((item, index) => {
-    if (!imageOnlyToolCall(item)) return;
-    imageOnlyCallIndexes.add(index);
-    for (let previous = index - 1; previous >= 0; previous -= 1) {
-      if (modelInputItemType(items[previous]) !== "reasoning") break;
-      imageOnlyCallIndexes.add(previous);
-    }
-    const callId = modelInputCallId(item);
-    if (callId) imageOnlyCallIds.add(callId);
+export function incrementalModelInputProjectionFilter(
+  policy: ModelInputProjectionPolicy,
+  initialInputAlreadyProjected: boolean,
+): CallModelInputFilter | undefined {
+  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return undefined;
+  let sourcePrefixLength: number | null = initialInputAlreadyProjected ? null : -1;
+  let cachedProjectedPrefix: Array<Record<string, unknown>> | null = null;
+  return async ({ modelData }) => ({
+    ...modelData,
+    input: (() => {
+      const input = modelData.input as unknown as Array<Record<string, unknown>>;
+      if (sourcePrefixLength === null) {
+        // This exact prefix was projected before SDK state construction. Record
+        // its length; future calls inspect only items generated this turn.
+        sourcePrefixLength = input.length;
+        return modelData.input;
+      }
+      if (sourcePrefixLength < 0 || input.length < sourcePrefixLength) {
+        // Approval/human resumes restore an SDK RunState rather than receiving a
+        // preprojected durable array. Project that request once and retain only
+        // its request-local view; later calls reuse it without mutating RunState.
+        const projected = projectModelInputForCapabilities(input, policy);
+        sourcePrefixLength = input.length;
+        cachedProjectedPrefix = projected === input ? null : projected;
+        return projected as typeof modelData.input;
+      }
+      const tail = input.slice(sourcePrefixLength);
+      if (tail.length === 0) return modelData.input;
+      const projectedTail = projectModelInputForCapabilities(tail, policy);
+      const tailUnchanged =
+        projectedTail.length === tail.length &&
+        projectedTail.every((item, index) => item === tail[index]);
+      if (tailUnchanged && cachedProjectedPrefix === null) {
+        return modelData.input;
+      }
+      return [
+        ...(cachedProjectedPrefix ?? input.slice(0, sourcePrefixLength)),
+        ...projectedTail,
+      ] as typeof modelData.input;
+    })(),
   });
-
-  const projected: T[] = [];
-  items.forEach((item, index) => {
-    const callId = modelInputCallId(item);
-    if (imageOnlyCallIndexes.has(index) || (callId && imageOnlyCallIds.has(callId))) return;
-    const stripped = stripImagesFromModelInputItem(item);
-    if (stripped) projected.push(stripped);
-  });
-  return sanitizeHistoryItemsForModel(projected, toolOutputTruncationTokens) as T[];
 }
 
 function modelModalityProjectionFilterForAgent(
   agent: object,
-  settings: Settings,
+  initialInputAlreadyProjected: boolean,
 ): CallModelInputFilter | undefined {
-  if (agentSupportsImageInput.get(agent) !== false) return undefined;
-  return async ({ modelData }) => ({
-    ...modelData,
-    input: projectModelInputForImageSupport(
-      modelData.input as unknown as Array<Record<string, unknown>>,
-      false,
-      settings.modelToolOutputTruncationTokens,
-    ) as typeof modelData.input,
-  });
+  return incrementalModelInputProjectionFilter(
+    {
+      supportsImageInput: agentSupportsImageInput.get(agent) !== false,
+      ...(agentInputFileMediaTypes.has(agent)
+        ? { inputFileMediaTypes: agentInputFileMediaTypes.get(agent)! }
+        : {}),
+    },
+    initialInputAlreadyProjected,
+  );
 }
 
 /**
@@ -4916,7 +5023,7 @@ export async function runAgentStream(
         // canonical bound at the literal final seam before accounting/provider
         // serialization so no extension can bypass the policy.
         boundModelToolOutputsFilterForSettings(settings),
-        modelModalityProjectionFilterForAgent(agent, settings),
+        modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
         contextRobustnessFilterForSettings(settings, {
           throwOnCompactionNeeded: Boolean(
             overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -5027,7 +5134,7 @@ export async function runAgentStream(
       genesisTitleInputFilter,
       overrides.callModelInputFilter,
       boundModelToolOutputsFilterForSettings(settings),
-      modelModalityProjectionFilterForAgent(agent, settings),
+      modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
       contextRobustnessFilterForSettings(settings, {
         throwOnCompactionNeeded: Boolean(
           overrides.contextCompactionSignal || overrides.contextCompactionRequested,

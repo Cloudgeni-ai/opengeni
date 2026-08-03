@@ -94,7 +94,7 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
-  projectModelInputForImageSupport,
+  projectModelInputForCapabilities,
   appendPersistentSessionSettings,
   appendSessionInstructions,
   appendWorkspaceGovernance,
@@ -272,7 +272,13 @@ import {
   redactSensitiveText,
   type SecretForRedaction,
 } from "./redaction";
-import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
+import {
+  applyCodexHistoryStrip,
+  createModelHistoryAttachmentProjector,
+  turnInput,
+  type ModelAttachmentInputPolicy,
+  type TurnCodexAccount,
+} from "./run-input";
 import {
   createRuntimeBatcher,
   currentActivityContext,
@@ -1922,44 +1928,40 @@ export function hostedWebSearchForTurn(
 /** Exact model-catalog modality gate; null preserves the legacy built-in path. */
 export function modelSupportsImageInputForTurn(
   resolvedModel: {
-    configured: { capabilities: { inputModalities: string[] } };
+    configured: { capabilities?: { inputModalities: string[] } };
   } | null,
 ): boolean {
   return (
     resolvedModel === null ||
-    resolvedModel.configured.capabilities.inputModalities.includes("image")
+    resolvedModel.configured.capabilities?.inputModalities.includes("image") !== false
   );
 }
 
-/** Project portable-compaction input through the same per-model modality view as the agent loop. */
-export function projectCompactionInputForTurn<T extends Record<string, unknown>>(
-  items: readonly T[],
-  resolvedModel: Parameters<typeof modelSupportsImageInputForTurn>[0],
-  toolOutputTruncationTokens: number,
-): T[] {
-  return projectModelInputForImageSupport(
-    items,
-    modelSupportsImageInputForTurn(resolvedModel),
-    toolOutputTruncationTokens,
-  );
-}
+const LEGACY_INPUT_FILE_MEDIA_TYPES = [
+  "application/json",
+  "application/pdf",
+  "application/x-yaml",
+  "application/yaml",
+  "text/*",
+] as const;
 
-/**
- * Decide whether this turn accepts typed attachment content in a user message.
- * The wire must support typed content and the exact configured model must
- * advertise image input. Text-only and chat-completions models retain only the
- * sandbox-path projection.
- */
-export function modelAcceptsTypedAttachmentContentForTurn(
+/** Image and file input are independent catalogue capabilities. */
+export function modelAttachmentInputPolicyForTurn(
   resolvedModel: {
     provider: { api: ModelProviderApi };
-    configured: { capabilities: { inputModalities: string[] } };
+    configured: {
+      capabilities?: { inputModalities: string[]; inputFileMediaTypes?: string[] };
+    };
   } | null,
-): boolean {
-  return (
-    (resolvedModel === null || resolvedModel.provider.api === "responses") &&
-    modelSupportsImageInputForTurn(resolvedModel)
-  );
+): ModelAttachmentInputPolicy {
+  const typedTransport = resolvedModel === null || resolvedModel.provider.api === "responses";
+  return {
+    supportsImageInput: typedTransport && modelSupportsImageInputForTurn(resolvedModel),
+    inputFileMediaTypes: typedTransport
+      ? (resolvedModel?.configured.capabilities?.inputFileMediaTypes ??
+        LEGACY_INPUT_FILE_MEDIA_TYPES)
+      : [],
+  };
 }
 
 export type TurnSandboxProvisioner<T> = {
@@ -4181,6 +4183,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnExecutionPolicy.productModelId,
       );
       const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
+      const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
+      const attachmentProjector = createModelHistoryAttachmentProjector(
+        db,
+        input.workspaceId,
+        modelInputPolicy,
+        objectStorage ? (file) => objectStorage.getFileBytes(file) : undefined,
+      );
+      const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
+        projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
       const selectedProvider = resolvedModel?.provider;
       const publicProviderHeaders = new Set(
         selectedProvider?.publicDefaultHeaderNames?.map((name) => name.toLowerCase()) ?? [],
@@ -4381,36 +4392,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         resolvedModel
           ? (s: Settings, m: Array<Record<string, unknown>>) =>
               withCodex(() =>
-                summarizeForCompaction(
-                  s,
-                  projectCompactionInputForTurn(
-                    m,
-                    resolvedModel,
-                    s.modelToolOutputTruncationTokens,
-                  ),
-                  {
-                    client: resolvedModel.client,
-                    api: resolvedModel.provider.api,
-                    model: turnExecutionPolicy.upstreamModelId,
-                    maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                    onUsage: recordCompactionUsage,
-                    ...(systemInstructions ? { systemInstructions } : {}),
-                    ...(promptCacheKey ? { promptCacheKey } : {}),
-                  },
-                ),
-              )
-          : (s: Settings, m: Array<Record<string, unknown>>) =>
-              summarizeForCompaction(
-                s,
-                projectCompactionInputForTurn(m, resolvedModel, s.modelToolOutputTruncationTokens),
-                {
+                summarizeForCompaction(s, m, {
+                  client: resolvedModel.client,
+                  api: resolvedModel.provider.api,
                   model: turnExecutionPolicy.upstreamModelId,
                   maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                   onUsage: recordCompactionUsage,
                   ...(systemInstructions ? { systemInstructions } : {}),
                   ...(promptCacheKey ? { promptCacheKey } : {}),
-                },
-              );
+                }),
+              )
+          : (s: Settings, m: Array<Record<string, unknown>>) =>
+              summarizeForCompaction(s, m, {
+                model: turnExecutionPolicy.upstreamModelId,
+                maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+                onUsage: recordCompactionUsage,
+                ...(systemInstructions ? { systemInstructions } : {}),
+                ...(promptCacheKey ? { promptCacheKey } : {}),
+              });
       // Prompt-cache prefix for remote_v2 MUST match ordinary turns:
       // tools → instructions → history. Filled after buildAgent for every
       // compact path (including operator /compact, which now builds the agent
@@ -4555,6 +4554,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   codexAccount: {
                     currentCodexCredentialId: effectiveCodexCredentialId,
                   },
+                  projectModelInput: modelHistoryProjector,
                   ...compactionModeOptions,
                 },
               ),
@@ -5737,6 +5737,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // compaction threshold.
         hostedWebSearch,
         supportsImageInput,
+        inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
         ...(resolvedModel
           ? {
               encryptedReasoning:
@@ -6083,6 +6084,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   codexAccount: {
                     currentCodexCredentialId: effectiveCodexCredentialId,
                   },
+                  projectModelInput: modelHistoryProjector,
                   ...compactionModeOptions,
                 },
               ),
@@ -6217,6 +6219,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     codexAccount: {
                       currentCodexCredentialId: effectiveCodexCredentialId,
                     },
+                    projectModelInput: modelHistoryProjector,
                     ...compactionModeOptions,
                   }
                 : {
@@ -6224,6 +6227,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     codexAccount: {
                       currentCodexCredentialId: effectiveCodexCredentialId,
                     },
+                    projectModelInput: modelHistoryProjector,
                     ...compactionModeOptions,
                   },
             ),
@@ -6383,11 +6387,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             recovering: turn.executionGeneration > 1,
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
             ...(runCredentialsNote ? { runCredentialsNote } : {}),
-            ...(modelAcceptsTypedAttachmentContentForTurn(resolvedModel) && objectStorage
-              ? {
-                  readFileBytesForModel: (file) => objectStorage.getFileBytes(file),
-                }
-              : {}),
+            projectModelHistory: modelHistoryProjector,
           },
         );
         runInput = prepared.input;
@@ -6461,6 +6461,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               codexAccount: {
                 currentCodexCredentialId: effectiveCodexCredentialId,
               },
+              projectModelInput: modelHistoryProjector,
               ...compactionModeOptions,
             },
           ),

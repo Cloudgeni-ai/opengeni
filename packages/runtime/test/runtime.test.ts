@@ -28,6 +28,7 @@ import {
 } from "@opengeni/config";
 import {
   CLEARED_RUN_STATE_BLOB,
+  MODEL_ATTACHMENT_REFS_FIELD,
   sessionSystemUpdateBatchHistoryItem,
   type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
@@ -75,6 +76,8 @@ import {
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
+  incrementalModelInputProjectionFilter,
+  projectModelInputForCapabilities,
   projectModelInputForImageSupport,
   prefixedMcpToolName,
   prepareAgentTools,
@@ -1939,6 +1942,9 @@ describe("runtime event normalization", () => {
               opengeni_internal_resume: "worker_restart",
               keep_me: "yes",
             },
+            [MODEL_ATTACHMENT_REFS_FIELD]: [
+              { kind: "file", fileId: "00000000-0000-4000-8000-000000000099" },
+            ],
           } as never,
           {
             type: "message",
@@ -1950,6 +1956,7 @@ describe("runtime event normalization", () => {
     );
     const serialized = JSON.stringify(prepared.input);
     expect(serialized).not.toContain("opengeni_internal_resume");
+    expect(serialized).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
     expect(serialized).toContain("keep_me");
   });
 
@@ -5833,7 +5840,7 @@ describe("provider item id stripping", () => {
     expect(elideSupersededViewImagePairs(prefix)).toBe(prefix);
   });
 
-  test("text-only request projection removes images and image-tool pairs without mutating history", () => {
+  test("text-only projection keeps ordinary tool pairs and removes only hosted computer pairs", () => {
     const input = [
       {
         type: "message",
@@ -5886,14 +5893,29 @@ describe("provider item id stripping", () => {
     const projected = projectModelInputForImageSupport(input, false);
 
     expect(JSON.stringify(projected)).not.toContain("data:image");
-    expect(projected.some((item) => item.name === "view_image")).toBe(false);
+    expect(projected.some((item) => item.name === "view_image")).toBe(true);
     expect(projected.some((item) => item.type === "computer_call")).toBe(false);
-    expect(projected.some((item) => item.callId === "view-1")).toBe(false);
-    expect(projected.some((item) => item.type === "reasoning")).toBe(false);
+    expect(projected.find((item) => item.callId === "view-1" && "output" in item)).toEqual({
+      type: "function_call_result",
+      callId: "view-1",
+      output: [
+        {
+          type: "input_text",
+          text: "[Image content omitted because the selected model does not support image input.]",
+        },
+      ],
+    });
+    expect(projected.some((item) => item.type === "reasoning")).toBe(true);
     expect(projected.find((item) => item.callId === "metadata-1" && "output" in item)).toEqual({
       type: "function_call_result",
       callId: "metadata-1",
-      output: [{ type: "input_text", text: "width=10" }],
+      output: [
+        { type: "input_text", text: "width=10" },
+        {
+          type: "input_text",
+          text: "[Image content omitted because the selected model does not support image input.]",
+        },
+      ],
     });
     expect(JSON.stringify(projected)).toContain("Image content omitted");
     expect(JSON.stringify(input)).toBe(durableJson);
@@ -5901,7 +5923,7 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(projectModelInputForImageSupport(input, true))).toBe(durableJson);
   });
 
-  test("text-only projection preserves the configured tool-output limit", () => {
+  test("text-only projection does not reapply a tool-output bound", () => {
     const output = "x".repeat(100_000);
     const input = [
       {
@@ -5917,9 +5939,122 @@ describe("provider item id stripping", () => {
       },
     ] as Array<Record<string, unknown>>;
 
-    const projected = projectModelInputForImageSupport(input, false, 1_000_000);
+    const projected = projectModelInputForImageSupport(input, false);
 
     expect(projected[1]?.output).toBe(output);
+  });
+
+  test("typed file projection is independent from image support and MIME-specific", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_image", image: "data:image/png;base64,IMAGE" },
+          {
+            type: "input_file",
+            file: "data:application/pdf;base64,PDF",
+            filename: "kept.pdf",
+          },
+          {
+            type: "input_file",
+            file: "data:text/plain;base64,TEXT",
+            filename: "hidden.txt",
+          },
+        ],
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const projected = projectModelInputForCapabilities(input, {
+      supportsImageInput: true,
+      inputFileMediaTypes: ["application/pdf"],
+    });
+    const json = JSON.stringify(projected);
+
+    expect(json).toContain("data:image/png;base64,IMAGE");
+    expect(json).toContain("data:application/pdf;base64,PDF");
+    expect(json).not.toContain("data:text/plain;base64,TEXT");
+    expect(json).toContain("File content omitted");
+    expect(JSON.stringify(input)).toContain("data:text/plain;base64,TEXT");
+  });
+
+  test("preprojected giant prefixes inspect only new tool-result suffixes", async () => {
+    const prefix = Array.from({ length: 100_000 }, (_, index) => ({
+      type: "message",
+      role: "user",
+      content: `history ${index}`,
+    }));
+    const filter = incrementalModelInputProjectionFilter(
+      { supportsImageInput: false, inputFileMediaTypes: [] },
+      true,
+    )!;
+    const run = async (input: Array<Record<string, unknown>>) =>
+      await filter({
+        modelData: { input: input as never },
+        agent: {} as never,
+        context: undefined,
+      });
+
+    const first = await run(prefix);
+    expect(first.input).toBe(prefix);
+
+    const next = [
+      ...prefix,
+      { type: "function_call", callId: "image-tool", name: "mcp_image", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "image-tool",
+        output: [{ type: "input_image", image: "data:image/png;base64,NEW" }],
+      },
+    ];
+    const second = await run(next);
+    const output = second.input as unknown as Array<Record<string, unknown>>;
+
+    expect(output.slice(0, prefix.length)).toEqual(prefix);
+    expect(JSON.stringify(output.slice(prefix.length))).not.toContain("data:image");
+    expect(JSON.stringify(output.slice(prefix.length))).toContain("Image content omitted");
+  });
+
+  test("defensive RunState projection scans its giant prefix only once", async () => {
+    let prefixInspections = 0;
+    const prefix = Array.from({ length: 100_000 }, (_, index) => ({
+      get type() {
+        prefixInspections += 1;
+        return "message";
+      },
+      role: "user",
+      content: `history ${index}`,
+    }));
+    const filter = incrementalModelInputProjectionFilter(
+      { supportsImageInput: false, inputFileMediaTypes: [] },
+      false,
+    )!;
+    const run = async (input: Array<Record<string, unknown>>) =>
+      await filter({
+        modelData: { input: input as never },
+        agent: {} as never,
+        context: undefined,
+      });
+
+    const first = await run(prefix);
+    expect(first.input).toBe(prefix);
+    expect(prefixInspections).toBeGreaterThan(0);
+    const firstPassInspections = prefixInspections;
+
+    const next = [
+      ...prefix,
+      { type: "function_call", callId: "image-tool", name: "mcp_image", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "image-tool",
+        output: [{ type: "input_image", image: "data:image/png;base64,NEW" }],
+      },
+    ];
+    const second = await run(next);
+
+    expect(prefixInspections).toBe(firstPassInspections);
+    expect(JSON.stringify(second.input).slice(-500)).not.toContain("data:image");
+    expect(JSON.stringify(second.input).slice(-500)).toContain("Image content omitted");
   });
 
   test("text-only projection runs before context accounting in the real agent loop", async () => {

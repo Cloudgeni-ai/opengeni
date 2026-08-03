@@ -1176,6 +1176,8 @@ export const ModelCapabilitiesV1Schema = z
       codeExecution: CapabilityStateV1Schema,
     }),
     inputModalities: z.array(ModelModalityV1).min(1),
+    /** Exact MIME types accepted as typed `input_file`; `text/*` is allowed. */
+    inputFileMediaTypes: z.array(z.string()).default([]),
     outputModalities: z.array(ModelModalityV1).min(1),
     transports: z.object({
       sse: CapabilityStateV1Schema,
@@ -2271,6 +2273,7 @@ function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabili
     inputModalities: [...parsed.inputModalities].sort(
       (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
     ),
+    inputFileMediaTypes: [...new Set(parsed.inputFileMediaTypes)].sort(),
     outputModalities: [...parsed.outputModalities].sort(
       (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
     ),
@@ -2305,6 +2308,13 @@ function legacyModelCapabilities(
       codeExecution: { upstream: "unknown", runnable: false },
     },
     inputModalities: input.vision ? ["text", "image"] : ["text"],
+    inputFileMediaTypes: [
+      "application/json",
+      "application/pdf",
+      "application/x-yaml",
+      "application/yaml",
+      "text/*",
+    ],
     outputModalities: ["text"],
     transports: {
       sse: { upstream: "unknown", runnable: true },
@@ -2334,7 +2344,7 @@ export function gatewayRequestPolicyForUpstreamModel(
 
 function gatewayModelCapabilities(
   settings: Settings,
-  input: { implicitCaching: boolean; vision: boolean },
+  input: { implicitCaching: boolean; vision: boolean; inputFileMediaTypes?: string[] },
 ): ModelCapabilitiesV1 {
   const legacy = legacyModelCapabilities(settings, {
     reasoningEffort: true,
@@ -2344,6 +2354,7 @@ function gatewayModelCapabilities(
     ...legacy,
     functionCalling: { upstream: "supported", runnable: true },
     inputModalities: input.vision ? ["text", "image"] : ["text"],
+    inputFileMediaTypes: input.inputFileMediaTypes ?? [],
     transports: {
       ...legacy.transports,
       sse: { upstream: "supported", runnable: true },
@@ -2373,6 +2384,7 @@ function gatewayRegistryProvider(
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
         vision: kimi,
+        inputFileMediaTypes: kimi ? ["application/pdf"] : [],
       }),
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 900_000,
