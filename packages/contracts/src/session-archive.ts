@@ -166,7 +166,17 @@ export const SessionArchivePlanRequest = z
   })
   .strict()
   .superRefine((request, context) => {
+    const seenRoots = new Set<string>();
     for (const [index, root] of request.roots.entries()) {
+      const rootSessionId = root.rootSessionId.toLowerCase();
+      if (seenRoots.has(rootSessionId)) {
+        context.addIssue({
+          code: "custom",
+          message: `duplicate root ${rootSessionId}`,
+          path: ["roots", index, "rootSessionId"],
+        });
+      }
+      seenRoots.add(rootSessionId);
       if (request.action === "archive" && root.targetSealId !== null) {
         context.addIssue({
           code: "custom",
@@ -287,6 +297,10 @@ function canonicalUuid(value: string): string {
   return value.toLowerCase();
 }
 
+function compareCanonicalIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function manifestError(message: string): never {
   throw new Error(`Invalid session archive manifest: ${message}`);
 }
@@ -317,9 +331,9 @@ export function canonicalizeSessionArchiveManifest(
           expectedArchiveRevision: member.expectedArchiveRevision,
           expectedArchived: member.expectedArchived,
         }))
-        .sort((left, right) => left.sessionId.localeCompare(right.sessionId)),
+        .sort((left, right) => compareCanonicalIds(left.sessionId, right.sessionId)),
     }))
-    .sort((left, right) => left.rootSessionId.localeCompare(right.rootSessionId));
+    .sort((left, right) => compareCanonicalIds(left.rootSessionId, right.rootSessionId));
 
   const seenRoots = new Set<string>();
   const seenMembers = new Set<string>();
@@ -342,8 +356,8 @@ export function canonicalizeSessionArchiveManifest(
     }
     const membersById = new Map(root.members.map((member) => [member.sessionId, member]));
     const rootMember = membersById.get(root.rootSessionId);
-    if (!rootMember || rootMember.depth !== 0) {
-      manifestError(`root ${root.rootSessionId} must be present exactly once at depth 0`);
+    if (!rootMember || rootMember.depth !== 0 || rootMember.parentSessionId !== null) {
+      manifestError(`root ${root.rootSessionId} must be present at depth 0 with no parent`);
     }
     for (const member of root.members) {
       if (seenMembers.has(member.sessionId)) {

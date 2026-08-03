@@ -10,6 +10,10 @@ import {
 
 export type SessionArchiveChecksum = `sha256:${string}`;
 
+function compareCanonicalIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function sha256(value: string): SessionArchiveChecksum {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
@@ -41,7 +45,7 @@ export function sessionArchiveCoverageChecksum(input: {
         afterArchived: parsed.afterArchived,
       };
     })
-    .sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+    .sort((left, right) => compareCanonicalIds(left.sessionId, right.sessionId));
   const seen = new Set<string>();
   for (const member of members) {
     if (seen.has(member.sessionId)) {

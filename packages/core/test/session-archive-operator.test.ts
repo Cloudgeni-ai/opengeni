@@ -253,7 +253,7 @@ describe("session archive bulk operator", () => {
       root: manifest.roots[0]!,
       receiptId: "00000000-0000-4000-8000-000000000050",
       sealId: sealA,
-      operationKey: "another-authorized-operator-key",
+      operationKey: operationKey(manifest, manifest.roots[0]!),
     });
     const client = fakeClient({ manifest, existing: [existing] });
     const result = await applySessionArchiveBulk({
@@ -268,6 +268,27 @@ describe("session archive bulk operator", () => {
     expect(client.requests[0]!.manifest).toBeNull();
   });
 
+  test("rejects an existing receipt with a mismatched deterministic idempotency key", async () => {
+    const manifest = archiveManifest();
+    const existing = receiptEvidence({
+      manifest,
+      root: manifest.roots[0]!,
+      receiptId: "00000000-0000-4000-8000-000000000055",
+      sealId: sealA,
+      operationKey: "another-authorized-operator-key",
+    });
+    const client = fakeClient({ manifest, existing: [existing] });
+
+    await expect(
+      applySessionArchiveBulk({
+        client,
+        manifest,
+        approvedManifestChecksum: sessionArchiveManifestChecksum(manifest),
+      }),
+    ).rejects.toThrow("operation key differs from the deterministic request");
+    expect(client.requests).toHaveLength(0);
+  });
+
   test("rejects tampered durable evidence before submitting another root", async () => {
     const manifest = archiveManifest();
     const existing = receiptEvidence({
@@ -275,7 +296,7 @@ describe("session archive bulk operator", () => {
       root: manifest.roots[0]!,
       receiptId: "00000000-0000-4000-8000-000000000051",
       sealId: sealA,
-      operationKey: "existing-key",
+      operationKey: operationKey(manifest, manifest.roots[0]!),
     });
     existing.receipt.coverageChecksum = `sha256:${"0".repeat(64)}`;
     const client = fakeClient({ manifest, existing: [existing] });
@@ -297,7 +318,7 @@ describe("session archive bulk operator", () => {
       root: manifest.roots[0]!,
       receiptId: "00000000-0000-4000-8000-000000000053",
       sealId: sealA,
-      operationKey: "existing-key",
+      operationKey: operationKey(manifest, manifest.roots[0]!),
     });
     const client = fakeClient({
       manifest,
@@ -350,7 +371,7 @@ describe("session archive bulk operator", () => {
       root: manifest.roots[0]!,
       receiptId: "00000000-0000-4000-8000-000000000052",
       sealId: sealA,
-      operationKey: "unarchive-overlap",
+      operationKey: operationKey(manifest, manifest.roots[0]!),
       afterArchived: true,
     });
     expect(

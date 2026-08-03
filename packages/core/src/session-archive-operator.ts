@@ -135,7 +135,7 @@ function verifyReceiptIdentity(input: {
   rootChecksum: SessionArchiveChecksum;
   expectedOperationKey?: string;
 }): void {
-  const { receipt, manifest, manifestChecksum, root, rootChecksum, expectedOperationKey } = input;
+  const { receipt, manifest, manifestChecksum, root, rootChecksum } = input;
   if (receipt.workspaceId.toLowerCase() !== manifest.workspaceId) {
     operatorError(`receipt ${receipt.id} belongs to another workspace`);
   }
@@ -154,7 +154,7 @@ function verifyReceiptIdentity(input: {
   if (receipt.memberCount !== root.memberCount) {
     operatorError(`receipt ${receipt.id} member count differs from the manifest`);
   }
-  if (expectedOperationKey !== undefined && receipt.operationKey !== expectedOperationKey) {
+  if (receipt.operationKey !== deterministicOperationKey(manifestChecksum, rootChecksum)) {
     operatorError(`receipt ${receipt.id} operation key differs from the deterministic request`);
   }
   if (

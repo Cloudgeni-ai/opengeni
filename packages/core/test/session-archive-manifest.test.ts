@@ -101,6 +101,13 @@ describe("session archive manifest", () => {
   });
 
   test("rejects duplicate or structurally incomplete root coverage", () => {
+    expect(() =>
+      SessionArchivePlanRequest.parse({
+        action: "archive",
+        roots: [{ rootSessionId: rootA }, { rootSessionId: rootA.toUpperCase() }],
+      }),
+    ).toThrow(`duplicate root ${rootA}`);
+
     const duplicate = structuredClone(manifest());
     duplicate.roots[1]!.members[0]!.sessionId = rootB;
     expect(() => canonicalizeSessionArchiveManifest(duplicate)).toThrow(
@@ -111,6 +118,12 @@ describe("session archive manifest", () => {
     missingParent.roots[1]!.members[0]!.parentSessionId = rootB;
     expect(() => canonicalizeSessionArchiveManifest(missingParent)).toThrow(
       `parent ${rootB} outside root ${rootA}`,
+    );
+
+    const parentedRoot = structuredClone(manifest());
+    parentedRoot.roots[1]!.members[1]!.parentSessionId = childA;
+    expect(() => canonicalizeSessionArchiveManifest(parentedRoot)).toThrow(
+      `root ${rootA} must be present at depth 0 with no parent`,
     );
   });
 
