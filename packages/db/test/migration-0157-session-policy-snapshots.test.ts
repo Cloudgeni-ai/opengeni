@@ -597,6 +597,75 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
     ).toMatchObject({ policySnapshot: null, preferenceSnapshot: null });
   });
 
+  test("keeps a historical accepted attempt inspectable after recovery advances the turn generation", async () => {
+    if (!shared || !client) return;
+    const workspace = await freshWorkspace("workspace-state-historical-attempt");
+    const subjectId = "workspace-state-historical-owner";
+    await activatePolicy(workspace, {
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      content: "HISTORICAL_ATTEMPT_POLICY",
+    });
+    const session = await createPolicySession(workspace, {
+      label: "workspace state historical accepted attempt",
+    });
+    const attempt = await seedAttempt(workspace, session.id, subjectId);
+    const [policySnapshot, preferenceSnapshot] = await Promise.all([
+      getOrCreateWorkspaceInstructionPolicySnapshot(client.db, attempt),
+      getOrCreatePreferenceRegistrySnapshot(client.db, attempt),
+    ]);
+
+    const recoveryAttemptId = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx`
+        update session_turn_attempts
+        set state = 'closed', outcome = 'interrupted_recoverable',
+            closed_at = now(), quiesced_at = now(), updated_at = now()
+        where id = ${attempt.attemptId}
+      `;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id,
+          temporal_activity_id, verified_control_revision, mcp_approval_policies
+        ) values (
+          ${recoveryAttemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id},
+          ${attempt.turnId}, 2, 'running', ${`policy-snapshot-${attempt.turnId}`},
+          ${`run-${recoveryAttemptId}`}, ${`activity-${recoveryAttemptId}`}, 0, '{}'::jsonb
+        )
+      `;
+      await tx`
+        update session_turns
+        set status = 'running', execution_generation = 2,
+            active_attempt_id = ${recoveryAttemptId}, updated_at = now()
+        where id = ${attempt.turnId}
+      `;
+    });
+
+    expect(
+      await getWorkspaceStateAcceptedAttemptGovernance(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId,
+        attemptId: attempt.attemptId,
+      }),
+    ).toMatchObject({
+      attemptId: attempt.attemptId,
+      executionGeneration: 1,
+      policySnapshot: { id: policySnapshot.id, executionGeneration: 1 },
+      preferenceSnapshot: { id: preferenceSnapshot.id },
+    });
+    expect(
+      await getWorkspaceStateAcceptedAttemptGovernance(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "workspace-state-historical-other-subject",
+        attemptId: attempt.attemptId,
+      }),
+    ).toBeNull();
+  });
+
   test("claim atomically installs both governance snapshots for the accepted human turn", async () => {
     if (!shared || !client) return;
     const workspace = await freshWorkspace("policy-claim-snapshots");

@@ -47,10 +47,13 @@ accepted attempt.
 Attempt inspection additionally requires the authenticated subject to equal
 the turn's immutable initiating-human subject (including a causal human carried
 by an authorized service continuation). The lookup explicitly fences account,
-workspace, attempt, execution generation, and initiating subject. Missing,
-foreign-account, foreign-workspace, and another subject's attempts all collapse
-to the same `attempt_not_found_or_not_authorized` result, with no session or turn
-identifier disclosed.
+workspace, the attempt's immutable session/turn identity and execution
+generation, and initiating subject. It does not require the turn's mutable
+current execution generation to remain equal after recovery, so a retained
+historical accepted attempt remains inspectable. Missing, foreign-account,
+foreign-workspace, and another subject's attempts all collapse to the same
+`attempt_not_found_or_not_authorized` result, with no session or turn identifier
+disclosed.
 
 Knowledge facts are independently gated by `documents:search`:
 

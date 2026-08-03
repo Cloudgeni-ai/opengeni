@@ -141,10 +141,6 @@ export async function getWorkspaceStateAcceptedAttemptGovernance(
           eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
           eq(schema.sessionTurns.sessionId, schema.sessionTurnAttempts.sessionId),
           eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
-          eq(
-            schema.sessionTurns.executionGeneration,
-            schema.sessionTurnAttempts.executionGeneration,
-          ),
         ),
       )
       .where(
