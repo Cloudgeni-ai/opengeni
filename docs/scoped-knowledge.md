@@ -50,15 +50,20 @@ runtime-role FORCE-RLS policy calls the same
 The older `visibility` field remains only as a compatibility projection
 (`personal` → `private`, organization/workspace → `workspace`).
 
-Migration 0165 is a drained maintenance cutover, not a legacy-payload fallback.
-Stop every API and worker, close all `document-index-*` Temporal workflows, and
-settle every queued/indexing document before applying it; the migration rejects
-both live `opengeni_app` sessions and an undrained document queue. After commit,
-only the new image may run and every direct
-or Temporal indexing input must carry the exact six-field document and authority
-identity. Publishing an organization-authority document requires an exact
-`account:admin` account grant; workspace-admin permission expansion is not
-account-wide publication authority.
+Migration 0165 is a drained maintenance cutover. Stop every API and worker,
+close all `document-index-*` Temporal workflows, and settle every queued/indexing
+document before applying it; the migration rejects both live `opengeni_app`
+sessions and an undrained document queue. After commit, only the new image may
+run, and every newly created direct or Temporal indexing input must carry the
+exact six-field document and authority identity. Rolling migration 0167 adds a
+bounded compatibility path only for already-recorded three-field Temporal
+history: before any document write, the worker resolves the stored immutable
+authority tuple through an exact account/workspace RLS capability. Any supplied
+authority tuple must be complete and exactly match that stored tuple; partial or
+mismatched tuples reject before parsing, embedding, or chunk writes. Publishing
+an organization-authority document requires an exact `account:admin` account
+grant; workspace-admin permission expansion is not account-wide publication
+authority.
 
 ## Source and lifecycle ledgers
 

@@ -47,6 +47,7 @@ import {
   updateSessionMcpServerCredentials,
   updateScheduledTask,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
   type Database,
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -2379,6 +2380,135 @@ describe("worker activities integration", () => {
       limit: 20,
     });
     expect(usage.some((event) => event.eventType === "document.indexed")).toBe(false);
+  });
+
+  test("resolves historical document indexing authority and rejects partial or stale tuples", async () => {
+    const grant = await testGrant(dbClient.db);
+    const base = await createDocumentBase(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "Historical replay docs",
+    });
+    const createPersonalDocument = async (label: string) => {
+      const upload = await createOwnedFileUpload(dbClient.db, grant, {
+        fileId: crypto.randomUUID(),
+        filename: `${label}.txt`,
+        safeFilename: `${label}.txt`,
+        contentType: "text/plain",
+        sizeBytes: 24,
+        bucket: "test",
+        objectKey: `workspaces/${grant.workspaceId}/files/${label}.txt`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const file = await completeFileUpload(dbClient.db, grant.workspaceId, upload.uploadId);
+      return await addDocumentToBase(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        baseId: base.id,
+        fileId: file.id,
+        authorityKind: "personal",
+        createdBy: grant.subjectId,
+        initiatingSubjectId: grant.subjectId,
+        access: { viewerSubjectId: grant.subjectId },
+      });
+    };
+    const historicalDocument = await createPersonalDocument("historical-replay");
+    const partialDocument = await createPersonalDocument("partial-replay");
+    const staleDocument = await createPersonalDocument("stale-replay");
+    let parserCalls = 0;
+    let embedderCalls = 0;
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      objectStorage: fakeObjectStorage("Historical document replay content."),
+      documentServices: {
+        parser: {
+          name: "test-text",
+          parse: async (bytes, inputFile) => {
+            parserCalls += 1;
+            return {
+              text: new TextDecoder().decode(bytes),
+              metadata: { filename: inputFile.filename, contentType: inputFile.contentType },
+            };
+          },
+        },
+        chunker: {
+          chunk: (parsed, inputFile) => [
+            { text: parsed.text, metadata: { filename: inputFile.filename, chunkIndex: 0 } },
+          ],
+        },
+        embedder: {
+          model: "test-embedder",
+          dimensions: 3,
+          embedMany: async (chunks) => {
+            embedderCalls += 1;
+            return chunks.map(() => [0, 0, 0]);
+          },
+          embedQuery: async () => [0, 0, 0],
+        },
+      } satisfies DocumentServices,
+    });
+
+    const replayed = await activities.indexDocument({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      documentId: historicalDocument.id,
+    });
+    expect(replayed).toMatchObject({
+      status: "ready",
+      authorityKind: "personal",
+      authorityWorkspaceId: grant.workspaceId,
+      authoritySubjectId: grant.subjectId,
+      chunkCount: 1,
+    });
+
+    const exact = await activities.indexDocument({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      documentId: historicalDocument.id,
+      authorityKind: historicalDocument.authorityKind,
+      authorityWorkspaceId: historicalDocument.authorityWorkspaceId,
+      authoritySubjectId: historicalDocument.authoritySubjectId,
+    });
+    expect(exact.status).toBe("ready");
+
+    await expect(
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: partialDocument.id,
+        authorityKind: partialDocument.authorityKind,
+      } as never),
+    ).rejects.toThrow("document authority tuple is partial");
+    await expect(
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: staleDocument.id,
+        authorityKind: "workspace",
+        authorityWorkspaceId: grant.workspaceId,
+        authoritySubjectId: null,
+      }),
+    ).rejects.toThrow("document authority changed before indexing");
+
+    const untouched = await withWorkspaceSubjectRls(
+      dbClient.db,
+      grant.workspaceId,
+      grant.subjectId,
+      async (scopedDb) =>
+        await scopedDb.execute<{ document_id: string }>(dbSql`
+          select document_id
+          from document_chunks
+          where document_id in (${partialDocument.id}, ${staleDocument.id})
+        `),
+    );
+    expect(untouched).toHaveLength(0);
+    expect(parserCalls).toBe(2);
+    expect(embedderCalls).toBe(2);
   });
 
   test("serializes concurrent document indexing against monthly chunk caps", async () => {

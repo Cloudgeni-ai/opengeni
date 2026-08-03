@@ -14,6 +14,7 @@ import type {
   ConnectionKind,
   ConnectionMetadata,
   ConnectionStatus,
+  DocumentAuthorityKind,
   McpServerConnectionRef,
   FileAsset,
   FileStatus,
@@ -1195,6 +1196,55 @@ export async function withWorkspaceUsageLock<T>(
     await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${`usage:${workspaceId}`}))`);
     return await fn(scopedDb);
   });
+}
+
+export type DocumentIndexAuthority = {
+  authorityKind: DocumentAuthorityKind;
+  authorityWorkspaceId: string | null;
+  authoritySubjectId: string | null;
+};
+
+/**
+ * Read the immutable authority tuple used by document indexing compatibility.
+ * The database capability returns no document content and independently
+ * verifies that this transaction already carries the exact account/workspace
+ * RLS context. It is intentionally subject-free so a historical three-field
+ * Temporal payload can recover a personal document's frozen subject without
+ * weakening ordinary document visibility.
+ */
+export async function resolveDocumentIndexAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; documentId: string },
+): Promise<DocumentIndexAuthority | null> {
+  const rows = await rawRows<{
+    authority_kind: string;
+    authority_workspace_id: string | null;
+    authority_subject_id: string | null;
+  }>(
+    db,
+    sql`
+      select authority_kind, authority_workspace_id, authority_subject_id
+      from opengeni_private.resolve_document_index_authority(
+        ${input.accountId},
+        ${input.workspaceId},
+        ${input.documentId}
+      )
+    `,
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (
+    row.authority_kind !== "organization" &&
+    row.authority_kind !== "workspace" &&
+    row.authority_kind !== "personal"
+  ) {
+    throw new Error(`Stored document authority kind is invalid: ${row.authority_kind}`);
+  }
+  return {
+    authorityKind: row.authority_kind,
+    authorityWorkspaceId: row.authority_workspace_id,
+    authoritySubjectId: row.authority_subject_id,
+  };
 }
 
 export async function withAccountRls<T>(
