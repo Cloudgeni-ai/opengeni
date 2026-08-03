@@ -5,6 +5,19 @@
  */
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
 export {
+  BillingClassMark,
+  ModelPolicyPicker,
+  ModelPolicyPickerMenu,
+  PickerAnimatedPage,
+  PickerBackHeader,
+  PickerNavRow,
+  defaultModelPolicyPickerMessages,
+} from "./components/model-policy-picker";
+export type {
+  ModelPolicyPickerMessages,
+  ModelPolicyPickerProps,
+} from "./components/model-policy-picker";
+export {
   Actions,
   AttachButton,
   Attachments,

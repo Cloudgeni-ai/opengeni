@@ -290,6 +290,10 @@ intentional changes should regenerate those snapshots and review the diff.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
   host-exposed models by provider.
+- `ModelPolicyPicker` — the full model policy control used by the OpenGeni web
+  app: provider/billing rails, model availability, reasoning effort, and
+  runnable latency modes such as Fast. It accepts either `ClientModel[]` or
+  catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
 - `CommandPalette` — the slash-command palette UI over `useSlashCommands`.
 
