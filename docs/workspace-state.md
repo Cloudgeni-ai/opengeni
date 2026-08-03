@@ -122,10 +122,10 @@ The current inventory remains labeled
 `truth.attemptGovernance.status=not_requested`.
 
 For an authorized accepted attempt, Workspace State reads the existing
-immutable OPE-107 instruction-policy and preference-registry snapshot rows. It
-projects only stable IDs, revisions, content hashes, activation versions,
-timestamps, normalized policy role/source, coarse counts, and truncation facts.
-Policy and preference bodies never cross the boundary.
+immutable instruction-policy and preference-registry snapshot rows. It projects
+only stable IDs, revisions, content hashes, activation versions, timestamps,
+normalized policy role/source, coarse counts, and truncation facts. Policy and
+preference bodies never cross the boundary.
 
 Drift is deterministic and independently labeled for policy and preferences:
 
