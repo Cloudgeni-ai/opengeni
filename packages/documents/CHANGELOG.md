@@ -1,5 +1,20 @@
 # @opengeni/documents
 
+## 0.3.0
+
+### Minor Changes
+
+- d1f0c3d: Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.
+
+### Patch Changes
+
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/db@0.24.0
+  - @opengeni/config@0.10.4
+  - @opengeni/storage@0.2.57
+
 ## 0.2.72
 
 ### Patch Changes
