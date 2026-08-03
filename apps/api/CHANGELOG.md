@@ -1,5 +1,28 @@
 # @opengeni/api-router
 
+## 0.20.0
+
+### Minor Changes
+
+- b121e7c: Add durable Google Drive pause, resume, disconnect, reconnect, revoked-token,
+  removed-app, and permission re-consent lifecycle handling with version-fenced
+  state transitions, generation-bound disconnect idempotency, stale-replay
+  protection, and secret-safe provider error classification.
+
+### Patch Changes
+
+- Updated dependencies [b121e7c]
+  - @opengeni/contracts@0.35.0
+  - @opengeni/db@0.26.0
+  - @opengeni/config@0.10.6
+  - @opengeni/core@0.20.2
+  - @opengeni/documents@0.3.2
+  - @opengeni/events@0.3.65
+  - @opengeni/github@0.4.22
+  - @opengeni/observability@0.4.9
+  - @opengeni/runtime@0.18.3
+  - @opengeni/storage@0.2.59
+
 ## 0.19.0
 
 ### Minor Changes
