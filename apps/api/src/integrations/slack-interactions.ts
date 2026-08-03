@@ -37,6 +37,7 @@ import {
   releaseSlackInteractionInbox,
   resolveSlackInstallationRoute,
   saveSlackBotUserLink,
+  saveSlackInteractionInboxReactionCheckpoint,
   settleSlackInteractionInbox,
   type SlackInstallationRoute,
   type SlackInteraction,
@@ -720,6 +721,29 @@ async function processSlackReactionInboxEntry(
   const context = await client.reactionMessageContext({
     channelId: entry.slackChannelId,
     messageTimestamp: entry.slackMessageTs,
+    checkpoint: entry.reactionContextCheckpoint,
+    checkpointBinding: {
+      inboxId: entry.id,
+      accountId: entry.accountId,
+      workspaceId: entry.workspaceId,
+      connectionId: entry.connectionId,
+      providerEventId: entry.providerEventId,
+      providerMessageId: entry.providerMessageId,
+      slackTeamId: entry.slackTeamId,
+      slackChannelId: entry.slackChannelId,
+      slackMessageTs: entry.slackMessageTs,
+    },
+    saveCheckpoint: async (checkpoint) => {
+      if (!entry.claimHolderId) {
+        throw new Error("Slack reaction inbox checkpoint requires an active claim");
+      }
+      const saved = await saveSlackInteractionInboxReactionCheckpoint(deps.db, {
+        entry,
+        claimHolderId: entry.claimHolderId,
+        checkpoint,
+      });
+      if (!saved) throw new Error("Slack reaction inbox checkpoint claim was lost");
+    },
   });
   const preparedEntry: SlackInteractionInboxEntry = {
     ...entry,
@@ -1377,6 +1401,10 @@ const PERMANENT_SLACK_DELIVERY_CODES = new Set([
   "message_not_found",
   "not_authed",
   "not_in_channel",
+  "reaction_checkpoint_invalid",
+  "reaction_checkpoint_too_large",
+  "reaction_pagination_exhausted",
+  "reaction_pagination_invalid",
   "slack_connect_unsupported",
   "token_expired",
   "token_revoked",

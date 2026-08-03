@@ -840,6 +840,7 @@ export const slackInteractionInbox = pgTable(
     attemptCount: integer("attempt_count").notNull().default(0),
     retryAt: timestamp("retry_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),
+    reactionContextCheckpoint: jsonb("reaction_context_checkpoint").$type<unknown>(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

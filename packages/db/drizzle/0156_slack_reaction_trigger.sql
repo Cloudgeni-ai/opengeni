@@ -24,3 +24,26 @@ ALTER TABLE "slack_interaction_inbox"
 
 ALTER TABLE "slack_interaction_inbox"
   VALIDATE CONSTRAINT "slack_interaction_inbox_trigger_check";
+
+-- A rate-limited conversations.replies traversal must resume at the exact next
+-- cursor instead of consuming the next one-request-per-minute allowance by
+-- refetching page one. The payload is application-authenticated and bounded;
+-- this database constraint additionally prevents terminal/non-reaction rows
+-- from retaining checkpoint material.
+ALTER TABLE "slack_interaction_inbox"
+  ADD COLUMN "reaction_context_checkpoint" jsonb;
+
+ALTER TABLE "slack_interaction_inbox"
+  ADD CONSTRAINT "slack_interaction_inbox_reaction_checkpoint_check"
+  CHECK (
+    "reaction_context_checkpoint" IS NULL
+    OR (
+      "trigger_kind" = 'reaction'
+      AND "status" IN ('pending', 'processing')
+      AND jsonb_typeof("reaction_context_checkpoint") = 'object'
+      AND octet_length("reaction_context_checkpoint"::text) <= 131072
+    )
+  ) NOT VALID;
+
+ALTER TABLE "slack_interaction_inbox"
+  VALIDATE CONSTRAINT "slack_interaction_inbox_reaction_checkpoint_check";

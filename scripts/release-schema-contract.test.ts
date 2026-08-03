@@ -173,11 +173,11 @@ describe("release schema contract", () => {
         (migrations.has("0156_slack_reaction_trigger.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "d92028e7f63bf5b5765c6dc420cea2b318edcf83dfcd98c5b802f58661b7c281",
+      "b4054ebdde52dce4953bb5f17097471222ab5ffb7d9f58432138a18506f280e7",
     );
     expect(contract.latestMigration).toBe("0156_slack_reaction_trigger.sql");
     expect(migrations.get("0156_slack_reaction_trigger.sql")).toMatchObject({
-      sha256: "f58f6932ca67be16b04003699942927f43b599ed435a2d9032d6d304c6bb29c3",
+      sha256: "080cd2840c3fd4c6c81b838cf7b0a4f1fa7e48ab4ced18c05e76da895934a945",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0155_connector_action_policies.sql")).toMatchObject({

@@ -804,7 +804,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(session!.initial_message).toContain("bounded Slack context limit");
   });
 
-  test("reaction pagination fails closed and preserves Slack rate-limit retry behavior", async () => {
+  test("reaction pagination resumes its durable cursor across a fresh claim after Slack throttling", async () => {
     if (!available) return;
     const channelId = "C_REACTION_RATE_LIMITED";
     const rootTimestamp = "1706200000.000001";
@@ -850,9 +850,19 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainSlackInteractionsOnce(value.deps);
 
     const [inbox] = await shared!.admin<
-      { status: string; attempt_count: number; retry_at: Date | null; last_error_code: string }[]
+      {
+        id: string;
+        status: string;
+        attempt_count: number;
+        retry_at: Date | null;
+        last_error_code: string;
+        reaction_context_checkpoint: unknown;
+        checkpoint_bytes: number;
+      }[]
     >`
-      select status, attempt_count, retry_at, last_error_code
+      select id, status, attempt_count, retry_at, last_error_code,
+        reaction_context_checkpoint,
+        octet_length(reaction_context_checkpoint::text)::int as checkpoint_bytes
       from slack_interaction_inbox
       where workspace_id = ${value.owner.workspaceId}`;
     expect(inbox).toMatchObject({
@@ -861,6 +871,297 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       last_error_code: "http_429",
     });
     expect(inbox!.retry_at).not.toBeNull();
+    expect(inbox!.reaction_context_checkpoint).toMatchObject({
+      version: 1,
+      binding: {
+        inboxId: inbox!.id,
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        slackMessageTs: reactedTimestamp,
+      },
+      state: {
+        pageCount: 1,
+        nextCursor: "rate-limited-page",
+        seenCursors: ["rate-limited-page"],
+      },
+    });
+    expect(inbox!.checkpoint_bytes).toBeLessThanOrEqual(131_072);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(value.slack.posts).toHaveLength(0);
+
+    value.slack.reactionContexts.get(`${channelId}:${reactedTimestamp}`)!.pages![
+      "rate-limited-page"
+    ] = {
+      messages: [
+        {
+          ts: "1706200000.000016",
+          thread_ts: rootTimestamp,
+          user: "U_CONTEXT_16",
+          text: "Context immediately before the reacted message",
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Resume from the stored cursor and investigate this exact message.",
+        },
+      ],
+    };
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now() - interval '1 second'
+      where id = ${inbox!.id}`;
+    const freshDeps = { ...value.deps, bus: new MemoryEventBus() } as ApiRouteDeps;
+    expect(await drainSlackInteractionsOnce(freshDeps)).toBe(true);
+
+    expect(value.slack.reactionContextHits).toEqual([
+      `${channelId}:${reactedTimestamp}`,
+      `${channelId}:${reactedTimestamp}:rate-limited-page`,
+      `${channelId}:${reactedTimestamp}:rate-limited-page`,
+    ]);
+    const [processed] = await shared!.admin<
+      {
+        status: string;
+        attempt_count: number;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, attempt_count, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${inbox!.id}`;
+    expect(processed).toEqual({
+      status: "processed",
+      attempt_count: 2,
+      last_error_code: null,
+      reaction_context_checkpoint: null,
+    });
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
+    const [sessionCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(sessionCount!.count).toBe(1);
+    expect(value.slack.posts).toHaveLength(1);
+    expect(value.slack.posts[0]).toMatchObject({
+      channel: channelId,
+      threadTimestamp: rootTimestamp,
+    });
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_RATE_LIMITED_READD_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const [deduplicated] = await shared!.admin<{ inboxes: number; sessions: number }[]>`
+      select
+        (select count(*)::int from slack_interaction_inbox
+          where workspace_id = ${value.owner.workspaceId}) as inboxes,
+        (select count(*)::int from sessions
+          where workspace_id = ${value.owner.workspaceId}) as sessions`;
+    expect(deduplicated).toEqual({ inboxes: 1, sessions: 1 });
+  });
+
+  test("reaction checkpoints fail closed when stale, malformed, or copied across workspace events", async () => {
+    if (!available) return;
+    const sourceChannelId = "C_REACTION_CHECKPOINT_SOURCE";
+    const sourceTimestamp = "1706250000.000020";
+    const source = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [sourceChannelId] },
+      },
+    });
+    source.slack.reactionContexts.set(`${sourceChannelId}:${sourceTimestamp}`, {
+      messages: [{ ts: "1706250000.000001", user: "U_ROOT", text: "Root" }],
+      nextCursor: "checkpoint-page-2",
+      pages: {
+        "checkpoint-page-2": {
+          messages: [],
+          status: 429,
+          retryAfterSeconds: 30,
+        },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          source.app,
+          reactionEvent({
+            teamId: source.teamId,
+            eventId: `E_REACTION_CHECKPOINT_SOURCE_${crypto.randomUUID()}`,
+            userId: source.ownerSlackUserId,
+            channelId: sourceChannelId,
+            timestamp: sourceTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainSlackInteractionsOnce(source.deps);
+    const [sourceInbox] = await shared!.admin<
+      { id: string; reaction_context_checkpoint: unknown }[]
+    >`
+      select id, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where workspace_id = ${source.owner.workspaceId}`;
+    expect(sourceInbox!.reaction_context_checkpoint).not.toBeNull();
+
+    await shared!.admin`
+      update slack_interaction_inbox
+      set reaction_context_checkpoint = jsonb_set(
+            reaction_context_checkpoint,
+            '{state,createdAtMs}',
+            '0'::jsonb
+          ),
+          retry_at = now() - interval '1 second'
+      where id = ${sourceInbox!.id}`;
+    expect(await drainSlackInteractionsOnce(source.deps)).toBe(true);
+    const [malformed] = await shared!.admin<
+      {
+        status: string;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${sourceInbox!.id}`;
+    expect(malformed).toEqual({
+      status: "failed",
+      last_error_code: "reaction_checkpoint_invalid",
+      reaction_context_checkpoint: null,
+    });
+    expect(source.slack.reactionContextHits).toEqual([
+      `${sourceChannelId}:${sourceTimestamp}`,
+      `${sourceChannelId}:${sourceTimestamp}:checkpoint-page-2`,
+    ]);
+
+    const targetChannelId = "C_REACTION_CHECKPOINT_TARGET";
+    const targetTimestamp = "1706250001.000020";
+    const target = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [targetChannelId] },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          target.app,
+          reactionEvent({
+            teamId: target.teamId,
+            eventId: `E_REACTION_CHECKPOINT_TARGET_${crypto.randomUUID()}`,
+            userId: target.ownerSlackUserId,
+            channelId: targetChannelId,
+            timestamp: targetTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const [targetInbox] = await shared!.admin<{ id: string }[]>`
+      select id
+      from slack_interaction_inbox
+      where workspace_id = ${target.owner.workspaceId}`;
+    await shared!.admin`
+      update slack_interaction_inbox
+      set reaction_context_checkpoint = ${shared!.admin.json(
+        sourceInbox!.reaction_context_checkpoint,
+      )}
+      where id = ${targetInbox!.id}`;
+    expect(await drainSlackInteractionsOnce(target.deps)).toBe(true);
+    const [crossWorkspace] = await shared!.admin<
+      {
+        status: string;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${targetInbox!.id}`;
+    expect(crossWorkspace).toEqual({
+      status: "failed",
+      last_error_code: "reaction_checkpoint_invalid",
+      reaction_context_checkpoint: null,
+    });
+    expect(target.slack.calls).toHaveLength(0);
+    expect(await interactions(target.owner.workspaceId)).toHaveLength(0);
+  });
+
+  test("reaction checkpointing rejects a repeated provider cursor and clears terminal state", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_REPEATED_CURSOR";
+    const reactedTimestamp = "1706260000.000020";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: [{ ts: "1706260000.000001", user: "U_ROOT", text: "Root" }],
+      nextCursor: "repeated-cursor",
+      pages: {
+        "repeated-cursor": {
+          messages: [{ ts: "1706260000.000002", user: "U_CONTEXT", text: "Context" }],
+          nextCursor: "repeated-cursor",
+        },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_REPEATED_CURSOR_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const [inbox] = await shared!.admin<
+      {
+        status: string;
+        attempt_count: number;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, attempt_count, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toEqual({
+      status: "failed",
+      attempt_count: 1,
+      last_error_code: "reaction_pagination_invalid",
+      reaction_context_checkpoint: null,
+    });
+    expect(value.slack.reactionContextHits).toEqual([
+      `${channelId}:${reactedTimestamp}`,
+      `${channelId}:${reactedTimestamp}:repeated-cursor`,
+    ]);
     expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
     expect(value.slack.posts).toHaveLength(0);
   });

@@ -48,6 +48,16 @@ const MAX_HISTORY_PAGE = 100;
 const MAX_THREAD_PAGE = 100;
 const MAX_REACTION_CONTEXT_MESSAGES = 15;
 const MAX_REACTION_CONTEXT_PAGES = 8;
+const MAX_REACTION_CONTEXT_SEEN_MESSAGES =
+  MAX_REACTION_CONTEXT_MESSAGES * MAX_REACTION_CONTEXT_PAGES;
+// Leave headroom for PostgreSQL jsonb's canonical text spacing under the
+// database's independent 128 KiB CHECK constraint.
+const MAX_REACTION_CONTEXT_CHECKPOINT_BYTES = 120 * 1024;
+const MAX_REACTION_CONTEXT_CHECKPOINT_AGE_MS = 24 * 60 * 60_000;
+const MAX_REACTION_CONTEXT_CHECKPOINT_CLOCK_SKEW_MS = 5 * 60_000;
+const MAX_REACTION_CONTEXT_CHECKPOINT_FILE_LABEL_CHARS = 1_500;
+const MAX_REACTION_CONTEXT_CHECKPOINT_FILES = 16;
+const SLACK_REACTION_CONTEXT_CHECKPOINT_VERSION = 1;
 const MAX_USER_PAGE = 200;
 const MAX_FILE_PAGE = 200;
 const MAX_FILE_CURSOR_LENGTH = 1_024;
@@ -152,6 +162,45 @@ type SlackBotContext = {
   subjectId: string | null;
   sessionId?: string | null;
   scheduledTaskId?: string | null;
+};
+
+export type SlackReactionContextCheckpointBinding = {
+  inboxId: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  providerEventId: string;
+  providerMessageId: string;
+  slackTeamId: string;
+  slackChannelId: string;
+  slackMessageTs: string;
+};
+
+type SlackReactionCheckpointMessage = {
+  timestamp: string;
+  userId: string;
+  botId: string;
+  threadTimestamp: string;
+  text: string;
+  files: Array<{ id: string; label: string }>;
+};
+
+type SlackReactionContextCheckpointUnsigned = {
+  version: typeof SLACK_REACTION_CONTEXT_CHECKPOINT_VERSION;
+  binding: SlackReactionContextCheckpointBinding;
+  state: {
+    createdAtMs: number;
+    pageCount: number;
+    nextCursor: string;
+    seenCursors: string[];
+    seenMessageTimestamps: string[];
+    threadTimestamp: string | null;
+    messages: SlackReactionCheckpointMessage[];
+  };
+};
+
+export type SlackReactionContextCheckpoint = SlackReactionContextCheckpointUnsigned & {
+  signature: string;
 };
 
 export class SlackBotProviderError extends Error {
@@ -397,21 +446,48 @@ export class OpenGeniSlackBotClient {
     });
   }
 
-  async reactionMessageContext(input: { channelId: string; messageTimestamp: string }) {
+  async reactionMessageContext(input: {
+    channelId: string;
+    messageTimestamp: string;
+    checkpoint: unknown | null;
+    checkpointBinding: SlackReactionContextCheckpointBinding;
+    saveCheckpoint: (checkpoint: SlackReactionContextCheckpoint) => Promise<void>;
+  }) {
     return await this.withAudit("thread_replies.read", async (headers) => {
+      const checkpointKey = environmentsEncryptionKeyBytes(this.settings);
+      if (!checkpointKey) throw new Error("connection encryption is not configured");
+      assertSlackReactionCheckpointBinding(
+        input.checkpointBinding,
+        this.context,
+        this.connection.id,
+        this.metadata.slackTeamId,
+        input.channelId,
+        input.messageTimestamp,
+      );
+      const restored = input.checkpoint
+        ? parseSlackReactionContextCheckpoint(
+            input.checkpoint,
+            input.checkpointBinding,
+            checkpointKey,
+          )
+        : null;
       const info = await this.requireMemberChannel(headers, input.channelId);
       if (info.isShared || info.isExternallyShared || info.isOrgShared) {
         throw new SlackBotProviderError("slack_connect_unsupported");
       }
-      const messages: ReturnType<typeof projectMessage>[] = [];
-      const seenMessageTimestamps = new Set<string>();
-      const seenCursors = new Set<string>();
-      let cursor: string | null = null;
-      let nextCursor: string | null = null;
-      let threadTimestamp: string | null = null;
+      const messages: ReturnType<typeof projectMessage>[] = restored
+        ? restored.state.messages.map(projectSlackReactionCheckpointMessage)
+        : [];
+      const seenMessageTimestamps = new Set(restored?.state.seenMessageTimestamps ?? []);
+      const seenCursors = new Set(restored?.state.seenCursors ?? []);
+      let cursor: string | null = restored?.state.nextCursor ?? null;
+      let nextCursor: string | null = cursor;
+      let threadTimestamp: string | null = restored?.state.threadTimestamp ?? null;
       let reactedMessage: ReturnType<typeof projectMessage> | null = null;
+      const checkpointCreatedAtMs = restored?.state.createdAtMs ?? Date.now();
+      const firstPage = restored?.state.pageCount ?? 0;
 
-      for (let page = 0; page < MAX_REACTION_CONTEXT_PAGES; page += 1) {
+      for (let page = firstPage; page < MAX_REACTION_CONTEXT_PAGES; page += 1) {
         const payload = await this.call(headers, "conversations.replies", {
           channel: input.channelId,
           // Slack accepts either the parent timestamp or a message timestamp from
@@ -437,9 +513,30 @@ export class OpenGeniSlackBotClient {
         nextCursor = responseCursor(payload);
         if (reactedMessage || !nextCursor) break;
         if (seenCursors.has(nextCursor)) {
-          throw new SlackBotProviderError("invalid_response");
+          throw new SlackBotProviderError("reaction_pagination_invalid");
         }
         seenCursors.add(nextCursor);
+        const pageCount = page + 1;
+        if (pageCount >= MAX_REACTION_CONTEXT_PAGES) {
+          throw new SlackBotProviderError("reaction_pagination_exhausted");
+        }
+        const retainedMessages = selectSlackReactionCheckpointMessages(messages);
+        messages.splice(0, messages.length, ...retainedMessages);
+        await input.saveCheckpoint(
+          createSlackReactionContextCheckpoint(
+            input.checkpointBinding,
+            {
+              createdAtMs: checkpointCreatedAtMs,
+              pageCount,
+              nextCursor,
+              seenCursors: [...seenCursors],
+              seenMessageTimestamps: [...seenMessageTimestamps],
+              threadTimestamp,
+              messages: retainedMessages.map(slackReactionCheckpointMessage),
+            },
+            checkpointKey,
+          ),
+        );
         cursor = nextCursor;
       }
 
@@ -455,7 +552,7 @@ export class OpenGeniSlackBotClient {
         threadTimestamp,
         reactedMessage,
         messages: boundedMessages,
-        truncated: nextCursor !== null || messages.length > boundedMessages.length,
+        truncated: nextCursor !== null || seenMessageTimestamps.size > boundedMessages.length,
       };
     });
   }
@@ -1352,6 +1449,349 @@ function projectMessage(value: unknown) {
       .map(projectFile)
       .filter((file): file is NonNullable<typeof file> => file !== null),
   };
+}
+
+function assertSlackReactionCheckpointBinding(
+  binding: SlackReactionContextCheckpointBinding,
+  context: SlackBotContext,
+  connectionId: string,
+  slackTeamId: string,
+  channelId: string,
+  messageTimestamp: string,
+): void {
+  if (
+    binding.accountId !== context.accountId ||
+    binding.workspaceId !== context.workspaceId ||
+    binding.connectionId !== connectionId ||
+    binding.slackTeamId !== slackTeamId ||
+    binding.slackChannelId !== channelId ||
+    binding.slackMessageTs !== messageTimestamp
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+}
+
+function createSlackReactionContextCheckpoint(
+  binding: SlackReactionContextCheckpointBinding,
+  state: SlackReactionContextCheckpointUnsigned["state"],
+  key: Uint8Array,
+): SlackReactionContextCheckpoint {
+  const unsigned: SlackReactionContextCheckpointUnsigned = {
+    version: SLACK_REACTION_CONTEXT_CHECKPOINT_VERSION,
+    binding: { ...binding },
+    state: {
+      createdAtMs: state.createdAtMs,
+      pageCount: state.pageCount,
+      nextCursor: state.nextCursor,
+      seenCursors: [...state.seenCursors],
+      seenMessageTimestamps: [...state.seenMessageTimestamps],
+      threadTimestamp: state.threadTimestamp,
+      messages: state.messages.map((message) => ({
+        ...message,
+        files: message.files.map((file) => ({ ...file })),
+      })),
+    },
+  };
+  const checkpoint: SlackReactionContextCheckpoint = {
+    ...unsigned,
+    signature: slackReactionContextCheckpointSignature(unsigned, key),
+  };
+  if (
+    Buffer.byteLength(JSON.stringify(checkpoint), "utf8") > MAX_REACTION_CONTEXT_CHECKPOINT_BYTES
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_too_large");
+  }
+  return checkpoint;
+}
+
+function parseSlackReactionContextCheckpoint(
+  value: unknown,
+  expectedBinding: SlackReactionContextCheckpointBinding,
+  key: Uint8Array,
+  nowMs = Date.now(),
+): SlackReactionContextCheckpoint {
+  const checkpoint = slackRecord(value);
+  if (
+    !checkpoint ||
+    !hasExactSlackCheckpointKeys(checkpoint, ["binding", "signature", "state", "version"]) ||
+    Buffer.byteLength(JSON.stringify(checkpoint), "utf8") > MAX_REACTION_CONTEXT_CHECKPOINT_BYTES ||
+    checkpoint.version !== SLACK_REACTION_CONTEXT_CHECKPOINT_VERSION
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  const bindingValue = slackRecord(checkpoint.binding);
+  const stateValue = slackRecord(checkpoint.state);
+  const signature = exactSlackCheckpointString(checkpoint.signature, 64);
+  if (
+    !bindingValue ||
+    !stateValue ||
+    !signature ||
+    !/^[0-9a-f]{64}$/.test(signature) ||
+    !hasExactSlackCheckpointKeys(bindingValue, [
+      "accountId",
+      "connectionId",
+      "inboxId",
+      "providerEventId",
+      "providerMessageId",
+      "slackChannelId",
+      "slackMessageTs",
+      "slackTeamId",
+      "workspaceId",
+    ]) ||
+    !hasExactSlackCheckpointKeys(stateValue, [
+      "createdAtMs",
+      "messages",
+      "nextCursor",
+      "pageCount",
+      "seenCursors",
+      "seenMessageTimestamps",
+      "threadTimestamp",
+    ])
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  const binding: SlackReactionContextCheckpointBinding = {
+    inboxId: requiredSlackCheckpointString(bindingValue.inboxId, 64),
+    accountId: requiredSlackCheckpointString(bindingValue.accountId, 64),
+    workspaceId: requiredSlackCheckpointString(bindingValue.workspaceId, 64),
+    connectionId: requiredSlackCheckpointString(bindingValue.connectionId, 64),
+    providerEventId: requiredSlackCheckpointString(bindingValue.providerEventId, 256),
+    providerMessageId: requiredSlackCheckpointString(bindingValue.providerMessageId, 256),
+    slackTeamId: requiredSlackCheckpointString(bindingValue.slackTeamId, 64),
+    slackChannelId: requiredSlackCheckpointString(bindingValue.slackChannelId, 64),
+    slackMessageTs: requiredSlackCheckpointString(bindingValue.slackMessageTs, 64),
+  };
+  if (!slackReactionCheckpointBindingMatches(binding, expectedBinding)) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  const createdAtMs = stateValue.createdAtMs;
+  const pageCount = stateValue.pageCount;
+  const nextCursor = exactSlackCheckpointString(stateValue.nextCursor, 1_024);
+  const threadTimestamp =
+    stateValue.threadTimestamp === null
+      ? null
+      : exactSlackCheckpointString(stateValue.threadTimestamp, 64);
+  if (
+    typeof createdAtMs !== "number" ||
+    !Number.isSafeInteger(createdAtMs) ||
+    createdAtMs > nowMs + MAX_REACTION_CONTEXT_CHECKPOINT_CLOCK_SKEW_MS ||
+    createdAtMs < nowMs - MAX_REACTION_CONTEXT_CHECKPOINT_AGE_MS ||
+    typeof pageCount !== "number" ||
+    !Number.isSafeInteger(pageCount) ||
+    pageCount < 1 ||
+    pageCount >= MAX_REACTION_CONTEXT_PAGES ||
+    !nextCursor ||
+    (threadTimestamp === "" && stateValue.threadTimestamp !== null) ||
+    !Array.isArray(stateValue.seenCursors) ||
+    !Array.isArray(stateValue.seenMessageTimestamps) ||
+    !Array.isArray(stateValue.messages)
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  const seenCursors = stateValue.seenCursors.map((cursor) =>
+    requiredSlackCheckpointString(cursor, 1_024),
+  );
+  const seenMessageTimestamps = stateValue.seenMessageTimestamps.map((timestamp) =>
+    requiredSlackCheckpointString(timestamp, 64),
+  );
+  if (
+    seenCursors.length !== pageCount ||
+    seenCursors.length > MAX_REACTION_CONTEXT_PAGES ||
+    new Set(seenCursors).size !== seenCursors.length ||
+    seenCursors.at(-1) !== nextCursor ||
+    seenMessageTimestamps.length > MAX_REACTION_CONTEXT_SEEN_MESSAGES ||
+    new Set(seenMessageTimestamps).size !== seenMessageTimestamps.length ||
+    seenMessageTimestamps.includes(expectedBinding.slackMessageTs) ||
+    stateValue.messages.length > MAX_REACTION_CONTEXT_MESSAGES
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  const messages = stateValue.messages.map(parseSlackReactionCheckpointMessage);
+  const seenTimestampIndexes = messages.map((message) =>
+    seenMessageTimestamps.indexOf(message.timestamp),
+  );
+  if (
+    (seenMessageTimestamps.length > 0 && messages.length === 0) ||
+    (messages.length > 0 && threadTimestamp === null) ||
+    (messages.length > 0 && messages[0]!.timestamp !== seenMessageTimestamps[0]) ||
+    seenTimestampIndexes.some(
+      (index, position) =>
+        index < 0 || (position > 0 && index <= seenTimestampIndexes[position - 1]!),
+    )
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  const unsigned: SlackReactionContextCheckpointUnsigned = {
+    version: SLACK_REACTION_CONTEXT_CHECKPOINT_VERSION,
+    binding,
+    state: {
+      createdAtMs,
+      pageCount,
+      nextCursor,
+      seenCursors,
+      seenMessageTimestamps,
+      threadTimestamp,
+      messages,
+    },
+  };
+  const expectedSignature = slackReactionContextCheckpointSignature(unsigned, key);
+  const actualBytes = Buffer.from(signature, "utf8");
+  const expectedBytes = Buffer.from(expectedSignature, "utf8");
+  if (actualBytes.length !== expectedBytes.length || !timingSafeEqual(actualBytes, expectedBytes)) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  return { ...unsigned, signature };
+}
+
+function slackReactionContextCheckpointSignature(
+  checkpoint: SlackReactionContextCheckpointUnsigned,
+  key: Uint8Array,
+): string {
+  return createHmac("sha256", key).update(JSON.stringify(checkpoint)).digest("hex");
+}
+
+function slackReactionCheckpointBindingMatches(
+  left: SlackReactionContextCheckpointBinding,
+  right: SlackReactionContextCheckpointBinding,
+): boolean {
+  return (
+    left.inboxId === right.inboxId &&
+    left.accountId === right.accountId &&
+    left.workspaceId === right.workspaceId &&
+    left.connectionId === right.connectionId &&
+    left.providerEventId === right.providerEventId &&
+    left.providerMessageId === right.providerMessageId &&
+    left.slackTeamId === right.slackTeamId &&
+    left.slackChannelId === right.slackChannelId &&
+    left.slackMessageTs === right.slackMessageTs
+  );
+}
+
+function parseSlackReactionCheckpointMessage(value: unknown): SlackReactionCheckpointMessage {
+  const message = slackRecord(value);
+  if (
+    !message ||
+    !hasExactSlackCheckpointKeys(message, [
+      "botId",
+      "files",
+      "text",
+      "threadTimestamp",
+      "timestamp",
+      "userId",
+    ]) ||
+    !Array.isArray(message.files) ||
+    message.files.length > MAX_REACTION_CONTEXT_CHECKPOINT_FILES ||
+    typeof message.timestamp !== "string" ||
+    message.timestamp.length < 1 ||
+    message.timestamp.length > 64 ||
+    typeof message.userId !== "string" ||
+    message.userId.length > 64 ||
+    typeof message.botId !== "string" ||
+    message.botId.length > 64 ||
+    typeof message.threadTimestamp !== "string" ||
+    message.threadTimestamp.length > 64 ||
+    typeof message.text !== "string" ||
+    message.text.length > MAX_PROJECTED_TEXT
+  ) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  const files = message.files.map((candidate) => {
+    const file = slackRecord(candidate);
+    if (!file || !hasExactSlackCheckpointKeys(file, ["id", "label"])) {
+      throw new SlackBotProviderError("reaction_checkpoint_invalid");
+    }
+    return {
+      id: requiredSlackCheckpointString(file.id, 64),
+      label: requiredSlackCheckpointString(file.label, 512),
+    };
+  });
+  let fileLabelChars = 0;
+  for (const file of files) {
+    fileLabelChars += file.label.length + (fileLabelChars > 0 ? 2 : 0);
+  }
+  if (fileLabelChars > MAX_REACTION_CONTEXT_CHECKPOINT_FILE_LABEL_CHARS) {
+    throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  }
+  return {
+    timestamp: message.timestamp,
+    userId: message.userId,
+    botId: message.botId,
+    threadTimestamp: message.threadTimestamp,
+    text: message.text,
+    files,
+  };
+}
+
+function slackReactionCheckpointMessage(
+  message: ReturnType<typeof projectMessage>,
+): SlackReactionCheckpointMessage {
+  const files: SlackReactionCheckpointMessage["files"] = [];
+  let fileLabelChars = 0;
+  for (const file of message.files) {
+    const label = file.title || file.name || file.id;
+    if (!label) continue;
+    const addedChars = label.length + (files.length > 0 ? 2 : 0);
+    if (
+      files.length >= MAX_REACTION_CONTEXT_CHECKPOINT_FILES ||
+      fileLabelChars + addedChars > MAX_REACTION_CONTEXT_CHECKPOINT_FILE_LABEL_CHARS
+    ) {
+      break;
+    }
+    files.push({ id: file.id, label });
+    fileLabelChars += addedChars;
+  }
+  return {
+    timestamp: message.timestamp,
+    userId: message.userId,
+    botId: message.botId,
+    threadTimestamp: message.threadTimestamp,
+    text: message.text,
+    files,
+  };
+}
+
+function projectSlackReactionCheckpointMessage(
+  message: SlackReactionCheckpointMessage,
+): ReturnType<typeof projectMessage> {
+  return {
+    timestamp: message.timestamp,
+    userId: message.userId,
+    botId: message.botId,
+    threadTimestamp: message.threadTimestamp,
+    text: message.text,
+    files: message.files.map((file) => ({
+      id: file.id,
+      name: "",
+      title: file.label,
+      mimetype: "",
+      filetype: "",
+      mode: "",
+      size: null,
+      originatingHuddleId: "",
+      huddleTranscriptFileId: "",
+    })),
+  };
+}
+
+function selectSlackReactionCheckpointMessages(
+  messages: ReturnType<typeof projectMessage>[],
+): ReturnType<typeof projectMessage>[] {
+  if (messages.length <= MAX_REACTION_CONTEXT_MESSAGES) return [...messages];
+  return [messages[0]!, ...messages.slice(-(MAX_REACTION_CONTEXT_MESSAGES - 1))];
+}
+
+function hasExactSlackCheckpointKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  return Object.keys(value).sort().join(",") === [...expected].sort().join(",");
+}
+
+function exactSlackCheckpointString(value: unknown, max: number): string {
+  return typeof value === "string" && value.length <= max ? value : "";
+}
+
+function requiredSlackCheckpointString(value: unknown, max: number): string {
+  const result = exactSlackCheckpointString(value, max);
+  if (!result) throw new SlackBotProviderError("reaction_checkpoint_invalid");
+  return result;
 }
 
 function selectSlackReactionContextMessages(
