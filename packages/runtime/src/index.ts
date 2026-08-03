@@ -3347,9 +3347,16 @@ function connectionBrokerFetch(
         true,
       );
       if (refreshed.status === "auth_needed") {
+        if (request.method === "tools/call") {
+          await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
+          return mcpToolOutcomeUncertainResponse(request.id);
+        }
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
+      if (request.method === "tools/call") {
+        return mcpToolOutcomeUncertainResponse(request.id);
+      }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
         withConnectionHeaders(input, init, refreshed.headers),
@@ -3501,6 +3508,22 @@ async function authNeededFetchResponse(
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
 ): Promise<Response> {
+  await publishAuthNeededForRequest(options, serverId, request, auth, connectionRef);
+  if (request.method === "tools/call") {
+    return mcpToolAuthNeededResponse(request.id);
+  }
+  return new Response("Authentication required for MCP server connection", {
+    status: 401,
+  });
+}
+
+async function publishAuthNeededForRequest(
+  options: PrepareToolsOptions,
+  serverId: string,
+  request: McpRequestInfo,
+  auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+  connectionRef: McpServerConnectionRef,
+): Promise<void> {
   const connectionId = auth.connectionId ?? connectionRef.connectionId;
   await publishAuthNeeded(options, {
     serverId,
@@ -3530,12 +3553,6 @@ async function authNeededFetchResponse(
         : {}),
     ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
     ...(options.subjectId ? { subjectId: options.subjectId } : {}),
-  });
-  if (request.method === "tools/call") {
-    return mcpToolAuthNeededResponse(request.id);
-  }
-  return new Response("Authentication required for MCP server connection", {
-    status: 401,
   });
 }
 
@@ -3662,6 +3679,12 @@ const MCP_AUTH_NEEDED_ERROR = {
   message: "Authentication required - a connection link was posted to the session.",
 } as const;
 
+const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
+  code: 40_102,
+  message:
+    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+} as const;
+
 function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
   return new Response(
     JSON.stringify({
@@ -3670,6 +3693,23 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
       error: {
         code: MCP_AUTH_NEEDED_ERROR.code,
         message: MCP_AUTH_NEEDED_ERROR.message,
+      },
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+function mcpToolOutcomeUncertainResponse(id: string | number | null | undefined): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: id ?? null,
+      error: {
+        code: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code,
+        message: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message,
       },
     }),
     {
@@ -3688,6 +3728,19 @@ function isAuthNeededMcpError(error: unknown): boolean {
     code === MCP_AUTH_NEEDED_ERROR.code &&
     (error.message === MCP_AUTH_NEEDED_ERROR.message ||
       error.message === `MCP error ${MCP_AUTH_NEEDED_ERROR.code}: ${MCP_AUTH_NEEDED_ERROR.message}`)
+  );
+}
+
+function isToolOutcomeUncertainMcpError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code &&
+    (error.message === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message ||
+      error.message ===
+        `MCP error ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code}: ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message}`)
   );
 }
 
@@ -4186,6 +4239,16 @@ class PrefixedMcpServer implements MCPServer {
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       return output;
     } catch (error) {
+      // A brokered tools/call that receives 401 may already have changed provider
+      // state. The broker refreshed credentials for future requests but did not
+      // replay this call. Preserve that ambiguity as an explicit model-visible
+      // error for required and best-effort servers alike.
+      if (isToolOutcomeUncertainMcpError(error)) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message }],
+        };
+      }
       // The connection broker's auth-needed short-circuit arrives as a thrown
       // JSON-RPC error (an inline isError result would be stripped by the SDK
       // shim). Surface it to the model as a failed-but-recoverable tool result

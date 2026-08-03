@@ -34,6 +34,12 @@ not grant authority: every catalog entry also has an explicit registration-time
 permission predicate, and target-scoped authorization still runs on calls.
 Child omission inherits the parent's exact effective selection.
 
+GitHub App installation credentials are deliberately absent from this catalog.
+Repository discovery and browser connect status remain model-visible, but token
+minting and credential-file renewal stay host-side in the worker/runtime. No
+first-party MCP, Toolspace, API, SDK, event, or audit projection returns a live
+installation token to the model or sandbox command surface.
+
 File and document resources are independent from this broad-server selection.
 Attaching a resource still materializes it for the session when
 `firstPartyMcpTools` is `[]` or title-only; selecting the dedicated `files` or
@@ -64,6 +70,9 @@ Rules of thumb:
 - Do not proxy one MCP surface through another, except the Toolspace path above:
   it is a deliberate server-side proxy through the first-party gate for a
   session-bound `toolspace:call` bearer.
+- A broker may refresh credentials after an upstream 401 for future requests,
+  but it must not replay the current `tools/call`. The result is outcome-unknown
+  and instructs the caller to verify provider state before any new attempt.
 - Embedded hosts that already own provider connections should bind
   `ConnectionCredentialsPort.mcpCredentials` on both the API and worker. The
   host's connection remains authoritative; the sandbox bearer is never treated

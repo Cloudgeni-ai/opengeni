@@ -7,9 +7,15 @@ export type TestMcpToolCall = {
   args: Record<string, unknown>;
 };
 
+export type TestMcpRequest = {
+  httpMethod: string;
+  jsonRpcMethod: string | null;
+};
+
 export type TestMcpServer = {
   url: string;
   calls: TestMcpToolCall[];
+  requests: TestMcpRequest[];
   close: () => void;
 };
 
@@ -51,6 +57,7 @@ export function startTestMcpServer(
   } = {},
 ): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
+  const requests: TestMcpRequest[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -60,6 +67,10 @@ export function startTestMcpServer(
       if (url.pathname !== "/mcp") {
         return new Response("not found", { status: 404 });
       }
+      requests.push({
+        httpMethod: request.method,
+        jsonRpcMethod: await jsonRpcMethod(request),
+      });
       if (
         options.requiredAuthorization &&
         request.headers.get("authorization") !== options.requiredAuthorization
@@ -150,20 +161,29 @@ export function startTestMcpServer(
   return {
     url: `http://127.0.0.1:${server.port}/mcp`,
     calls,
+    requests,
     close: () => server.stop(true),
   };
+}
+
+async function jsonRpcMethod(request: Request): Promise<string | null> {
+  if (request.method !== "POST") {
+    return null;
+  }
+  try {
+    const body = (await request.clone().json()) as { method?: unknown };
+    return typeof body.method === "string" ? body.method : null;
+  } catch {
+    return null;
+  }
 }
 
 async function matchesJsonRpcMethod(request: Request, methods: string[]): Promise<boolean> {
   if (methods.length === 0 || request.method !== "POST") {
     return false;
   }
-  try {
-    const body = (await request.clone().json()) as { method?: unknown };
-    return typeof body.method === "string" && methods.includes(body.method);
-  } catch {
-    return false;
-  }
+  const method = await jsonRpcMethod(request);
+  return method !== null && methods.includes(method);
 }
 
 async function forbiddenToolName(
