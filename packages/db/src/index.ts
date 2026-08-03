@@ -20350,6 +20350,15 @@ const DEFAULT_APPROVAL_RUN_STATE_LIMITS: ApprovalRunStateMaterializationLimits =
   maximumPendingApprovalItems: APPROVAL_PENDING_MAX_ITEMS,
 };
 
+function approvalRunStateNullableDate(value: Date | string | null): Date | null {
+  if (value === null) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Approval run state has a malformed provider artifact invalidation timestamp");
+  }
+  return parsed;
+}
+
 export async function getLatestRunState(
   db: Database,
   workspaceId: string,
@@ -20375,7 +20384,7 @@ export async function getLatestRunState(
       serialized_run_state: string | null;
       pending_approvals: unknown[] | null;
       frozen_codex_credential_id: string | null;
-      provider_artifact_invalidated_at: Date | null;
+      provider_artifact_invalidated_at: Date | string | null;
       actual_bytes: string;
       valid_json_object: boolean;
       actual_nodes: string;
@@ -20497,7 +20506,9 @@ export async function getLatestRunState(
       serializedRunState: row.serialized_run_state,
       pendingApprovals: row.pending_approvals,
       frozenCodexCredentialId: row.frozen_codex_credential_id ?? null,
-      providerArtifactInvalidatedAt: row.provider_artifact_invalidated_at ?? null,
+      providerArtifactInvalidatedAt: approvalRunStateNullableDate(
+        row.provider_artifact_invalidated_at,
+      ),
     };
   });
 }

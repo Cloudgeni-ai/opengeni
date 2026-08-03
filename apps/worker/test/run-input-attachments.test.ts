@@ -369,7 +369,7 @@ describe("turnInput attachment projection", () => {
     const requireFile = spyOn(opengeniDb, "requireFile").mockResolvedValue(image);
     const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image]);
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
+    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
       {
         item: storedUser,
         producerCodexCredentialId: null,
@@ -450,7 +450,7 @@ describe("turnInput attachment projection", () => {
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockImplementation(
       async () => [],
     );
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
+    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
       { position: 0, item: storedUser, producerCodexCredentialId: null },
     ]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
