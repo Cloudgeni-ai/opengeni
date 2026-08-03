@@ -1,8 +1,11 @@
 import { sql } from "drizzle-orm";
+import type { WorkspaceInstructionPolicySnapshotEntry } from "@opengeni/contracts";
 import {
   bigint,
   check,
   index,
+  integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -135,6 +138,44 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
         or (${table.kind} = 'policy' and ${table.scope} = 'global' and ${table.roleKey} is null)
         or (${table.kind} = 'policy' and ${table.scope} = 'role' and ${table.roleKey} is not null)
       )`,
+    ),
+  }),
+);
+
+export const workspaceInstructionPolicySnapshots = pgTable(
+  "workspace_instruction_policy_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    policyRole: text("policy_role"),
+    roleSource: text("role_source").notNull(),
+    entries: jsonb("entries").$type<WorkspaceInstructionPolicySnapshotEntry[]>().notNull(),
+    entryHash: text("entry_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    attempt: uniqueIndex("workspace_instruction_policy_snapshots_attempt_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.attemptId,
+    ),
+    workspaceTimeline: index("workspace_instruction_policy_snapshots_workspace_time_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+    entriesShape: check(
+      "workspace_instruction_policy_snapshots_entries_chk",
+      sql`jsonb_typeof(${table.entries}) = 'array' and jsonb_array_length(${table.entries}) <= 3`,
+    ),
+    roleSourceValid: check(
+      "workspace_instruction_policy_snapshots_role_source_chk",
+      sql`${table.roleSource} in ('session_binding', 'metadata_fallback', 'none', 'invalid_metadata_fallback')`,
     ),
   }),
 );

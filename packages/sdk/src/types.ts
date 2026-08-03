@@ -614,6 +614,8 @@ export type Session = {
   // Per-session agent persona/system instructions supplied at create; null when
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
+  /** Immutable normalized prompt-policy role; distinct from membership roles. */
+  policyRole: string | null;
   resources: ResourceRef[];
   skills: SessionSkill[];
   tools: ToolRef[];
@@ -1700,6 +1702,8 @@ export type CreateSessionRequest = {
   // how a host supplies per-agent-type prompts without leaking them into the
   // user-visible timeline. Trimmed, non-empty, max 32768 chars.
   instructions?: string | undefined;
+  /** Immutable normalized prompt-policy role; distinct from membership roles. */
+  policyRole?: string | undefined;
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
   skills?: SessionSkill[] | undefined;
@@ -2701,6 +2705,8 @@ export type SessionControlResponse = {
   effectiveControl: EffectiveSessionControl;
   interruptionCount: number;
   wakeCount: number;
+  cancelledSessionCount: number;
+  cancelledTurnCount: number;
 };
 
 export type WorkspaceInferenceControlResponse = {

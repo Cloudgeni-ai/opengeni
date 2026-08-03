@@ -217,6 +217,7 @@ import {
   serializeEffectiveSessionControl,
   type SessionDiscoveryControl,
   type SessionCommandActor,
+  SessionControlConflictError,
   SessionControlInvariantError,
   updateSessionCommandReceiptResult,
   type SessionTurnAttemptOutcome,
@@ -16735,6 +16736,7 @@ export type SessionCreateInput = {
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
+  policyRole?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
   sandboxGroupId?: string | null;
@@ -16890,6 +16892,9 @@ async function resolveSessionDepthDecision(
       .limit(1);
     if (!parent) {
       throw new Error(`Parent session not found: ${parentSessionId}`);
+    }
+    if (parent.status === "cancelled") {
+      throw new SessionControlConflictError("Cancelled session subtree cannot create children");
     }
   }
 
@@ -17146,6 +17151,7 @@ async function createSessionInTransaction(
       firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
       initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
       instructions: input.instructions ?? null,
+      policyRole: input.policyRole ?? null,
       parentSessionId: input.parentSessionId ?? null,
       parentTurnId,
       createIdempotencyKey,
@@ -36304,6 +36310,7 @@ export async function initializeSessionStartAtomically(
         let queueTailPosition = Number(session.queueTailPosition);
         if (!turn) {
           queueTailPosition += 1;
+          const acceptedAt = new Date();
           [turn] = await tx
             .insert(schema.sessionTurns)
             .values({
@@ -36335,10 +36342,14 @@ export async function initializeSessionStartAtomically(
                 : {},
               lineage: {},
               ...initiatorColumns(creator),
+              initiatingHumanSubjectId:
+                creator.initiator.kind === "subject" ? creator.initiator.subjectId : null,
               personalConnectionDelegations: parsedPersonalConnectionDelegations(
                 session.initialPersonalConnectionDelegations,
                 `sessions:${session.workspaceId}:${session.id}:initial`,
               ),
+              createdAt: acceptedAt,
+              updatedAt: acceptedAt,
             })
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
@@ -36472,6 +36483,7 @@ export async function enqueueSessionTurn(
         const position = atHead
           ? Number(lockedSession.queueHeadPosition) - 1
           : Number(lockedSession.queueTailPosition) + 1;
+        const acceptedAt = new Date();
         const [row] = await tx
           .insert(schema.sessionTurns)
           .values({
@@ -36499,7 +36511,11 @@ export async function enqueueSessionTurn(
               initiator: input.initiator,
               context: input.initiatorContext ?? {},
             }),
+            initiatingHumanSubjectId:
+              input.initiator.kind === "subject" ? input.initiator.subjectId : null,
             personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+            createdAt: acceptedAt,
+            updatedAt: acceptedAt,
           })
           .returning();
         if (!row) {
@@ -37016,7 +37032,37 @@ export async function claimSessionWorkForAttempt(
           if (connectorPolicyRows.length > 2048) {
             throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
           }
-          return await registerSessionTurnAttemptClaim(tx as unknown as Database, {
+          // New queued, compaction, and internal-update executions are born
+          // while the locked session still has no active-turn pointer. Publish
+          // that ownership edge before freezing governance so the database
+          // functions can require the complete exact-current-attempt chain.
+          // The enclosing transaction keeps this invisible unless every later
+          // claim/event/session settlement step succeeds.
+          if (session.activeTurnId !== turn.id) {
+            if (session.activeTurnId !== null) {
+              throw new SessionControlInvariantError(
+                `Attempt ${input.attemptId} cannot replace active turn ${session.activeTurnId}`,
+              );
+            }
+            const [claimedSession] = await tx
+              .update(schema.sessions)
+              .set({ activeTurnId: turn.id })
+              .where(
+                and(
+                  eq(schema.sessions.accountId, session.accountId),
+                  eq(schema.sessions.workspaceId, workspaceId),
+                  eq(schema.sessions.id, sessionId),
+                  isNull(schema.sessions.activeTurnId),
+                ),
+              )
+              .returning({ id: schema.sessions.id });
+            if (!claimedSession) {
+              throw new SessionControlInvariantError(
+                `Attempt ${input.attemptId} could not establish active turn ${turn.id}`,
+              );
+            }
+          }
+          const attempt = await registerSessionTurnAttemptClaim(tx as unknown as Database, {
             id: input.attemptId,
             accountId: session.accountId,
             workspaceId,
@@ -37030,6 +37076,42 @@ export async function claimSessionWorkForAttempt(
             mcpApprovalPolicies,
             connectorActionPolicies: connectorPolicyRows,
           });
+          // Freeze governance only after this exact attempt is durably claimed,
+          // while the claim transaction still owns the session/turn/attempt
+          // locks. Later policy or preference activation applies to a future
+          // attempt and can never move accepted queued/in-flight work.
+          await tx.execute(sql`
+            SELECT snapshot.id
+            FROM workspace_instruction_policy_get_or_create_snapshot(
+              ${session.accountId}::uuid,
+              ${workspaceId}::uuid,
+              ${sessionId}::uuid,
+              ${turn.id}::uuid,
+              ${input.attemptId}::uuid,
+              ${turn.executionGeneration}
+            ) snapshot
+          `);
+          const initiatingHumanSubjectId =
+            turn.initiatingHumanSubjectId ??
+            (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+          if (initiatingHumanSubjectId) {
+            await tx.execute(sql`
+              SELECT snapshot.id
+              FROM preference_registry_get_or_create_snapshot(
+                ${session.accountId}::uuid,
+                ${workspaceId}::uuid,
+                ${sessionId}::uuid,
+                ${turn.id}::uuid,
+                ${input.attemptId}::uuid,
+                ${turn.executionGeneration}
+              ) snapshot
+            `);
+            // The preference function applies the immutable initiating human
+            // only transaction-locally. Clear it before the rest of claim
+            // settlement so no unrelated subject-scoped read inherits it.
+            await tx.execute(sql`SELECT set_config('opengeni.subject_id', '', true)`);
+          }
+          return attempt;
         };
         if (session.activeTurnId !== null) {
           const [activeTurnPreview] = await tx
@@ -37377,6 +37459,9 @@ export async function claimSessionWorkForAttempt(
                 latencyMode: schema.sessionTurns.latencyMode,
                 sandboxBackend: schema.sessionTurns.sandboxBackend,
                 sandboxOs: schema.sessionTurns.sandboxOs,
+                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+                initiatorKind: schema.sessionTurns.initiatorKind,
+                initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
               })
               .from(schema.sessionTurns)
               .where(
@@ -37426,8 +37511,15 @@ export async function claimSessionWorkForAttempt(
                   },
                 ),
                 ...initiatorColumns(compactionInitiator),
+                initiatingHumanSubjectId:
+                  latestStarted?.initiatingHumanSubjectId ??
+                  (latestStarted?.initiatorKind === "subject"
+                    ? latestStarted.initiatorSubjectId
+                    : null),
                 personalConnectionDelegations: [],
                 startedAt: now,
+                createdAt: now,
+                updatedAt: now,
               })
               .returning();
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
@@ -37676,6 +37768,9 @@ export async function claimSessionWorkForAttempt(
               tools: schema.sessionTurns.tools,
               sandboxBackend: schema.sessionTurns.sandboxBackend,
               sandboxOs: schema.sessionTurns.sandboxOs,
+              initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+              initiatorKind: schema.sessionTurns.initiatorKind,
+              initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
             })
             .from(schema.sessionTurns)
             .where(
@@ -37710,6 +37805,39 @@ export async function claimSessionWorkForAttempt(
             typeof goalPolicy?.sandboxBackend === "string"
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
+          let initiatingHumanSubjectId =
+            internalInitiator.initiator.kind === "subject"
+              ? internalInitiator.initiator.subjectId
+              : null;
+          if (!initiatingHumanSubjectId && routingGoalUpdate) {
+            const causalTurnIdValue =
+              routingGoalUpdate.lineage &&
+              typeof routingGoalUpdate.lineage === "object" &&
+              !Array.isArray(routingGoalUpdate.lineage)
+                ? (routingGoalUpdate.lineage as Record<string, unknown>).causalTurnId
+                : null;
+            const causalTurnId = typeof causalTurnIdValue === "string" ? causalTurnIdValue : null;
+            if (causalTurnId) {
+              const [causalTurn] = await tx
+                .select({
+                  initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+                  initiatorKind: schema.sessionTurns.initiatorKind,
+                  initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                })
+                .from(schema.sessionTurns)
+                .where(
+                  and(
+                    eq(schema.sessionTurns.workspaceId, workspaceId),
+                    eq(schema.sessionTurns.sessionId, sessionId),
+                    eq(schema.sessionTurns.id, causalTurnId),
+                  ),
+                )
+                .limit(1);
+              initiatingHumanSubjectId =
+                causalTurn?.initiatingHumanSubjectId ??
+                (causalTurn?.initiatorKind === "subject" ? causalTurn.initiatorSubjectId : null);
+            }
+          }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
             .insert(schema.sessionTurns)
@@ -37741,8 +37869,11 @@ export async function claimSessionWorkForAttempt(
                 { id: input.dispatchId, generation: 1, triggerEventId },
               ),
               ...initiatorColumns(internalInitiator),
+              initiatingHumanSubjectId,
               personalConnectionDelegations: internalPersonalConnectionDelegations,
               startedAt: now,
+              createdAt: now,
+              updatedAt: now,
             })
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
@@ -38442,15 +38573,23 @@ export async function settleSessionAttemptInterruptions(
         throw new Error(`Live interrupted attempt ${attemptId} lost its exact turn ownership`);
       }
 
-      const steer = interruptions.some((interruption) => interruption.kind === "steer");
-      const outcome: SessionTurnAttemptOutcome = steer ? "superseded" : "interrupted_recoverable";
-      const reason = steer
-        ? "steer"
-        : interruptions.some((interruption) => interruption.kind === "workspace_pause")
-          ? "workspace_pause"
-          : interruptions.some((interruption) => interruption.kind === "maintenance")
-            ? "maintenance"
-            : "session_pause";
+      const terminalCancel = session.status === "cancelled";
+      const steer =
+        !terminalCancel && interruptions.some((interruption) => interruption.kind === "steer");
+      const outcome: SessionTurnAttemptOutcome = terminalCancel
+        ? "cancelled"
+        : steer
+          ? "superseded"
+          : "interrupted_recoverable";
+      const reason = terminalCancel
+        ? "session_cancelled"
+        : steer
+          ? "steer"
+          : interruptions.some((interruption) => interruption.kind === "workspace_pause")
+            ? "workspace_pause"
+            : interruptions.some((interruption) => interruption.kind === "maintenance")
+              ? "maintenance"
+              : "session_pause";
       let sequence = session.lastSequence;
       const closedTools = await closePendingSessionToolCallsInTransaction(
         tx as unknown as Database,
@@ -38475,38 +38614,14 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = steer
+      const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = terminalCancel
         ? [
             {
               accountId: session.accountId,
               workspaceId,
               sessionId,
               sequence: ++sequence,
-              type: "turn.superseded",
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: attemptId,
-              turnAssociation: "current",
-              payload: sanitizeEventPayload({ reason: "steer" }),
-              occurredAt: now,
-            },
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: ++sequence,
-              type: "session.status.changed",
-              payload: sanitizeEventPayload({ status: "queued" }),
-              occurredAt: now,
-            },
-          ]
-        : [
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: ++sequence,
-              type: "turn.recovery.requested",
+              type: "turn.cancelled",
               turnId: turn.id,
               turnGeneration: turn.executionGeneration,
               turnAttemptId: attemptId,
@@ -38514,50 +38629,101 @@ export async function settleSessionAttemptInterruptions(
               payload: sanitizeEventPayload({ reason }),
               occurredAt: now,
             },
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: ++sequence,
-              type: "session.status.changed",
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: attemptId,
-              turnAssociation: "current",
-              payload: sanitizeEventPayload({ status: "recovering" }),
-              occurredAt: now,
-            },
-          ];
+          ]
+        : steer
+          ? [
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "turn.superseded",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attemptId,
+                turnAssociation: "current",
+                payload: sanitizeEventPayload({ reason: "steer" }),
+                occurredAt: now,
+              },
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                payload: sanitizeEventPayload({ status: "queued" }),
+                occurredAt: now,
+              },
+            ]
+          : [
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "turn.recovery.requested",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attemptId,
+                turnAssociation: "current",
+                payload: sanitizeEventPayload({ reason }),
+                occurredAt: now,
+              },
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attemptId,
+                turnAssociation: "current",
+                payload: sanitizeEventPayload({ status: "recovering" }),
+                occurredAt: now,
+              },
+            ];
       const eventRows = await tx.insert(schema.sessionEvents).values(eventValues).returning();
       await tx
         .update(schema.sessionTurns)
         .set(
-          steer
+          terminalCancel
             ? {
-                status: "superseded",
+                status: "cancelled",
                 activeAttemptId: null,
                 metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                cancelledBy: "system:session_cancelled",
+                cancelReason: reason,
                 version: turn.version + 1,
                 finishedAt: turn.finishedAt ?? now,
                 updatedAt: now,
               }
-            : {
-                status: "recovering",
-                activeAttemptId: null,
-                metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
-                cancelledBy: null,
-                cancelReason: null,
-                version: turn.version + 1,
-                finishedAt: null,
-                updatedAt: now,
-              },
+            : steer
+              ? {
+                  status: "superseded",
+                  activeAttemptId: null,
+                  metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                  version: turn.version + 1,
+                  finishedAt: turn.finishedAt ?? now,
+                  updatedAt: now,
+                }
+              : {
+                  status: "recovering",
+                  activeAttemptId: null,
+                  metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                  cancelledBy: null,
+                  cancelReason: null,
+                  version: turn.version + 1,
+                  finishedAt: null,
+                  updatedAt: now,
+                },
         )
         .where(eq(schema.sessionTurns.id, turn.id));
       await tx
         .update(schema.sessions)
         .set({
-          status: steer ? "queued" : "recovering",
-          activeTurnId: steer ? null : turn.id,
+          status: terminalCancel ? "cancelled" : steer ? "queued" : "recovering",
+          activeTurnId: terminalCancel || steer ? null : turn.id,
           lastSequence: sequence,
           updatedAt: now,
         })
@@ -43083,6 +43249,7 @@ function mapSession(
     title: row.title ?? null,
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
+    policyRole: row.policyRole ?? null,
     resources: row.resources as ResourceRef[],
     skills: (row.skills as SessionSkill[]) ?? [],
     tools: row.tools as ToolRef[],

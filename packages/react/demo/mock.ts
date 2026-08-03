@@ -580,6 +580,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       effectiveControl: this.effectiveControl(sessionId),
       interruptionCount: 0,
       wakeCount: 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
     };
   }
 
@@ -1598,6 +1600,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       title: null,
       titleSource: null,
       instructions: null,
+      policyRole: null,
       resources: [],
       skills: [],
       tools: [],

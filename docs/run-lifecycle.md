@@ -91,12 +91,30 @@ routes upstream as `gpt-5.6-sol`. Billing and Codex allocator eligibility are
 derived from the explicit accepted attribution, never from a model prefix or a
 mutable active-credential snapshot; malformed present metadata fails closed.
 
+The same accepted logical-turn boundary governs prompt policy and structured
+preferences. After claim, the owning attempt installs immutable instruction-
+policy and preference-descriptor snapshots reconstructed from lifecycle events
+as of the turn's immutable `created_at`, not from mutable heads at claim time.
+The session's normalized policy role is independent of workspace membership and
+memory roles. Service-initiated goal continuations and compactions may preserve
+the causal human in `initiating_human_subject_id` solely for personal
+preference authority while retaining their service initiator; pure service work
+has no personal authority. Runtime composition is deterministic: core safety,
+organization/workspace/user preference descriptors plus organization/global,
+workspace, and role policy, then session/turn instructions, tool/repository/
+skill substrate, and memory. Documents and RAG evidence never become policy,
+and full preference bodies require explicit retrieval. When no structured
+governance applies, the legacy prompt bytes remain unchanged.
+
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
-rather than resolve or overwrite it. A new user/API turn or a newly materialized
-goal, system, child-result, or scheduled turn is a new logical turn and resolves
-a fresh policy. Thus a per-turn model/provider switch persists through recovery
-without accidentally becoming a permanent session default.
+rather than resolve or overwrite it; they also reuse the accepted governance
+snapshots. A new user/API turn or a newly materialized goal, system,
+child-result, scheduled, or compaction turn is a new logical turn and resolves
+fresh execution and governance policy. Thus a per-turn model/provider switch
+persists through recovery without accidentally becoming a permanent session
+default, while later policy or preference changes affect only later accepted
+turns.
 
 **Runs have no length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to
@@ -284,6 +302,20 @@ logical turn `recovering`; Steer closes it as `superseded`, makes the steered
 human prompt first, and does not revive the old turn. A missing or already
 closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
+Terminal Cancel uses the same exact-attempt interruption fence but settles the
+live turn as `cancelled`, marks the selected session and every existing
+descendant terminal, and drains their queued/non-running work in the same
+transaction. The workspace-control lock orders concurrent prompts and child
+creation around that terminal write, so no work can appear behind the final
+empty snapshot. A cancelled ancestor permanently rejects Send, Steer, Resume,
+and new descendants. The cancellation transaction also advances the durable
+workflow wake for every affected session, including an approval or capacity
+wait with no live attempt, so the terminal row cannot leave a Temporal workflow
+parked indefinitely. When the selected root is a child, the same transaction
+also enqueues one deduplicated `child_terminal_result` with status `cancelled`
+for its surviving parent and copies the causal parent-turn delegation snapshot;
+cancelled descendants do not notify parents inside the same terminal subtree.
+Only physical attempt quiescence can clear the stopping projection.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
 For Agent Steer, accepting that signal is not an admission acknowledgement: if
@@ -529,7 +561,7 @@ split failure settlement.
 items, so a failed turn does not invalidate history. A new `user.message`
 into a failed session transitions it failed → queued, restarts the session
 workflow (signalWithStart), and the next turn runs from the stored items.
-Only `cancelled` — an explicit user act — is terminal.
+Only `cancelled` — an explicit terminal Cancel — is irreversible.
 
 Every transaction that creates or re-enables workflow work also increments the
 session's durable wake revision. An active goal has a second, goal-owned

@@ -23,9 +23,14 @@ Resume is optional.
 ```ts
 createSessionForRequest(deps, grant, workspaceId, rawPayload);
 acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
+controlHumanSessionWorkstream(deps, context, {
+  action: "cancel",
+  clientEventId: crypto.randomUUID(),
+  reason: "host record deleted",
+});
 ```
 
-Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
+The create/message helpers live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`; terminal control lives in `packages/core/src/application/session-commands.ts` and uses an explicit authenticated command context. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
 
 **Runtime dependency isolation.** `@opengeni/runtime` bundles its OpenAI Agents
 implementation together with the Zod 4 instance that defines those runtime

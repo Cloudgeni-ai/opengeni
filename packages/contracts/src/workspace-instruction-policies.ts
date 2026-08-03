@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS = 262_144;
+export const WORKSPACE_INSTRUCTION_POLICY_PROMPT_MAX_UTF8_BYTES = 131_072;
 export const WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS = 4_096;
 export const WORKSPACE_INSTRUCTION_POLICY_ROLE_KEY_MAX_CHARS = 64;
 export const WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS = 512;
@@ -50,10 +51,23 @@ export function normalizeWorkspaceInstructionPolicyRoleKey(value: string): strin
   return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-").replace(/-+/g, "-");
 }
 
-const RequestRoleKey = z
+export const WorkspaceInstructionPolicyRoleKeyInput = z
   .string()
   .transform(normalizeWorkspaceInstructionPolicyRoleKey)
   .pipe(WorkspaceInstructionPolicyRoleKey);
+export type WorkspaceInstructionPolicyRoleKeyInput = z.infer<
+  typeof WorkspaceInstructionPolicyRoleKeyInput
+>;
+
+export const WorkspaceInstructionPolicyRoleSource = z.enum([
+  "session_binding",
+  "metadata_fallback",
+  "none",
+  "invalid_metadata_fallback",
+]);
+export type WorkspaceInstructionPolicyRoleSource = z.infer<
+  typeof WorkspaceInstructionPolicyRoleSource
+>;
 
 const targetShape = {
   kind: WorkspaceInstructionPolicyKind,
@@ -138,6 +152,64 @@ export const WorkspaceInstructionPolicyHead = z.object({
 });
 export type WorkspaceInstructionPolicyHead = z.infer<typeof WorkspaceInstructionPolicyHead>;
 
+export const WorkspaceInstructionPolicySnapshotProvenance = z.object({
+  source: WorkspaceInstructionPolicyProvenanceSource,
+  sourceIdHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+});
+export type WorkspaceInstructionPolicySnapshotProvenance = z.infer<
+  typeof WorkspaceInstructionPolicySnapshotProvenance
+>;
+
+export const WorkspaceInstructionPolicySnapshotEntry = z.object({
+  kind: WorkspaceInstructionPolicyKind,
+  scope: WorkspaceInstructionPolicyScope,
+  roleKey: WorkspaceInstructionPolicyRoleKey.nullable(),
+  revisionId: z.string().uuid(),
+  revision: z.number().int().positive(),
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/),
+  activationVersion: z.number().int().positive(),
+  activatedAt: z.string().datetime(),
+  provenance: WorkspaceInstructionPolicySnapshotProvenance,
+});
+export type WorkspaceInstructionPolicySnapshotEntry = z.infer<
+  typeof WorkspaceInstructionPolicySnapshotEntry
+>;
+
+export const WorkspaceInstructionPolicySnapshot = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  attemptId: z.string().uuid(),
+  executionGeneration: z.number().int().positive(),
+  policyRole: WorkspaceInstructionPolicyRoleKey.nullable(),
+  roleSource: WorkspaceInstructionPolicyRoleSource,
+  entryHash: z.string().regex(/^[0-9a-f]{64}$/),
+  entries: z.array(WorkspaceInstructionPolicySnapshotEntry).max(3),
+  createdAt: z.string().datetime(),
+});
+export type WorkspaceInstructionPolicySnapshot = z.infer<typeof WorkspaceInstructionPolicySnapshot>;
+
+export const ResolvedWorkspaceInstructionPolicySnapshotEntry =
+  WorkspaceInstructionPolicySnapshotEntry.extend({
+    content: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
+  });
+export type ResolvedWorkspaceInstructionPolicySnapshotEntry = z.infer<
+  typeof ResolvedWorkspaceInstructionPolicySnapshotEntry
+>;
+
+export const ResolvedWorkspaceInstructionPolicySnapshot = WorkspaceInstructionPolicySnapshot.extend(
+  {
+    entries: z.array(ResolvedWorkspaceInstructionPolicySnapshotEntry).max(3),
+  },
+);
+export type ResolvedWorkspaceInstructionPolicySnapshot = z.infer<
+  typeof ResolvedWorkspaceInstructionPolicySnapshot
+>;
+
 export const WorkspaceInstructionPolicyActivationEvent = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -159,7 +231,7 @@ export const CreateWorkspaceInstructionPolicyDraftRequest = z
   .object({
     kind: WorkspaceInstructionPolicyKind,
     scope: WorkspaceInstructionPolicyScope,
-    roleKey: RequestRoleKey.nullable().default(null),
+    roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
     content: z
       .string()
       .min(1)
@@ -191,7 +263,7 @@ export type ImportLegacyWorkspaceInstructionPolicyDraftRequest = z.infer<
 export const WorkspaceInstructionPolicyListQuery = z.object({
   kind: WorkspaceInstructionPolicyKind.optional(),
   scope: WorkspaceInstructionPolicyScope.optional(),
-  roleKey: RequestRoleKey.nullable().optional(),
+  roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().optional(),
   afterRevision: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });

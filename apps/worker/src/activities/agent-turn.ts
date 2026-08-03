@@ -70,6 +70,9 @@ import {
   getEnrollment,
   abandonRecordingForTurnAttempt,
   markSessionAttemptQuiesced,
+  getOrCreatePreferenceRegistrySnapshot,
+  getOrCreateWorkspaceInstructionPolicySnapshot,
+  PreferenceRegistryInitiatorError,
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
@@ -93,8 +96,11 @@ import {
   sanitizeHistoryItemsForModel,
   appendPersistentSessionSettings,
   appendSessionInstructions,
+  appendWorkspaceGovernance,
   appendWorkspaceMemory,
   composeAgentInstructions,
+  hasActiveWorkspaceInstructionPolicy,
+  renderWorkspaceGovernanceContext,
   summarizeForCompaction,
   requestRemoteCompactionV2,
   serializedToolsForRemoteCompaction,
@@ -4060,10 +4066,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // deployment default). null means the workspace has no override, so the
       // runtime falls back to runSettings.agentInstructionsTemplate (the
       // deployment default, byte-identical to the historical preamble).
-      const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(
-        db,
-        input.workspaceId,
-      );
+      const governanceClaims = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
+      };
+      const [workspaceAgentInstructions, instructionPolicySnapshot, preferenceSnapshot] =
+        await Promise.all([
+          resolveWorkspaceAgentInstructions(db, input.workspaceId),
+          getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+          getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
+            if (error instanceof PreferenceRegistryInitiatorError) return null;
+            throw error;
+          }),
+        ]);
+      const workspaceGovernance = renderWorkspaceGovernanceContext({
+        instructionPolicy: instructionPolicySnapshot,
+        preferences: preferenceSnapshot,
+      });
+      const structuredWorkspacePolicyActive =
+        hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
       const baseRunSettings = {
         // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
@@ -4438,19 +4463,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const persistentSessionSettings = {
           titleIsSet: Boolean(session.title?.trim()),
         };
-        const compactionInstructions = appendPersistentSessionSettings(
-          appendSessionInstructions(
-            appendWorkspaceMemory(
-              composeAgentInstructions(
-                workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate,
-                undefined,
-                rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
+        const compactionInstructions = appendWorkspaceMemory(
+          appendPersistentSessionSettings(
+            appendSessionInstructions(
+              appendWorkspaceGovernance(
+                composeAgentInstructions(
+                  structuredWorkspacePolicyActive
+                    ? modelRunSettings.agentInstructionsTemplate
+                    : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
+                  undefined,
+                  rigVersion && rigName
+                    ? { name: rigName, version: rigVersion.version }
+                    : undefined,
+                ),
+                workspaceGovernance ?? undefined,
               ),
-              workspaceMemory ?? undefined,
+              session.instructions ?? undefined,
             ),
-            session.instructions ?? undefined,
+            persistentSessionSettings,
           ),
-          persistentSessionSettings,
+          workspaceMemory ?? undefined,
         );
         const requested = await isSessionCompactionRequested(
           db,
@@ -5715,7 +5747,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               skillLibrarySelections: skillLibraryRuntime.skillLibrarySelections,
             }
           : {}),
-        ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
+        ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
+          ? { instructionsTemplate: workspaceAgentInstructions }
+          : {}),
+        ...(workspaceGovernance ? { workspaceGovernance } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
