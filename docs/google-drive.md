@@ -105,10 +105,12 @@ subject-owned Google Drive connection:
   A new account may be connected only after this local disconnect.
 
 Pause, resume, source changes, refresh transitions, disconnect, and reconnect
-all share the connection's `(id, version)` compare-and-set fence. Duplicate
-pause/resume/disconnect requests converge on the already-reached state, while a
-stale conflicting action returns a retryable conflict instead of overwriting
-newer credential or lifecycle truth.
+all share the connection's `(id, version)` compare-and-set fence. A disconnect
+also carries a stable idempotency key bound durably to the expected and result
+versions. Exact retries converge only while that result generation remains
+current; reconnect or any later transition permanently fences a delayed old
+DELETE. A stale conflicting action returns a retryable conflict instead of
+overwriting newer credential or lifecycle truth.
 
 Only bounded OAuth error codes are used to classify permanent refresh failures.
 Google response descriptions, response bodies, tokens, and client secrets are

@@ -809,7 +809,7 @@ describe("Google Drive local source preview", () => {
     expect(credential?.credential.refresh_token).toBe("google-refresh-token");
   });
 
-  test("disconnect is local, idempotent, provider-silent, and then permits account switching", async () => {
+  test("disconnect is local, idempotent, stale-replay safe, and then permits account switching", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const first = googleFixture();
@@ -818,6 +818,10 @@ describe("Google Drive local source preview", () => {
       "connections:read",
       "connections:write",
     ]);
+    const disconnectBody = JSON.stringify({
+      expectedVersion: connected.connection.version,
+      idempotencyKey: `disconnect:${connected.connection.id}:${connected.connection.version}`,
+    });
     const disconnect = () =>
       app(first.fetch).request(
         `/v1/workspaces/${workspace.workspaceId}/connections/${connected.connection.id}`,
@@ -825,8 +829,10 @@ describe("Google Drive local source preview", () => {
           method: "DELETE",
           headers: {
             authorization,
+            "content-type": "application/json",
             [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
           },
+          body: disconnectBody,
         },
       );
     const [firstDisconnect, duplicateDisconnect] = await Promise.all([disconnect(), disconnect()]);
@@ -864,6 +870,54 @@ describe("Google Drive local source preview", () => {
     );
     expect(blockedBrowse.status).toBe(409);
     expect(first.apiAuthorizationHeaders).toHaveLength(1);
+
+    const samePermission = googleFixture();
+    const reconnected = await connect(workspace, samePermission, connected.connection.id);
+    expect(reconnected.callback.headers.get("location")).toContain("google_drive=connected");
+    expect(reconnected.connection).toMatchObject({
+      id: connected.connection.id,
+      subjectId: "subject-a",
+      status: "active",
+      version: firstBody.connection.version + 1,
+      metadata: {
+        googlePermissionId: "google-permission-a",
+        lifecycle: { state: "active", recoverable: true },
+      },
+    });
+
+    const staleReplay = await disconnect();
+    expect(staleReplay.status).toBe(409);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "active",
+      version: reconnected.connection.version,
+      metadata: { lifecycle: { state: "active" } },
+    });
+    expect(first.tokenRequests).toHaveLength(1);
+    expect(first.apiAuthorizationHeaders).toHaveLength(1);
+
+    const currentDisconnect = await app(samePermission.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${connected.connection.id}`,
+      {
+        method: "DELETE",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          expectedVersion: reconnected.connection.version,
+          idempotencyKey: `disconnect:${connected.connection.id}:${reconnected.connection.version}`,
+        }),
+      },
+    );
+    expect(currentDisconnect.status).toBe(200);
 
     const second = googleFixture({ permissionId: "google-permission-b" });
     const switched = await connect(workspace, second);
