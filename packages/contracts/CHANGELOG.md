@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.32.0
+
+### Minor Changes
+
+- 3baaebd: Add configurable Slack emoji-reaction summons with a least-privilege manifest, bounded thread context, and workspace-admin settings.
+
 ## 0.31.2
 
 ### Patch Changes
