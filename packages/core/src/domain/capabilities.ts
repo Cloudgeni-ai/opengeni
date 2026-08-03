@@ -919,6 +919,7 @@ function packCatalogItem(
       scheduledTaskTemplates: pack.scheduledTaskTemplates,
       // Runtime composition surface only: skill names, never file content.
       ...(pack.sandboxImage ? { sandboxImage: pack.sandboxImage } : {}),
+      ...(pack.sandboxProviderImages ? { sandboxProviderImages: pack.sandboxProviderImages } : {}),
       ...(pack.skills.length > 0 ? { skills: pack.skills.map((skill) => skill.name) } : {}),
       ...pack.metadata,
     },

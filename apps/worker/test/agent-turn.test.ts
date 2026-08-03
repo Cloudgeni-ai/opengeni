@@ -2042,6 +2042,17 @@ describe("turn-time Modal private-registry warm", () => {
       "modal",
       ensureRegistryImage,
     );
+    await ensureTurnModalRegistryImage(
+      testSettings({
+        sandboxBackend: "modal",
+        modalImageRef:
+          "acr.example.com/[redacted:MODAL_PROFILE]/f4c-gecko@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        modalImageId: "im-1234567890123456789012",
+        modalImageRegistrySecret: "acr-credentials-gecko",
+      }),
+      "modal",
+      ensureRegistryImage,
+    );
     expect(ensureRegistryImage).not.toHaveBeenCalled();
   });
 });

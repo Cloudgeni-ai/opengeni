@@ -3412,6 +3412,11 @@ export type CapabilityPack = {
   category: string;
   version: string;
   sandboxImage?: string | undefined;
+  sandboxProviderImages?:
+    | {
+        modal?: { imageId: string } | undefined;
+      }
+    | undefined;
   skills: CapabilityPackSkill[];
   tools: ToolRef[];
   connectors: CapabilityPackConnector[];
@@ -3430,6 +3435,11 @@ export type RegisterCapabilityPackRequest = {
   category: string;
   version: string;
   sandboxImage?: string | undefined;
+  sandboxProviderImages?:
+    | {
+        modal?: { imageId: string } | undefined;
+      }
+    | undefined;
   skills?:
     | {
         name: string;

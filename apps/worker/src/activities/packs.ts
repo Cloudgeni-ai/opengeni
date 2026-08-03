@@ -21,10 +21,15 @@ import {
  */
 export type WorkspacePackRuntime = {
   sandboxImage: string | null;
+  sandboxProviderImages: CapabilityPack["sandboxProviderImages"] | null;
   skills: PackSkill[];
 };
 
-const emptyPackRuntime: WorkspacePackRuntime = { sandboxImage: null, skills: [] };
+const emptyPackRuntime: WorkspacePackRuntime = {
+  sandboxImage: null,
+  sandboxProviderImages: null,
+  skills: [],
+};
 
 export type WorkspaceSkillLibraryRuntime = {
   skillLibrarySkills: PackSkill[];
@@ -200,6 +205,7 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
   }
   return {
     sandboxImage: imagePacks[0]?.sandboxImage?.trim() ?? null,
+    sandboxProviderImages: imagePacks[0]?.sandboxProviderImages ?? null,
     skills,
   };
 }
@@ -231,6 +237,7 @@ export async function resolveWorkspaceAgentInstructions(
 export function settingsWithPackSandboxImage(
   settings: Settings,
   sandboxImage: string | null,
+  sandboxProviderImages: CapabilityPack["sandboxProviderImages"] | null = null,
 ): Settings {
   if (!sandboxImage) {
     return settings;
@@ -239,6 +246,7 @@ export function settingsWithPackSandboxImage(
     ...settings,
     dockerImage: sandboxImage,
     modalImageRef: sandboxImage,
+    modalImageId: sandboxProviderImages?.modal?.imageId,
   };
 }
 
@@ -260,6 +268,10 @@ export function settingsWithRigImage(settings: Settings, rigImage: string | null
     ...settings,
     dockerImage: rigImage,
     modalImageRef: rigImage,
+    // A rig image has no provider-native identity in the current rig contract.
+    // Clear a lower-precedence pack/deployment ID so the rig cannot silently
+    // run the wrong Modal image.
+    modalImageId: undefined,
   };
 }
 
