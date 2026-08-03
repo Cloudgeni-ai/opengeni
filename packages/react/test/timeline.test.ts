@@ -750,6 +750,27 @@ describe("buildTimeline", () => {
     expect(message.tools).toEqual([]);
   });
 
+  test("projects realtime voice text while retaining expandable execution context", () => {
+    reset();
+    const context = [
+      "<realtime_delegation>",
+      "  <input>Check the active task</input>",
+      "  <transcript_delta>user: include tests</transcript_delta>",
+      "</realtime_delegation>",
+    ].join("\n");
+    const [message] = buildTimeline([
+      event("user.message", {
+        text: "Check the active task",
+        presentation: { kind: "realtime_voice", context },
+      }),
+    ]) as UserMessageItem[];
+    expect(message).toMatchObject({
+      kind: "user-message",
+      text: "Check the active task",
+      presentation: { kind: "realtime_voice", context },
+    });
+  });
+
   test("a delta after a tool call starts a new message instead of appending", () => {
     reset();
     const items = buildTimeline([

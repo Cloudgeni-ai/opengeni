@@ -6,6 +6,7 @@ import {
   FileJsonIcon,
   GitBranchIcon,
   ImageIcon,
+  AudioLinesIcon,
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -245,6 +246,12 @@ export function UserMessageBody({
 
   return (
     <div data-testid="timeline-user">
+      {item.presentation ? (
+        <div className="mb-1.5 inline-flex items-center gap-1 text-xs font-medium text-fg-muted">
+          <AudioLinesIcon className="size-3.5" />
+          {item.presentation.kind === "realtime_voice_handoff" ? "Voice handoff" : "Voice request"}
+        </div>
+      ) : null}
       {filesPending ? (
         <div className="mb-2 flex flex-wrap gap-1.5">
           {fileResources.map((resource) => (
@@ -309,6 +316,17 @@ export function UserMessageBody({
       ) : null}
 
       <MarkdownText text={item.text} compact />
+
+      {item.presentation ? (
+        <details className="group mt-2 border-t border-border/60 pt-1.5 text-xs text-fg-muted">
+          <summary className="cursor-pointer select-none list-none hover:text-fg [&::-webkit-details-marker]:hidden">
+            Context sent to agent
+          </summary>
+          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-2 p-2 font-mono text-[11px] leading-relaxed text-fg-muted">
+            {item.presentation.context}
+          </pre>
+        </details>
+      ) : null}
     </div>
   );
 }

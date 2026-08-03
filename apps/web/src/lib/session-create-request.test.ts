@@ -130,6 +130,16 @@ describe("buildCreateSessionRequest", () => {
     ).toBe("fast");
   });
 
+  test("creates a realtime-first session without an initial user message", () => {
+    const request = build([], [], {
+      submission: { text: "", resources: [] },
+      startMode: "realtime",
+    });
+
+    expect(request.startMode).toBe("realtime");
+    expect(request).not.toHaveProperty("initialMessage");
+  });
+
   test("omits tools only when the ready catalog selection equals workspace defaults", () => {
     const result = build([], [], {
       selectedTools: [{ kind: "mcp", id: "docs" }],

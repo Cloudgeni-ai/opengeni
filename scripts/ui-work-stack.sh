@@ -111,7 +111,7 @@ if ! pgrep -f "opengeni-ui-work/apps/worker.*OPENGENI_WORKER_ROLE=control|WORKER
 fi
 
 if ! port_in_use "$OPENGENI_WEB_PORT"; then
-  nohup bash -c "cd \"$ROOT/apps/web\" && VITE_API_BASE_URL=\"$VITE_API_BASE_URL\" bunx vite dev --port \"$OPENGENI_WEB_PORT\" --host 127.0.0.1" \
+  nohup bash -c "cd \"$ROOT/apps/web\" && VITE_API_BASE_URL=\"$VITE_API_BASE_URL\" bun x vite dev --port \"$OPENGENI_WEB_PORT\" --host 127.0.0.1" \
     >"$LOG_DIR/web.log" 2>&1 &
   echo $! >"$LOG_DIR/web.pid"
 fi

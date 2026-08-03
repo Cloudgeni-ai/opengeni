@@ -32,6 +32,7 @@ export function ConsoleComposer(props: {
   disabled?: boolean;
   fileUploadsEnabled: boolean;
   controls?: ReactNode;
+  actions?: ReactNode;
   commandContext?: SlashCommandContext;
   onClearView?: () => void;
 }) {
@@ -52,6 +53,7 @@ export function ConsoleComposer(props: {
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       controlsStart={props.controls}
+      actionsStart={props.actions}
       {...(context.clientConfig.voiceInput?.available
         ? {
             transcription: {

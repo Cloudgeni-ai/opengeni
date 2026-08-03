@@ -27,6 +27,56 @@ export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
+export {
+  CodexRealtimeMicrophoneError,
+  acquireCodexRealtimeMicrophone,
+  codexRealtimeMicrophoneHealthy,
+  startCodexRealtimeWebrtc,
+} from "./codex-realtime";
+export type {
+  AcquireCodexRealtimeMicrophoneOptions,
+  CodexRealtimeAudibleOutputState,
+  CodexRealtimeConnectionHealth,
+  CodexRealtimeMicrophoneErrorCode,
+  CodexRealtimeNegotiator,
+  CodexRealtimeWebrtcSession,
+  StartCodexRealtimeWebrtcOptions,
+} from "./codex-realtime";
+export {
+  CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES,
+  contextAppendChunks,
+  createCodexRealtimeV3Bridge,
+  encodeCodexRealtimeV3DelegationContextAppend,
+  encodeCodexRealtimeV3SessionContextAppend,
+  parseCodexRealtimeV3Event,
+} from "./codex-realtime-v3";
+export type {
+  CodexRealtimeV3Bridge,
+  CodexRealtimeV3BridgeOptions,
+  CodexRealtimeV3BridgeSnapshot,
+  CodexRealtimeV3ContextAppendChannel,
+  CodexRealtimeV3DelegationContextAppend,
+  CodexRealtimeV3Event,
+  CodexRealtimeV3ParseFailure,
+  CodexRealtimeV3ParseResult,
+  CodexRealtimeV3SessionContextAppend,
+} from "./codex-realtime-v3";
+export { createCodexRealtimeController } from "./codex-realtime-controller";
+export type {
+  CodexRealtimeController,
+  CodexRealtimeControllerClient,
+  CodexRealtimeDiagnostic,
+  CodexRealtimeDiagnosticKind,
+  CodexRealtimeControllerSnapshot,
+  CodexRealtimeControllerStatus,
+  CodexRealtimeMicrophoneState,
+  CodexRealtimeOwnerStorage,
+  CreateCodexRealtimeControllerOptions,
+  RealtimeControllerTransportStarter,
+} from "./codex-realtime-controller";
+export { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
+export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
+export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";
@@ -169,10 +219,12 @@ export {
 } from "./types";
 export type {
   AccessContext,
+  ActivateCodexRealtimeConnectionRequest,
   AccessGrant,
   AccountGrant,
   AccountRole,
   AddWorkspaceMemberRequest,
+  BeginSessionRealtimeRequest,
   AgentMessageCompletedPayload,
   AgentTextDeltaPayload,
   AgentToolCallCreatedPayload,
@@ -215,6 +267,14 @@ export type {
   ClientConfig,
   ClientVoiceInputConfig,
   ClientModel,
+  CodexRealtimeVoice,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  CodexRealtimeWebrtcVersion,
+  GatewayRealtimeConnectRequest,
+  GatewayRealtimeConnectResponse,
+  GatewayRealtimeInitialItem,
+  EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
   ModelCapabilitiesV1,
@@ -224,8 +284,16 @@ export type {
   ModelCredentialSourceV1,
   ModelPricingScheduleV1,
   ModelPricingV1,
+  RenewSessionRealtimeRequest,
+  SessionRealtimeEndReason,
+  SessionRealtimeMode,
+  SessionRealtimeModel,
+  SessionRealtimeMutationResponse,
+  SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogItem,
+  WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,
   CodexAccountOverview,
   CodexAccountsResponse,

@@ -5,6 +5,210 @@ import type { WorkspaceTranscriptionPolicy } from "./transcription";
 // publishable on its own; `test/contract-parity.test.ts` pins these types to
 // the contracts package so drift fails the gate instead of shipping.
 
+export type CodexRealtimeWebrtcVersion = "v3";
+export type CodexRealtimeVoice =
+  | "juniper"
+  | "maple"
+  | "spruce"
+  | "ember"
+  | "vale"
+  | "breeze"
+  | "arbor"
+  | "sol"
+  | "cove";
+
+export type CodexRealtimeWebrtcRequest = {
+  realtimeId: string;
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+  expectedConnectionEpoch: number;
+  rotate: boolean;
+  browserActivation?: "required" | undefined;
+  sdp: string;
+  version: CodexRealtimeWebrtcVersion;
+  instructions?: string | undefined;
+  voice?: CodexRealtimeVoice | undefined;
+};
+
+export type CodexRealtimeWebrtcResponse = {
+  sdp: string;
+  version: CodexRealtimeWebrtcVersion;
+  model: "gpt-live-1-boulder-alpha";
+  connectionId: string;
+  connectionEpoch: number;
+  startupFenceSequence: number;
+  modeVersion: number;
+  replay: boolean;
+};
+
+export type GatewayRealtimeConnectRequest = {
+  realtimeId: string;
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+  expectedConnectionEpoch: number;
+  rotate: boolean;
+};
+
+export type GatewayRealtimeInitialItem = {
+  role: "user" | "developer" | "assistant";
+  text: string;
+};
+
+export type GatewayRealtimeConnectResponse = {
+  token: string;
+  url: string;
+  upstreamModelId: string;
+  expiresAt: number | null;
+  connectionId: string;
+  connectionEpoch: number;
+  startupFenceSequence: number;
+  modeVersion: number;
+  initialItems: GatewayRealtimeInitialItem[];
+  instructions: string;
+  replay: false;
+};
+
+export type ActivateCodexRealtimeConnectionRequest = {
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  connectionEpoch: number;
+  expectedVersion: number;
+  expectedConnectionEpoch: number;
+};
+
+export type SessionRealtimeLedgerDirection = "provider_in" | "provider_out";
+export type SessionRealtimeLedgerKind =
+  | "user_transcript"
+  | "assistant_transcript"
+  | "delegation_call"
+  | "delegation_progress"
+  | "delegation_result"
+  | "interruption"
+  | "session_update"
+  | "error";
+
+export type SessionRealtimeLedgerEntry = {
+  id: string;
+  realtimeId: string;
+  operationId: string;
+  connectionEpoch: number;
+  sequence: number;
+  direction: SessionRealtimeLedgerDirection;
+  kind: SessionRealtimeLedgerKind;
+  role: "user" | "assistant" | null;
+  providerEventId: string | null;
+  delegationItemId: string | null;
+  sourceUpdateId: string | null;
+  historyItemId: string | null;
+  turnId: string | null;
+  text: string | null;
+  payload: Record<string, unknown>;
+  clientAckedAt: string | null;
+  providerAckedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SessionRealtimeInboundEntry = {
+  operationId: string;
+  kind: Exclude<
+    SessionRealtimeLedgerKind,
+    "delegation_progress" | "delegation_result" | "session_update"
+  >;
+  role?: "user" | "assistant" | null | undefined;
+  providerEventId?: string | null | undefined;
+  delegationItemId?: string | null | undefined;
+  text?: string | null | undefined;
+  payload?: Record<string, unknown> | undefined;
+};
+
+export type SyncSessionRealtimeLedgerRequest = {
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+  connectionId: string;
+  connectionEpoch: number;
+  entries?: SessionRealtimeInboundEntry[] | undefined;
+  clientAckThroughSequence?: number | null | undefined;
+  providerAckSequences?: number[] | undefined;
+  providerStarted?:
+    | { providerSessionId: string; providerEventId?: string | null | undefined }
+    | undefined;
+};
+
+export type SyncSessionRealtimeLedgerResponse = {
+  accepted: Array<{ entry: SessionRealtimeLedgerEntry; replay: boolean }>;
+  outbound: SessionRealtimeLedgerEntry[];
+};
+
+export type SessionRealtimeModel =
+  | "gpt-live-1-boulder-alpha"
+  | "opengeni-gateway/openai/gpt-realtime-2.1"
+  | "opengeni-gateway/openai/gpt-realtime-mini"
+  | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
+  | "workspace-gateway/openai/gpt-realtime-2.1"
+  | "workspace-gateway/openai/gpt-realtime-mini"
+  | "workspace-gateway/xai/grok-voice-think-fast-2.0";
+
+export type WorkspaceRealtimeModelCatalogItem = {
+  id: SessionRealtimeModel;
+  label: string;
+  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  description: string;
+  available: boolean;
+  unavailableReason: string | null;
+  recommended: boolean;
+};
+
+export type WorkspaceRealtimeModelCatalogResponse = {
+  models: WorkspaceRealtimeModelCatalogItem[];
+};
+export type SessionRealtimeState = "active" | "ended";
+export type SessionRealtimeEndReason = "user_stop" | "browser_unload" | "lease_expired";
+
+export type SessionRealtimeMode = {
+  id: string;
+  sessionId: string;
+  operationId: string;
+  browserInstanceId: string;
+  model: SessionRealtimeModel;
+  state: SessionRealtimeState;
+  version: number;
+  connectionEpoch: number;
+  leaseExpiresAt: string;
+  lastHeartbeatAt: string;
+  startedAt: string;
+  endedAt: string | null;
+  endReason: SessionRealtimeEndReason | null;
+};
+
+export type BeginSessionRealtimeRequest = {
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  model: SessionRealtimeModel;
+};
+
+export type RenewSessionRealtimeRequest = {
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+};
+
+export type EndSessionRealtimeRequest = RenewSessionRealtimeRequest & {
+  reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
+};
+
+export type SessionRealtimeMutationResponse = {
+  mode: SessionRealtimeMode;
+  replay: boolean;
+};
+
 export type SessionStatus =
   | "queued"
   | "running"
@@ -843,6 +1047,8 @@ export const SESSION_EVENT_TYPES = [
   // Defensive bounded projection for malformed/legacy oversized envelopes.
   "session.event.envelope_omitted",
   "session.status.changed",
+  "session.realtime.started",
+  "session.realtime.ended",
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",
@@ -1694,7 +1900,9 @@ export type CreateSessionRequest = {
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
-  initialMessage: string;
+  initialMessage?: string | undefined;
+  /** Create an idle session shell so realtime voice can be the first interaction. */
+  startMode?: "realtime" | undefined;
   /** System instructions scoped to the initial turn; never visible timeline text. */
   turnInstructions?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
@@ -2167,7 +2375,9 @@ export type CodexAccountOverview = {
 };
 
 /** Independently settled live overview keyed by workspace credential id. */
-export type CodexOverviewResponse = { accounts: Record<string, CodexAccountOverview> };
+export type CodexOverviewResponse = {
+  accounts: Record<string, CodexAccountOverview>;
+};
 
 export type CodexAllocatorUpdate = {
   allocatorEnabled: boolean;

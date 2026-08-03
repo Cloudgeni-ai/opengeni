@@ -122,10 +122,12 @@ function usePickerNavState(
   return [state, setState];
 }
 
-function NavRow(props: {
+export function PickerNavRow(props: {
   label: string;
   hint?: string;
   icon?: ReactNode;
+  trailing?: ReactNode;
+  showChevron?: boolean;
   disabled?: boolean;
   title?: string;
   active?: boolean;
@@ -141,7 +143,7 @@ function NavRow(props: {
       data-testid={props.testId}
       className={cn(
         "flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-surface-2",
-        props.active && "text-fg",
+        props.active && "bg-surface-2 text-fg",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
@@ -156,12 +158,15 @@ function NavRow(props: {
           <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{props.hint}</span>
         ) : null}
       </span>
-      <ChevronRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
+      {props.trailing ? <span className="ml-auto shrink-0">{props.trailing}</span> : null}
+      {props.showChevron === false ? null : (
+        <ChevronRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
+      )}
     </button>
   );
 }
 
-function BackHeader(props: {
+export function PickerBackHeader(props: {
   label: string;
   icon?: ReactNode;
   onBack: () => void;
@@ -181,6 +186,25 @@ function BackHeader(props: {
       </button>
       {props.trailing ? <div className="relative z-10 shrink-0">{props.trailing}</div> : null}
     </div>
+  );
+}
+
+export function PickerAnimatedPage(props: {
+  pageKey: string;
+  direction: 1 | -1;
+  children: ReactNode;
+}) {
+  const reduceMotion = useReducedMotion();
+  return (
+    <motion.div
+      key={props.pageKey}
+      initial={reduceMotion ? false : { x: props.direction * 14, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      transition={{ duration: reduceMotion ? 0 : 0.18, ease: SLIDE_EASE }}
+      className="w-full"
+    >
+      {props.children}
+    </motion.div>
   );
 }
 
@@ -217,7 +241,6 @@ export function ModelPickerMenu(
     onNavChange?: (next: NavUpdater) => void;
   },
 ) {
-  const reduceMotion = useReducedMotion();
   const rows = useMemo(
     () => applyCodexOnly(props.rows, props.codexOnly === true),
     [props.rows, props.codexOnly],
@@ -230,7 +253,7 @@ export function ModelPickerMenu(
   );
   const nav = props.nav ?? localNav;
   const setNav = props.onNavChange ?? setLocalNav;
-  const [direction, setDirection] = useState(1);
+  const [direction, setDirection] = useState<1 | -1>(1);
 
   const effectiveNav =
     nav.level === "providers" && groups.length === 1
@@ -286,7 +309,7 @@ export function ModelPickerMenu(
     body = (
       <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
         {groups.map((group) => (
-          <NavRow
+          <PickerNavRow
             key={group.billingClass}
             label={group.label}
             hint={BILLING_CLASS_HINT[group.billingClass]}
@@ -302,7 +325,7 @@ export function ModelPickerMenu(
     body = (
       <div data-testid="model-picker-models">
         {groups.length > 1 ? (
-          <BackHeader
+          <PickerBackHeader
             label={activeGroup.label}
             icon={<BillingClassMark billingClass={activeGroup.billingClass} />}
             onBack={() => go({ level: "providers", rail: null, modelId: null }, -1)}
@@ -310,7 +333,7 @@ export function ModelPickerMenu(
         ) : null}
         <div className="flex flex-col gap-0.5">
           {activeGroup.rows.map((row) => (
-            <NavRow
+            <PickerNavRow
               key={`${row.billingClass}:${row.id}`}
               label={row.label}
               hint={row.unavailableReason ?? undefined}
@@ -332,7 +355,7 @@ export function ModelPickerMenu(
     const fastRunnable = runnableLatencyModesForModel(focusModel.catalog).includes("fast");
     body = (
       <div data-testid="model-picker-reasoning">
-        <BackHeader
+        <PickerBackHeader
           label={focusModel.label}
           icon={<BillingClassMark billingClass={focusModel.billingClass} />}
           onBack={() =>
@@ -421,7 +444,7 @@ export function ModelPickerMenu(
     body = (
       <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
         {groups.map((group) => (
-          <NavRow
+          <PickerNavRow
             key={group.billingClass}
             label={group.label}
             hint={BILLING_CLASS_HINT[group.billingClass]}
@@ -443,15 +466,9 @@ export function ModelPickerMenu(
           {props.error}
         </p>
       ) : null}
-      <motion.div
-        key={pageKey}
-        initial={reduceMotion ? false : { x: direction * 14, opacity: 0 }}
-        animate={{ x: 0, opacity: 1 }}
-        transition={{ duration: reduceMotion ? 0 : 0.18, ease: SLIDE_EASE }}
-        className="w-full"
-      >
+      <PickerAnimatedPage pageKey={pageKey} direction={direction}>
         {body}
-      </motion.div>
+      </PickerAnimatedPage>
     </div>
   );
 }

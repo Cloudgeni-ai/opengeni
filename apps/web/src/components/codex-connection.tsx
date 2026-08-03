@@ -774,7 +774,10 @@ export function CodexSubscriptionsCard({
       window.open(start.verificationUri, "_blank", "noopener,noreferrer");
       const interval = Math.max(2, start.intervalSeconds) * 1000;
       const poll = async (): Promise<void> => {
-        if (cancelled.current) return;
+        // Device authorization is server-side work. Keep polling after this
+        // settings card unmounts so navigating back to the workspace cannot
+        // strand an already-approved OpenAI grant. Only UI updates are gated
+        // by the component lifetime.
         // The recursive poll runs detached via setTimeout, so a rejection here
         // (a 500/502/400 from the poll route) would otherwise be swallowed,
         // leaving the card stuck on "Waiting for authorization…" forever with no
@@ -784,23 +787,29 @@ export function CodexSubscriptionsCard({
         try {
           result = await client.codexConnectPoll(workspaceId, start.state);
         } catch (error) {
-          setPending(null);
-          toast.error(
-            error instanceof Error
-              ? error.message
-              : "Failed to verify Codex authorization. Try again.",
-          );
+          if (!cancelled.current) {
+            setPending(null);
+            toast.error(
+              error instanceof Error
+                ? error.message
+                : "Failed to verify Codex authorization. Try again.",
+            );
+          }
           return;
         }
         if (result.status === "connected") {
-          setPending(null);
-          toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
-          await refreshAccounts();
+          if (!cancelled.current) {
+            setPending(null);
+            toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
+            await refreshAccounts();
+          }
           return;
         }
         if (result.status === "expired") {
-          setPending(null);
-          toast.error("The code expired before it was authorized. Try again.");
+          if (!cancelled.current) {
+            setPending(null);
+            toast.error("The code expired before it was authorized. Try again.");
+          }
           return;
         }
         setTimeout(() => void poll(), interval);
@@ -1086,7 +1095,8 @@ export function CodexSubscriptionsCard({
       ) : pending ? (
         <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
           <div className="text-xs text-fg-muted">
-            Enter this code at the OpenAI page (opened in a new tab), then leave this open:
+            Enter this code at the OpenAI page (opened in a new tab). Authorization continues if you
+            navigate away.
           </div>
           <div className="flex items-center gap-2">
             <code className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest">

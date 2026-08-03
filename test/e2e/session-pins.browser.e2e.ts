@@ -917,6 +917,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
       await queueChip.click();
       await chrome.getByRole("list", { name: "Queued prompts" }).waitFor();
+      const queuePanel = chrome.locator('[data-og-session-chrome-panel-frame="queue"]');
+      await waitFor(
+        async () =>
+          (await queuePanel.evaluate((element) => Number(getComputedStyle(element).opacity))) >= 1,
+        { timeoutMs: 2_000 },
+      );
       const queuedRows = chrome.getByRole("list", { name: "Queued prompts" }).getByRole("listitem");
       expect(await queuedRows.count()).toBe(2);
       expect(await queuedRows.nth(0).innerText()).toContain(
@@ -970,20 +976,24 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
-      // it preserves that row, moves it to the head, and resumes the branch.
+      // it moves that row to the head and resumes the branch. The accepted row
+      // is presented separately as the active direction, never as still queued.
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
-      await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer (edited)");
+      await chrome.getByText("Changing direction…", { exact: true }).waitFor();
+      await chrome.getByText("A second prompt queued from the composer (edited)").waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 
       // Remove deletes only the selected waiting prompt. Add one final prompt so
-      // the same two-row surface can still be exercised in the mobile pass.
-      await chrome.getByRole("button", { name: "Remove queued prompt 2" }).click();
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      // the queue surface can still be exercised in the mobile pass.
+      await chrome.getByRole("button", { name: "Remove queued prompt 1" }).click();
+      await queueChip.waitFor({ state: "detached" });
       await composer.fill("A replacement prompt after delete");
       await composer.press("Enter");
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       const timeline = desktopPage.getByTestId("session-timeline");
       expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
       expect(await timeline.getByText("A second prompt queued from the composer").count()).toBe(0);
@@ -1733,11 +1743,23 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     } else {
       document.documentElement.removeAttribute("data-og-theme");
     }
-    // Theme tokens affect independently composited panels. Wait for two paint
-    // frames so retained visual evidence cannot mix layers from both themes.
+    // Theme tokens affect independently composited panels. Let the browser
+    // start their CSS transitions, then wait for the session chrome transitions
+    // themselves so neither Axe nor retained evidence sees mixed-theme colors.
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
+    const transitions = document.getAnimations().filter((animation) => {
+      const target = animation.effect instanceof KeyframeEffect ? animation.effect.target : null;
+      return (
+        animation.constructor.name === "CSSTransition" &&
+        target instanceof Element &&
+        target.closest('[data-testid="session-chrome"]') !== null
+      );
+    });
+    await Promise.all(
+      transitions.map(async (transition) => await transition.finished.catch(() => undefined)),
+    );
   }, theme);
 }
 

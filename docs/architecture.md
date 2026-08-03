@@ -306,6 +306,91 @@ flowchart LR
 6. **Stream back.** Events were durably appended then live-published; the client's SSE connection delivers them exactly-once, in-order, gap-free.
 7. **Continue or idle.** Terminal settlement of the last turn atomically advances an active goal's Postgres wake revision and the session workflow-wake outbox. With no authoritative human/Steer work, approval, recovery, capacity wait, or closed admission gate, `maybeContinueGoal` atomically materializes that revision as one typed internal update, event pair, usage fact, observed revision, and another workflow wake; the next eligible internal-update inference consumes it with other machine updates. Stable revision dedupe prevents a lost commit response from creating a second logical continuation. Temporal signals/runs are replaceable nudges, so delayed outbox repair, worker death, and `continueAsNew` cannot strand the obligation. Otherwise the workflow idles out. Goal continuations inherit model + reasoning + latency mode from the newest turn that durably emitted `turn.started` (fallback: session default), so preflight-rejected turns cannot silently change provider or billing owner. Child terminal results enter the same bounded typed internal-update batch.
 
+Provider-call lifetime is independent of that logical mode. One active
+`session_realtime_connections` row may coexist with one preparing
+(`negotiating` or `ready`) replacement. The browser reuses a healthy microphone,
+negotiates on OpenGeni's configured conservative proactive-rotation interval or after peer failure, and confirms
+the replacement only after its `oai-events` channel is open. Transactional
+promotion advances the connection epoch and retires the previous connection
+without changing the realtime id, owner, durable ledger, or ordinary-session
+admission mode. Generation fences make callbacks from old or aborted peers
+inert; replay and ACK remain exact-connection fenced. Failed replacement
+preparation preserves the still-healthy active peer, while dead-peer recovery
+uses bounded backoff and terminal conflicts fence all further retries. The
+browser-activation request marker enables this two-phase path; omission keeps
+legacy clients immediately activated only for rolling compatibility.
+
+Browser media truth is explicit. Healthy microphone streams are reusable;
+permission denial, missing devices, acquisition failure, and ended tracks are
+typed separately, and recovery reacquires input before reporting it healthy.
+Remote audio never disables microphone input or adds a client-side turn-taking
+gate. An autoplay rejection leaves the same connection running in an announced
+audible-output-blocked state, with an accessible gesture retry that only calls
+play again. Stop and lost-owner reconciliation release tracks, peers, audio
+elements, and timers, including pending rotation. Fixed-code diagnostics expose
+microphone, autoplay, negotiation, rotation, reconnect, lost-owner, and terminal
+stop classes without credentials, SDP, audio, or transcript bodies. The
+promotion schema is canonical in
+`packages/db/drizzle/0162_session_realtime_connection_promotion.sql` and
+`packages/db/src/session-realtime-ledger.ts`.
+
+The web UI mounts realtime as a compact split action inside the existing
+composer action row, immediately before Pause/Send; it does not reserve a
+second panel above the composer. The primary action follows the current
+lifecycle (start, end, retry, or resume audio). Its disclosure contains the
+supported realtime-model picker, plain-language status, recovery actions, and
+development-only diagnostics. Realtime-model choice remains separate from the
+durable session's underlying model; only models backed by a real provider
+adapter may appear. The picker groups OpenGeni-managed Gateway, Connected Codex,
+and workspace-owned Gateway choices and remembers the last workspace selection.
+Connected Codex remains on its original WebRTC/V3 path. Gateway models use a
+single-use browser token and normalized WebSocket transport, then translate at
+the provider edge into the same durable V3 bridge; provider choice cannot alter
+session context, delegation/Steer, progress/results, ACK fencing, or tail handoff.
+`ChatComposer.actionsStart` is the provider-neutral host seam.
+
+Complete role-bearing provider `turn.done` rows are the only authoritative voice
+transcript. Each provider delegation includes bounded finalized dialogue since
+the previous delegation and records a transcript fence. On end, after the
+browser seals and durably drains parsed V3 events, the lifecycle transaction
+selects only the finalized tail after the latest fence, excludes a late user
+turn already covered by the delegation, and submits one bounded Codex-style XML
+wrapper through canonical ordinary `Steer`. The linked
+`session_realtime_context_projections` row is idempotency/audit provenance for
+that durable turn, not hidden worker context. Empty tails create neither row nor
+turn. Later realtime calls receive bounded ordinary durable history plus bounded
+prior finalized voice turns as inert role-labeled startup continuity with an
+explicit silence instruction. Canonical:
+`packages/sdk/src/codex-realtime-v3.ts`,
+`packages/db/src/session-realtime-context.ts`,
+`packages/db/drizzle/0161_session_realtime_context_projection.sql`, and
+`apps/api/src/session-realtime-context.ts`.
+
+Native provider delegation remains in that same session. Exact owner, connection
+epoch, and provider-start proof gate one transaction that accepts the provider
+call ledger row and invokes the canonical prompt `Steer` transaction with a
+service initiator and immutable realtime provenance. This is exactly ordinary
+Steer: it supersedes current direction when needed, moves the replacement to the
+queue head, emits canonical events/audit, and creates the durable workflow wake.
+The call's one-to-one `turn_id` is the terminal result/error projection seam;
+ordinary work claims remain available throughout realtime. Progress and terminal
+output for that still-active call use commentary/speakable
+`delegation.context.append`. Pre-existing work, direct human work, and work from
+a prior realtime call use session-wide `session.context.append` instead, so a
+newly joined voice session receives progress and completion without inventing a
+delegation id. Accepted human Send/Steer is mirrored once as silent typed
+session context after canonical execution admission and cannot loop back into
+another delegation. A Steer then continues through later agent updates; internal
+turn supersession produces no synthetic stopped/error message. Completion,
+failure, and cancellation create the corresponding durable outbound row. The browser
+durably ACKs delivery from OpenGeni, but pinned V3 has no provider receipt for a
+context append, so provider send remains at-least-once and the same durable row
+may replay after an ambiguous send, browser restart, or connection rotation.
+Exact owner/session/connection/epoch proof fences delivery and the client ACK.
+Invalid calls ledger one deterministic outbound error; a
+transient admission failure commits neither call nor turn. There is no
+child/fork session or after-commit admission worker.
+
 ---
 
 ## 5. The runtime spine — session → turn → run

@@ -9,6 +9,7 @@ import {
   UpdateWorkspaceSettingsRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogResponse,
   WorkspaceInferenceControlRequest,
   Workspace,
   WorkspaceMember,
@@ -54,7 +55,12 @@ import {
 import { boundedLimit } from "../http/common";
 import { sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
-import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
+import {
+  AI_GATEWAY_REALTIME_MODELS,
+  CODEX_REALTIME_MODEL_ID,
+  canonicalizeConfiguredModelId,
+  type Settings,
+} from "@opengeni/config";
 
 export function canonicalWorkspacePolicyModelIds(
   settings: Settings,
@@ -179,6 +185,55 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       ),
     );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [codexConnected, workspaceGatewayConnected] = await Promise.all([
+      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
+    ]);
+    const availability = (
+      credentialReady: boolean,
+      credentialReason: string,
+    ): { available: boolean; unavailableReason: string | null } => {
+      return credentialReady
+        ? { available: true, unavailableReason: null }
+        : { available: false, unavailableReason: credentialReason };
+    };
+    const gatewayModels = Object.values(AI_GATEWAY_REALTIME_MODELS);
+    const models = [
+      ...gatewayModels.map((model, index) => ({
+        id: model.managedModelId,
+        label: model.label,
+        provider: "OpenGeni" as const,
+        description: model.description,
+        ...availability(
+          Boolean(deps.settings.vercelAiGatewayApiKey),
+          "OpenGeni Gateway voice is not configured",
+        ),
+        recommended: index === 0,
+      })),
+      {
+        id: CODEX_REALTIME_MODEL_ID,
+        label: "Codex Live",
+        provider: "Connected Codex" as const,
+        description: "Deep session integration",
+        ...availability(codexConnected, "Connect Codex to use this voice model"),
+        recommended: false,
+      },
+      ...gatewayModels.map((model) => ({
+        id: model.workspaceModelId,
+        label: model.label,
+        provider: "Your Gateway" as const,
+        description: model.description,
+        ...availability(workspaceGatewayConnected, "Connect a workspace AI Gateway key"),
+        recommended: false,
+      })),
+    ];
+    c.header("cache-control", "private, no-store");
+    return c.json(WorkspaceRealtimeModelCatalogResponse.parse({ models }));
   });
 
   app.get("/v1/workspaces/:workspaceId/model-policy", async (c) => {
