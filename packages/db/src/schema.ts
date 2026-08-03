@@ -720,6 +720,45 @@ export const connections = pgTable(
   }),
 );
 
+export const connectionDisconnectOperations = pgTable(
+  "connection_disconnect_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    expectedVersion: integer("expected_version").notNull(),
+    resultVersion: integer("result_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceSubjectKey: uniqueIndex("connection_disconnect_operations_subject_key_uq").on(
+      table.workspaceId,
+      table.subjectId,
+      table.idempotencyKey,
+    ),
+    connectionGeneration: uniqueIndex(
+      "connection_disconnect_operations_connection_generation_uq",
+    ).on(table.workspaceId, table.connectionId, table.expectedVersion),
+    identityValid: check(
+      "connection_disconnect_operations_identity_check",
+      sql`length(${table.subjectId}) between 1 and 512
+        and length(${table.idempotencyKey}) between 1 and 200
+        and ${table.idempotencyKey} = btrim(${table.idempotencyKey})
+        and ${table.expectedVersion} > 0
+        and ${table.resultVersion} = ${table.expectedVersion} + 1`,
+    ),
+  }),
+);
+
 export const connectorActionPolicies = pgTable(
   "connector_action_policies",
   {

@@ -34,7 +34,14 @@ import {
 } from "./index";
 
 export type ResolveConnectionCredentialResult =
-  | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
+  | {
+      status: "ok";
+      headers: Record<string, string>;
+      connectionId: string;
+      /** Exact durable version when the credential came from the local connection store. */
+      connectionVersion?: number;
+      expiresAt?: Date | null;
+    }
   | {
       status: "auth_needed";
       reason: McpCredentialAuthNeededReason;
@@ -337,6 +344,29 @@ export type ConnectionBrokerDeps = {
   now: () => Date;
 };
 
+export type PermanentConnectionRefreshFailure = {
+  workspaceId: string;
+  connectionId: string;
+  connectionVersion: number;
+  subjectId: string | null;
+  providerDomain: string;
+  httpStatus: number;
+  oauthErrorCode: string | null;
+};
+
+export type ConnectionTokenResolverOptions = {
+  /** Provider-aware transport override used by local/integration adapters. */
+  refreshTransport?: RefreshTransportOptions;
+  /**
+   * Optional provider adapter for an atomic, metadata-aware permanent refresh
+   * transition. Returning true means the adapter owned the transition (even if
+   * its CAS lost to newer truth); false falls back to generic needs_reauth.
+   */
+  transitionPermanentRefreshFailure?: (
+    failure: PermanentConnectionRefreshFailure,
+  ) => Promise<boolean>;
+};
+
 export type RefreshTransportOptions = {
   fetchImpl?: FetchLike;
   dnsLookup?: DnsLookup;
@@ -361,6 +391,7 @@ export function buildConnectionTokenResolver(
   db: Database,
   settings: Settings,
   deps: ConnectionBrokerDeps = defaultDeps,
+  options: ConnectionTokenResolverOptions = {},
 ): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
   type CredentialLookupInput = Pick<
     ResolveConnectionCredentialInput,
@@ -439,6 +470,7 @@ export function buildConnectionTokenResolver(
       status: "ok",
       headers,
       connectionId: cred.id,
+      connectionVersion: cred.version,
       expiresAt: cred.expiresAt,
     };
   };
@@ -451,7 +483,7 @@ export function buildConnectionTokenResolver(
     if (!key) {
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
-    const refreshed = await deps.refresh(cred, ref, settings);
+    const refreshed = await deps.refresh(cred, ref, settings, options.refreshTransport);
     const refreshRecord: Parameters<typeof recordConnectionTokenRefresh>[1] = {
       id: cred.id,
       version: cred.version,
@@ -541,19 +573,31 @@ export function buildConnectionTokenResolver(
         // Only a rejected grant may poison the connection; transient failures
         // (network errors, AS 5xx) leave it active so the next resolve retries.
         if (isPermanentRefreshError(error)) {
-          await deps
-            .setStatus(
-              db,
-              input.workspaceId,
-              "needs_reauth",
-              error instanceof Error ? error.message : String(error),
-              {
+          let handled = false;
+          if (options.transitionPermanentRefreshFailure) {
+            try {
+              handled = await options.transitionPermanentRefreshFailure({
+                workspaceId: cred.workspaceId,
+                connectionId: cred.id,
+                connectionVersion: cred.version,
+                subjectId: cred.subjectId,
+                providerDomain: cred.providerDomain,
+                httpStatus: error.httpStatus,
+                oauthErrorCode: error.oauthErrorCode,
+              });
+            } catch {
+              handled = false;
+            }
+          }
+          if (!handled) {
+            await deps
+              .setStatus(db, input.workspaceId, "needs_reauth", error.message, {
                 id: cred.id,
                 version: cred.version,
                 subjectId: cred.subjectId,
-              },
-            )
-            .catch(() => undefined);
+              })
+              .catch(() => undefined);
+          }
         }
         return authNeeded(ref, "refresh_failed", cred.id);
       }
@@ -629,18 +673,20 @@ function canonicalResource(value: string): string {
 
 export class ConnectionRefreshHttpError extends Error {
   readonly httpStatus: number;
+  readonly oauthErrorCode: string | null;
 
-  constructor(httpStatus: number) {
+  constructor(httpStatus: number, oauthErrorCode: string | null = null) {
     super(`connection refresh failed with HTTP ${httpStatus}`);
     this.name = "ConnectionRefreshHttpError";
     this.httpStatus = httpStatus;
+    this.oauthErrorCode = oauthErrorCode;
   }
 }
 
 // The token endpoint rejecting the grant itself means re-auth is the only way
 // forward. 429 (throttling) and 408 are transient despite being 4xx; network
 // failures and AS 5xx are likewise retryable.
-function isPermanentRefreshError(error: unknown): boolean {
+function isPermanentRefreshError(error: unknown): error is ConnectionRefreshHttpError {
   return (
     error instanceof ConnectionRefreshHttpError &&
     error.httpStatus >= 400 &&
@@ -817,8 +863,10 @@ export async function refreshOAuthConnectionCredential(
     throw new ConnectionRefreshHttpError(response.status);
   }
   if (!response.ok) {
-    await cancelResponseBody(response);
-    throw new ConnectionRefreshHttpError(response.status);
+    throw new ConnectionRefreshHttpError(
+      response.status,
+      await readOAuthRefreshErrorCode(response),
+    );
   }
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
     response,
@@ -851,6 +899,21 @@ export async function refreshOAuthConnectionCredential(
     expiresAt,
     ...(scopeText ? { grantedScopes: scopeText.split(/\s+/).filter(Boolean) } : {}),
   };
+}
+
+async function readOAuthRefreshErrorCode(response: Response): Promise<string | null> {
+  try {
+    const payload = await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "OAuth refresh error response",
+    );
+    const code = stringValue(payload.error);
+    return code && /^[a-z0-9_.-]{1,64}$/i.test(code) ? code : null;
+  } catch {
+    await cancelResponseBody(response);
+    return null;
+  }
 }
 
 function expiresAtFromTokenResponse(

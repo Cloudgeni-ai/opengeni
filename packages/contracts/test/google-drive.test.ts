@@ -4,6 +4,9 @@ import {
   GOOGLE_DRIVE_FULL_SCOPE,
   GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
   GOOGLE_DRIVE_READONLY_SCOPE,
+  GoogleDriveConnectionLifecycle,
+  GoogleDriveDisconnectRequest,
+  GoogleDriveLifecycleActionRequest,
   googleDriveOAuthScopeDecision,
   googleDriveScopesAllowCapability,
 } from "../src/google-drive";
@@ -64,5 +67,58 @@ describe("Google Drive OAuth scope capabilities", () => {
         "email",
       ]),
     ).toEqual(googleDriveOAuthScopeDecision([GOOGLE_DRIVE_READONLY_SCOPE]));
+  });
+
+  test("keeps lifecycle state bounded and transition requests version-fenced", () => {
+    expect(
+      GoogleDriveConnectionLifecycle.parse({
+        state: "token_revoked",
+        recoverable: true,
+        observedAt: "2026-08-03T10:00:00.000Z",
+      }),
+    ).toEqual({
+      state: "token_revoked",
+      recoverable: true,
+      observedAt: "2026-08-03T10:00:00.000Z",
+    });
+    expect(
+      GoogleDriveLifecycleActionRequest.parse({ action: "pause", expectedVersion: 7 }),
+    ).toEqual({ action: "pause", expectedVersion: 7 });
+    expect(() =>
+      GoogleDriveLifecycleActionRequest.parse({ action: "resume", expectedVersion: 0 }),
+    ).toThrow();
+    expect(
+      GoogleDriveDisconnectRequest.parse({
+        expectedVersion: 7,
+        idempotencyKey: "  disconnect-generation-7  ",
+      }),
+    ).toEqual({ expectedVersion: 7, idempotencyKey: "disconnect-generation-7" });
+    expect(() =>
+      GoogleDriveDisconnectRequest.parse({ expectedVersion: 0, idempotencyKey: "disconnect" }),
+    ).toThrow();
+    expect(() =>
+      GoogleDriveDisconnectRequest.parse({ expectedVersion: 7, idempotencyKey: "" }),
+    ).toThrow();
+    expect(() =>
+      GoogleDriveConnectionLifecycle.parse({
+        state: "provider_error_body",
+        recoverable: true,
+        observedAt: "2026-08-03T10:00:00.000Z",
+      }),
+    ).toThrow();
+    expect(() =>
+      GoogleDriveConnectionLifecycle.parse({
+        state: "app_removed",
+        recoverable: true,
+        observedAt: "2026-08-03T10:00:00.000Z",
+      }),
+    ).toThrow();
+    expect(
+      GoogleDriveConnectionLifecycle.parse({
+        state: "disconnected",
+        recoverable: true,
+        observedAt: "2026-08-03T10:00:00.000Z",
+      }),
+    ).toMatchObject({ state: "disconnected", recoverable: true });
   });
 });

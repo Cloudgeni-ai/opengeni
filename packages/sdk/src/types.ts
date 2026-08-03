@@ -644,6 +644,22 @@ export type OpenGeniSlackBotInstallStart = {
 export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
 export type GoogleDriveSyncCadence = "manual" | "hourly" | "daily";
 export type GoogleDriveReadPolicy = "allow" | "ask" | "block";
+export type GoogleDriveConnectionLifecycleState =
+  | "active"
+  | "paused"
+  | "token_revoked"
+  | "app_removed"
+  | "disconnected"
+  | "reconnect_required"
+  | "reconsent_required";
+
+export type GoogleDriveConnectionLifecycle =
+  | {
+      state: Exclude<GoogleDriveConnectionLifecycleState, "app_removed">;
+      recoverable: true;
+      observedAt: string;
+    }
+  | { state: "app_removed"; recoverable: false; observedAt: string };
 
 export type GoogleDriveSelectedSource = {
   id: string;
@@ -664,6 +680,7 @@ export type GoogleDriveConnectionMetadata = {
   googleDisplayName: string | null;
   verifiedAt: string;
   accessMode: "metadata_readonly" | "readonly";
+  lifecycle?: GoogleDriveConnectionLifecycle | undefined;
   selectedSources?: GoogleDriveSelectedSource[] | undefined;
   /** @deprecated Read selectedSources; retained while existing connections migrate. */
   selectedSource?: GoogleDriveSelectedSource | null | undefined;
@@ -677,6 +694,16 @@ export type GoogleDriveOAuthStartRequest = {
 export type GoogleDriveOAuthStartResponse = {
   authorizationUrl: string;
   expiresAt: string;
+};
+
+export type GoogleDriveLifecycleActionRequest = {
+  action: "pause" | "resume";
+  expectedVersion: number;
+};
+
+export type GoogleDriveDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
 };
 
 export type GoogleDriveBrowseItem = {
