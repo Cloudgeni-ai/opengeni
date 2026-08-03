@@ -12,7 +12,7 @@ import {
   assertRepositoryChangesVisible,
   controlCancellationDurationMs,
   fixturePrompt,
-  isExpectedCaptureFileCancellation,
+  isExpectedBrowserCancellation,
   openWorkspaceIfCollapsed,
   parseCookieHeader,
   parseLiveAcceptanceArgs,
@@ -23,11 +23,16 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
-  test("ignores only an explicitly aborted superseded capture-file read", () => {
+  test("ignores only expected browser-cancelled background reads", () => {
     const path = "/v1/workspaces/workspace/sessions/session/workspace/capture/file";
-    expect(isExpectedCaptureFileCancellation(path, "net::ERR_ABORTED")).toBe(true);
-    expect(isExpectedCaptureFileCancellation(path, "net::ERR_FAILED")).toBe(false);
-    expect(isExpectedCaptureFileCancellation("/v1/config/client", "net::ERR_ABORTED")).toBe(false);
+    expect(isExpectedBrowserCancellation(path, "net::ERR_ABORTED")).toBe(true);
+    expect(
+      isExpectedBrowserCancellation("/assets/analytics-consent-aB_09.js", "net::ERR_ABORTED"),
+    ).toBe(true);
+    expect(isExpectedBrowserCancellation("/v1/auth/get-session", "net::ERR_ABORTED")).toBe(true);
+    expect(isExpectedBrowserCancellation(path, "net::ERR_FAILED")).toBe(false);
+    expect(isExpectedBrowserCancellation("/assets/index-aB_09.js", "net::ERR_ABORTED")).toBe(false);
+    expect(isExpectedBrowserCancellation("/v1/config/client", "net::ERR_ABORTED")).toBe(false);
   });
 
   test("keeps an open workspace open when Files hides the Changes panel", async () => {
