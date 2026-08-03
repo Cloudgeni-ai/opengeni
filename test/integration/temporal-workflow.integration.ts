@@ -50,6 +50,8 @@ const workerDeathTestTimeoutMs = 360_000;
 // ceiling that covers that scheduling variance without changing any runtime
 // timeout, retry contract, or behavioral assertion.
 const temporalWorkflowTestTimeoutMs = 60_000;
+const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url)
+  .pathname;
 
 // This case follows two real 125-second heartbeat-timeout proofs. Temporal can
 // take more than the general 30-second budget to poll and drain its next worker
@@ -1237,6 +1239,63 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "replays historical three-field document index workflow history",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const historicalInput = {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        documentId: "historical-document-1",
+      };
+      const calls: unknown[] = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        indexDocument: async (input: unknown) => {
+          calls.push(input);
+          return {
+            id: historicalInput.documentId,
+            baseId: "base-1",
+            fileId: "file-1",
+            status: "ready",
+            title: "historical-runbook.txt",
+            parser: "liteparse",
+            chunkCount: 1,
+            error: null,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        runAgentTurn: async () => ({ status: "idle" }),
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("documentIndexWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [historicalInput],
+        });
+        await handle.result();
+        expect(calls).toEqual([historicalInput]);
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          await handle.fetchHistory(),
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "scheduled task fire workflow delegates one durable dispatch activity",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -2306,7 +2365,7 @@ async function testWorker(
       connection: nativeConnection,
       namespace: "default",
       taskQueue,
-      workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
+      workflowsPath: workflowDefinitionsPath,
       activities: controlActivities,
       maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
     }),

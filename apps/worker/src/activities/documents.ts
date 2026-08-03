@@ -3,6 +3,7 @@ import { configuredStaticUsageLimits } from "@opengeni/config";
 import {
   getBillingBalance,
   recordUsageEvent,
+  resolveDocumentIndexAuthority,
   rlsContextForWorkspace,
   sumUsageQuantity,
   withWorkspaceUsageLock,
@@ -21,14 +22,39 @@ export function createDocumentActivities(services: () => Promise<ActivityService
         throw new Error("document account/workspace authority mismatch");
       }
       return await withWorkspaceUsageLock(db, input.workspaceId, async (lockedDb) => {
+        const storedAuthority = await resolveDocumentIndexAuthority(lockedDb, input);
+        if (!storedAuthority) {
+          throw new Error("document authority was not found before indexing");
+        }
+        const suppliedAuthorityFields = [
+          "authorityKind",
+          "authorityWorkspaceId",
+          "authoritySubjectId",
+        ] as const;
+        const suppliedCount = suppliedAuthorityFields.filter((field) =>
+          Object.prototype.hasOwnProperty.call(input, field),
+        ).length;
+        const suppliedMismatch =
+          (Object.prototype.hasOwnProperty.call(input, "authorityKind") &&
+            input.authorityKind !== storedAuthority.authorityKind) ||
+          (Object.prototype.hasOwnProperty.call(input, "authorityWorkspaceId") &&
+            input.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId) ||
+          (Object.prototype.hasOwnProperty.call(input, "authoritySubjectId") &&
+            input.authoritySubjectId !== storedAuthority.authoritySubjectId);
+        if (suppliedMismatch) {
+          throw new Error("document authority changed before indexing");
+        }
+        if (suppliedCount !== 0 && suppliedCount !== suppliedAuthorityFields.length) {
+          throw new Error("document authority tuple is partial");
+        }
         const claimedDocument = await getDocument(lockedDb, input.workspaceId, input.documentId, {
-          viewerSubjectId: input.authoritySubjectId,
+          viewerSubjectId: storedAuthority.authoritySubjectId,
         });
         if (
           !claimedDocument ||
-          claimedDocument.authorityKind !== input.authorityKind ||
-          claimedDocument.authorityWorkspaceId !== input.authorityWorkspaceId ||
-          claimedDocument.authoritySubjectId !== input.authoritySubjectId
+          claimedDocument.authorityKind !== storedAuthority.authorityKind ||
+          claimedDocument.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId ||
+          claimedDocument.authoritySubjectId !== storedAuthority.authoritySubjectId
         ) {
           throw new Error("document authority changed before indexing");
         }
@@ -64,12 +90,12 @@ export function createDocumentActivities(services: () => Promise<ActivityService
               }
             },
           },
-          { viewerSubjectId: input.authoritySubjectId },
+          { viewerSubjectId: storedAuthority.authoritySubjectId },
         );
         if (
-          document.authorityKind !== input.authorityKind ||
-          document.authorityWorkspaceId !== input.authorityWorkspaceId ||
-          document.authoritySubjectId !== input.authoritySubjectId
+          document.authorityKind !== storedAuthority.authorityKind ||
+          document.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId ||
+          document.authoritySubjectId !== storedAuthority.authoritySubjectId
         ) {
           throw new Error("document authority changed before indexing");
         }
