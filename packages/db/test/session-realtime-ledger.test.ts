@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { and, asc, eq, sql } from "drizzle-orm";
 
 import {
+  acceptSessionHumanInputResponse,
   addSessionSystemUpdate,
   activateSessionRealtimeConnectionInTransaction,
   appendSessionEventsForTurnAttempt,
@@ -18,7 +19,9 @@ import {
   endSessionRealtimeInTransaction,
   failSessionRealtimeConnectionInTransaction,
   getActiveSessionHistoryItems,
+  getSessionHumanInputRequest,
   listOutstandingSessionSystemUpdates,
+  mutateSessionControlInTransaction,
   peekSessionWork,
   recoverSessionDispatch,
   SessionControlInvariantError,
@@ -250,6 +253,55 @@ async function admitAndClaimDelegation(
   }
   expect(claimed.turn.id).toBe(turnId);
   return { admitted, turn: claimed.turn, attemptId };
+}
+
+async function freezeDelegatedHumanInput(
+  value: Fixture,
+  connection: { id: string; connectionEpoch: number },
+) {
+  const delegated = await admitAndClaimDelegation(value, connection);
+  const requestId = crypto.randomUUID();
+  const questions = [
+    {
+      id: "environment",
+      kind: "single_select" as const,
+      prompt: "Which environment should I deploy to?",
+      label: "Environment",
+      options: [
+        { id: "staging", label: "Staging", description: "Validate before production" },
+        { id: "production", label: "Production", description: "Deploy to users" },
+      ],
+      required: true,
+      allowOther: false,
+    },
+  ];
+  const request = {
+    id: requestId,
+    toolCallId: `human-input-${requestId}`,
+    questions,
+    allowSkip: false,
+    expiresAt: null,
+  };
+  const settlement = await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+    sessionId: value.owner.sessionId,
+    turnId: delegated.turn.id,
+    triggerEventId: delegated.turn.triggerEventId,
+    attemptId: delegated.attemptId,
+    turnStatus: "requires_action",
+    sessionStatus: "requires_action",
+    activeTurnId: delegated.turn.id,
+    runState: {
+      serializedRunState: JSON.stringify({ version: 1, waiting: requestId }),
+      pendingApprovals: [],
+      humanInputRequests: [request],
+    },
+    events: [
+      { type: "session.humanInput.requested", payload: { request } },
+      { type: "session.status.changed", payload: { status: "requires_action" } },
+    ],
+  });
+  expect(settlement.action).toBe("settled");
+  return { ...delegated, requestId, questions };
 }
 
 describe("session realtime ledger", () => {
@@ -1266,6 +1318,252 @@ describe("session realtime ledger", () => {
     });
     expect(facts.interruption).toMatchObject({ attemptId, kind: "steer", state: "pending" });
     expect(facts.session?.activeTurnId).toBe(foreground.turnId);
+  });
+
+  test("mirrors a durable structured question into realtime as speakable session context", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const waiting = await freezeDelegatedHumanInput(value, connection.claimed.connection);
+
+    const sync = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const question = sync.outbound.find((entry) => entry.payload.source === "human_input_request");
+    expect(question).toMatchObject({
+      kind: "session_update",
+      delegationItemId: null,
+      payload: {
+        source: "human_input_request",
+        sourceTurnId: waiting.turn.id,
+        channel: "speakable",
+        status: "waiting_for_user",
+        requestIds: [waiting.requestId],
+      },
+    });
+    expect(question?.text).toContain("<prompt>Which environment should I deploy to?</prompt>");
+    expect(question?.text).toContain("<label>Staging</label>");
+    expect(question?.text).toContain("delegate exactly once");
+    expect(question?.text).not.toContain("Steer");
+  });
+
+  test("mirrors an already-pending structured question when realtime starts", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const waiting = await freezeDelegatedHumanInput(value, connection.claimed.connection);
+    await endMode(value);
+
+    const resumed = await beginReplacementMode(value);
+    const resumedConnection = await claimInitial(resumed);
+    await complete(resumed, resumedConnection.claimed.connection);
+    await proveProviderStarted(resumed, resumedConnection.claimed.connection);
+    const sync = await transaction(resumed.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(resumed),
+        connectionId: resumedConnection.claimed.connection.id,
+        connectionEpoch: resumedConnection.claimed.connection.connectionEpoch,
+      }),
+    );
+
+    expect(
+      sync.outbound.find((entry) => entry.payload.source === "human_input_request"),
+    ).toMatchObject({
+      kind: "session_update",
+      payload: {
+        channel: "speakable",
+        status: "waiting_for_user",
+        trigger: "realtime_start",
+        requestIds: [waiting.requestId],
+        sourceTurnId: waiting.turn.id,
+      },
+    });
+  });
+
+  test("mirrors an accepted structured UI answer without delegating it again", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const waiting = await freezeDelegatedHumanInput(value, connection.claimed.connection);
+    const questionSync = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const questionSequence = questionSync.outbound.find(
+      (entry) => entry.payload.source === "human_input_request",
+    )?.sequence;
+    if (!questionSequence) throw new Error("Structured question was not projected");
+
+    const accepted = await acceptSessionHumanInputResponse(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: value.owner.sessionId,
+      requestId: waiting.requestId,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["staging"] }],
+      },
+      respondedBy: value.owner.ownerSubjectId,
+      clientEventId: crypto.randomUUID(),
+    });
+    expect(accepted.action).toBe("accepted");
+
+    const sync = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+        clientAckThroughSequence: questionSequence,
+      }),
+    );
+    const response = sync.outbound.find((entry) => entry.payload.source === "human_input_response");
+    expect(response).toMatchObject({
+      kind: "session_update",
+      payload: {
+        source: "human_input_response",
+        channel: "speakable",
+        requestId: waiting.requestId,
+        outcome: "answered",
+      },
+    });
+    expect(response?.text).toContain("<value>Staging</value>");
+    expect(response?.text).toContain("do not delegate it again");
+  });
+
+  test("a conversational answer delegates normally and supersedes the waiting question", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const waiting = await freezeDelegatedHumanInput(value, connection.claimed.connection);
+    const firstSync = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const questionSequence = firstSync.outbound.find(
+      (entry) => entry.payload.source === "human_input_request",
+    )?.sequence;
+    if (!questionSequence) throw new Error("Structured question was not projected");
+
+    const operationId = crypto.randomUUID();
+    const answer = "The answer to ‘Which environment should I deploy to?’ is Staging.";
+    const delegated = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+        clientAckThroughSequence: questionSequence,
+        entries: [
+          {
+            operationId,
+            kind: "delegation_call",
+            providerEventId: `delegation-created-${operationId}`,
+            delegationItemId: `delegation-item-${operationId}`,
+            text: `<realtime_delegation>\n  <input>${answer}</input>\n</realtime_delegation>`,
+            payload: { inputTranscript: answer, transcriptFenceTurnIds: [] },
+          },
+        ],
+      }),
+    );
+    const answerTurnId = delegated.accepted[0]?.entry.turnId;
+    if (!answerTurnId) throw new Error("Conversational answer was not delegated");
+    expect(answerTurnId).not.toBe(waiting.turn.id);
+
+    const state = await transaction(value.owner.workspaceId, async (tx) => {
+      const [request] = await tx
+        .select()
+        .from(schema.sessionHumanInputRequests)
+        .where(eq(schema.sessionHumanInputRequests.id, waiting.requestId));
+      const [waitingTurn] = await tx
+        .select({ status: schema.sessionTurns.status })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, waiting.turn.id));
+      const [answerTurn] = await tx
+        .select({ prompt: schema.sessionTurns.prompt, metadata: schema.sessionTurns.metadata })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, answerTurnId));
+      return { request, waitingTurn, answerTurn };
+    });
+    expect(state.request).toMatchObject({
+      status: "cancelled",
+      response: { outcome: "cancelled" },
+    });
+    expect(state.waitingTurn?.status).toBe("superseded");
+    expect(state.answerTurn?.prompt).toContain(answer);
+    expect(state.answerTurn?.metadata).toMatchObject({ delivery: "steer" });
+    expect(
+      delegated.outbound.find(
+        (entry) =>
+          entry.payload.source === "human_input_response" &&
+          entry.payload.requestId === waiting.requestId,
+      ),
+    ).toMatchObject({ payload: { outcome: "cancelled", channel: null } });
+    expect(
+      await getSessionHumanInputRequest(
+        client.db,
+        value.owner.workspaceId,
+        value.owner.sessionId,
+        waiting.requestId,
+      ),
+    ).toMatchObject({ status: "cancelled" });
+  });
+
+  test("session cancellation retires the pending voice question silently", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const waiting = await freezeDelegatedHumanInput(value, connection.claimed.connection);
+    const firstSync = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const questionSequence = firstSync.outbound.find(
+      (entry) => entry.payload.source === "human_input_request",
+    )?.sequence;
+    if (!questionSequence) throw new Error("Structured question was not projected");
+
+    await transaction(value.owner.workspaceId, (tx) =>
+      mutateSessionControlInTransaction(tx, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        actor: { type: "human", subjectId: value.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        action: "cancel",
+      }),
+    );
+    const sync = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+        clientAckThroughSequence: questionSequence,
+      }),
+    );
+    expect(
+      sync.outbound.find(
+        (entry) =>
+          entry.payload.source === "human_input_response" &&
+          entry.payload.requestId === waiting.requestId,
+      ),
+    ).toMatchObject({ payload: { channel: null, outcome: "cancelled" } });
   });
 
   test("human Steer continues an ownerless realtime delegation through session context", async () => {

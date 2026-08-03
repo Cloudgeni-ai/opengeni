@@ -234,6 +234,11 @@ import {
   projectSessionRealtimeDelegationTerminalInTransaction,
 } from "./session-realtime-ledger";
 import {
+  mirrorSessionRealtimeContextInTransaction,
+  renderRealtimeHumanInputRequestContext,
+  renderRealtimeHumanInputResponseContext,
+} from "./session-realtime-mirror";
+import {
   listSessionRealtimeContinuityEntriesInTransaction,
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
@@ -20723,6 +20728,27 @@ export async function acceptSessionHumanInputResponse(
           })
           .returning();
         if (!event) throw new Error("Failed to append human-input response");
+        await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sourceKind: "human_input_response",
+          sourceId: event.id,
+          turnId: turn.id,
+          channel:
+            response.outcome === "answered" || response.outcome === "skipped" ? "speakable" : null,
+          text: renderRealtimeHumanInputResponseContext({
+            requestId: request.id,
+            questions: request.questions,
+            response,
+          }),
+          payload: {
+            requestId: request.id,
+            outcome: response.outcome,
+            sourceEventId: event.id,
+          },
+          now,
+        });
         await tx
           .update(schema.sessions)
           .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
@@ -39945,11 +39971,11 @@ export async function applySessionTurnSettlement(
         };
       }
 
+      const humanInputRequests = input.runState?.humanInputRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
         }
-        const humanInputRequests = input.runState.humanInputRequests ?? [];
         for (const request of humanInputRequests) {
           const parsedQuestions = request.questions.map((question) =>
             HumanInputQuestionContract.parse(question),
@@ -40201,7 +40227,10 @@ export async function applySessionTurnSettlement(
                 eq(schema.sessionHumanInputRequests.status, "pending"),
               ),
             )
-            .returning({ id: schema.sessionHumanInputRequests.id })
+            .returning({
+              id: schema.sessionHumanInputRequests.id,
+              questions: schema.sessionHumanInputRequests.questions,
+            })
         : [];
       const terminalHumanInputEvents: AppendEventInput[] = terminalHumanInputRows.map(
         (request) => ({
@@ -40284,6 +40313,69 @@ export async function applySessionTurnSettlement(
       });
       const inserted =
         values.length > 0 ? await tx.insert(schema.sessionEvents).values(values).returning() : [];
+      const requestedEvents = inserted.filter(
+        (event) => event.type === "session.humanInput.requested",
+      );
+      if (requestedEvents.length > 0) {
+        const requestedIds = new Set(
+          requestedEvents.flatMap((event) => {
+            const request = sessionEventPayloadRecord(event.payload).request;
+            if (!request || typeof request !== "object" || Array.isArray(request)) return [];
+            const id = (request as Record<string, unknown>).id;
+            return typeof id === "string" ? [id] : [];
+          }),
+        );
+        const requests = humanInputRequests.filter((request) => requestedIds.has(request.id));
+        if (requests.length !== requestedIds.size) {
+          throw new Error("Human-input realtime projection lost its durable request contract");
+        }
+        await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          sourceKind: "human_input_request",
+          sourceId: requestedEvents.map((event) => event.id).join(":"),
+          turnId: input.turnId,
+          channel: "speakable",
+          text: renderRealtimeHumanInputRequestContext({ requests }),
+          payload: {
+            status: "waiting_for_user",
+            requestIds: requests.map((request) => request.id),
+            sourceEventIds: requestedEvents.map((event) => event.id),
+          },
+          now,
+        });
+      }
+      const terminalHumanInputById = new Map(
+        terminalHumanInputRows.map((request) => [request.id, request]),
+      );
+      for (const event of inserted) {
+        if (event.type !== "user.humanInputResponse") continue;
+        const payload = sessionEventPayloadRecord(event.payload);
+        const requestId = typeof payload.requestId === "string" ? payload.requestId : null;
+        const request = requestId ? terminalHumanInputById.get(requestId) : null;
+        if (!request) continue;
+        await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          sourceKind: "human_input_response",
+          sourceId: event.id,
+          turnId: input.turnId,
+          channel: null,
+          text: renderRealtimeHumanInputResponseContext({
+            requestId: request.id,
+            questions: request.questions,
+            response: { outcome: "cancelled" },
+          }),
+          payload: {
+            requestId: request.id,
+            outcome: "cancelled",
+            sourceEventId: event.id,
+          },
+          now,
+        });
+      }
       const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       if (isTerminalSessionTurnStatus(input.turnStatus)) {
         const terminalType = terminalSessionTurnEventType(input.turnStatus);

@@ -35,6 +35,7 @@ import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
 import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputContext,
+  renderRealtimeHumanInputResponseContext,
 } from "./session-realtime-mirror";
 import * as schema from "./schema";
 import {
@@ -284,23 +285,56 @@ export async function supersedeSessionCurrentDirectionInTransaction(
         eq(schema.sessionHumanInputRequests.status, "pending"),
       ),
     )
-    .returning({ id: schema.sessionHumanInputRequests.id });
+    .returning({
+      id: schema.sessionHumanInputRequests.id,
+      questions: schema.sessionHumanInputRequests.questions,
+    });
   let lastSequence = closedTools.sequence;
   if (cancelledHumanInputs.length > 0) {
-    await db.insert(schema.sessionEvents).values(
-      cancelledHumanInputs.map((request) => ({
+    const cancelledHumanInputEvents = await db
+      .insert(schema.sessionEvents)
+      .values(
+        cancelledHumanInputs.map((request) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sequence: ++lastSequence,
+          type: "user.humanInputResponse",
+          turnId: current.id,
+          turnGeneration: current.executionGeneration,
+          turnAssociation: "current",
+          payload: { requestId: request.id, response: { outcome: "cancelled" } },
+          occurredAt: now,
+        })),
+      )
+      .returning();
+    const requestsById = new Map(cancelledHumanInputs.map((request) => [request.id, request]));
+    for (const event of cancelledHumanInputEvents) {
+      const payload = event.payload as { requestId?: unknown };
+      const request =
+        typeof payload.requestId === "string" ? requestsById.get(payload.requestId) : null;
+      if (!request) continue;
+      await mirrorSessionRealtimeContextInTransaction(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        sequence: ++lastSequence,
-        type: "user.humanInputResponse",
+        sourceKind: "human_input_response",
+        sourceId: event.id,
         turnId: current.id,
-        turnGeneration: current.executionGeneration,
-        turnAssociation: "current",
-        payload: { requestId: request.id, response: { outcome: "cancelled" } },
-        occurredAt: now,
-      })),
-    );
+        channel: null,
+        text: renderRealtimeHumanInputResponseContext({
+          requestId: request.id,
+          questions: request.questions,
+          response: { outcome: "cancelled" },
+        }),
+        payload: {
+          requestId: request.id,
+          outcome: "cancelled",
+          sourceEventId: event.id,
+        },
+        now,
+      });
+    }
   }
   await db
     .update(schema.sessionTurns)
