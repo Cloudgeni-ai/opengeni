@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 0.31.2
+
+### Patch Changes
+
+- e62495f: Allow session creators to explicitly opt out of a workspace default rig, and make live release acceptance prove its fixture command completed before waiting for a workspace capture.
+- b4982fa: Expose GPT-5.6 Max reasoning end to end for managed and connected Codex models.
+
 ## 0.31.1
 
 ### Patch Changes
