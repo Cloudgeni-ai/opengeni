@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   boundWorkspaceControlEvent,
+  McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
@@ -1846,20 +1847,28 @@ async function loadSessionSubtreeIds(
   db: Database,
   workspaceId: string,
   rootSessionId: string,
-): Promise<string[]> {
-  const rows: Array<{ id: string; depth: number | string; cycle: boolean }> = await db.execute(sql`
-    with recursive subtree(id, depth, path, cycle) as (
-      select session.id, 0::integer, array[session.id]::uuid[], false
+): Promise<{ sessionIds: string[]; rootParentSessionId: string | null }> {
+  const rows: Array<{
+    id: string;
+    rootParentSessionId: string | null;
+    depth: number | string;
+    cycle: boolean;
+  }> = await db.execute(sql`
+    with recursive subtree(id, root_parent_session_id, depth, path, cycle) as (
+      select session.id, session.parent_session_id, 0::integer, array[session.id]::uuid[], false
       from ${schema.sessions} session
       where session.workspace_id = ${workspaceId} and session.id = ${rootSessionId}
       union all
-      select child.id, parent.depth + 1, parent.path || child.id, child.id = any(parent.path)
+      select child.id, parent.root_parent_session_id, parent.depth + 1,
+             parent.path || child.id, child.id = any(parent.path)
       from subtree parent
       join ${schema.sessions} child
         on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.id
       where parent.depth < ${SESSION_ANCESTRY_LIMIT} and not parent.cycle
     )
-    select id, depth, cycle from subtree order by id
+    select id, root_parent_session_id as "rootParentSessionId", depth, cycle
+    from subtree
+    order by id
   `);
   if (rows.length === 0) {
     throw new SessionControlInvariantError(`Session ${rootSessionId} does not exist`);
@@ -1867,7 +1876,109 @@ async function loadSessionSubtreeIds(
   if (rows.some((row) => row.cycle || Number(row.depth) >= SESSION_ANCESTRY_LIMIT)) {
     throw new SessionControlInvariantError(`Session ${rootSessionId} subtree is invalid`);
   }
+  return {
+    sessionIds: rows.map((row) => row.id),
+    rootParentSessionId: rows[0]?.rootParentSessionId ?? null,
+  };
+}
+
+const TERMINAL_CANCELLATION_LIVE_TURN_STATUSES = [
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+];
+
+async function loadCancellationTurnIds(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        inArray(schema.sessionTurns.sessionId, sessionIds),
+        inArray(schema.sessionTurns.status, TERMINAL_CANCELLATION_LIVE_TURN_STATUSES),
+      ),
+    )
+    .orderBy(schema.sessionTurns.id);
   return rows.map((row) => row.id);
+}
+
+async function enqueueCancelledChildOutboxInTransaction(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rootSession: typeof schema.sessions.$inferSelect;
+    parentSession: typeof schema.sessions.$inferSelect | null;
+  },
+): Promise<void> {
+  const parentSessionId = input.rootSession.parentSessionId;
+  if (!parentSessionId) return;
+  if (!input.parentSession || input.parentSession.id !== parentSessionId) {
+    throw new SessionControlInvariantError(
+      `Parent session ${parentSessionId} was not locked with cancellation root ${input.rootSession.id}`,
+    );
+  }
+  if (input.parentSession.status === "cancelled") return;
+  let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
+    [];
+  if (input.rootSession.parentTurnId) {
+    const [parentTurn] = await db
+      .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, parentSessionId),
+          eq(schema.sessionTurns.id, input.rootSession.parentTurnId),
+        ),
+      )
+      .limit(1);
+    if (parentTurn) {
+      const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
+      if (!parsed.success) {
+        throw new SessionControlInvariantError(
+          `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.rootSession.parentTurnId}`,
+        );
+      }
+      personalConnectionDelegations = parsed.data.map((delegation) => ({ ...delegation }));
+    }
+  }
+  await db
+    .insert(schema.sessionSystemUpdateOutbox)
+    .values({
+      accountId: input.rootSession.accountId,
+      workspaceId: input.workspaceId,
+      sourceSessionId: input.rootSession.id,
+      targetSessionId: parentSessionId,
+      dedupeKey: `child-completion:${input.rootSession.id}:cancelled`,
+      kind: "child_terminal_result",
+      classification: "info",
+      sourceId: input.rootSession.id,
+      summary: "Child session was terminally cancelled.",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: input.rootSession.id,
+        status: "cancelled",
+      },
+      lineage: {
+        childSessionId: input.rootSession.id,
+        parentSessionId,
+        ...(input.rootSession.parentTurnId ? { parentTurnId: input.rootSession.parentTurnId } : {}),
+      },
+      personalConnectionDelegations,
+    })
+    .onConflictDoNothing({
+      target: [
+        schema.sessionSystemUpdateOutbox.workspaceId,
+        schema.sessionSystemUpdateOutbox.dedupeKey,
+      ],
+    });
 }
 
 async function assertSessionBranchIsNotCancelled(
@@ -1914,6 +2025,8 @@ async function cancelSessionSubtreeInTransaction(
     rootSessionId: string;
     sessionIds: string[];
     lockedSessions: Array<typeof schema.sessions.$inferSelect>;
+    candidateTurnIds: string[];
+    lockedTurns: Array<typeof schema.sessionTurns.$inferSelect>;
     actor: string;
     reason: string | null;
     operationId: string;
@@ -1924,26 +2037,38 @@ async function cancelSessionSubtreeInTransaction(
   cancelledTurnCount: number;
   affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
 }> {
-  const liveStatuses = ["queued", "running", "requires_action", "recovering", "waiting_capacity"];
-  const candidateTurns = await db
-    .select()
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        inArray(schema.sessionTurns.sessionId, input.sessionIds),
-        inArray(schema.sessionTurns.status, liveStatuses),
-      ),
-    )
-    .orderBy(schema.sessionTurns.id);
-  await lockSessionEventWriteRows(db, {
+  const candidateTurnIdSet = new Set(input.candidateTurnIds);
+  const candidateTurns = input.lockedTurns.filter((turn) => candidateTurnIdSet.has(turn.id));
+  if (candidateTurns.length !== candidateTurnIdSet.size) {
+    throw new SessionControlInvariantError("Cancellation candidate turns changed while locking");
+  }
+  // The outer command acquired every session and candidate turn in one UUID-
+  // sorted call before the actor attempt. Repeat only those already-held locks
+  // so this event-writing suffix retains a directly auditable lock contract;
+  // this call must never discover or acquire a new row.
+  const suffixLocks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     workspaceLock: "already_locked",
-    turnIds: candidateTurns.map((turn) => turn.id),
+    sessionIds: input.lockedSessions.map((session) => session.id),
+    turnIds: input.candidateTurnIds,
   });
-
+  if (
+    suffixLocks.sessions.length !== input.lockedSessions.length ||
+    suffixLocks.turns.length !== candidateTurnIdSet.size
+  ) {
+    throw new SessionControlInvariantError("Cancellation rows changed under canonical locks");
+  }
   const sessionIdSet = new Set(input.sessionIds);
+  const rootSession = input.lockedSessions.find((session) => session.id === input.rootSessionId);
+  if (!rootSession) {
+    throw new SessionControlInvariantError(
+      `Cancellation root ${input.rootSessionId} was not locked with its subtree`,
+    );
+  }
+  const rootParentSession = rootSession.parentSessionId
+    ? (input.lockedSessions.find((session) => session.id === rootSession.parentSessionId) ?? null)
+    : null;
   const candidateTurnById = new Map(candidateTurns.map((turn) => [turn.id, turn]));
   const liveTurnIds = new Set(
     input.lockedSessions
@@ -2146,6 +2271,11 @@ async function cancelSessionSubtreeInTransaction(
     if (session.id === input.rootSessionId) eventIds.unshift(input.rootControlEventId);
     if (eventIds.length > 0) affectedSessionEvents.push({ sessionId: session.id, eventIds });
   }
+  await enqueueCancelledChildOutboxInTransaction(db, {
+    workspaceId: input.workspaceId,
+    rootSession,
+    parentSession: rootParentSession,
+  });
   return {
     cancelledSessionCount: input.sessionIds.length,
     cancelledTurnCount: candidateTurns.length,
@@ -2167,20 +2297,47 @@ export async function mutateSessionControlInTransaction(
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
-  const cancellationSessionIds =
+  const cancellationSubtree =
     input.action === "cancel"
       ? await loadSessionSubtreeIds(db, input.workspaceId, input.sessionId)
-      : [input.sessionId];
+      : { sessionIds: [input.sessionId], rootParentSessionId: null };
+  const cancellationSessionIds = cancellationSubtree.sessionIds;
+  const cancellationTurnIds =
+    input.action === "cancel"
+      ? await loadCancellationTurnIds(db, input.workspaceId, cancellationSessionIds)
+      : [];
   const locks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds:
       input.actor.type === "agent_attempt"
-        ? [input.actor.sessionId, ...cancellationSessionIds]
-        : cancellationSessionIds,
-    turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
+        ? [
+            input.actor.sessionId,
+            ...cancellationSessionIds,
+            ...(cancellationSubtree.rootParentSessionId
+              ? [cancellationSubtree.rootParentSessionId]
+              : []),
+          ]
+        : [
+            ...cancellationSessionIds,
+            ...(cancellationSubtree.rootParentSessionId
+              ? [cancellationSubtree.rootParentSessionId]
+              : []),
+          ],
+    turnIds:
+      input.actor.type === "agent_attempt"
+        ? [input.actor.turnId, ...cancellationTurnIds]
+        : cancellationTurnIds,
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
+  if (input.action === "cancel") {
+    const rootSession = locks.sessions.find((session) => session.id === input.sessionId);
+    if (!rootSession || rootSession.parentSessionId !== cancellationSubtree.rootParentSessionId) {
+      throw new SessionControlInvariantError(
+        `Session ${input.sessionId} parent changed while establishing cancellation locks`,
+      );
+    }
+  }
   const hash = canonicalSessionCommandHash({
     action: input.action,
     reason: input.reason ?? null,
@@ -2392,6 +2549,8 @@ export async function mutateSessionControlInTransaction(
           rootSessionId: input.sessionId,
           sessionIds: cancellationSessionIds,
           lockedSessions: locks.sessions,
+          candidateTurnIds: cancellationTurnIds,
+          lockedTurns: locks.turns,
           actor,
           reason: input.reason ?? null,
           operationId: reserved.receipt.id,

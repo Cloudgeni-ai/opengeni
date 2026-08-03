@@ -293,8 +293,11 @@ empty snapshot. A cancelled ancestor permanently rejects Send, Steer, Resume,
 and new descendants. The cancellation transaction also advances the durable
 workflow wake for every affected session, including an approval or capacity
 wait with no live attempt, so the terminal row cannot leave a Temporal workflow
-parked indefinitely. Only physical attempt quiescence can clear the stopping
-projection.
+parked indefinitely. When the selected root is a child, the same transaction
+also enqueues one deduplicated `child_terminal_result` with status `cancelled`
+for its surviving parent and copies the causal parent-turn delegation snapshot;
+cancelled descendants do not notify parents inside the same terminal subtree.
+Only physical attempt quiescence can clear the stopping projection.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
 For Agent Steer, accepting that signal is not an admission acknowledgement: if

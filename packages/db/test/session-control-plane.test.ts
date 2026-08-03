@@ -36,6 +36,7 @@ import {
   getActiveSessionHistoryItems,
   getSession,
   getSessionGoal,
+  getSessionSystemUpdateOutboxByDedupeKey,
   getSessionTurn,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
@@ -3861,6 +3862,63 @@ describe("clean session control plane", () => {
         lineage: expect.objectContaining({ turnId: exhaustedTurn.id }),
       }),
     ]);
+
+    const parentPrompt = await send(grant, parent.id, "spawn a child that will be cancelled");
+    const parentAttemptId = crypto.randomUUID();
+    const parentTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      parent.id,
+      `session-${parent.id}`,
+      { attemptId: parentAttemptId },
+    );
+    expect(parentTurn?.id).toBe(parentPrompt.turn.id);
+    const cancelledChild = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "cancelled child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: parent.id,
+      createdByActor: {
+        type: "agent_attempt",
+        attemptId: parentAttemptId,
+        sessionId: parent.id,
+        turnId: parentTurn!.id,
+        executionGeneration: parentTurn!.executionGeneration,
+      },
+    });
+    await send(grant, cancelledChild.id, "cancelled child");
+    expect(await controlSession(grant, cancelledChild.id, "cancel")).toMatchObject({
+      cancelledSessionCount: 1,
+      cancelledTurnCount: 1,
+    });
+    const cancellationDedupeKey = `child-completion:${cancelledChild.id}:cancelled`;
+    expect(
+      await getSessionSystemUpdateOutboxByDedupeKey(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        dedupeKey: cancellationDedupeKey,
+      }),
+    ).toMatchObject({
+      dedupeKey: cancellationDedupeKey,
+      classification: "info",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: cancelledChild.id,
+        status: "cancelled",
+      },
+      lineage: {
+        childSessionId: cancelledChild.id,
+        parentSessionId: parent.id,
+        parentTurnId: parentTurn!.id,
+      },
+      personalConnectionDelegations: [],
+    });
+    await controlSession(grant, cancelledChild.id, "cancel");
+    expect(await childOutboxes(cancelledChild.id)).toHaveLength(1);
   });
 
   test("Pause blocks a racing terminal settlement and Resume admits a new attempt of the same turn", async () => {

@@ -4583,7 +4583,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
     .object({
       type: z.literal("child_terminal_result"),
       childSessionId: z.string().uuid(),
-      status: z.enum(["idle", "failed"]),
+      status: z.enum(["idle", "failed", "cancelled"]),
     })
     .passthrough(),
 ]);
