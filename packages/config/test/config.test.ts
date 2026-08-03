@@ -403,6 +403,17 @@ describe("sandbox preparation profiles", () => {
     expect(sandboxLifecycleHookIds(settings)).toEqual([]);
   });
 
+  test("offers GPT-5.6 max reasoning by default", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(configuredAllowedReasoningEfforts(settings)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
   test("returns client model and reasoning options with current defaults included", () => {
     const settings = {
       ...withEnv({}, () => getSettings()),

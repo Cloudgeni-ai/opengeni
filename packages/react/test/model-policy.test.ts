@@ -102,7 +102,7 @@ describe("model-policy", () => {
         reasoning: {
           upstream: "supported",
           runnable: true,
-          efforts: ["low", "high"],
+          efforts: ["low", "high", "max"],
           defaultEffort: "low",
           required: false,
         },
@@ -123,7 +123,7 @@ describe("model-policy", () => {
         latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
       },
     });
-    expect(effortOptionsForModel(model)).toEqual(["low", "high"]);
+    expect(effortOptionsForModel(model)).toEqual(["low", "high", "max"]);
     expect(coerceReasoningEffortForModel(model, "xhigh")).toBe("low");
     expect(billingClassForModel(model)).toBe("opengeni_credits");
   });

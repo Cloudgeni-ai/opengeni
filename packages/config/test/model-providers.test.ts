@@ -1138,7 +1138,7 @@ describe("turn execution policy V1", () => {
       modelId: "codex/gpt-5.6-sol",
       requestedModelId: null,
       modelSource: "session",
-      reasoningEffort: "xhigh",
+      reasoningEffort: "max",
       reasoningSource: "session",
     });
     expect(policy).toMatchObject({
@@ -1148,6 +1148,7 @@ describe("turn execution policy V1", () => {
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
     });
+    expect(policy.reasoningEffort).toBe("max");
   });
 });
 describe("Grok 4.5 explicit xAI registry contract", () => {

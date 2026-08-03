@@ -432,7 +432,7 @@ const SettingsSchema = z.object({
   // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.
   codexRotationNearExhaustionPct: z.coerce.number().int().min(1).max(100).default(90),
   openaiReasoningEffort: ReasoningEffort.default("low"),
-  openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
+  openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh,max"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
   // resolved against the provider's server-side response store. That store is
