@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.38.0
+
+### Patch Changes
+
+- 763aa97: Preserve a latency-mode selection made while a durable composer draft is loading.
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [3e4842d]
+  - @opengeni/sdk@0.38.0
+
 ## 0.37.0
 
 ### Minor Changes
