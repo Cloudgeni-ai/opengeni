@@ -1,5 +1,12 @@
 # @opengeni/documents
 
+## 0.2.68
+
+### Patch Changes
+
+- 4fcb6af: Add a bounded, resumable Google Drive inventory and deterministic export planner with
+  tenant- and permission-bound versioned checkpoints.
+
 ## 0.2.67
 
 ### Patch Changes
