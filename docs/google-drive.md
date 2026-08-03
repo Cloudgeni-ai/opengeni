@@ -111,9 +111,12 @@ authorization boundary.
 The **Only me**, **This workspace**, and **Company** options record the intended
 future knowledge scope. **Hourly**, **Daily**, and **On demand** record the
 intended cadence, while **Allow**, **Ask**, and **Block** record the connector
-read policy. They are configuration only in this slice. Durable scheduler
-dispatch, source rows, content fetching and indexing, cursor processing, ACL
-projection, and memory updates are not activated by the inventory planner.
+read policy. The common MCP runtime can now enforce persisted connector-action
+policies with durable approval and secret-free audit, but this Google Drive setup
+slice does not yet publish its selections into that backend policy table.
+They remain configuration only in this slice. Durable scheduler dispatch, source
+rows, content fetching and indexing, cursor processing, ACL projection,
+policy-UI wiring, and memory updates are not activated by the inventory planner.
 
 Disconnecting revokes the OpenGeni connection locally. It deliberately does not
 call Google's project-wide token revocation endpoint, which can invalidate

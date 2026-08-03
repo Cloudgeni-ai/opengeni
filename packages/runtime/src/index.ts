@@ -1372,6 +1372,35 @@ export function effectiveSkillSelectionsForAgent(
   return agentSkillSelections.get(agent) ?? emptySkillSelections;
 }
 
+export type ConnectorActionToolCall = {
+  approvalId: string;
+  connectionId?: string | null;
+  serverId: string;
+  toolName: string;
+  arguments: unknown;
+};
+
+export type ConnectorActionPolicyPreparation =
+  | { managed: false; decision: "unmanaged" }
+  | { managed: true; decision: "allow" | "ask" | "block" };
+
+export type ConnectorActionExecutionAdmission =
+  | { allowed: true; managed: false }
+  | { allowed: true; managed: true; requestId: string }
+  | {
+      allowed: false;
+      managed: true;
+      requestId: string;
+      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+    };
+
+/** Secret-free persistence boundary supplied by the worker for one attempt. */
+export type ConnectorActionPolicyHooks = {
+  prepare: (call: ConnectorActionToolCall) => Promise<ConnectorActionPolicyPreparation>;
+  begin: (call: ConnectorActionToolCall) => Promise<ConnectorActionExecutionAdmission>;
+  complete: (input: { requestId: string; outcome: "completed" | "uncertain" }) => Promise<void>;
+};
+
 export type BuildAgentOptions = {
   model?: Model;
   /** Settled response for the one internal human-input interruption resumed by this run. */
@@ -1451,6 +1480,10 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  /** Exact broker-resolved connection identity frozen during MCP preparation. */
+  resolvedMcpConnectionIds?: ReadonlyMap<string, string>;
+  /** Attempt-bound connector Allow/Ask/Block enforcement and safe audit hooks. */
+  connectorActionPolicy?: ConnectorActionPolicyHooks;
   // Workspace Memory V1 working-set block, resolved by the worker per turn.
   // Composed after the workspace persona/CORE/toolspace substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
@@ -1990,7 +2023,12 @@ export function buildOpenGeniAgent(
       agentsNeedingGenesisTitleDirective.add(agent);
     }
     maybeInstallCodexToolSearch(agent, settings, options);
-    applyMcpApprovalPolicy(agent, settings);
+    applyMcpApprovalPolicy(
+      agent,
+      settings,
+      options.connectorActionPolicy,
+      options.resolvedMcpConnectionIds,
+    );
     return agent;
   }
 
@@ -2085,7 +2123,12 @@ export function buildOpenGeniAgent(
     agentRigCredentialHooks.set(agent, sandboxLifecycleHooksForIds(options.rigCredentialHookIds));
   }
   maybeInstallCodexToolSearch(agent, settings, options);
-  applyMcpApprovalPolicy(agent, settings);
+  applyMcpApprovalPolicy(
+    agent,
+    settings,
+    options.connectorActionPolicy,
+    options.resolvedMcpConnectionIds,
+  );
   return agent;
 }
 
@@ -2136,7 +2179,10 @@ function mcpToolRequiresApproval(
 /** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
 type McpApprovalPolicy = {
   prefix: string;
+  serverId: string;
   requireApproval: boolean | ReadonlySet<string>;
+  connectorBacked: boolean;
+  connectionId: string | null;
 };
 
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
@@ -2165,10 +2211,11 @@ type ApprovalCapableAgent = {
 function installMcpApprovalPolicy(
   agent: ApprovalCapableAgent,
   policies: McpApprovalPolicy[],
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
 ): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
-  agent.getMcpTools = async (runContext: unknown) => {
-    const tools = await listMcpTools(runContext);
+  agent.getMcpTools = async (resolutionContext: unknown) => {
+    const tools = await listMcpTools(resolutionContext);
     return tools.map((tool) => {
       if (tool.type !== "function") {
         return tool;
@@ -2178,16 +2225,89 @@ function installMcpApprovalPolicy(
         return tool;
       }
       const unprefixed = tool.name.slice(policy.prefix.length);
-      return mcpToolRequiresApproval(policy.requireApproval, unprefixed)
-        ? { ...tool, needsApproval: async () => true }
-        : tool;
+      const originalNeedsApproval = tool.needsApproval.bind(tool);
+      const originalInvoke = tool.invoke.bind(tool);
+      const connectorManaged = Boolean(connectorActionPolicy && policy.connectorBacked);
+      if (!connectorManaged && !mcpToolRequiresApproval(policy.requireApproval, unprefixed)) {
+        return tool;
+      }
+      const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
+        if (!policy.connectionId) {
+          throw new Error("Connector action is missing its resolved connection identity");
+        }
+        return {
+          approvalId,
+          connectionId: policy.connectionId,
+          serverId: policy.serverId,
+          toolName: unprefixed,
+          arguments: args,
+        };
+      };
+      return {
+        ...tool,
+        needsApproval: async (
+          runContext: Parameters<typeof originalNeedsApproval>[0],
+          parsedInput: Parameters<typeof originalNeedsApproval>[1],
+          callId: Parameters<typeof originalNeedsApproval>[2],
+        ) => {
+          if (connectorManaged && !callId) {
+            throw new Error("Connector action is missing its durable approval identity");
+          }
+          const preparation = connectorManaged
+            ? await connectorActionPolicy!.prepare(connectorCall(callId!, parsedInput))
+            : ({ managed: false, decision: "unmanaged" } as const);
+          if (preparation.managed && preparation.decision === "block") {
+            return false;
+          }
+          const legacyApproval =
+            mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+            (await originalNeedsApproval(runContext, parsedInput, callId));
+          return (preparation.managed && preparation.decision === "ask") || legacyApproval;
+        },
+        invoke: async (runContext, input, details) => {
+          if (!connectorManaged) {
+            return await originalInvoke(runContext, input, details);
+          }
+          const callId = details?.toolCall?.callId;
+          if (!callId) {
+            throw new Error("Connector action was not executed: missing durable call identity");
+          }
+          let parsedInput: unknown;
+          try {
+            parsedInput = JSON.parse(input) as unknown;
+          } catch {
+            throw new Error("Connector action was not executed: malformed tool input");
+          }
+          const admission = await connectorActionPolicy!.begin(connectorCall(callId, parsedInput));
+          if (!admission.allowed) {
+            throw new Error(`Connector action was not executed: ${admission.reason}`);
+          }
+          if (!admission.managed) {
+            return await originalInvoke(runContext, input, details);
+          }
+          try {
+            const output = await originalInvoke(runContext, input, details);
+            await connectorActionPolicy!.complete({
+              requestId: admission.requestId,
+              outcome: "completed",
+            });
+            return output;
+          } catch {
+            await connectorActionPolicy!.complete({
+              requestId: admission.requestId,
+              outcome: "uncertain",
+            });
+            throw new Error("Connector action failed after execution began");
+          }
+        },
+      };
     });
   };
   const originalClone = agent.clone?.bind(agent);
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installMcpApprovalPolicy(cloned, policies);
+      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy);
       return cloned;
     };
   }
@@ -2218,23 +2338,47 @@ function installMcpApprovalPolicy(
  *  - CLONE SURVIVAL. The wrap is re-installed onto every clone; see
  *    {@link installMcpApprovalPolicy}.
  */
-function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): void {
+function applyMcpApprovalPolicy(
+  agent: Agent<any, any>,
+  settings: Settings,
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
+  resolvedMcpConnectionIds?: ReadonlyMap<string, string>,
+): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
     .filter(
       (server) =>
+        Boolean(connectorActionPolicy && server.connectionRef) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
-    .map((server) => ({
-      prefix: prefixedMcpToolName(server.id, ""),
-      requireApproval:
-        server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
-    }))
+    .map((server) => {
+      const staticConnectionId = server.connectionRef?.connectionId ?? null;
+      const resolvedConnectionId = resolvedMcpConnectionIds?.get(server.id) ?? null;
+      if (
+        staticConnectionId &&
+        resolvedConnectionId &&
+        staticConnectionId !== resolvedConnectionId
+      ) {
+        throw new Error("MCP connection identity changed between configuration and preparation");
+      }
+      return {
+        prefix: prefixedMcpToolName(server.id, ""),
+        serverId: server.id,
+        requireApproval:
+          server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
+        connectorBacked: Boolean(server.connectionRef),
+        connectionId: resolvedConnectionId ?? staticConnectionId,
+      };
+    })
     .sort((a, b) => b.prefix.length - a.prefix.length);
   if (policies.length === 0) {
     return;
   }
-  installMcpApprovalPolicy(agent as unknown as ApprovalCapableAgent, policies);
+  installMcpApprovalPolicy(
+    agent as unknown as ApprovalCapableAgent,
+    policies,
+    connectorActionPolicy,
+  );
 }
 
 /**
@@ -2454,6 +2598,8 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 
 export type PreparedAgentTools = {
   mcpServers: MCPServer[];
+  /** Attempt-frozen successful broker identity for each prepared MCP server. */
+  resolvedMcpConnectionIds: ReadonlyMap<string, string>;
   close: () => Promise<void>;
   // P4 (Part B.1): the live, by-reference Set of ORIGINAL-dotted connector
   // namespaces the codex_apps transport saw across this turn's tools/list calls.
@@ -2571,9 +2717,15 @@ export async function prepareAgentTools(
   // codex_apps sanitizing fetch so every tools/list this turn accumulates the
   // account's connector namespaces. Surfaced on PreparedAgentTools for the worker.
   const codexConnectorNamespaces = new Set<string>();
+  const resolvedMcpConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
   if (tools.length === 0) {
-    return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
+    return {
+      mcpServers: [],
+      resolvedMcpConnectionIds,
+      close: async () => {},
+      codexConnectorNamespaces,
+    };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const aggregateToolBudget = new McpAggregateToolListBudget();
@@ -2606,7 +2758,7 @@ export async function prepareAgentTools(
         },
       );
       const fetchImpl = config.connectionRef
-        ? connectionBrokerFetch(guardedFetch, config, options)
+        ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
         : firstParty
           ? firstPartyAuthFetch(guardedFetch, settings, options)
           : guardedFetch;
@@ -2713,6 +2865,7 @@ export async function prepareAgentTools(
   }
   return {
     mcpServers: [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])],
+    resolvedMcpConnectionIds: new Map(resolvedMcpConnectionIds),
     close: async () => {
       let firstError: unknown;
       if (connectedBestEffort) {
@@ -2737,6 +2890,7 @@ function connectionBrokerFetch(
   baseFetch: FetchLike,
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
+  resolvedMcpConnectionIds: Map<string, string>,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
@@ -2756,6 +2910,7 @@ function connectionBrokerFetch(
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
     }
+    recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     const response = await baseFetch(
       fetchInputForAttempt(input),
       withConnectionHeaders(input, init, first.headers),
@@ -2773,6 +2928,7 @@ function connectionBrokerFetch(
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
+      recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       const retry = await baseFetch(
         fetchInputForAttempt(input),
         withConnectionHeaders(input, init, refreshed.headers),
@@ -2818,6 +2974,23 @@ function connectionBrokerFetch(
     }
     return response;
   };
+}
+
+function recordResolvedMcpConnectionId(
+  resolvedMcpConnectionIds: Map<string, string>,
+  config: Settings["mcpServers"][number],
+  connectionId: string,
+): void {
+  const staticConnectionId = config.connectionRef?.connectionId;
+  const existingConnectionId = resolvedMcpConnectionIds.get(config.id);
+  if (
+    connectionId.length === 0 ||
+    (staticConnectionId !== undefined && staticConnectionId !== connectionId) ||
+    (existingConnectionId !== undefined && existingConnectionId !== connectionId)
+  ) {
+    throw new Error("MCP connection identity changed during attempt preparation");
+  }
+  resolvedMcpConnectionIds.set(config.id, connectionId);
 }
 
 async function resolveConnectionForRequest(
