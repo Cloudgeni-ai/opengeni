@@ -89,7 +89,9 @@ import {
   SessionArchivePlanRequest as ContractSessionArchivePlanRequest,
   SessionArchivePlanResponse as ContractSessionArchivePlanResponse,
   SessionArchiveProjection as ContractSessionArchiveProjection,
+  SessionArchiveReceiptAuthority as ContractSessionArchiveReceiptAuthority,
   SessionArchiveReceiptEvidence as ContractSessionArchiveReceiptEvidence,
+  SessionArchiveReceiptPrecondition as ContractSessionArchiveReceiptPrecondition,
   SessionArchiveView as ContractSessionArchiveView,
 } from "@opengeni/contracts/session-archive";
 import type { z } from "zod";
@@ -158,7 +160,9 @@ import type {
   SessionArchivePlanRequest,
   SessionArchivePlanResponse,
   SessionArchiveProjection,
+  SessionArchiveReceiptAuthority,
   SessionArchiveReceiptEvidence,
+  SessionArchiveReceiptPrecondition,
   SessionArchiveView,
   SessionCapabilities,
   SessionEvent,
@@ -236,6 +240,12 @@ describe("SDK / contracts parity", () => {
     const acceptApplyResponse = (
       value: z.infer<typeof ContractSessionArchiveApplyResponse>,
     ): SessionArchiveApplyResponse => value;
+    const acceptReceiptAuthority = (
+      value: z.infer<typeof ContractSessionArchiveReceiptAuthority>,
+    ): SessionArchiveReceiptAuthority => value;
+    const acceptReceiptPrecondition = (
+      value: z.infer<typeof ContractSessionArchiveReceiptPrecondition>,
+    ): SessionArchiveReceiptPrecondition => value;
     const acceptReceiptEvidence = (
       value: z.infer<typeof ContractSessionArchiveReceiptEvidence>,
     ): SessionArchiveReceiptEvidence => value;
@@ -253,6 +263,8 @@ describe("SDK / contracts parity", () => {
         acceptDenial,
         acceptPlanResponse,
         acceptApplyResponse,
+        acceptReceiptAuthority,
+        acceptReceiptPrecondition,
         acceptReceiptEvidence,
         acceptPlanRequest,
         acceptApplyRequest,

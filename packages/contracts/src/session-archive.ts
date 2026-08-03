@@ -246,21 +246,99 @@ export const SessionArchiveApplyRequest = z
   });
 export type SessionArchiveApplyRequest = z.infer<typeof SessionArchiveApplyRequest>;
 
+export const SessionArchiveReceiptAuthority = z
+  .object({
+    /** Authenticated technical caller that submitted the mutation. */
+    actorSubjectId: z.string().min(1).max(1024),
+    /** Subject whose grant authorized the archive mutation. */
+    grantSubjectId: z.string().min(1).max(1024),
+    /** Exact permission or policy authority accepted by the server. */
+    grantAuthority: z.string().min(1).max(128),
+  })
+  .strict();
+export type SessionArchiveReceiptAuthority = z.infer<typeof SessionArchiveReceiptAuthority>;
+
+export const SessionArchiveReceiptPrecondition = z
+  .object({
+    /** Apply is permitted only after the locked closure proves zero blockers. */
+    blockerCount: z.literal(0),
+    memberCount: z.number().int().positive(),
+    checksum: SessionArchiveChecksum,
+  })
+  .strict();
+export type SessionArchiveReceiptPrecondition = z.infer<typeof SessionArchiveReceiptPrecondition>;
+
 export const SessionArchiveReceipt = z
   .object({
     id: z.string().uuid(),
     workspaceId: z.string().uuid(),
     action: SessionArchiveAction,
     operationKey: z.string().min(1),
+    idempotencyKey: z.string().min(1).max(200),
+    requestHash: SessionArchiveChecksum,
+    authority: SessionArchiveReceiptAuthority,
     manifestChecksum: SessionArchiveChecksum,
     rootChecksum: SessionArchiveChecksum,
     rootSessionId: z.string().uuid(),
+    /** Seal selected for release; null for archive. */
+    targetSealId: z.string().uuid().nullable(),
+    /** Seal created by archive; null for unarchive. */
+    resultingSealId: z.string().uuid().nullable(),
+    /** Compatibility alias for resultingSealId on archive and targetSealId on unarchive. */
     sealId: z.string().uuid(),
     memberCount: z.number().int().positive(),
+    precondition: SessionArchiveReceiptPrecondition,
     coverageChecksum: SessionArchiveChecksum,
-    committedAt: z.string(),
+    committedAt: z.string().datetime({ offset: true }),
   })
-  .strict();
+  .strict()
+  .superRefine((receipt, context) => {
+    if (receipt.operationKey !== receipt.idempotencyKey) {
+      context.addIssue({
+        code: "custom",
+        message: "operationKey must equal idempotencyKey",
+        path: ["operationKey"],
+      });
+    }
+    if (receipt.precondition.memberCount !== receipt.memberCount) {
+      context.addIssue({
+        code: "custom",
+        message: "precondition memberCount must equal receipt memberCount",
+        path: ["precondition", "memberCount"],
+      });
+    }
+    if (receipt.action === "archive") {
+      if (receipt.targetSealId !== null) {
+        context.addIssue({
+          code: "custom",
+          message: "archive receipt must not name a target seal",
+          path: ["targetSealId"],
+        });
+      }
+      if (receipt.resultingSealId === null || receipt.resultingSealId !== receipt.sealId) {
+        context.addIssue({
+          code: "custom",
+          message: "archive receipt sealId must equal its resulting seal",
+          path: ["resultingSealId"],
+        });
+      }
+    } else {
+      if (receipt.targetSealId === null || receipt.targetSealId !== receipt.sealId) {
+        context.addIssue({
+          code: "custom",
+          message: "unarchive receipt sealId must equal its target seal",
+          path: ["targetSealId"],
+        });
+      }
+      if (receipt.resultingSealId !== null) {
+        context.addIssue({
+          code: "custom",
+          message: "unarchive receipt must not name a resulting seal",
+          path: ["resultingSealId"],
+        });
+      }
+    }
+  });
 export type SessionArchiveReceipt = z.infer<typeof SessionArchiveReceipt>;
 
 export const SessionArchiveReceiptMember = z
@@ -290,7 +368,45 @@ export const SessionArchiveReceiptEvidence = z
     receipt: SessionArchiveReceipt,
     members: z.array(SessionArchiveReceiptMember),
   })
-  .strict();
+  .strict()
+  .superRefine((evidence, context) => {
+    if (evidence.members.length !== evidence.receipt.memberCount) {
+      context.addIssue({
+        code: "custom",
+        message: "receipt evidence member count differs from its compact receipt",
+        path: ["members"],
+      });
+    }
+    let previousSessionId: string | null = null;
+    for (const [index, member] of evidence.members.entries()) {
+      const sessionId = member.sessionId.toLowerCase();
+      if (member.sessionId !== sessionId) {
+        context.addIssue({
+          code: "custom",
+          message: "receipt evidence session IDs must be lower-case",
+          path: ["members", index, "sessionId"],
+        });
+      }
+      if (
+        member.parentSessionId !== null &&
+        member.parentSessionId !== member.parentSessionId.toLowerCase()
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "receipt evidence parent session IDs must be lower-case",
+          path: ["members", index, "parentSessionId"],
+        });
+      }
+      if (previousSessionId !== null && previousSessionId >= sessionId) {
+        context.addIssue({
+          code: "custom",
+          message: "receipt evidence members must be uniquely ordered by session ID",
+          path: ["members", index, "sessionId"],
+        });
+      }
+      previousSessionId = sessionId;
+    }
+  });
 export type SessionArchiveReceiptEvidence = z.infer<typeof SessionArchiveReceiptEvidence>;
 
 function canonicalUuid(value: string): string {

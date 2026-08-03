@@ -1,10 +1,12 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   canonicalizeSessionArchiveManifest,
+  SessionArchiveAction,
+  SessionArchiveChecksum as SessionArchiveChecksumSchema,
+  SessionArchiveReceiptAuthority,
   SessionArchiveReceiptMember,
   stringifySessionArchiveManifest,
   type CanonicalSessionArchiveManifest,
-  type SessionArchiveAction,
   type SessionArchiveManifestRoot,
 } from "@opengeni/contracts/session-archive";
 
@@ -18,26 +20,56 @@ function sha256(value: string): SessionArchiveChecksum {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
 
-export function sessionArchiveManifestChecksum(input: unknown): SessionArchiveChecksum {
-  return sha256(stringifySessionArchiveManifest(input));
+function canonicalUuid(value: string): string {
+  return value.toLowerCase();
 }
 
-export function sessionArchiveCoverageChecksum(input: {
-  workspaceId: string;
-  action: SessionArchiveAction;
-  rootSessionId: string;
-  sealId: string;
-  members: unknown[];
-}): SessionArchiveChecksum {
-  const workspaceId = input.workspaceId.toLowerCase();
-  const rootSessionId = input.rootSessionId.toLowerCase();
-  const sealId = input.sealId.toLowerCase();
-  const members = input.members
+function canonicalIdempotencyKey(value: string): string {
+  if (value.length < 1 || value.length > 200) {
+    throw new Error("Session archive idempotency key must contain 1-200 characters");
+  }
+  return value;
+}
+
+function canonicalTargetSealId(
+  action: SessionArchiveAction,
+  targetSealId: string | null,
+): string | null {
+  if (action === "archive") {
+    if (targetSealId !== null) {
+      throw new Error("Session archive request must not name a target seal");
+    }
+    return null;
+  }
+  if (targetSealId === null) {
+    throw new Error("Session unarchive request must name a target seal");
+  }
+  return canonicalUuid(targetSealId);
+}
+
+function canonicalResultingSealId(
+  action: SessionArchiveAction,
+  resultingSealId: string | null,
+): string | null {
+  if (action === "archive") {
+    if (resultingSealId === null) {
+      throw new Error("Session archive receipt must name its resulting seal");
+    }
+    return canonicalUuid(resultingSealId);
+  }
+  if (resultingSealId !== null) {
+    throw new Error("Session unarchive receipt must not name a resulting seal");
+  }
+  return null;
+}
+
+function canonicalReceiptMembers(input: unknown[]) {
+  const members = input
     .map((member) => {
       const parsed = SessionArchiveReceiptMember.parse(member);
       return {
-        sessionId: parsed.sessionId.toLowerCase(),
-        parentSessionId: parsed.parentSessionId?.toLowerCase() ?? null,
+        sessionId: canonicalUuid(parsed.sessionId),
+        parentSessionId: parsed.parentSessionId ? canonicalUuid(parsed.parentSessionId) : null,
         depth: parsed.depth,
         beforeArchiveRevision: parsed.beforeArchiveRevision,
         afterArchiveRevision: parsed.afterArchiveRevision,
@@ -53,18 +85,127 @@ export function sessionArchiveCoverageChecksum(input: {
     }
     seen.add(member.sessionId);
   }
+  return members;
+}
+
+function assertCoverageRoot(
+  members: ReturnType<typeof canonicalReceiptMembers>,
+  rootSessionId: string,
+): void {
   const root = members.find((member) => member.sessionId === rootSessionId);
   if (!root || root.depth !== 0) {
     throw new Error(`Session archive coverage must contain root ${rootSessionId} at depth 0`);
   }
+}
+
+export function sessionArchiveManifestChecksum(input: unknown): SessionArchiveChecksum {
+  return sha256(stringifySessionArchiveManifest(input));
+}
+
+export function sessionArchiveRequestHash(input: {
+  workspaceId: string;
+  action: SessionArchiveAction;
+  manifestChecksum: string;
+  rootSessionId: string;
+  rootChecksum: string;
+  targetSealId: string | null;
+  idempotencyKey: string;
+}): SessionArchiveChecksum {
+  const action = SessionArchiveAction.parse(input.action);
+  return sha256(
+    JSON.stringify({
+      format: "opengeni.session-archive-request",
+      version: 1,
+      workspaceId: canonicalUuid(input.workspaceId),
+      action,
+      manifestChecksum: SessionArchiveChecksumSchema.parse(input.manifestChecksum),
+      rootSessionId: canonicalUuid(input.rootSessionId),
+      rootChecksum: SessionArchiveChecksumSchema.parse(input.rootChecksum),
+      targetSealId: canonicalTargetSealId(action, input.targetSealId),
+      idempotencyKey: canonicalIdempotencyKey(input.idempotencyKey),
+    }),
+  );
+}
+
+export function sessionArchivePreconditionChecksum(input: {
+  workspaceId: string;
+  action: SessionArchiveAction;
+  manifestChecksum: string;
+  rootSessionId: string;
+  rootChecksum: string;
+  targetSealId: string | null;
+  blockerCount: number;
+  members: unknown[];
+}): SessionArchiveChecksum {
+  if (input.blockerCount !== 0) {
+    throw new Error("Session archive precondition proof requires zero blockers");
+  }
+  const action = SessionArchiveAction.parse(input.action);
+  const rootSessionId = canonicalUuid(input.rootSessionId);
+  const members = canonicalReceiptMembers(input.members);
+  assertCoverageRoot(members, rootSessionId);
+  return sha256(
+    JSON.stringify({
+      format: "opengeni.session-archive-precondition",
+      version: 1,
+      workspaceId: canonicalUuid(input.workspaceId),
+      action,
+      manifestChecksum: SessionArchiveChecksumSchema.parse(input.manifestChecksum),
+      rootSessionId,
+      rootChecksum: SessionArchiveChecksumSchema.parse(input.rootChecksum),
+      targetSealId: canonicalTargetSealId(action, input.targetSealId),
+      blockerCount: 0,
+      memberCount: members.length,
+      members: members.map((member) => ({
+        sessionId: member.sessionId,
+        parentSessionId: member.parentSessionId,
+        depth: member.depth,
+        beforeArchiveRevision: member.beforeArchiveRevision,
+        beforeArchived: member.beforeArchived,
+      })),
+    }),
+  );
+}
+
+export function sessionArchiveCoverageChecksum(input: {
+  workspaceId: string;
+  action: SessionArchiveAction;
+  manifestChecksum: string;
+  rootSessionId: string;
+  rootChecksum: string;
+  targetSealId: string | null;
+  resultingSealId: string | null;
+  requestHash: string;
+  idempotencyKey: string;
+  authority: unknown;
+  preconditionChecksum: string;
+  members: unknown[];
+}): SessionArchiveChecksum {
+  const workspaceId = canonicalUuid(input.workspaceId);
+  const action = SessionArchiveAction.parse(input.action);
+  const rootSessionId = canonicalUuid(input.rootSessionId);
+  const members = canonicalReceiptMembers(input.members);
+  assertCoverageRoot(members, rootSessionId);
+  const authority = SessionArchiveReceiptAuthority.parse(input.authority);
   return sha256(
     JSON.stringify({
       format: "opengeni.session-archive-coverage",
-      version: 1,
+      version: 2,
       workspaceId,
-      action: input.action,
+      action,
+      manifestChecksum: SessionArchiveChecksumSchema.parse(input.manifestChecksum),
       rootSessionId,
-      sealId,
+      rootChecksum: SessionArchiveChecksumSchema.parse(input.rootChecksum),
+      targetSealId: canonicalTargetSealId(action, input.targetSealId),
+      resultingSealId: canonicalResultingSealId(action, input.resultingSealId),
+      requestHash: SessionArchiveChecksumSchema.parse(input.requestHash),
+      idempotencyKey: canonicalIdempotencyKey(input.idempotencyKey),
+      authority: {
+        actorSubjectId: authority.actorSubjectId,
+        grantSubjectId: authority.grantSubjectId,
+        grantAuthority: authority.grantAuthority,
+      },
+      preconditionChecksum: SessionArchiveChecksumSchema.parse(input.preconditionChecksum),
       memberCount: members.length,
       members,
     }),

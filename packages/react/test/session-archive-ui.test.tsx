@@ -22,6 +22,8 @@ const RECEIPT_ID = "66666666-6666-4666-8666-666666666666";
 const MANIFEST_CHECKSUM = `sha256:${"a".repeat(64)}`;
 const ROOT_CHECKSUM = `sha256:${"b".repeat(64)}`;
 const COVERAGE_CHECKSUM = `sha256:${"c".repeat(64)}`;
+const REQUEST_HASH = `sha256:${"d".repeat(64)}`;
+const PRECONDITION_CHECKSUM = `sha256:${"e".repeat(64)}`;
 
 let mounted: RenderedComponent | null = null;
 
@@ -120,11 +122,25 @@ function applyFixture(
       workspaceId: WORKSPACE_ID,
       action,
       operationKey,
+      idempotencyKey: operationKey,
+      requestHash: REQUEST_HASH,
+      authority: {
+        actorSubjectId: "operator:authenticated-caller",
+        grantSubjectId: "operator:archive-grant",
+        grantAuthority: "workspace:admin",
+      },
       manifestChecksum: MANIFEST_CHECKSUM,
       rootChecksum: ROOT_CHECKSUM,
       rootSessionId: SESSION_ID,
+      targetSealId: action === "unarchive" ? SEAL_ID : null,
+      resultingSealId: action === "archive" ? SEAL_ID : null,
       sealId: SEAL_ID,
       memberCount: 2,
+      precondition: {
+        blockerCount: 0,
+        memberCount: 2,
+        checksum: PRECONDITION_CHECKSUM,
+      },
       coverageChecksum: COVERAGE_CHECKSUM,
       committedAt: "2026-07-19T00:00:00.000Z",
     },
@@ -273,6 +289,44 @@ describe("SessionArchiveDialog", () => {
       manifest: planFixture("archive").manifest,
     });
     expect(applied).toHaveLength(1);
+  });
+
+  test("fails closed when apply omits bound receipt authority evidence", async () => {
+    let applied = 0;
+    const client = fakeClient({
+      planSessionArchive: async () => planFixture("archive"),
+      applySessionArchive: async (_workspaceId, request) => {
+        const response = applyFixture("archive", archivedProjection, request.idempotencyKey);
+        response.receipt.authority.actorSubjectId = "";
+        return response;
+      },
+    });
+    mounted = await renderComponent(
+      <SessionArchiveDialog
+        action="archive"
+        sessionId={SESSION_ID}
+        open
+        onOpenChange={() => {}}
+        onApplied={() => {
+          applied += 1;
+        }}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+      />,
+    );
+    await flush();
+
+    await actRun(() =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>("[data-session-archive-confirm]")!
+        .click(),
+    );
+    await flush();
+
+    expect(mounted.container.querySelector('[role="alert"]')?.textContent).toContain(
+      "missing authority evidence",
+    );
+    expect(applied).toBe(0);
   });
 
   test("renders typed blockers and cannot apply until a new blocker-free plan exists", async () => {

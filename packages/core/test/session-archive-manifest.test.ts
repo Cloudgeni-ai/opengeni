@@ -11,6 +11,8 @@ import {
   assertSessionArchiveManifestChecksum,
   sessionArchiveCoverageChecksum,
   sessionArchiveManifestChecksum,
+  sessionArchivePreconditionChecksum,
+  sessionArchiveRequestHash,
   sessionArchiveRootChecksum,
 } from "../src/session-archive-manifest";
 
@@ -219,8 +221,16 @@ describe("session archive manifest", () => {
     ).toBe(false);
   });
 
-  test("binds sorted exact post-commit receipt coverage", () => {
+  test("binds canonical request, blocker-free precondition, and exact receipt coverage", () => {
     const sealId = "00000000-0000-4000-8000-000000000099";
+    const manifestChecksum = sessionArchiveManifestChecksum(manifest());
+    const rootChecksum = sessionArchiveRootChecksum(manifest(), rootA);
+    const idempotencyKey = `session-archive:${manifestChecksum.slice(7)}:${rootChecksum.slice(7)}`;
+    const authority = {
+      actorSubjectId: "operator:authenticated-caller",
+      grantSubjectId: "operator:archive-grant",
+      grantAuthority: "workspace:admin",
+    };
     const members = [
       {
         sessionId: childA,
@@ -241,31 +251,106 @@ describe("session archive manifest", () => {
         afterArchived: true,
       },
     ];
+    const requestHash = sessionArchiveRequestHash({
+      workspaceId,
+      action: "archive",
+      manifestChecksum,
+      rootSessionId: rootA,
+      rootChecksum,
+      targetSealId: null,
+      idempotencyKey,
+    });
+    const preconditionChecksum = sessionArchivePreconditionChecksum({
+      workspaceId,
+      action: "archive",
+      manifestChecksum,
+      rootSessionId: rootA,
+      rootChecksum,
+      targetSealId: null,
+      blockerCount: 0,
+      members,
+    });
     const checksum = sessionArchiveCoverageChecksum({
       workspaceId,
       action: "archive",
+      manifestChecksum,
       rootSessionId: rootA,
-      sealId,
+      rootChecksum,
+      targetSealId: null,
+      resultingSealId: sealId,
+      requestHash,
+      idempotencyKey,
+      authority,
+      preconditionChecksum,
       members,
     });
-    expect(checksum).toBe(
-      "sha256:fe0e8e7b377216aadd8f0ae77b128e9f467d2a6a61b4ac74310dfe0365895750",
-    );
+    expect(requestHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(preconditionChecksum).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(
+      sessionArchiveRequestHash({
+        workspaceId: workspaceId.toUpperCase(),
+        action: "archive",
+        manifestChecksum,
+        rootSessionId: rootA.toUpperCase(),
+        rootChecksum,
+        targetSealId: null,
+        idempotencyKey,
+      }),
+    ).toBe(requestHash);
+    expect(
+      sessionArchivePreconditionChecksum({
+        workspaceId: workspaceId.toUpperCase(),
+        action: "archive",
+        manifestChecksum,
+        rootSessionId: rootA.toUpperCase(),
+        rootChecksum,
+        targetSealId: null,
+        blockerCount: 0,
+        members: members.toReversed(),
+      }),
+    ).toBe(preconditionChecksum);
     expect(
       sessionArchiveCoverageChecksum({
         workspaceId: workspaceId.toUpperCase(),
         action: "archive",
+        manifestChecksum,
         rootSessionId: rootA.toUpperCase(),
-        sealId: sealId.toUpperCase(),
+        rootChecksum,
+        targetSealId: null,
+        resultingSealId: sealId.toUpperCase(),
+        requestHash,
+        idempotencyKey,
+        authority,
+        preconditionChecksum,
         members: members.toReversed(),
       }),
     ).toBe(checksum);
     expect(() =>
+      sessionArchivePreconditionChecksum({
+        workspaceId,
+        action: "archive",
+        manifestChecksum,
+        rootSessionId: rootA,
+        rootChecksum,
+        targetSealId: null,
+        blockerCount: 1,
+        members,
+      }),
+    ).toThrow("requires zero blockers");
+    expect(() =>
       sessionArchiveCoverageChecksum({
         workspaceId,
         action: "archive",
+        manifestChecksum,
         rootSessionId: rootA,
-        sealId,
+        rootChecksum,
+        targetSealId: null,
+        resultingSealId: sealId,
+        requestHash,
+        idempotencyKey,
+        authority,
+        preconditionChecksum,
         members: [members[0], members[0]],
       }),
     ).toThrow(`Duplicate session archive coverage member ${childA}`);

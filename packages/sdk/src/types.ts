@@ -341,16 +341,32 @@ export type SessionArchiveApplyRequest = {
   rootChecksum: SessionArchiveChecksum;
   idempotencyKey: string;
 };
+export type SessionArchiveReceiptAuthority = {
+  actorSubjectId: string;
+  grantSubjectId: string;
+  grantAuthority: string;
+};
+export type SessionArchiveReceiptPrecondition = {
+  blockerCount: 0;
+  memberCount: number;
+  checksum: SessionArchiveChecksum;
+};
 export type SessionArchiveReceipt = {
   id: string;
   workspaceId: string;
   action: SessionArchiveAction;
   operationKey: string;
+  idempotencyKey: string;
+  requestHash: SessionArchiveChecksum;
+  authority: SessionArchiveReceiptAuthority;
   manifestChecksum: SessionArchiveChecksum;
   rootChecksum: SessionArchiveChecksum;
   rootSessionId: string;
+  targetSealId: string | null;
+  resultingSealId: string | null;
   sealId: string;
   memberCount: number;
+  precondition: SessionArchiveReceiptPrecondition;
   coverageChecksum: SessionArchiveChecksum;
   committedAt: string;
 };

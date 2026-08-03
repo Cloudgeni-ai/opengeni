@@ -119,16 +119,44 @@ function validateApplyResponse(
     receipt.action !== expected.action ||
     receipt.rootSessionId !== expected.sessionId ||
     receipt.operationKey !== operationKey ||
+    receipt.idempotencyKey !== operationKey ||
     receipt.manifestChecksum !== plan.manifestChecksum ||
     receipt.rootChecksum !== plannedRoot.rootChecksum ||
-    receipt.memberCount !== plannedRoot.memberCount
+    receipt.targetSealId !== expected.targetSealId ||
+    receipt.memberCount !== plannedRoot.memberCount ||
+    receipt.precondition.blockerCount !== 0 ||
+    receipt.precondition.memberCount !== plannedRoot.memberCount
   ) {
     throw new Error("Archive receipt does not match the confirmed plan.");
   }
-  if (!ARCHIVE_CHECKSUM_PATTERN.test(receipt.coverageChecksum)) {
-    throw new Error("Archive receipt has an invalid coverage checksum.");
+  if (
+    !ARCHIVE_CHECKSUM_PATTERN.test(receipt.requestHash) ||
+    !ARCHIVE_CHECKSUM_PATTERN.test(receipt.precondition.checksum) ||
+    !ARCHIVE_CHECKSUM_PATTERN.test(receipt.coverageChecksum)
+  ) {
+    throw new Error("Archive receipt has invalid evidence checksums.");
   }
-  if (expected.action === "unarchive" && receipt.sealId !== expected.targetSealId) {
+  if (
+    !receipt.authority.actorSubjectId ||
+    !receipt.authority.grantSubjectId ||
+    !receipt.authority.grantAuthority
+  ) {
+    throw new Error("Archive receipt is missing authority evidence.");
+  }
+  if (
+    expected.action === "archive" &&
+    (receipt.targetSealId !== null ||
+      receipt.resultingSealId === null ||
+      receipt.sealId !== receipt.resultingSealId)
+  ) {
+    throw new Error("Archive receipt did not bind the resulting archive seal.");
+  }
+  if (
+    expected.action === "unarchive" &&
+    (receipt.targetSealId !== expected.targetSealId ||
+      receipt.resultingSealId !== null ||
+      receipt.sealId !== expected.targetSealId)
+  ) {
     throw new Error("Unarchive receipt released a different archive seal.");
   }
   if (expected.action === "archive" && !response.rootArchive.archived) {

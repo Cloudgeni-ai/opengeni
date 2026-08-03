@@ -13,6 +13,8 @@ import {
 import {
   assertSessionArchiveManifestChecksum,
   sessionArchiveCoverageChecksum,
+  sessionArchivePreconditionChecksum,
+  sessionArchiveRequestHash,
   sessionArchiveRootChecksum,
   type SessionArchiveChecksum,
 } from "./session-archive-manifest";
@@ -154,8 +156,34 @@ function verifyReceiptIdentity(input: {
   if (receipt.memberCount !== root.memberCount) {
     operatorError(`receipt ${receipt.id} member count differs from the manifest`);
   }
-  if (receipt.operationKey !== deterministicOperationKey(manifestChecksum, rootChecksum)) {
-    operatorError(`receipt ${receipt.id} operation key differs from the deterministic request`);
+  const expectedOperationKey =
+    input.expectedOperationKey ?? deterministicOperationKey(manifestChecksum, rootChecksum);
+  if (
+    receipt.operationKey !== expectedOperationKey ||
+    receipt.idempotencyKey !== expectedOperationKey
+  ) {
+    operatorError(`receipt ${receipt.id} idempotency key differs from the deterministic request`);
+  }
+  const requestHash = sessionArchiveRequestHash({
+    workspaceId: manifest.workspaceId,
+    action: manifest.action,
+    manifestChecksum,
+    rootSessionId: root.rootSessionId,
+    rootChecksum,
+    targetSealId: root.targetSealId,
+    idempotencyKey: expectedOperationKey,
+  });
+  if (receipt.requestHash !== requestHash) {
+    operatorError(`receipt ${receipt.id} request hash differs from the deterministic request`);
+  }
+  if ((receipt.targetSealId?.toLowerCase() ?? null) !== root.targetSealId) {
+    operatorError(`receipt ${receipt.id} target seal differs from the manifest`);
+  }
+  if (
+    manifest.action === "archive" &&
+    receipt.resultingSealId?.toLowerCase() !== receipt.sealId.toLowerCase()
+  ) {
+    operatorError(`receipt ${receipt.id} did not bind its resulting archive seal`);
   }
   if (
     manifest.action === "unarchive" &&
@@ -241,11 +269,32 @@ export function verifySessionArchiveReceiptEvidence(input: {
     }
   }
 
+  const preconditionChecksum = sessionArchivePreconditionChecksum({
+    workspaceId: manifest.workspaceId,
+    action: manifest.action,
+    manifestChecksum,
+    rootSessionId: root.rootSessionId,
+    rootChecksum,
+    targetSealId: root.targetSealId,
+    blockerCount: evidence.receipt.precondition.blockerCount,
+    members: evidence.members,
+  });
+  if (evidence.receipt.precondition.checksum !== preconditionChecksum) {
+    operatorError(`receipt ${evidence.receipt.id} precondition checksum is invalid`);
+  }
+
   const coverageChecksum = sessionArchiveCoverageChecksum({
     workspaceId: manifest.workspaceId,
     action: manifest.action,
+    manifestChecksum,
     rootSessionId: root.rootSessionId,
-    sealId: evidence.receipt.sealId,
+    rootChecksum,
+    targetSealId: evidence.receipt.targetSealId,
+    resultingSealId: evidence.receipt.resultingSealId,
+    requestHash: evidence.receipt.requestHash,
+    idempotencyKey: evidence.receipt.idempotencyKey,
+    authority: evidence.receipt.authority,
+    preconditionChecksum,
     members: evidence.members,
   });
   if (evidence.receipt.coverageChecksum !== coverageChecksum) {

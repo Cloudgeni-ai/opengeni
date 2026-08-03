@@ -11,6 +11,8 @@ import {
 import {
   sessionArchiveCoverageChecksum,
   sessionArchiveManifestChecksum,
+  sessionArchivePreconditionChecksum,
+  sessionArchiveRequestHash,
   sessionArchiveRootChecksum,
 } from "../src/session-archive-manifest";
 import {
@@ -26,6 +28,11 @@ const childA = "00000000-0000-4000-8000-000000000011";
 const rootB = "00000000-0000-4000-8000-000000000020";
 const sealA = "00000000-0000-4000-8000-000000000030";
 const sealB = "00000000-0000-4000-8000-000000000031";
+const receiptAuthority = {
+  actorSubjectId: "operator:authenticated-caller",
+  grantSubjectId: "operator:archive-grant",
+  grantAuthority: "workspace:admin",
+} as const;
 
 function archiveManifest(): CanonicalSessionArchiveManifest {
   return canonicalizeSessionArchiveManifest({
@@ -93,11 +100,39 @@ function receiptEvidence(input: {
     beforeArchived: member.expectedArchived,
     afterArchived: input.afterArchived ?? input.manifest.action === "archive",
   }));
+  const targetSealId = input.manifest.action === "unarchive" ? input.root.targetSealId : null;
+  const resultingSealId = input.manifest.action === "archive" ? input.sealId : null;
+  const requestHash = sessionArchiveRequestHash({
+    workspaceId,
+    action: input.manifest.action,
+    manifestChecksum,
+    rootSessionId: input.root.rootSessionId,
+    rootChecksum,
+    targetSealId,
+    idempotencyKey: input.operationKey,
+  });
+  const preconditionChecksum = sessionArchivePreconditionChecksum({
+    workspaceId,
+    action: input.manifest.action,
+    manifestChecksum,
+    rootSessionId: input.root.rootSessionId,
+    rootChecksum,
+    targetSealId,
+    blockerCount: 0,
+    members,
+  });
   const coverageChecksum = sessionArchiveCoverageChecksum({
     workspaceId,
     action: input.manifest.action,
+    manifestChecksum,
     rootSessionId: input.root.rootSessionId,
-    sealId: input.sealId,
+    rootChecksum,
+    targetSealId,
+    resultingSealId,
+    requestHash,
+    idempotencyKey: input.operationKey,
+    authority: receiptAuthority,
+    preconditionChecksum,
     members,
   });
   return {
@@ -106,11 +141,21 @@ function receiptEvidence(input: {
       workspaceId,
       action: input.manifest.action,
       operationKey: input.operationKey,
+      idempotencyKey: input.operationKey,
+      requestHash,
+      authority: receiptAuthority,
       manifestChecksum,
       rootChecksum,
       rootSessionId: input.root.rootSessionId,
+      targetSealId,
+      resultingSealId,
       sealId: input.sealId,
       memberCount: input.root.memberCount,
+      precondition: {
+        blockerCount: 0,
+        memberCount: input.root.memberCount,
+        checksum: preconditionChecksum,
+      },
       coverageChecksum,
       committedAt: "2026-07-19T00:00:00.000Z",
     },
@@ -285,7 +330,7 @@ describe("session archive bulk operator", () => {
         manifest,
         approvedManifestChecksum: sessionArchiveManifestChecksum(manifest),
       }),
-    ).rejects.toThrow("operation key differs from the deterministic request");
+    ).rejects.toThrow("idempotency key differs from the deterministic request");
     expect(client.requests).toHaveLength(0);
   });
 
@@ -309,6 +354,67 @@ describe("session archive bulk operator", () => {
       }),
     ).rejects.toThrow("coverage checksum is invalid");
     expect(client.requests).toHaveLength(0);
+  });
+
+  test("rejects tampered request, authority, seal, precondition, and member identity", () => {
+    const manifest = archiveManifest();
+    const root = manifest.roots[0]!;
+    const evidence = receiptEvidence({
+      manifest,
+      root,
+      receiptId: "00000000-0000-4000-8000-000000000056",
+      sealId: sealA,
+      operationKey: operationKey(manifest, root),
+    });
+    const verify = (candidate: SessionArchiveReceiptEvidence) =>
+      verifySessionArchiveReceiptEvidence({
+        evidence: candidate,
+        manifest,
+        manifestChecksum: sessionArchiveManifestChecksum(manifest),
+        rootSessionId: root.rootSessionId,
+        rootChecksum: sessionArchiveRootChecksum(manifest, root.rootSessionId),
+      });
+
+    const wrongRequestHash = structuredClone(evidence);
+    wrongRequestHash.receipt.requestHash = `sha256:${"1".repeat(64)}`;
+    expect(() => verify(wrongRequestHash)).toThrow(
+      "request hash differs from the deterministic request",
+    );
+
+    for (const mutate of [
+      (candidate: SessionArchiveReceiptEvidence) => {
+        candidate.receipt.authority.actorSubjectId = "operator:another-actor";
+      },
+      (candidate: SessionArchiveReceiptEvidence) => {
+        candidate.receipt.authority.grantSubjectId = "operator:another-grant";
+      },
+      (candidate: SessionArchiveReceiptEvidence) => {
+        candidate.receipt.authority.grantAuthority = "sessions:control";
+      },
+    ]) {
+      const wrongAuthority = structuredClone(evidence);
+      mutate(wrongAuthority);
+      expect(() => verify(wrongAuthority)).toThrow("coverage checksum is invalid");
+    }
+
+    const wrongResultingSeal = structuredClone(evidence);
+    wrongResultingSeal.receipt.resultingSealId = sealB;
+    wrongResultingSeal.receipt.sealId = sealB;
+    expect(() => verify(wrongResultingSeal)).toThrow("coverage checksum is invalid");
+
+    const wrongPrecondition = structuredClone(evidence);
+    wrongPrecondition.receipt.precondition.checksum = `sha256:${"2".repeat(64)}`;
+    expect(() => verify(wrongPrecondition)).toThrow("precondition checksum is invalid");
+
+    const wrongBeforeRevision = structuredClone(evidence);
+    wrongBeforeRevision.members[0]!.beforeArchiveRevision = "999";
+    expect(() => verify(wrongBeforeRevision)).toThrow("violated the revision fence");
+
+    const wrongOrder = structuredClone(evidence);
+    wrongOrder.members.reverse();
+    expect(() => verify(wrongOrder)).toThrow(
+      "receipt evidence members must be uniquely ordered by session ID",
+    );
   });
 
   test("rejects a compact receipt that disagrees with its durable evidence", async () => {
@@ -385,14 +491,8 @@ describe("session archive bulk operator", () => {
     ).toBe(evidence.receipt.id);
 
     const wrongSeal = structuredClone(evidence);
+    wrongSeal.receipt.targetSealId = sealB;
     wrongSeal.receipt.sealId = sealB;
-    wrongSeal.receipt.coverageChecksum = sessionArchiveCoverageChecksum({
-      workspaceId,
-      action: "unarchive",
-      rootSessionId: rootA,
-      sealId: sealB,
-      members: wrongSeal.members,
-    });
     expect(() =>
       verifySessionArchiveReceiptEvidence({
         evidence: wrongSeal,
@@ -401,6 +501,6 @@ describe("session archive bulk operator", () => {
         rootSessionId: rootA,
         rootChecksum: sessionArchiveRootChecksum(manifest, rootA),
       }),
-    ).toThrow("released a seal other than the manifest target");
+    ).toThrow("target seal differs from the manifest");
   });
 });

@@ -20,6 +20,8 @@ const ARCHIVE_RECEIPT_ID = "55555555-5555-4555-8555-555555555555";
 const MANIFEST_CHECKSUM = `sha256:${"a".repeat(64)}`;
 const ROOT_CHECKSUM = `sha256:${"b".repeat(64)}`;
 const COVERAGE_CHECKSUM = `sha256:${"c".repeat(64)}`;
+const REQUEST_HASH = `sha256:${"d".repeat(64)}`;
+const PRECONDITION_CHECKSUM = `sha256:${"e".repeat(64)}`;
 
 const params = new URLSearchParams(window.location.search);
 const action = params.get("action") === "unarchive" ? "unarchive" : "archive";
@@ -120,17 +122,33 @@ class ArchiveHarnessClient extends MockOpenGeniClient {
     request: SessionArchiveApplyRequest,
   ): Promise<SessionArchiveApplyResponse> {
     const applyAction = request.manifest!.action;
+    const targetSealId = request.manifest!.roots[0]!.targetSealId;
+    const sealId = applyAction === "archive" ? ARCHIVE_SEAL_ID : targetSealId!;
     return {
       receipt: {
         id: ARCHIVE_RECEIPT_ID,
         workspaceId,
         action: applyAction,
         operationKey: request.idempotencyKey,
+        idempotencyKey: request.idempotencyKey,
+        requestHash: REQUEST_HASH,
+        authority: {
+          actorSubjectId: "operator:authenticated-caller",
+          grantSubjectId: "operator:archive-grant",
+          grantAuthority: "workspace:admin",
+        },
         manifestChecksum: request.manifestChecksum,
         rootChecksum: request.rootChecksum,
         rootSessionId: request.rootSessionId,
-        sealId: ARCHIVE_SEAL_ID,
+        targetSealId,
+        resultingSealId: applyAction === "archive" ? sealId : null,
+        sealId,
         memberCount: 2,
+        precondition: {
+          blockerCount: 0,
+          memberCount: 2,
+          checksum: PRECONDITION_CHECKSUM,
+        },
         coverageChecksum: COVERAGE_CHECKSUM,
         committedAt: "2026-07-19T00:00:01.000Z",
       },

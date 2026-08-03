@@ -207,8 +207,17 @@ receipt binds:
 - workspace, action, root, target/new seal, manifest and per-root checksums;
 - canonical request hash and idempotency key;
 - exact ordered member set and before/after revisions/states;
-- actor/grant subject and commit timestamp;
+- actor/grant subject and exact grant authority plus commit timestamp;
 - blocker-free precondition proof and post-commit coverage checksum.
+
+The wire receipt names `targetSealId` only for unarchive and `resultingSealId`
+only for archive. `sealId` remains the compact compatibility alias for the one
+non-null operation seal and must equal the action-appropriate explicit field.
+`operationKey` and `idempotencyKey` likewise identify the same deterministic
+per-root replay key. Coverage checksum v2 binds those fields, the canonical
+request hash, authority tuple, precondition checksum, and the ordered durable
+member evidence; the operator independently recomputes every envelope before
+trusting a new or resumed receipt.
 
 Replaying the same key and checksum returns the committed receipt. Reusing a key
 with another request is a typed idempotency conflict. A stale checksum/revision
