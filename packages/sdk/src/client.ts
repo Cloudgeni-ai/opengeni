@@ -337,7 +337,7 @@ export class OpenGeniClient {
 
   // --- Session lifecycle ---------------------------------------------------
 
-  /** Upload one ephemeral browser recording. This method never retries. */
+  /** Make one finalization attempt for a recording; callers may retry retained audio. */
   async transcribeAudio(
     workspaceId: string,
     input: TranscribeAudioInput,

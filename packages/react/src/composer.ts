@@ -71,9 +71,31 @@ export type {
   ComposerTranscriptionControlProps,
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
-export { useVoiceInput } from "./hooks/use-voice-input";
+export { VOICE_RECORDING_TIMESLICE_MILLISECONDS, useVoiceInput } from "./hooks/use-voice-input";
 export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
   VoiceInputStatus,
 } from "./hooks/use-voice-input";
+export {
+  IndexedDbVoiceRecordingStore,
+  VoiceRecordingChunkConflictError,
+  VoiceRecordingChunkSequenceError,
+  VoiceRecordingNotFoundError,
+  VoiceRecordingStorageUnavailableError,
+  createVoiceRecordingManifest,
+  planVoiceRecordingChunkCommit,
+  prepareVoiceRecordingChunk,
+} from "./voice-recording-store";
+export type {
+  PersistVoiceRecordingChunkInput,
+  PersistVoiceRecordingChunkResult,
+  VoiceRecordingCaptureState,
+  VoiceRecordingChunk,
+  VoiceRecordingChunkUploadState,
+  VoiceRecordingFinalizationState,
+  VoiceRecordingManifest,
+  VoiceRecordingStore,
+  VoiceRecordingTranscriptionState,
+  VoiceRecordingUploadState,
+} from "./voice-recording-store";

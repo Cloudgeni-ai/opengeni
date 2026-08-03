@@ -224,7 +224,7 @@ describe("native voice input contracts", () => {
       acceptedMimeTypes: ["audio/webm", "audio/mp4"],
     });
     expect(capability.available).toBe(true);
-    expect(capability.maxDurationSeconds).toBe(60);
+    expect(capability.maxDurationSeconds).toBe(1_800);
     expect(
       ClientVoiceInputConfig.safeParse({
         available: true,

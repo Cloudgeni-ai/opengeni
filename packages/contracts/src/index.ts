@@ -1148,7 +1148,7 @@ export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSett
 export const ClientVoiceInputConfig = z
   .object({
     available: z.boolean(),
-    maxDurationSeconds: z.number().int().positive().max(600),
+    maxDurationSeconds: z.number().int().positive().max(7_200),
     maxSizeBytes: z.number().int().positive(),
     acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
   })
@@ -1164,8 +1164,8 @@ export const TranscribeAudioResponse = z
   .strict();
 export type TranscribeAudioResponse = z.infer<typeof TranscribeAudioResponse>;
 
-/** Default ceilings for native voice input (hard-stop recording + upload). */
-export const VOICE_INPUT_MAX_DURATION_SECONDS = 60 as const;
+/** Default safety ceiling for durable native voice input (30 minutes). */
+export const VOICE_INPUT_MAX_DURATION_SECONDS = 1_800 as const;
 export const VOICE_INPUT_MAX_SIZE_BYTES = 25 * 1024 * 1024;
 export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
   "audio/webm",

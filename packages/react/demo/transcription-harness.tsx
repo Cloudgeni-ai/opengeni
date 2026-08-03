@@ -16,7 +16,7 @@ else delete document.documentElement.dataset.ogTheme;
 
 const capability: ClientVoiceInputConfig = {
   available: true,
-  maxDurationSeconds: 60,
+  maxDurationSeconds: 1800,
   maxSizeBytes: 25 * 1024 * 1024,
   acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
 };
@@ -37,9 +37,18 @@ class FixtureMediaRecorder {
   ) {
     this.mimeType = options?.mimeType ?? "audio/webm";
   }
-  start() {
+  start(timeslice?: number) {
     this.state = "recording";
     document.documentElement.dataset.transcriptionStatus = "recording";
+    document.documentElement.dataset.transcriptionTimeslice = String(timeslice ?? 0);
+    setTimeout(() => {
+      if (this.state !== "recording") return;
+      this.ondataavailable?.({
+        data: new Blob([new Uint8Array([9, 8, 7, 6])], { type: this.mimeType }),
+        timecode: timeslice ?? 5_000,
+      } as BlobEvent);
+      document.documentElement.dataset.transcriptionChunkEmitted = "true";
+    }, 0);
   }
   stop() {
     this.state = "inactive";
@@ -64,10 +73,15 @@ function installBrowserFixtures(mode: FixtureMode) {
           ? async () => {
               throw new DOMException("Permission denied", "NotAllowedError");
             }
-          : async () =>
-              ({
+          : async () => {
+              const requests = Number(
+                document.documentElement.dataset.transcriptionMicRequests ?? "0",
+              );
+              document.documentElement.dataset.transcriptionMicRequests = String(requests + 1);
+              return {
                 getTracks: () => [track],
-              }) as unknown as MediaStream,
+              } as unknown as MediaStream;
+            },
     },
   });
   Object.defineProperty(window, "MediaRecorder", {

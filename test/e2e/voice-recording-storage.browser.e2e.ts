@@ -48,22 +48,28 @@ describe("durable voice recording browser storage", () => {
     const databaseName = `opengeni-voice-test-${crypto.randomUUID()}`;
     const recordingId = crypto.randomUUID();
     const initial = await page.evaluate(
-      async ({ source, databaseName, recordingId }) => {
+      async ({
+        source,
+        databaseName: requestedDatabaseName,
+        recordingId: requestedRecordingId,
+      }) => {
         const moduleUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
         const storage = (await import(
           moduleUrl
         )) as typeof import("../../packages/react/src/voice-recording-store");
         URL.revokeObjectURL(moduleUrl);
-        const store = new storage.IndexedDbVoiceRecordingStore({ databaseName });
+        const store = new storage.IndexedDbVoiceRecordingStore({
+          databaseName: requestedDatabaseName,
+        });
         const manifest = storage.createVoiceRecordingManifest({
-          recordingId,
+          recordingId: requestedRecordingId,
           workspaceId: "workspace-1",
           mimeType: "audio/webm;codecs=opus",
           createdAt: "2026-08-03T21:00:00.000Z",
         });
         await store.createManifest(manifest);
         const persisted = await store.persistChunk({
-          recordingId,
+          recordingId: requestedRecordingId,
           chunkNumber: 0,
           capturedAt: "2026-08-03T21:00:05.000Z",
           startMilliseconds: 0,
@@ -87,17 +93,23 @@ describe("durable voice recording browser storage", () => {
     await page.reload();
 
     const recovered = await page.evaluate(
-      async ({ source, databaseName, recordingId }) => {
+      async ({
+        source,
+        databaseName: requestedDatabaseName,
+        recordingId: requestedRecordingId,
+      }) => {
         const moduleUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
         const storage = (await import(
           moduleUrl
         )) as typeof import("../../packages/react/src/voice-recording-store");
         URL.revokeObjectURL(moduleUrl);
-        const store = new storage.IndexedDbVoiceRecordingStore({ databaseName });
+        const store = new storage.IndexedDbVoiceRecordingStore({
+          databaseName: requestedDatabaseName,
+        });
         const manifests = await store.listRecoverableManifests("workspace-1");
-        const chunks = await store.listChunks(recordingId);
+        const chunks = await store.listChunks(requestedRecordingId);
         const duplicate = await store.persistChunk({
-          recordingId,
+          recordingId: requestedRecordingId,
           chunkNumber: 0,
           capturedAt: "2026-08-03T21:00:05.000Z",
           startMilliseconds: 0,
@@ -110,7 +122,7 @@ describe("durable voice recording browser storage", () => {
         let conflictName: string | null = null;
         try {
           await store.persistChunk({
-            recordingId,
+            recordingId: requestedRecordingId,
             chunkNumber: 0,
             capturedAt: "2026-08-03T21:00:05.000Z",
             startMilliseconds: 0,
@@ -123,11 +135,11 @@ describe("durable voice recording browser storage", () => {
         } catch (error) {
           conflictName = error instanceof Error ? error.name : "unknown";
         }
-        await store.discard(recordingId);
+        await store.discard(requestedRecordingId);
         const afterDiscard = await store.listRecoverableManifests("workspace-1");
         await store.close();
         await new Promise<void>((resolve, reject) => {
-          const deletion = indexedDB.deleteDatabase(databaseName);
+          const deletion = indexedDB.deleteDatabase(requestedDatabaseName);
           deletion.onsuccess = () => resolve();
           deletion.onerror = () => reject(deletion.error);
           deletion.onblocked = () => reject(new Error("Test database deletion was blocked."));

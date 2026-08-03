@@ -363,7 +363,7 @@ const SettingsSchema = z.object({
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
   // the same clip across vendors after an upstream request may have started.
-  voiceInputMaxDurationSeconds: z.coerce.number().int().positive().max(600).default(60),
+  voiceInputMaxDurationSeconds: z.coerce.number().int().positive().max(7_200).default(1_800),
   voiceInputMaxSizeBytes: z.coerce
     .number()
     .int()

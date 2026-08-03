@@ -10,24 +10,32 @@ message by itself.
   draft**. While recording, chrome shows a compact waveform plus separate **Cancel**
   (discard) and **Stop** (transcribe) actions. Provider, model, credential, and region
   choices never appear beside the microphone or in Workspace settings for end users.
-- Click microphone → record locally → press stop → **immediately** upload and
-  transcribe with no extra click → append the transcript to the editable draft.
-  Cancel (or Escape) discards without uploading.
+- Click microphone → record locally in durable five-second chunks → press stop →
+  **automatically** assemble, upload, and transcribe with no extra click → append the
+  transcript to the editable draft. Cancel (or Escape) while recording discards without
+  uploading.
 - The transcript does **not** auto-submit as an agent message. Ordinary Send still
   sends the message.
-- Escape cancels or discards an in-flight recording/transcription. Recording hard-stops
-  at 60 seconds (`ClientConfig.voiceInput.maxDurationSeconds`).
-- Audio exists only in browser memory and the in-flight API request buffer. It is never
-  persisted, logged, or written to object storage. Transcript text is returned once to
-  the client and is not stored server-side by the transcription path.
+- Escape during saving or transcription aborts the in-flight work but retains the same
+  locally recoverable recording. Recording stops at the configurable
+  `ClientConfig.voiceInput.maxDurationSeconds` ceiling (30 minutes by default, up to
+  2 hours).
+- Audio chunks and their manifest are persisted in browser IndexedDB before the UI marks
+  them locally saved. Stop assembles those persisted chunks for the existing one-shot API
+  upload. A failed or interrupted finalization remains recoverable across reload and Retry
+  reuses the same recording; a successful draft append discards the local copy. The
+  transcription path does not log audio or write it to server object storage, and does not
+  store transcript text server-side.
 - Controlled error codes map to local UI copy. Provider names, secrets, and raw upstream
   detail never appear in client config or composer chrome.
 
 ## Trust boundary and data flow
 
 ```text
-Browser MediaRecorder
-  -> OpenGeni SDK transcribeAudio (multipart, no retry)
+Browser MediaRecorder (5s chunks)
+  -> IndexedDB recording manifest + Blob chunks
+  -> assemble persisted chunks
+  -> OpenGeni SDK transcribeAudio (one multipart finalization attempt)
   -> POST /v1/workspaces/:workspaceId/transcriptions
   -> server provider registry (select once before send)
   -> OpenAI gpt-transcribe | Azure deployment transcriptions
@@ -62,7 +70,7 @@ use `voiceInput`.
 | Service port | `packages/core/src/transcription.ts` |
 | API providers + route | `apps/api/src/transcription/`, `apps/api/src/routes/transcriptions.ts` |
 | SDK binary call | `packages/sdk/src/client.ts` (`transcribeAudio`) |
-| React MediaRecorder lifecycle | `packages/react/src/hooks/use-voice-input.ts` |
+| React MediaRecorder lifecycle + recovery | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-store.ts` |
 | Microphone control | `packages/react/src/components/composer-transcription-control.tsx` |
 | Workspace toggle UI | `apps/web/src/components/transcription-settings.tsx` |
 
@@ -102,13 +110,21 @@ an active workspace Codex credential at selection/request time.
 
 ## Lifecycle requirements
 
-1. Browser requests microphone permission, then records with a negotiated MIME type
-   (`webm/opus`, then `mp4`, then `ogg/opus`).
-2. Stop (user click or 60s hard-stop) finalizes the `MediaRecorder` blob and immediately
-   calls `transcribeAudio`.
-3. React fences callbacks by generation so late responses after Escape/unmount/replace
-   cannot append to the draft.
-4. Tracks are stopped on every exit path.
-5. Empty/whitespace transcripts do not change the draft.
-6. Workspace disablement and missing deployment configuration hide or block the mic
-   without inventing provider controls in product UI.
+1. Browser creates a recording manifest before starting microphone capture, negotiates a
+   MIME type (`webm/opus`, then `mp4`, then `ogg/opus`), and asks `MediaRecorder` for a
+   chunk every five seconds.
+2. Each chunk is written to IndexedDB with its sequence, timing, codec, size, and SHA-256
+   integrity metadata before the UI reports that audio as locally saved. A storage failure
+   stops capture and fails closed instead of continuing with memory-only audio.
+3. Stop (user click or the configured duration ceiling) waits for pending chunk writes,
+   marks capture stopped, assembles the persisted chunks in order, and calls
+   `transcribeAudio` through the existing one-shot multipart endpoint.
+4. Upload/provider errors and aborts retain the recording. Mount/reload recovery exposes
+   the latest recoverable manifest, Retry reuses it without reopening the microphone, and
+   explicit discard removes it. Successful transcript append marks handoff complete and
+   removes the local recording.
+5. React fences callbacks by generation so late responses after Escape/unmount/replace
+   cannot append to the draft, and tracks are stopped on every exit path.
+6. Empty/whitespace transcripts do not change the draft. Workspace disablement and
+   missing deployment configuration hide or block the mic without inventing provider
+   controls in product UI.
