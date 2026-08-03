@@ -26,6 +26,7 @@ import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
+import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { SessionPersonalConnectionDisclosure } from "@/components/capabilities/session-personal-connection-disclosure";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
@@ -1079,6 +1080,19 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+            controlsLeading={
+              <ComposerMobilePlus
+                disabled={terminal || composer.sending}
+                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                servers={selectableSessionMcpServers}
+                firstPartyTools={firstPartySessionToolOptions}
+                selection={durableToolSelection}
+                toolsDisabled={
+                  composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                }
+                onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+              />
+            }
             actions={
               !terminal ? (
                 <Suspense fallback={null}>
@@ -1112,7 +1126,7 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="flex min-w-0 items-center gap-1.5">
+              <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
                 <ModelPicker
                   rows={modelCatalog.rows}
                   model={model}
@@ -1142,6 +1156,7 @@ function SessionChatPane(props: {
                   servers={selectableSessionMcpServers}
                   firstPartyTools={firstPartySessionToolOptions}
                   selection={durableToolSelection}
+                  triggerClassName="max-sm:hidden"
                   disabled={
                     composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                   }

@@ -147,7 +147,7 @@ export function ComposerTranscriptionControl({
             transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
               "inline-flex h-8 items-center gap-1 rounded-og-md border border-og-border/80",
-              "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
+              "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-9",
             )}
           >
             {status === "requesting-permission" ? (
@@ -224,7 +224,7 @@ export function ComposerTranscriptionControl({
               aria-pressed={false}
               aria-disabled={unavailableMessage !== null}
               className={cn(
-                "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
+                "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-9",
                 "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
                 unavailableMessage
                   ? "cursor-not-allowed opacity-45"
