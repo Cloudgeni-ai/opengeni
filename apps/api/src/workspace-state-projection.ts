@@ -72,6 +72,12 @@ function policyTargetKey(value: { kind: string; scope: string; roleKey: string |
   return `${value.kind}:${value.scope}:${value.roleKey ?? ""}`;
 }
 
+function policyTargetKeysForRole(policyRole: string | null): Set<string> {
+  const keys = new Set(["charter:global:", "policy:global:"]);
+  if (policyRole !== null) keys.add(`policy:role:${policyRole}`);
+  return keys;
+}
+
 function policyIdentity(value: {
   kind: string;
   scope: string;
@@ -128,9 +134,10 @@ function attemptGovernanceProjection(input: WorkspaceStateProjectionInput) {
     const snapshotEntries = [...policySnapshot.entries].sort((left, right) =>
       policyTargetKey(left).localeCompare(policyTargetKey(right)),
     );
-    const targetKeys = snapshotEntries.map(policyTargetKey);
+    const snapshotKeys = snapshotEntries.map(policyTargetKey);
+    const relevantTargetKeys = policyTargetKeysForRole(policySnapshot.policyRole);
     const currentEntries = input.policies.activeHeads
-      .filter((head) => targetKeys.includes(policyTargetKey(head)))
+      .filter((head) => relevantTargetKeys.has(policyTargetKey(head)))
       .sort((left, right) => policyTargetKey(left).localeCompare(policyTargetKey(right)));
     const snapshotIdentities = snapshotEntries.map(policyIdentity);
     const currentIdentities = currentEntries.map(policyIdentity);
@@ -138,7 +145,7 @@ function attemptGovernanceProjection(input: WorkspaceStateProjectionInput) {
     policyStatus = classifyIdentityDrift(
       snapshotIdentities,
       currentIdentities,
-      targetKeys,
+      snapshotKeys,
       currentKeys,
     );
     policySnapshotHash = hashIdentities(snapshotIdentities);

@@ -335,6 +335,21 @@ describe("workspace state projection", () => {
         attemptGovernance: identicalInput,
       }).truth.attemptGovernance,
     ).toMatchObject({ drift: { overall: "changed", policy: { status: "changed" } } });
+    expect(
+      projectWorkspaceState({
+        ...shared,
+        policies: policies([currentHead]),
+        attemptGovernance: {
+          ...identicalInput,
+          policySnapshot: { ...policySnapshot, entries: [] },
+        },
+      }).truth.attemptGovernance,
+    ).toMatchObject({
+      drift: {
+        overall: "changed",
+        policy: { status: "changed", snapshotTargetCount: 0, currentTargetCount: 1 },
+      },
+    });
   });
 
   test("bounds, sanitizes, sorts, and labels partial aggregate coverage deterministically", () => {
