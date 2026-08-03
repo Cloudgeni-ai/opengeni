@@ -21,7 +21,7 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
-The same ordinary session can add and remove a connected-Codex GPT-Live
+The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
 Only the authenticated browser owner/connection is exclusive. Human
 composer/queue/Send/Steer, ordinary turns, recovery, compaction, goals, and
@@ -34,23 +34,28 @@ canonical in
 `packages/db/src/session-realtime.ts`, `packages/db/src/index.ts`, and
 `apps/worker/src/workflows/session.ts`.
 
-The ordinary web session composes this durable mode through
-`createCodexRealtimeController`: begin is followed by microphone/remote-audio
-WebRTC negotiation, the pinned V3 bridge, periodic outbound-ledger sync, and a
-version-fenced heartbeat. The already-mounted composer, Send/Steer,
+The ordinary web session composes this durable mode through one lifecycle
+controller and a selected provider transport. Connected Codex keeps its native
+WebRTC/V3 transport unchanged. AI Gateway models mint a single-use short-lived
+browser token, connect through Gateway's normalized realtime WebSocket, and
+translate only at the edge into the same pinned V3 bridge. Both therefore share
+the same owner, connection epochs, ledger, context projection, delegation/Steer,
+tail handoff, heartbeat, rotation, and recovery semantics. The already-mounted composer, Send/Steer,
 model/reasoning/tool configuration, and queue mutations remain available while
 voice is active. Its only persistent surface is a split voice action beside
 Send: the primary click starts or ends the call, while the disclosure holds the
 supported realtime-model choice, connection status, recovery actions, and dev
 diagnostics. Realtime-model choice is intentionally independent from the
-ordinary session model; the current controller truthfully exposes only its one
-supported Codex Live model until provider adapters add real alternatives.
+ordinary session model and remembers the user's last workspace choice. The
+catalog groups OpenGeni-managed Gateway, Connected Codex, and workspace-owned
+Gateway models; unconfigured credentials remain visible but disabled.
 The owner operation and browser proof are
 scoped to session storage and never rendered or logged. Reload replays that
 same operation and rotates only the dead browser connection. Without matching
 proof, the surface truthfully remains lost-owner until an end/expiry event;
 there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
+`packages/sdk/src/gateway-realtime-transport.ts`,
 `apps/web/src/components/session/codex-realtime-control.tsx`, and
 `apps/web/src/routes/session.tsx`.
 

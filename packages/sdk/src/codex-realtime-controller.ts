@@ -29,9 +29,12 @@ import type {
   BeginSessionRealtimeRequest,
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
+  GatewayRealtimeConnectRequest,
+  GatewayRealtimeConnectResponse,
   EndSessionRealtimeRequest,
   RenewSessionRealtimeRequest,
   SessionRealtimeMode,
+  SessionRealtimeModel,
   SessionRealtimeMutationResponse,
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
@@ -112,6 +115,12 @@ export type CodexRealtimeControllerClient = {
     request: CodexRealtimeWebrtcRequest,
     options?: { signal?: AbortSignal | undefined },
   ): Promise<CodexRealtimeWebrtcResponse>;
+  negotiateGatewayRealtime?(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<GatewayRealtimeConnectResponse>;
   activateCodexRealtimeConnection(
     workspaceId: string,
     sessionId: string,
@@ -152,7 +161,30 @@ export type CreateCodexRealtimeControllerOptions = {
   negotiationTimeoutMs?: number | undefined;
   connectionRotationIntervalMs?: number | undefined;
   reconnectBackoffMs?: readonly number[] | undefined;
+  /** Defaults to connected Codex; alternate transports opt in explicitly. */
+  model?: SessionRealtimeModel | undefined;
+  ownerStorageNamespace?: string | undefined;
+  startTransport?: RealtimeControllerTransportStarter | undefined;
 };
+
+export type RealtimeControllerTransportStarter = (input: {
+  client: CodexRealtimeControllerClient;
+  workspaceId: string;
+  sessionId: string;
+  realtimeId: string;
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+  expectedConnectionEpoch: number;
+  rotate: boolean;
+  signal: AbortSignal;
+  media: MediaStream;
+  onEventsCreated(events: RTCDataChannel): void;
+  onAudibleOutputState(state: CodexRealtimeAudibleOutputState): void;
+  onMicrophoneEnded(): void;
+  onConnectionHealth(health: CodexRealtimeConnectionHealth): void;
+}) => Promise<CodexRealtimeWebrtcSession>;
 
 export type CodexRealtimeController = {
   snapshot(): CodexRealtimeControllerSnapshot;
@@ -196,7 +228,12 @@ export function createCodexRealtimeController(
   options: CreateCodexRealtimeControllerOptions,
 ): CodexRealtimeController {
   const storage = options.storage ?? defaultStorage();
-  const storageKey = ownerStorageKey(options.workspaceId, options.sessionId);
+  const storageKey = ownerStorageKey(
+    options.workspaceId,
+    options.sessionId,
+    options.ownerStorageNamespace,
+  );
+  const model = options.model ?? "gpt-live-1-boulder-alpha";
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
   const scheduleInterval =
     options.setInterval ?? ((callback, delay) => globalThis.setInterval(callback, delay));
@@ -687,9 +724,13 @@ export function createCodexRealtimeController(
     let connected: CodexRealtimeWebrtcSession;
     try {
       const media = await ensureMicrophone(replaceMicrophone, abort.signal);
-      connected = await startCodexRealtimeWebrtc({
+      const operationId = randomUUID();
+      const commonTransportInput = {
+        client: options.client,
+        workspaceId: options.workspaceId,
+        sessionId: options.sessionId,
         realtimeId: currentMode.id,
-        operationId: randomUUID(),
+        operationId,
         browserInstanceId: record.browserInstanceId,
         ownerKey: record.ownerKey,
         expectedVersion: currentMode.version,
@@ -697,22 +738,29 @@ export function createCodexRealtimeController(
         rotate,
         signal: abort.signal,
         media,
-        remoteAudio: options.remoteAudio,
-        activateRemoteAudio: false,
-        createPeerConnection: options.createPeerConnection,
-        getUserMedia: options.getUserMedia,
         onEventsCreated: earlyEvents.attach,
-        onAudibleOutputState: (next) => onAudibleOutput(targetGeneration, next),
+        onAudibleOutputState: (next: CodexRealtimeAudibleOutputState) =>
+          onAudibleOutput(targetGeneration, next),
         onMicrophoneEnded: () => onMicrophoneEnded(targetGeneration),
-        onConnectionHealth: (health) => onConnectionHealth(targetGeneration, health),
-        negotiate: async (request, requestOptions) =>
-          await options.client.negotiateCodexRealtimeWebrtc(
-            options.workspaceId,
-            options.sessionId,
-            request,
-            requestOptions,
-          ),
-      });
+        onConnectionHealth: (health: CodexRealtimeConnectionHealth) =>
+          onConnectionHealth(targetGeneration, health),
+      };
+      connected = options.startTransport
+        ? await options.startTransport(commonTransportInput)
+        : await startCodexRealtimeWebrtc({
+            ...commonTransportInput,
+            remoteAudio: options.remoteAudio,
+            activateRemoteAudio: false,
+            createPeerConnection: options.createPeerConnection,
+            getUserMedia: options.getUserMedia,
+            negotiate: async (request, requestOptions) =>
+              await options.client.negotiateCodexRealtimeWebrtc(
+                options.workspaceId,
+                options.sessionId,
+                request,
+                requestOptions,
+              ),
+          });
     } catch (error) {
       clearNegotiationTimer();
       earlyEvents.close();
@@ -864,7 +912,7 @@ export function createCodexRealtimeController(
         operationId: record.operationId,
         browserInstanceId: record.browserInstanceId,
         ownerKey: record.ownerKey,
-        model: "gpt-live-1-boulder-alpha",
+        model,
       },
     );
     if (response.mode.state !== "active") {
@@ -1234,8 +1282,12 @@ class CodexRealtimeGenerationError extends Error {
   readonly name = "CodexRealtimeGenerationError";
 }
 
-function ownerStorageKey(workspaceId: string, sessionId: string): string {
-  return `opengeni:codex-realtime-owner:${workspaceId}:${sessionId}`;
+function ownerStorageKey(
+  workspaceId: string,
+  sessionId: string,
+  namespace = "codex-realtime-owner",
+): string {
+  return `opengeni:${namespace}:${workspaceId}:${sessionId}`;
 }
 
 function readOwnerRecord(

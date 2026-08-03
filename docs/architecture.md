@@ -331,7 +331,7 @@ elements, and timers, including pending rotation. Fixed-code diagnostics expose
 microphone, autoplay, negotiation, rotation, reconnect, lost-owner, and terminal
 stop classes without credentials, SDP, audio, or transcript bodies. The
 promotion schema is canonical in
-`packages/db/drizzle/0135_session_realtime_connection_promotion.sql` and
+`packages/db/drizzle/0160_session_realtime_connection_promotion.sql` and
 `packages/db/src/session-realtime-ledger.ts`.
 
 The web UI mounts realtime as a compact split action inside the existing
@@ -341,9 +341,13 @@ lifecycle (start, end, retry, or resume audio). Its disclosure contains the
 supported realtime-model picker, plain-language status, recovery actions, and
 development-only diagnostics. Realtime-model choice remains separate from the
 durable session's underlying model; only models backed by a real provider
-adapter may appear.
-`ChatComposer.actionsStart` is the provider-neutral host seam; the current
-Codex-specific controller remains behind the web leaf.
+adapter may appear. The picker groups OpenGeni-managed Gateway, Connected Codex,
+and workspace-owned Gateway choices and remembers the last workspace selection.
+Connected Codex remains on its original WebRTC/V3 path. Gateway models use a
+single-use browser token and normalized WebSocket transport, then translate at
+the provider edge into the same durable V3 bridge; provider choice cannot alter
+session context, delegation/Steer, progress/results, ACK fencing, or tail handoff.
+`ChatComposer.actionsStart` is the provider-neutral host seam.
 
 Complete role-bearing provider `turn.done` rows are the only authoritative voice
 transcript. Each provider delegation includes bounded finalized dialogue since
@@ -359,7 +363,7 @@ prior finalized voice turns as inert role-labeled startup continuity with an
 explicit silence instruction. Canonical:
 `packages/sdk/src/codex-realtime-v3.ts`,
 `packages/db/src/session-realtime-context.ts`,
-`packages/db/drizzle/0156_session_realtime_context_projection.sql`, and
+`packages/db/drizzle/0159_session_realtime_context_projection.sql`, and
 `apps/api/src/session-realtime-context.ts`.
 
 Native provider delegation remains in that same session. Exact owner, connection

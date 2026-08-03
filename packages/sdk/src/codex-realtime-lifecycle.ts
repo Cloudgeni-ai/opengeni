@@ -1,4 +1,4 @@
-import type { SessionEvent } from "./types";
+import type { SessionEvent, SessionRealtimeModel } from "./types";
 
 export type SessionRealtimeLifecycleProjection =
   | {
@@ -8,6 +8,7 @@ export type SessionRealtimeLifecycleProjection =
       version: number;
       connectionEpoch: number;
       leaseExpiresAt: string;
+      model: SessionRealtimeModel;
     }
   | {
       state: "ended";
@@ -30,7 +31,8 @@ export function projectSessionRealtimeLifecycle(
       const version = positiveInteger(payload?.version);
       const connectionEpoch = positiveInteger(payload?.connectionEpoch);
       const leaseExpiresAt = stringValue(payload?.leaseExpiresAt);
-      if (realtimeId && operationId && version && connectionEpoch && leaseExpiresAt) {
+      const model = realtimeModel(payload?.model);
+      if (realtimeId && operationId && version && connectionEpoch && leaseExpiresAt && model) {
         projected = {
           state: "active",
           realtimeId,
@@ -38,6 +40,7 @@ export function projectSessionRealtimeLifecycle(
           version,
           connectionEpoch,
           leaseExpiresAt,
+          model,
         };
       }
     } else if (event.type === "session.realtime.ended") {
@@ -59,6 +62,18 @@ export function projectSessionRealtimeLifecycle(
     }
   }
   return projected;
+}
+
+function realtimeModel(value: unknown): SessionRealtimeModel | null {
+  return value === "gpt-live-1-boulder-alpha" ||
+    value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
+    value === "opengeni-gateway/openai/gpt-realtime-mini" ||
+    value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
+    value === "workspace-gateway/openai/gpt-realtime-2.1" ||
+    value === "workspace-gateway/openai/gpt-realtime-mini" ||
+    value === "workspace-gateway/xai/grok-voice-think-fast-2.0"
+    ? value
+    : null;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {

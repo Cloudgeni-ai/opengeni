@@ -1269,6 +1269,7 @@ describe("Codex realtime browser controller", () => {
       state: "active",
       realtimeId: current.id,
       operationId: current.operationId,
+      model: current.model,
       version: current.version,
       connectionEpoch: current.connectionEpoch,
       leaseExpiresAt: current.leaseExpiresAt,

@@ -514,6 +514,8 @@ export async function createAndStartSession(input: {
   accountId: string;
   workspaceId: string;
   initialMessage: string;
+  /** Create the session shell without an initial user event/agent turn. */
+  deferInitialTurn?: boolean;
   turnInstructions?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
@@ -707,6 +709,7 @@ async function finishStartSession(
     bus: EventBus;
     workflowClient: SessionWorkflowClient;
     initialMessage: string;
+    deferInitialTurn?: boolean;
     turnInstructions?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
@@ -786,6 +789,7 @@ async function finishStartSession(
         }
       : null,
     consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
+    deferInitialTurn: input.deferInitialTurn === true,
   });
   await publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events);
   if (started.workflowWakeRevision !== null) {
@@ -1605,13 +1609,15 @@ export async function createSessionForRequest(
       }
     }
   }
-  await requireLimit(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    action: "agent_run:create",
-    quantity: 1,
-    model,
-  });
+  if (payload.startMode !== "realtime") {
+    await requireLimit(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      action: "agent_run:create",
+      quantity: 1,
+      model,
+    });
+  }
   const creationInitiator = creationInitiatorForGrant(grant);
   let session: CreateSessionResponse;
   try {
@@ -1622,7 +1628,8 @@ export async function createSessionForRequest(
       workflowClient,
       accountId: grant.accountId,
       workspaceId,
-      initialMessage: payload.initialMessage,
+      initialMessage: payload.initialMessage ?? "",
+      deferInitialTurn: payload.startMode === "realtime",
       turnInstructions: payload.turnInstructions ?? null,
       resources,
       skills,
@@ -1695,21 +1702,23 @@ export async function createSessionForRequest(
     }
     throw error;
   }
-  await recordWorkspaceUsage(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    subjectId: grant.subjectId,
-    eventType: "agent_run.created",
-    quantity: 1,
-    unit: "run",
-    sourceResourceType: "session",
-    sourceResourceId: session.id,
-    sessionId: session.id,
-    initiator: session.createdBy,
-    initiatorContext: session.createdByContext,
-    origin: creationInitiator.actor ? "system" : "user",
-    idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
-  });
+  if (payload.startMode !== "realtime") {
+    await recordWorkspaceUsage(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "session",
+      sourceResourceId: session.id,
+      sessionId: session.id,
+      initiator: session.createdBy,
+      initiatorContext: session.createdByContext,
+      origin: creationInitiator.actor ? "system" : "user",
+      idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
+    });
+  }
   return session;
 }
 

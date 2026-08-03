@@ -1576,7 +1576,15 @@ export const sessionRealtimeModes = pgTable(
     ),
     modelValid: check(
       "session_realtime_modes_model_check",
-      sql`${table.model} = 'gpt-live-1-boulder-alpha'`,
+      sql`${table.model} in (
+        'gpt-live-1-boulder-alpha',
+        'opengeni-gateway/openai/gpt-realtime-2.1',
+        'opengeni-gateway/openai/gpt-realtime-mini',
+        'opengeni-gateway/xai/grok-voice-think-fast-2.0',
+        'workspace-gateway/openai/gpt-realtime-2.1',
+        'workspace-gateway/openai/gpt-realtime-mini',
+        'workspace-gateway/xai/grok-voice-think-fast-2.0'
+      )`,
     ),
     endReasonValid: check(
       "session_realtime_modes_end_reason_check",

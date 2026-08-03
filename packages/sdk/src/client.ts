@@ -26,6 +26,8 @@ import type {
   CodexConnectionStatus,
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
+  GatewayRealtimeConnectRequest,
+  GatewayRealtimeConnectResponse,
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
@@ -43,6 +45,7 @@ import type {
   MoveDocumentRequest,
   ClientConfig,
   WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
@@ -584,6 +587,22 @@ export class OpenGeniClient {
     return await this.requestJson<CodexRealtimeWebrtcResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/webrtc`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Mint a short-lived browser token for one AI Gateway realtime connection. */
+  async negotiateGatewayRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<GatewayRealtimeConnectResponse> {
+    return await this.requestJson<GatewayRealtimeConnectResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/gateway`,
       request,
       {},
       { signal: options.signal },
@@ -1842,6 +1861,16 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelCatalogResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-catalog`,
+    );
+  }
+
+  /** Authenticated realtime voice models and credential readiness. */
+  async getWorkspaceRealtimeModelCatalog(
+    workspaceId: string,
+  ): Promise<WorkspaceRealtimeModelCatalogResponse> {
+    return await this.requestJson<WorkspaceRealtimeModelCatalogResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/realtime-model-catalog`,
     );
   }
 

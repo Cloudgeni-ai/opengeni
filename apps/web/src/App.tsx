@@ -29,6 +29,8 @@ import {
   createRouter,
   lazyRouteComponent,
 } from "@tanstack/react-router";
+import { SessionRealtimeModel as SessionRealtimeModelSchema } from "@opengeni/contracts";
+import type { SessionRealtimeModel } from "@opengeni/sdk";
 
 import { ProblemPanel } from "@/components/common";
 import { RootRouteComponent, useAppContext } from "@/context";
@@ -171,6 +173,10 @@ const workspaceSessionsRoute = createRoute({
 const workspaceSessionRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions/$sessionId",
+  validateSearch: (search: Record<string, unknown>): { realtime?: SessionRealtimeModel } => {
+    const realtime = SessionRealtimeModelSchema.safeParse(search.realtime);
+    return realtime.success ? { realtime: realtime.data } : {};
+  },
   component: SessionView,
 });
 const workspaceVariableSetsRoute = createRoute({
@@ -370,7 +376,14 @@ function SessionsIndex() {
 
 function SessionView() {
   const { workspaceId, sessionId } = workspaceSessionRoute.useParams();
-  return <LazySessionRoute workspaceId={workspaceId} sessionId={sessionId} />;
+  const { realtime } = workspaceSessionRoute.useSearch();
+  return (
+    <LazySessionRoute
+      workspaceId={workspaceId}
+      sessionId={sessionId}
+      realtimeAutostartModel={realtime}
+    />
+  );
 }
 
 function SessionDeepLink() {

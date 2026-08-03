@@ -33,6 +33,7 @@ const settings = testSettings({
   delegationSecret: DELEGATION_SECRET,
   environmentsEncryptionKey: encryptionKey.toString("base64"),
   codexSubscriptionEnabled: true,
+  vercelAiGatewayApiKey: "gateway-test-key",
 });
 
 let shared: SharedTestDatabase;
@@ -76,6 +77,12 @@ beforeAll(async () => {
     codexFetch: async (input, init) => {
       providerCalls += 1;
       const request = new Request(input, init);
+      if (request.url.endsWith("/v1/realtime/client-secrets")) {
+        const body = (await request.json()) as { model?: string; expiresIn?: number };
+        expect(request.headers.get("authorization")).toBe("Bearer gateway-test-key");
+        expect(body).toEqual({ model: "openai/gpt-realtime-2.1", expiresIn: 120 });
+        return Response.json({ token: "vcst_test_token", expiresAt: 2_000_000_000 });
+      }
       const body = (await request.json()) as { sdp?: string };
       if (body.sdp?.includes("a=force-failure")) {
         throw new Error("forced provider transport failure");
@@ -458,6 +465,89 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       mode: { version: started.mode.version, connectionEpoch: 1 },
       replay: false,
     });
+  });
+
+  test("mints one single-use Gateway token behind the same owner and activation fences", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "opengeni-gateway/openai/gpt-realtime-2.1",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    expect(startedResponse.status).toBe(201);
+    const started = (await startedResponse.json()) as {
+      mode: { id: string; version: number; connectionEpoch: number };
+    };
+    const request = {
+      realtimeId: started.mode.id,
+      operationId: crypto.randomUUID(),
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: started.mode.version,
+      expectedConnectionEpoch: started.mode.connectionEpoch,
+      rotate: false,
+    };
+    const callsBefore = providerCalls;
+    const response = await app.request(`${base}/gateway`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(response.status).toBe(200);
+    const connected = (await response.json()) as {
+      token: string;
+      url: string;
+      upstreamModelId: string;
+      connectionId: string;
+      connectionEpoch: number;
+      initialItems: unknown[];
+      instructions: string;
+      replay: boolean;
+    };
+    expect(connected).toMatchObject({
+      token: "vcst_test_token",
+      upstreamModelId: "openai/gpt-realtime-2.1",
+      connectionEpoch: 1,
+      replay: false,
+    });
+    expect(connected.url).toBe(
+      "wss://ai-gateway.vercel.sh/v4/ai/realtime-model?ai-model-id=openai%2Fgpt-realtime-2.1",
+    );
+    expect(connected.initialItems).toBeArray();
+    expect(connected.instructions).toContain("realtime conversational interface");
+    expect(providerCalls).toBe(callsBefore + 1);
+
+    const replay = await app.request(`${base}/gateway`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(409);
+    expect(providerCalls).toBe(callsBefore + 1);
+
+    const activated = await app.request(
+      `${base}/${started.mode.id}/connections/${connected.connectionId}/activate`,
+      {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          operationId: request.operationId,
+          expectedVersion: started.mode.version,
+          expectedConnectionEpoch: 1,
+          connectionEpoch: connected.connectionEpoch,
+        }),
+      },
+    );
+    expect(activated.status).toBe(200);
   });
 
   test("keeps omission-compatible clients on immediate idempotent activation during rollout", async () => {

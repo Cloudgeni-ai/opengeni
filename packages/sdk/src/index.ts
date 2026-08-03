@@ -72,7 +72,9 @@ export type {
   CodexRealtimeMicrophoneState,
   CodexRealtimeOwnerStorage,
   CreateCodexRealtimeControllerOptions,
+  RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
+export { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
@@ -269,6 +271,9 @@ export type {
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
   CodexRealtimeWebrtcVersion,
+  GatewayRealtimeConnectRequest,
+  GatewayRealtimeConnectResponse,
+  GatewayRealtimeInitialItem,
   EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
@@ -287,6 +292,8 @@ export type {
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogItem,
+  WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,
   CodexAccountOverview,
   CodexAccountsResponse,

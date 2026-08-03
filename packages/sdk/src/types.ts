@@ -43,6 +43,35 @@ export type CodexRealtimeWebrtcResponse = {
   replay: boolean;
 };
 
+export type GatewayRealtimeConnectRequest = {
+  realtimeId: string;
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+  expectedConnectionEpoch: number;
+  rotate: boolean;
+};
+
+export type GatewayRealtimeInitialItem = {
+  role: "user" | "developer" | "assistant";
+  text: string;
+};
+
+export type GatewayRealtimeConnectResponse = {
+  token: string;
+  url: string;
+  upstreamModelId: string;
+  expiresAt: number | null;
+  connectionId: string;
+  connectionEpoch: number;
+  startupFenceSequence: number;
+  modeVersion: number;
+  initialItems: GatewayRealtimeInitialItem[];
+  instructions: string;
+  replay: false;
+};
+
 export type ActivateCodexRealtimeConnectionRequest = {
   operationId: string;
   browserInstanceId: string;
@@ -117,7 +146,28 @@ export type SyncSessionRealtimeLedgerResponse = {
   outbound: SessionRealtimeLedgerEntry[];
 };
 
-export type SessionRealtimeModel = "gpt-live-1-boulder-alpha";
+export type SessionRealtimeModel =
+  | "gpt-live-1-boulder-alpha"
+  | "opengeni-gateway/openai/gpt-realtime-2.1"
+  | "opengeni-gateway/openai/gpt-realtime-mini"
+  | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
+  | "workspace-gateway/openai/gpt-realtime-2.1"
+  | "workspace-gateway/openai/gpt-realtime-mini"
+  | "workspace-gateway/xai/grok-voice-think-fast-2.0";
+
+export type WorkspaceRealtimeModelCatalogItem = {
+  id: SessionRealtimeModel;
+  label: string;
+  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  description: string;
+  available: boolean;
+  unavailableReason: string | null;
+  recommended: boolean;
+};
+
+export type WorkspaceRealtimeModelCatalogResponse = {
+  models: WorkspaceRealtimeModelCatalogItem[];
+};
 export type SessionRealtimeState = "active" | "ended";
 export type SessionRealtimeEndReason = "user_stop" | "browser_unload" | "lease_expired";
 
@@ -1850,7 +1900,9 @@ export type CreateSessionRequest = {
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
-  initialMessage: string;
+  initialMessage?: string | undefined;
+  /** Create an idle session shell so realtime voice can be the first interaction. */
+  startMode?: "realtime" | undefined;
   /** System instructions scoped to the initial turn; never visible timeline text. */
   turnInstructions?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a

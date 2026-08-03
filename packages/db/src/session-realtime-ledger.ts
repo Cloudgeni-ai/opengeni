@@ -60,6 +60,7 @@ export type ClaimSessionRealtimeConnectionInput = AssertSessionRealtimeOwnerInpu
 export type ClaimSessionRealtimeConnectionResult = {
   connection: SessionRealtimeConnection;
   startupEntries: SessionRealtimeLedgerEntry[];
+  mode: SessionRealtimeMode;
   modeVersion: number;
   replay: boolean;
 };
@@ -443,6 +444,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
     return {
       connection: mapConnection(existing),
       startupEntries: await startupEntriesForConnection(db, existing),
+      mode,
       modeVersion: mode.version,
       replay: true,
     };
@@ -572,6 +574,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
   return {
     connection: mapConnection(connection),
     startupEntries: startupEntries.map(mapEntry),
+    mode,
     modeVersion,
     replay: false,
   };

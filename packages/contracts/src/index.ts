@@ -4047,6 +4047,38 @@ export const CodexRealtimeWebrtcResponse = z
   .strict();
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
 
+export const GatewayRealtimeConnectRequest = SessionRealtimeOwnerProof.extend({
+  realtimeId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+  expectedConnectionEpoch: z.number().int().positive(),
+  rotate: z.boolean(),
+}).strict();
+export type GatewayRealtimeConnectRequest = z.infer<typeof GatewayRealtimeConnectRequest>;
+
+export const GatewayRealtimeInitialItem = z.object({
+  role: z.enum(["user", "developer", "assistant"]),
+  text: z.string().min(1).max(131_072),
+});
+export type GatewayRealtimeInitialItem = z.infer<typeof GatewayRealtimeInitialItem>;
+
+export const GatewayRealtimeConnectResponse = z
+  .object({
+    token: z.string().min(1).max(16_384),
+    url: z.string().url(),
+    upstreamModelId: z.string().min(1).max(256),
+    expiresAt: z.number().int().positive().nullable(),
+    connectionId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    startupFenceSequence: z.number().int().nonnegative(),
+    modeVersion: z.number().int().positive(),
+    initialItems: z.array(GatewayRealtimeInitialItem).max(128),
+    instructions: z.string().min(1).max(32_768),
+    replay: z.literal(false),
+  })
+  .strict();
+export type GatewayRealtimeConnectResponse = z.infer<typeof GatewayRealtimeConnectResponse>;
+
 export const ActivateCodexRealtimeConnectionRequest = SessionRealtimeOwnerProof.extend({
   operationId: z.string().uuid(),
   connectionEpoch: z.number().int().positive(),
@@ -4143,8 +4175,34 @@ export const SyncSessionRealtimeLedgerResponse = z
   .strict();
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
-export const SessionRealtimeModel = z.literal("gpt-live-1-boulder-alpha");
+export const SessionRealtimeModel = z.enum([
+  "gpt-live-1-boulder-alpha",
+  "opengeni-gateway/openai/gpt-realtime-2.1",
+  "opengeni-gateway/openai/gpt-realtime-mini",
+  "opengeni-gateway/xai/grok-voice-think-fast-2.0",
+  "workspace-gateway/openai/gpt-realtime-2.1",
+  "workspace-gateway/openai/gpt-realtime-mini",
+  "workspace-gateway/xai/grok-voice-think-fast-2.0",
+]);
 export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
+
+export const WorkspaceRealtimeModelCatalogItem = z.object({
+  id: SessionRealtimeModel,
+  label: z.string().min(1),
+  provider: z.enum(["OpenGeni", "Connected Codex", "Your Gateway"]),
+  description: z.string().min(1),
+  available: z.boolean(),
+  unavailableReason: z.string().nullable(),
+  recommended: z.boolean(),
+});
+export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
+
+export const WorkspaceRealtimeModelCatalogResponse = z.object({
+  models: z.array(WorkspaceRealtimeModelCatalogItem),
+});
+export type WorkspaceRealtimeModelCatalogResponse = z.infer<
+  typeof WorkspaceRealtimeModelCatalogResponse
+>;
 
 export const SessionRealtimeState = z.enum(["active", "ended"]);
 export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
@@ -8364,7 +8422,11 @@ export const CreateSessionRequest = withVariableSetIdAlias({
    * identity or authorization from the UUID.
    */
   requestedSessionId: z.string().uuid().optional(),
-  initialMessage: z.string().min(1),
+  initialMessage: z.string().min(1).optional(),
+  // Creates the durable session shell without fabricating a user message or
+  // starting an underlying agent turn. Realtime can then become the first
+  // interaction and use the ordinary Send/Steer path when it delegates.
+  startMode: z.literal("realtime").optional(),
   // System-level host context for the initial turn only. Unlike `instructions`,
   // this does not persist into later turns and is never emitted as a user event.
   turnInstructions: z.string().trim().min(1).max(32768).optional(),
@@ -8475,6 +8537,21 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   sandbox: z
     .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
     .optional(),
+}).superRefine((value, context) => {
+  if (value.startMode !== "realtime" && value.initialMessage === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["initialMessage"],
+      message: "initialMessage is required unless startMode is realtime",
+    });
+  }
+  if (value.startMode === "realtime" && value.initialMessage !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["initialMessage"],
+      message: "initialMessage must be omitted when startMode is realtime",
+    });
+  }
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 

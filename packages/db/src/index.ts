@@ -36212,6 +36212,8 @@ export type InitializeSessionStartInput = {
     subjectId: string;
     expectedRevision: number;
   } | null;
+  /** Persist session.created only; realtime will supply the first human turn. */
+  deferInitialTurn?: boolean;
 };
 
 export type InitializeSessionStartResult = {
@@ -36295,6 +36297,95 @@ export async function initializeSessionStartAtomically(
             })
             .returning();
           if (!goal) throw new Error("Failed to create initial session goal");
+        }
+
+        if (input.deferInitialTurn) {
+          const [existingCreatedEvent] = await tx
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, session.id),
+                eq(schema.sessionEvents.type, "session.created"),
+              ),
+            )
+            .limit(1);
+          let sequence = session.lastSequence;
+          let initializedNow = false;
+          let insertedEvents: Array<typeof schema.sessionEvents.$inferSelect> = [];
+          if (!existingCreatedEvent) {
+            insertedEvents = await tx
+              .insert(schema.sessionEvents)
+              .values([
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  sequence: ++sequence,
+                  type: "session.created",
+                  payload: sanitizeEventPayload({
+                    ...input.createdEventPayload,
+                    status: "idle",
+                    createdBy: creator.initiator,
+                  }),
+                },
+                ...(goal
+                  ? [
+                      {
+                        accountId: session.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: session.id,
+                        sequence: ++sequence,
+                        type: "goal.set" as const,
+                        payload: sanitizeEventPayload({
+                          goalId: goal.id,
+                          text: goal.text,
+                          ...(goal.successCriteria
+                            ? { successCriteria: goal.successCriteria }
+                            : {}),
+                          version: goal.version,
+                          actor: "api",
+                          replaced: false,
+                        }),
+                      },
+                    ]
+                  : []),
+              ])
+              .returning();
+            initializedNow = true;
+          }
+          await tx
+            .update(schema.sessions)
+            .set({
+              temporalWorkflowId,
+              lastSequence: sequence,
+              ...(initializedNow && session.status === "queued" ? { status: "idle" } : {}),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, session.id),
+              ),
+            );
+          if (initializedNow && input.consumeNewSessionDraft) {
+            await setSubjectRlsContext(
+              tx as unknown as Database,
+              input.consumeNewSessionDraft.subjectId,
+            );
+            await seedNewSessionDraftInTransaction(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              subjectId: input.consumeNewSessionDraft.subjectId,
+              expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+            });
+          }
+          return {
+            events: insertedEvents.map(mapEvent),
+            turn: null,
+            temporalWorkflowId,
+            workflowWakeRevision: null,
+          };
         }
 
         const existingUserEvents = await tx

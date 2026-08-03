@@ -60,7 +60,7 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
+import type { ComposerDraft, LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const LazySessionInspector = lazy(() =>
@@ -78,13 +78,23 @@ const LazyCodexRealtimeControl = lazy(() =>
 export function SessionRoute({
   workspaceId,
   sessionId,
+  realtimeAutostartModel,
 }: {
   workspaceId: string;
   sessionId: string;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
 }) {
   const context = useAppContext();
   const rail = useRail();
   const navigate = useNavigate();
+  const consumeRealtimeAutostart = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId },
+      search: {},
+      replace: true,
+    });
+  }, [navigate, sessionId, workspaceId]);
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
@@ -360,6 +370,8 @@ export function SessionRoute({
       events={events}
       timeline={timeline}
       initialLoading={initialLoading}
+      realtimeAutostartModel={realtimeAutostartModel}
+      onRealtimeAutostartConsumed={consumeRealtimeAutostart}
       approvals={approvals}
       humanInput={humanInput}
       failure={failure}
@@ -505,6 +517,8 @@ function SessionChatPane(props: {
   events: SessionEvent[];
   timeline: TimelineItem[];
   initialLoading: boolean;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  onRealtimeAutostartConsumed: () => void;
   approvals: PendingApproval[];
   humanInput: ReturnType<typeof useHumanInputRequests>;
   failure: ReturnType<typeof summarizeSessionFailure> | null;
@@ -1079,7 +1093,8 @@ function SessionChatPane(props: {
                     events={props.events}
                     eventsReady={!props.initialLoading}
                     codexConnected={codexConnected}
-                    underlyingModel={findPickerRow(modelCatalog.rows, model)?.label ?? model}
+                    realtimeAutostartModel={props.realtimeAutostartModel}
+                    onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
                   />
                 </Suspense>
               ) : null

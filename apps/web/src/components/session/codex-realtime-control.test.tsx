@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, createRef } from "react";
+import { act, createRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type {
   CodexRealtimeControllerSnapshot,
@@ -11,7 +11,9 @@ import type {
 
 import {
   CodexRealtimeControl,
+  RealtimeModelPickerMenu,
   codexRealtimeAdmissionAllowed,
+  type RealtimeModelOption,
   useSessionCodexRealtime,
 } from "./codex-realtime-control";
 
@@ -119,6 +121,7 @@ describe("ordinary session Codex realtime control", () => {
       payload: {
         realtimeId: "33333333-3333-4333-8333-333333333333",
         operationId: "44444444-4444-4444-8444-444444444444",
+        model: "gpt-live-1-boulder-alpha",
         version: 1,
         connectionEpoch: 1,
         leaseExpiresAt: "2026-07-29T07:00:30.000Z",
@@ -173,7 +176,7 @@ describe("ordinary session Codex realtime control", () => {
         <CodexRealtimeControl
           snapshot={idle}
           canStart={true}
-          codexConnected={true}
+          modelAvailable={true}
           showDiagnostics={true}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={async () => {
@@ -216,7 +219,7 @@ describe("ordinary session Codex realtime control", () => {
             mode: activeMode,
           }}
           canStart={false}
-          codexConnected={true}
+          modelAvailable={true}
           showDiagnostics={true}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={async () => {
@@ -243,6 +246,79 @@ describe("ordinary session Codex realtime control", () => {
     expect(calls).toEqual(["start", "stop"]);
   });
 
+  test("uses the shared provider-to-model drill-down with recognizable provider marks", async () => {
+    const models: RealtimeModelOption[] = [
+      {
+        id: "opengeni-gateway/openai/gpt-realtime-2.1",
+        label: "GPT Realtime 2.1",
+        provider: "OpenGeni",
+        description: "Best overall voice intelligence",
+        available: true,
+        unavailableReason: null,
+        recommended: true,
+      },
+      {
+        id: "gpt-live-1-boulder-alpha",
+        label: "Codex Live",
+        provider: "Connected Codex",
+        description: "Deep session integration",
+        available: true,
+        unavailableReason: null,
+        recommended: false,
+      },
+      {
+        id: "workspace-gateway/openai/gpt-realtime-mini",
+        label: "GPT Realtime Mini",
+        provider: "Your Gateway",
+        description: "Faster, lighter live voice",
+        available: true,
+        unavailableReason: null,
+        recommended: false,
+      },
+    ];
+
+    function Harness() {
+      const [provider, setProvider] = useState<RealtimeModelOption["provider"] | null>(null);
+      return (
+        <RealtimeModelPickerMenu
+          models={models}
+          selectedModel={models[1]!}
+          provider={provider}
+          direction={provider ? 1 : -1}
+          disabled={false}
+          onProviderChange={(next) => setProvider(next)}
+          onSelect={() => undefined}
+        />
+      );
+    }
+
+    await act(async () => root.render(<Harness />));
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-codex_subscription"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("GPT Realtime 2.1");
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="realtime-model-provider-opengeni_credits"]',
+        )
+        ?.click(),
+    );
+    expect(container.textContent).toContain("GPT Realtime 2.1");
+    expect(container.textContent).not.toContain("Codex Live");
+
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="model-picker-back"]')?.click(),
+    );
+    expect(container.textContent).toContain("Connected Codex");
+    expect(container.textContent).not.toContain("GPT Realtime 2.1");
+  });
+
   test("exposes an autoplay-blocked retry without starting another realtime call", async () => {
     const calls: string[] = [];
     await act(async () => {
@@ -264,7 +340,7 @@ describe("ordinary session Codex realtime control", () => {
             },
           }}
           canStart={false}
-          codexConnected={true}
+          modelAvailable={true}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={async () => {
             calls.push("start");
@@ -302,7 +378,7 @@ describe("ordinary session Codex realtime control", () => {
           snapshot={idle}
           canStart={false}
           admissionBlocker="Connect Codex to use this voice model."
-          codexConnected={false}
+          modelAvailable={false}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={async () => undefined}
           onStop={async () => undefined}
@@ -318,7 +394,7 @@ describe("ordinary session Codex realtime control", () => {
     expect(start?.dataset.phase).toBe("unavailable");
     expect(start?.disabled).toBe(true);
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "Connect Codex for voice",
+      "Voice model unavailable",
     );
   });
 });

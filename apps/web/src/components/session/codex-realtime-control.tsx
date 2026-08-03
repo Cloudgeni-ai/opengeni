@@ -5,10 +5,14 @@ import {
   type CodexRealtimeControllerSnapshot,
   type EffectiveSessionControl,
   type SessionEvent,
+  type SessionRealtimeModel,
   type SessionStatus,
+  type WorkspaceRealtimeModelCatalogItem,
+  type WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
 import {
   AudioLinesIcon,
+  CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
   LoaderCircleIcon,
@@ -19,13 +23,12 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
+import { PickerAnimatedPage, PickerBackHeader, PickerNavRow } from "@/components/pickers";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -34,12 +37,14 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
-type RealtimeModelOption = {
-  id: string;
+export type RealtimeModelOption = {
+  id: SessionRealtimeModel;
   label: string;
-  provider: string;
+  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
   description: string;
-  recommended?: boolean | undefined;
+  available: boolean;
+  unavailableReason: string | null;
+  recommended: boolean;
 };
 
 const CODEX_LIVE_MODEL: RealtimeModelOption = {
@@ -47,10 +52,32 @@ const CODEX_LIVE_MODEL: RealtimeModelOption = {
   label: "Codex Live",
   provider: "Connected Codex",
   description: "Deep session integration",
-  recommended: true,
+  available: false,
+  unavailableReason: "Connect Codex to use this voice model",
+  recommended: false,
 };
 
-const SUPPORTED_REALTIME_MODELS = [CODEX_LIVE_MODEL] as const;
+const REALTIME_MODEL_PROVIDERS = ["OpenGeni", "Connected Codex", "Your Gateway"] as const;
+type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
+
+const REALTIME_PROVIDER_META: Record<
+  RealtimeModelProvider,
+  { billingClass: BillingClass; hint: string }
+> = {
+  OpenGeni: { billingClass: "opengeni_credits", hint: "Will use credits" },
+  "Connected Codex": {
+    billingClass: "codex_subscription",
+    hint: "ChatGPT / Codex plan",
+  },
+  "Your Gateway": { billingClass: "byok", hint: "Billed to your AI Gateway" },
+};
+const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
+
+type RealtimeControllerClient = CodexRealtimeControllerClient & {
+  getWorkspaceRealtimeModelCatalog?(
+    workspaceId: string,
+  ): Promise<WorkspaceRealtimeModelCatalogResponse>;
+};
 
 type AdmissionInput = {
   sessionStatus: SessionStatus;
@@ -74,7 +101,7 @@ export function codexRealtimeAdmissionBlocker(input: AdmissionInput): string | n
 }
 
 export function useSessionCodexRealtime(options: {
-  client: CodexRealtimeControllerClient;
+  client: RealtimeControllerClient;
   workspaceId: string;
   sessionId: string;
   sessionStatus: SessionStatus;
@@ -82,11 +109,18 @@ export function useSessionCodexRealtime(options: {
   events: SessionEvent[];
   eventsReady: boolean;
   codexConnected: boolean;
+  model?: SessionRealtimeModel | undefined;
+  modelAvailable?: boolean | undefined;
+  modelUnavailableReason?: string | null | undefined;
 }) {
+  const model = options.model ?? CODEX_LIVE_MODEL.id;
   const audioRef = useRef<HTMLAudioElement>(null);
   const controllerRef = useRef<CodexRealtimeController | null>(null);
+  const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
   const [snapshot, setSnapshot] = useState<CodexRealtimeControllerSnapshot>(() => ({
-    status: hasStoredOwnerProof(options.workspaceId, options.sessionId) ? "recovering" : "idle",
+    status: hasStoredOwnerProof(options.workspaceId, options.sessionId, model)
+      ? "recovering"
+      : "idle",
     realtimeId: null,
     mode: null,
     bridge: null,
@@ -111,16 +145,29 @@ export function useSessionCodexRealtime(options: {
     let disposed = false;
     let controller: CodexRealtimeController | null = null;
     let unsubscribe: (() => void) | null = null;
-    void import("@opengeni/sdk/codex-realtime-controller")
-      .then(({ createCodexRealtimeController }) => {
+    void Promise.all([
+      import("@opengeni/sdk/codex-realtime-controller"),
+      model === CODEX_LIVE_MODEL.id
+        ? Promise.resolve(null)
+        : import("@opengeni/sdk/gateway-realtime-transport"),
+    ])
+      .then(([{ createCodexRealtimeController }, gateway]) => {
         if (disposed) return;
         controller = createCodexRealtimeController({
           client: options.client,
           workspaceId: options.workspaceId,
           sessionId: options.sessionId,
           ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
+          ...(model === CODEX_LIVE_MODEL.id
+            ? {}
+            : {
+                model,
+                ownerStorageNamespace: "gateway-realtime-owner",
+                startTransport: gateway!.createGatewayRealtimeTransportStarter(),
+              }),
         });
         controllerRef.current = controller;
+        controllerModelRef.current = model;
         unsubscribe = controller.subscribe(setSnapshot);
         if (eventsReadyRef.current) {
           void controller.observeLifecycle(lifecycleRef.current).catch(() => undefined);
@@ -153,9 +200,12 @@ export function useSessionCodexRealtime(options: {
       disposed = true;
       unsubscribe?.();
       controller?.close();
-      if (controllerRef.current === controller) controllerRef.current = null;
+      if (controllerRef.current === controller) {
+        controllerRef.current = null;
+        controllerModelRef.current = null;
+      }
     };
-  }, [options.client, options.sessionId, options.workspaceId]);
+  }, [model, options.client, options.sessionId, options.workspaceId]);
 
   useEffect(() => {
     if (!options.eventsReady) return;
@@ -163,8 +213,12 @@ export function useSessionCodexRealtime(options: {
   }, [lifecycle, options.eventsReady]);
 
   const start = useCallback(async () => {
-    await controllerRef.current?.start();
-  }, []);
+    const controller = controllerRef.current;
+    if (!controller || controllerModelRef.current !== model) {
+      throw new Error("The selected voice model is still preparing");
+    }
+    await controller.start();
+  }, [model]);
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
   }, []);
@@ -178,12 +232,16 @@ export function useSessionCodexRealtime(options: {
     sessionStatus: options.sessionStatus,
     controlState: options.effectiveControl.state,
     settlement: options.effectiveControl.settlement,
-    codexConnected: options.codexConnected,
+    codexConnected: options.modelAvailable ?? options.codexConnected,
     lifecycleActive,
   } satisfies AdmissionInput;
-  const admissionBlocker = codexRealtimeAdmissionBlocker(admissionInput);
+  const admissionBlocker =
+    options.modelAvailable === false
+      ? (options.modelUnavailableReason ?? "This voice model is unavailable.")
+      : codexRealtimeAdmissionBlocker(admissionInput);
   const canStart =
     controllerRef.current !== null &&
+    controllerModelRef.current === model &&
     ["idle", "error"].includes(snapshot.status) &&
     admissionBlocker === null;
 
@@ -201,11 +259,17 @@ export function useSessionCodexRealtime(options: {
   };
 }
 
-function hasStoredOwnerProof(workspaceId: string, sessionId: string): boolean {
+function hasStoredOwnerProof(
+  workspaceId: string,
+  sessionId: string,
+  model: SessionRealtimeModel,
+): boolean {
   if (typeof sessionStorage === "undefined") return false;
   try {
     return (
-      sessionStorage.getItem(`opengeni:codex-realtime-owner:${workspaceId}:${sessionId}`) !== null
+      sessionStorage.getItem(
+        `opengeni:${model === CODEX_LIVE_MODEL.id ? "codex" : "gateway"}-realtime-owner:${workspaceId}:${sessionId}`,
+      ) !== null
     );
   } catch {
     return false;
@@ -213,7 +277,7 @@ function hasStoredOwnerProof(workspaceId: string, sessionId: string): boolean {
 }
 
 export function SessionCodexRealtimeControl(props: {
-  client: CodexRealtimeControllerClient;
+  client: RealtimeControllerClient;
   workspaceId: string;
   sessionId: string;
   sessionStatus: SessionStatus;
@@ -221,18 +285,71 @@ export function SessionCodexRealtimeControl(props: {
   events: SessionEvent[];
   eventsReady: boolean;
   codexConnected: boolean;
-  underlyingModel: string;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  onRealtimeAutostartConsumed?: (() => void) | undefined;
 }) {
-  const realtime = useSessionCodexRealtime(props);
+  const lifecycle = useMemo(() => projectSessionRealtimeLifecycle(props.events), [props.events]);
+  const selection = useWorkspaceRealtimeModelSelection({
+    client: props.client,
+    workspaceId: props.workspaceId,
+    codexConnected: props.codexConnected,
+    activeModel: lifecycle?.state === "active" ? lifecycle.model : null,
+  });
+  const selectedModel = selection.selectedModel;
+  const realtime = useSessionCodexRealtime({
+    ...props,
+    model: selectedModel.id,
+    modelAvailable: selectedModel.available,
+    modelUnavailableReason: selectedModel.unavailableReason,
+  });
+  const autostartModelRef = useRef(props.realtimeAutostartModel ?? null);
+  const autostartStartedRef = useRef(false);
+
+  const { models, selectedModel: selectedRealtimeModel, selectModel } = selection;
+  const { canStart, start } = realtime;
+  const onRealtimeAutostartConsumed = props.onRealtimeAutostartConsumed;
+
+  useEffect(() => {
+    const pending = autostartModelRef.current;
+    if (!pending || autostartStartedRef.current || lifecycle?.state === "active") return;
+    const available = models.some((model) => model.id === pending && model.available);
+    if (!available) return;
+    if (selectedRealtimeModel.id !== pending) {
+      selectModel(pending);
+      return;
+    }
+    if (!canStart) return;
+    autostartStartedRef.current = true;
+    void start()
+      .then(() => {
+        autostartModelRef.current = null;
+        onRealtimeAutostartConsumed?.();
+      })
+      .catch(() => {
+        autostartStartedRef.current = false;
+      });
+  }, [
+    canStart,
+    lifecycle?.state,
+    models,
+    props.sessionId,
+    props.workspaceId,
+    onRealtimeAutostartConsumed,
+    selectModel,
+    selectedRealtimeModel.id,
+    start,
+  ]);
 
   return (
     <CodexRealtimeControl
       snapshot={realtime.snapshot}
       canStart={realtime.canStart}
       admissionBlocker={realtime.admissionBlocker}
-      codexConnected={realtime.codexConnected}
+      modelAvailable={selectedModel.available}
       audioRef={realtime.audioRef}
-      underlyingModel={props.underlyingModel}
+      selectedModel={selectedModel}
+      models={selection.models}
+      onSelectModel={realtime.lifecycleActive ? undefined : selection.selectModel}
       onStart={realtime.start}
       onStop={realtime.stop}
       onRetry={realtime.retry}
@@ -241,24 +358,170 @@ export function SessionCodexRealtimeControl(props: {
   );
 }
 
+export function useWorkspaceRealtimeModelSelection(options: {
+  client: RealtimeControllerClient;
+  workspaceId: string;
+  codexConnected: boolean;
+  activeModel?: SessionRealtimeModel | null | undefined;
+}) {
+  const activeModel = options.activeModel;
+  const [catalog, setCatalog] = useState<RealtimeModelOption[]>(() => [
+    {
+      ...CODEX_LIVE_MODEL,
+      available: options.codexConnected,
+      unavailableReason: options.codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
+    },
+  ]);
+  const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(
+    () => readRealtimeModelPreference(options.workspaceId) ?? CODEX_LIVE_MODEL.id,
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    const load = options.client.getWorkspaceRealtimeModelCatalog;
+    if (!load) return;
+    void load
+      .call(options.client, options.workspaceId)
+      .then((response) => {
+        if (disposed) return;
+        const models = response.models.map(toRealtimeModelOption);
+        setCatalog(models);
+        setSelectedModelId((current) => {
+          if (models.some((model) => model.id === current && model.available)) return current;
+          return models.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [options.client, options.workspaceId]);
+
+  useEffect(() => {
+    if (activeModel) setSelectedModelId(activeModel);
+  }, [activeModel]);
+
+  const selectedModel =
+    catalog.find((model) => model.id === selectedModelId) ??
+    ({
+      ...CODEX_LIVE_MODEL,
+      available: options.codexConnected,
+      unavailableReason: options.codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
+    } satisfies RealtimeModelOption);
+  const selectModel = useCallback(
+    (value: string) => {
+      const model = catalog.find((candidate) => candidate.id === value);
+      if (!model || !model.available || activeModel) return;
+      setSelectedModelId(model.id);
+      writeRealtimeModelPreference(options.workspaceId, model.id);
+    },
+    [activeModel, catalog, options.workspaceId],
+  );
+
+  return { models: catalog, selectedModel, selectModel };
+}
+
+const IDLE_REALTIME_SNAPSHOT: CodexRealtimeControllerSnapshot = {
+  status: "idle",
+  realtimeId: null,
+  mode: null,
+  bridge: null,
+  microphone: "inactive",
+  audibleOutput: "inactive",
+  connectionGeneration: 0,
+  reconnectAttempt: 0,
+  diagnostic: null,
+  error: null,
+};
+
+export function NewSessionRealtimeControl(props: {
+  client: RealtimeControllerClient;
+  workspaceId: string;
+  codexConnected: boolean;
+  disabled?: boolean | undefined;
+  disabledReason?: string | null | undefined;
+  onStart: (model: SessionRealtimeModel) => Promise<boolean>;
+}) {
+  const selection = useWorkspaceRealtimeModelSelection({
+    client: props.client,
+    workspaceId: props.workspaceId,
+    codexConnected: props.codexConnected,
+  });
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const snapshot = useMemo<CodexRealtimeControllerSnapshot>(
+    () =>
+      starting
+        ? { ...IDLE_REALTIME_SNAPSHOT, status: "starting" }
+        : error
+          ? { ...IDLE_REALTIME_SNAPSHOT, status: "error", error }
+          : IDLE_REALTIME_SNAPSHOT,
+    [error, starting],
+  );
+  const canStart = selection.selectedModel.available && props.disabled !== true && !starting;
+  const onStart = props.onStart;
+  const selectedModelId = selection.selectedModel.id;
+  const start = useCallback(async () => {
+    if (!canStart) return;
+    setStarting(true);
+    setError(null);
+    try {
+      const started = await onStart(selectedModelId);
+      if (!started) setError("The voice session could not be created.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setStarting(false);
+    }
+  }, [canStart, onStart, selectedModelId]);
+
+  return (
+    <CodexRealtimeControl
+      snapshot={snapshot}
+      canStart={canStart}
+      admissionBlocker={selection.selectedModel.unavailableReason ?? props.disabledReason ?? null}
+      modelAvailable={selection.selectedModel.available}
+      selectionDisabled={starting}
+      showDiagnostics={false}
+      audioRef={audioRef}
+      selectedModel={selection.selectedModel}
+      models={selection.models}
+      onSelectModel={selection.selectModel}
+      onStart={start}
+      onStop={async () => undefined}
+      onRetry={start}
+      onRetryAudibleOutput={async () => undefined}
+    />
+  );
+}
+
 export function CodexRealtimeControl(props: {
   snapshot: CodexRealtimeControllerSnapshot;
   canStart: boolean;
   admissionBlocker?: string | null | undefined;
-  codexConnected: boolean;
+  modelAvailable: boolean;
+  selectionDisabled?: boolean | undefined;
   showDiagnostics?: boolean;
   audioRef: RefObject<HTMLAudioElement | null>;
-  underlyingModel?: string | undefined;
+  selectedModel?: RealtimeModelOption | undefined;
+  models?: readonly RealtimeModelOption[] | undefined;
+  onSelectModel?: ((modelId: string) => void) | undefined;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
   onRetry: () => Promise<void>;
   onRetryAudibleOutput: () => Promise<void>;
 }) {
   const reduceMotion = useReducedMotion();
-  const selectedModel = CODEX_LIVE_MODEL;
+  const selectedModel = props.selectedModel ?? {
+    ...CODEX_LIVE_MODEL,
+    available: props.modelAvailable,
+    unavailableReason: props.modelAvailable ? null : CODEX_LIVE_MODEL.unavailableReason,
+  };
+  const models = props.models ?? [selectedModel];
   const status = statusContent(
     props.snapshot,
-    props.codexConnected,
+    props.modelAvailable,
     props.canStart,
     props.admissionBlocker ?? null,
     selectedModel.label,
@@ -290,6 +553,15 @@ export function CodexRealtimeControl(props: {
         ? props.onStop
         : props.onStart;
   const diagnosticsVisible = props.showDiagnostics ?? import.meta.env.DEV;
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerProvider, setPickerProvider] = useState<RealtimeModelProvider | null>(
+    selectedModel.provider,
+  );
+  const [pickerDirection, setPickerDirection] = useState<1 | -1>(1);
+
+  useEffect(() => {
+    if (!pickerOpen) setPickerProvider(selectedModel.provider);
+  }, [pickerOpen, selectedModel.provider]);
 
   return (
     <div aria-label="Realtime voice" className="inline-flex shrink-0 items-center">
@@ -321,12 +593,13 @@ export function CodexRealtimeControl(props: {
         />
       </motion.button>
 
-      <DropdownMenu>
+      <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
         <DropdownMenuTrigger asChild>
           <button
             type="button"
             aria-label="Choose voice model and options"
             title={`Voice model: ${selectedModel.label}`}
+            disabled={props.selectionDisabled}
             className={cn(
               "inline-flex h-8 w-5 items-center justify-center rounded-r-og-md border border-l-0 outline-none",
               "transition-[background-color,border-color,color] duration-200 ease-og-out",
@@ -341,56 +614,41 @@ export function CodexRealtimeControl(props: {
         <DropdownMenuContent
           side="top"
           align="end"
-          sideOffset={10}
-          collisionPadding={16}
-          className="w-[min(22rem,calc(100vw-2rem))] rounded-og-lg border-og-border bg-og-surface-1 p-1.5 text-og-fg shadow-og-lg"
+          sideOffset={8}
+          collisionPadding={12}
+          className="flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-1.5 shadow-xl"
+          onCloseAutoFocus={(event) => event.preventDefault()}
         >
-          <DropdownMenuLabel className="px-2.5 pb-1 pt-2 text-og-xs font-semibold uppercase tracking-[0.12em] text-og-fg-subtle">
-            Voice model
-          </DropdownMenuLabel>
-          <DropdownMenuRadioGroup value={selectedModel.id}>
-            {SUPPORTED_REALTIME_MODELS.map((model) => (
-              <DropdownMenuRadioItem
-                key={model.id}
-                value={model.id}
-                className="items-start rounded-og-md py-2.5 pl-8 pr-2.5"
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-2">
-                    <span className="truncate text-og-sm font-medium text-og-fg">
-                      {model.label}
-                    </span>
-                    {model.recommended ? (
-                      <span className="rounded-full border border-og-accent/25 bg-og-accent-soft px-1.5 py-0.5 text-[10px] font-medium leading-none text-og-accent">
-                        Recommended
-                      </span>
-                    ) : null}
-                  </span>
-                  <span className="mt-0.5 block truncate text-og-xs text-og-fg-subtle">
-                    {model.provider} · {model.description}
-                  </span>
-                </span>
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-
-          <DropdownMenuSeparator className="mx-1 bg-og-border" />
-          <div className="px-2.5 py-2" role="status" aria-live="polite">
-            <div className="flex items-center gap-2 text-og-sm font-medium text-og-fg">
-              <RealtimeStatusDot phase={status.phase} reduceMotion={reduceMotion === true} />
-              {status.label}
-            </div>
-            <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <RealtimeModelPickerMenu
+              models={models}
+              selectedModel={selectedModel}
+              provider={pickerProvider}
+              direction={pickerDirection}
+              disabled={props.selectionDisabled === true || props.snapshot.mode?.state === "active"}
+              onProviderChange={(provider, direction) => {
+                setPickerDirection(direction);
+                setPickerProvider(provider);
+              }}
+              onSelect={(modelId) => {
+                props.onSelectModel?.(modelId);
+                setPickerOpen(false);
+              }}
+            />
           </div>
 
-          <div className="mx-2 mb-1 rounded-og-md border border-og-border/70 bg-og-surface-2/60 px-2.5 py-2">
-            <p className="truncate text-og-xs font-medium text-og-fg">
-              Session agent: {friendlyModelName(props.underlyingModel)}
-            </p>
-            <p className="mt-0.5 text-[11px] leading-4 text-og-fg-subtle">
-              Voice handles conversation; your session agent handles durable work.
-            </p>
-          </div>
+          {status.phase !== "idle" ? (
+            <>
+              <DropdownMenuSeparator className="mx-1 bg-og-border" />
+              <div className="px-2.5 py-2" role="status" aria-live="polite">
+                <div className="flex items-center gap-2 text-og-sm font-medium text-og-fg">
+                  <RealtimeStatusDot phase={status.phase} reduceMotion={reduceMotion === true} />
+                  {status.label}
+                </div>
+                <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+              </div>
+            </>
+          ) : null}
 
           {audioBlocked ? (
             <DropdownMenuItem
@@ -434,6 +692,84 @@ export function CodexRealtimeControl(props: {
           {props.snapshot.error}
         </span>
       ) : null}
+    </div>
+  );
+}
+
+export function RealtimeModelPickerMenu(props: {
+  models: readonly RealtimeModelOption[];
+  selectedModel: RealtimeModelOption;
+  provider: RealtimeModelProvider | null;
+  direction: 1 | -1;
+  disabled: boolean;
+  onProviderChange: (provider: RealtimeModelProvider | null, direction: 1 | -1) => void;
+  onSelect: (modelId: SessionRealtimeModel) => void;
+}) {
+  const providers = REALTIME_MODEL_PROVIDERS.filter((provider) =>
+    props.models.some((model) => model.provider === provider),
+  );
+  const pageKey = props.provider ? `voice-models:${props.provider}` : "voice-providers";
+  const body = props.provider ? (
+    <div data-testid="realtime-model-picker-models">
+      <PickerBackHeader
+        label={props.provider}
+        icon={
+          <BillingClassMark
+            billingClass={REALTIME_PROVIDER_META[props.provider].billingClass}
+            aria-label=""
+          />
+        }
+        onBack={() => props.onProviderChange(null, -1)}
+      />
+      <div className="flex flex-col gap-0.5">
+        {props.models
+          .filter((model) => model.provider === props.provider)
+          .map((model) => {
+            const selected = model.id === props.selectedModel.id;
+            return (
+              <PickerNavRow
+                key={model.id}
+                label={model.label}
+                hint={
+                  model.unavailableReason ??
+                  (model.recommended ? `Recommended · ${model.description}` : model.description)
+                }
+                disabled={props.disabled || !model.available}
+                title={model.unavailableReason ?? model.description}
+                active={selected}
+                showChevron={false}
+                trailing={selected ? <CheckIcon className="size-3.5" aria-hidden /> : undefined}
+                testId={`realtime-model-choice-${model.id}`}
+                onClick={() => props.onSelect(model.id)}
+              />
+            );
+          })}
+      </div>
+    </div>
+  ) : (
+    <div className="flex flex-col gap-0.5" data-testid="realtime-model-picker-providers">
+      {providers.map((provider) => {
+        const meta = REALTIME_PROVIDER_META[provider];
+        return (
+          <PickerNavRow
+            key={provider}
+            label={provider}
+            hint={meta.hint}
+            icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
+            active={props.selectedModel.provider === provider}
+            testId={`realtime-model-provider-${meta.billingClass}`}
+            onClick={() => props.onProviderChange(provider, 1)}
+          />
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <div className="relative overflow-hidden" data-testid="realtime-model-picker-menu">
+      <PickerAnimatedPage pageKey={pageKey} direction={props.direction}>
+        {body}
+      </PickerAnimatedPage>
     </div>
   );
 }
@@ -499,7 +835,7 @@ type RealtimeVisualPhase =
 
 function statusContent(
   snapshot: CodexRealtimeControllerSnapshot,
-  codexConnected: boolean,
+  modelAvailable: boolean,
   canStart: boolean,
   admissionBlocker: string | null,
   modelLabel: string,
@@ -555,11 +891,11 @@ function statusContent(
         detail: snapshot.error ?? "The connection could not be started.",
       };
     case "idle":
-      if (!codexConnected) {
+      if (!modelAvailable) {
         return {
           phase: "unavailable",
-          label: "Connect Codex for voice",
-          detail: "Connect a Codex account before using this voice model.",
+          label: "Voice model unavailable",
+          detail: admissionBlocker ?? "Choose another voice model.",
         };
       }
       if (!canStart && admissionBlocker) {
@@ -703,8 +1039,37 @@ function voiceButtonTone(phase: RealtimeVisualPhase): string {
   return "border-og-border bg-og-surface-2 text-og-fg-muted hover:border-og-accent/35 hover:bg-og-accent-soft hover:text-og-accent";
 }
 
-function friendlyModelName(model: string | undefined): string {
-  if (!model) return "Current session model";
-  const providerSeparator = model.lastIndexOf("/");
-  return providerSeparator >= 0 ? model.slice(providerSeparator + 1) : model;
+function toRealtimeModelOption(model: WorkspaceRealtimeModelCatalogItem): RealtimeModelOption {
+  return { ...model };
+}
+
+function readRealtimeModelPreference(workspaceId: string): SessionRealtimeModel | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const value = localStorage.getItem(`${REALTIME_MODEL_STORAGE_PREFIX}:${workspaceId}`);
+    return isRealtimeModel(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRealtimeModelPreference(workspaceId: string, model: SessionRealtimeModel): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(`${REALTIME_MODEL_STORAGE_PREFIX}:${workspaceId}`, model);
+  } catch {
+    // Voice selection still works when browser storage is unavailable.
+  }
+}
+
+function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
+  return (
+    value === "gpt-live-1-boulder-alpha" ||
+    value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
+    value === "opengeni-gateway/openai/gpt-realtime-mini" ||
+    value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
+    value === "workspace-gateway/openai/gpt-realtime-2.1" ||
+    value === "workspace-gateway/openai/gpt-realtime-mini" ||
+    value === "workspace-gateway/xai/grok-voice-think-fast-2.0"
+  );
 }

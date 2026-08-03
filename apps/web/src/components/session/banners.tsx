@@ -6,7 +6,7 @@ import {
   FileJsonIcon,
   GitBranchIcon,
   ImageIcon,
-  MicIcon,
+  AudioLinesIcon,
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -248,7 +248,7 @@ export function UserMessageBody({
     <div data-testid="timeline-user">
       {item.presentation ? (
         <div className="mb-1.5 inline-flex items-center gap-1 text-xs font-medium text-fg-muted">
-          <MicIcon className="size-3.5" />
+          <AudioLinesIcon className="size-3.5" />
           {item.presentation.kind === "realtime_voice_handoff" ? "Voice handoff" : "Voice request"}
         </div>
       ) : null}

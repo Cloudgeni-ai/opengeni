@@ -29,6 +29,10 @@
     "./codex-realtime-controller": {
       "types": "./src/codex-realtime-controller.ts",
       "default": "./src/codex-realtime-controller.ts"
+    },
+    "./gateway-realtime-transport": {
+      "types": "./src/gateway-realtime-transport.ts",
+      "default": "./src/gateway-realtime-transport.ts"
     }
   },
   "publishConfig": {

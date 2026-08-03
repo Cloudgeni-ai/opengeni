@@ -13,6 +13,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "/lineage", "session.lineage.read"],
   ["POST", "/codex-account", "session.codex_account.write"],
   ["POST", "/realtime/webrtc", "session.realtime.start"],
+  ["POST", "/realtime/gateway", "session.realtime.start"],
   ["POST", "/realtime", "session.realtime.start"],
   ["PATCH", "/realtime/33333333-3333-4333-8333-333333333333/heartbeat", "session.realtime.control"],
   [
