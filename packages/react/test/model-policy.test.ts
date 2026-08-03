@@ -65,8 +65,8 @@ describe("model-policy", () => {
   test("labels a connected workspace Gateway as Your Gateway", () => {
     const rows = projectPickerRows([
       catalogModel({
-        id: "workspace-gateway/kimi-k3-fast",
-        label: "Kimi K3 Fast",
+        id: "workspace-gateway/kimi-k3",
+        label: "Kimi K3",
         source: "workspace_gateway",
       }),
     ]);

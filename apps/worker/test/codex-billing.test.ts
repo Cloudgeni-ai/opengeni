@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
@@ -56,6 +57,90 @@ describe("worker ensureRunAllowed — codex bypass", () => {
 });
 
 describe("worker recordModelUsageAndDebitCredits — codex usage recording", () => {
+  test("managed Gateway uses exact reported cost and records the serving provider", async () => {
+    const recorded: Array<{ eventType: string; quantity: number }> = [];
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({ eventType: input.eventType, quantity: input.quantity });
+      },
+    );
+    const debitInputs: Array<Record<string, any>> = [];
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async (_db, input) => {
+        debitInputs.push(input);
+        return {
+          balance: {
+            accountId: ACCOUNT,
+            balanceMicros: 1_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          },
+          debitedMicros: input.requestedAmountMicros,
+        };
+      },
+    );
+    try {
+      const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-gateway",
+        turnId: "turn-gateway",
+        turnAttemptId: "attempt-gateway",
+        model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        externallyBilled: false,
+        gatewayManaged: true,
+        gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
+        usage: {
+          inputTokens: 9,
+          outputTokens: 8,
+          totalTokens: 17,
+          inputTokensDetails: { cached_tokens: 3 },
+        },
+        sourceKey: "response-gateway",
+      });
+
+      expect(recorded).toContainEqual({ eventType: "model.cost", quantity: 5 });
+      expect(debitInputs).toHaveLength(1);
+      expect(debitInputs[0]).toMatchObject({
+        requestedAmountMicros: 5,
+        metadata: { gatewayProvider: "baseten", cachedTokens: 3 },
+      });
+      expect(billing).toMatchObject({ pricedCostMicros: 5, upstreamProvider: "baseten" });
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("managed Gateway rejects an unapproved reported provider before recording usage", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue(
+      undefined as never,
+    );
+    try {
+      await expect(
+        recordModelUsageAndDebitCredits(billedSettings(), db, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-gateway",
+          turnId: "turn-gateway-rejected",
+          turnAttemptId: "attempt-gateway-rejected",
+          model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
+          externallyBilled: false,
+          gatewayManaged: true,
+          gatewayBilling: { finalProvider: "unapproved", inferenceCostUsd: "0.01" },
+          usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
+          sourceKey: "response-gateway-rejected",
+        }),
+      ).rejects.toThrow("AI Gateway reported unapproved provider");
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
   test("(d) codex turn records model.cost=0, does NOT throw 'Missing model pricing', and never debits", async () => {
     const recorded: Array<{ eventType: string; quantity: number; unit: string }> = [];
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
