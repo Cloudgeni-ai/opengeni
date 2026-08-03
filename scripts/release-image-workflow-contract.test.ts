@@ -128,10 +128,28 @@ describe("release image workflow contract", () => {
 
   test("main CI publishes exact-SHA dogfood images without granting PR publication", async () => {
     const ci = await workflow("ci.yml");
-    const images = ci.slice(ci.indexOf("\n  images:\n"), ci.indexOf("\n  automation-report:\n"));
+    const images = ci.slice(
+      ci.indexOf("\n  service-images:\n"),
+      ci.indexOf("\n  automation-report:\n"),
+    );
+    const parsed = Bun.YAML.parse(ci) as {
+      jobs: Record<string, { name?: string; needs?: string | string[]; if?: string }>;
+    };
 
-    expect(() => Bun.YAML.parse(ci)).not.toThrow();
-    expect(images).toContain("packages: write");
+    expect(parsed.jobs["service-images"]?.needs).toBe("automation-admission");
+    expect(parsed.jobs["sandbox-image"]?.needs).toBe("automation-admission");
+    expect(parsed.jobs.images?.name).toBe("Workload image builds");
+    expect(parsed.jobs.images?.needs).toEqual([
+      "automation-admission",
+      "service-images",
+      "sandbox-image",
+    ]);
+    expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
+    expect(parsed.jobs.images?.if).toBe(parsed.jobs["service-images"]?.if);
+    expect(images.match(/packages: write/g)).toHaveLength(2);
+    expect(images).toContain("Require every workload image build");
+    expect(images).toContain("SERVICE_IMAGES_RESULT: ${{ needs.service-images.result }}");
+    expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
     expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
     expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
@@ -139,6 +157,8 @@ describe("release image workflow contract", () => {
     expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}");
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
+    expect(images).toContain("API_DIGEST: ${{ needs.service-images.outputs.api_digest }}");
+    expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
     expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
     expect(images).toContain("dogfood-images-${{ github.sha }}");
@@ -432,7 +452,12 @@ ${parser}`,
 
   test("ordinary CI builds the same five physical image roles", async () => {
     const ci = await workflow("ci.yml");
-    const imagesJob = ci.slice(ci.indexOf("\n  images:\n"));
+    const imagesJob = ci.slice(ci.indexOf("\n  service-images:\n"));
+    const serviceImages = ci.slice(
+      ci.indexOf("\n  service-images:\n"),
+      ci.indexOf("\n  sandbox-image:\n"),
+    );
+    const sandboxImage = ci.slice(ci.indexOf("\n  sandbox-image:\n"), ci.indexOf("\n  images:\n"));
 
     for (const identity of [
       "target: api",
@@ -445,5 +470,8 @@ ${parser}`,
     }
     expect(imagesJob).toContain("docker/setup-qemu-action@");
     expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
+    expect(serviceImages).not.toContain("docker/sandbox.Dockerfile");
+    expect(sandboxImage).toContain("docker/sandbox.Dockerfile");
+    expect(sandboxImage).not.toMatch(/target: (?:api|worker|web)/);
   });
 });
