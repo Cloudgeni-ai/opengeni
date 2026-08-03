@@ -19,6 +19,7 @@ import {
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
+  DocumentSearchResponse,
   EnablePackRequest,
   ErrorEnvelope,
   GitCredentialBindingId,
@@ -1466,6 +1467,43 @@ describe("contracts", () => {
       limit: 50,
       mode: "hybrid",
       sourceKinds: ["repository"],
+    });
+    expect(
+      DocumentSearchResponse.parse({
+        results: [
+          {
+            chunkId: "00000000-0000-4000-8000-000000000011",
+            workspaceId: "00000000-0000-4000-8000-000000000012",
+            documentId: "00000000-0000-4000-8000-000000000013",
+            baseId: "00000000-0000-4000-8000-000000000014",
+            fileId,
+            title: "Network policy",
+            text: "Private endpoints require the approved policy.",
+            score: 0.75,
+            matchType: "keyword",
+            vectorScore: null,
+            keywordScore: 0.75,
+            chunkIndex: 0,
+            metadata: {},
+            sourceKind: "repository",
+            sourceUri: "https://example.test/runbook",
+            sourceExternalId: "runbook-1",
+            sourceTitle: "Network policy",
+            sourceAuthor: "Platform",
+            sourceCreatedAt: null,
+            sourceUpdatedAt: null,
+            sourceVersion: "v1",
+            aclTags: ["platform"],
+            authorityKind: "personal",
+            authorityWorkspaceId: "00000000-0000-4000-8000-000000000012",
+            authoritySubjectId: "user:initiator",
+          },
+        ],
+      }).results[0],
+    ).toMatchObject({
+      sourceKind: "repository",
+      authorityKind: "personal",
+      authoritySubjectId: "user:initiator",
     });
   });
 

@@ -348,6 +348,7 @@ export type {
   CreateWorkspaceRequest,
   DiscoverMcpCapabilitiesResponse,
   Document,
+  DocumentAuthorityKind,
   DocumentBase,
   DocumentCuration,
   DocumentCurationStatus,

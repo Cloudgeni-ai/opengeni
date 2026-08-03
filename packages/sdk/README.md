@@ -360,7 +360,7 @@ Every public endpoint group has typed methods:
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
 | Variable sets | `listVariable sets`, `createVariable set`, `getVariable set`, `updateVariable set`, `deleteVariable set`, `setVariable setVariable`, `deleteVariable setVariable` (values are write-only) |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
-| Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments` |
+| Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
 | Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
 | GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |

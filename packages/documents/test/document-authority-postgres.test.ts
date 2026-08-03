@@ -7,6 +7,7 @@ import {
   getDocumentChunk,
   moveDocumentToBase,
   queueDocumentForReindex,
+  searchEffectiveDocuments,
   searchDocuments,
 } from "../src";
 
@@ -45,6 +46,7 @@ async function createReadyDocument(
     label: string;
     kind: "organization" | "workspace" | "personal";
     subjectId?: string;
+    text?: string;
   },
 ): Promise<StoredDocument> {
   const [file] = await shared!.admin<{ id: string }[]>`
@@ -77,7 +79,7 @@ async function createReadyDocument(
       text, metadata, embedding, embedding_model
     ) values (
       ${workspace.accountId}, ${workspace.workspaceId}, ${document!.id}, ${base!.id},
-      ${file!.id}, 0, ${`authoritycommon ${input.label}`}, '{}'::jsonb,
+      ${file!.id}, 0, ${input.text ?? `authoritycommon ${input.label}`}, '{}'::jsonb,
       ${zeroVector}::vector, 'authority-test'
     ) returning id`;
   return {
@@ -131,6 +133,12 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
       label: "personal",
       kind: "personal",
       subjectId: "user:alice",
+    });
+    const otherPersonal = await createReadyDocument(origin, {
+      label: "legacy-private-bob",
+      kind: "personal",
+      subjectId: "user:bob",
+      text: "authoritycommon authoritycommon authoritycommon legacy private bob",
     });
     const otherOrganization = await createReadyDocument(other, {
       label: "other-organization",
@@ -211,6 +219,34 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         [organization.documentId, workspace.documentId, personal.documentId].sort(),
       );
 
+      const effective = await searchEffectiveDocuments(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "authoritycommon",
+        mode: "keyword",
+        limit: 1,
+        initiatingSubjectId: "user:alice",
+        surface: "agent",
+        // Runtime hardening: even an untyped caller cannot replace the frozen
+        // initiating subject through the lower-level access shape.
+        access: { viewerSubjectId: "user:bob", agentOnly: false },
+      } as never);
+      expect(effective).toHaveLength(1);
+      expect(effective[0]?.documentId).not.toBe(otherPersonal.documentId);
+      expect(["organization", "workspace", "personal"]).toContain(effective[0]?.authorityKind);
+      const effectiveAll = await searchEffectiveDocuments(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "authoritycommon",
+        mode: "keyword",
+        limit: 50,
+        initiatingSubjectId: "user:alice",
+        surface: "agent",
+      });
+      expect(effectiveAll.map((result) => result.documentId).sort()).toEqual(
+        [organization.documentId, workspace.documentId, personal.documentId].sort(),
+      );
+
       const siblingResults = await searchDocuments(client.db, {
         accountId: sibling.accountId,
         workspaceId: sibling.workspaceId,
@@ -227,6 +263,18 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         authorityWorkspaceId: null,
         authoritySubjectId: null,
       });
+      const siblingEffective = await searchEffectiveDocuments(client.db, {
+        accountId: sibling.accountId,
+        workspaceId: sibling.workspaceId,
+        query: "legacy private bob",
+        mode: "keyword",
+        limit: 50,
+        initiatingSubjectId: "user:bob",
+        surface: "agent",
+      });
+      expect(siblingEffective.map((result) => result.documentId)).not.toContain(
+        otherPersonal.documentId,
+      );
 
       await expect(
         getDocumentChunk(client.db, sibling.accountId, sibling.workspaceId, organization.chunkId, {

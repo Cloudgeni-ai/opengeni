@@ -158,3 +158,16 @@ cutover.
 This slice intentionally adds no HTTP route, public SDK method, MCP tool, UI,
 connector, scheduled sweep, prompt injection, or automatic policy/preference
 activation.
+
+## Effective Document retrieval composition
+
+The later Documents retrieval slice does not expose normalized claims or create
+a second prompt/memory path. `searchEffectiveDocuments` composes only current
+Document/chunk evidence authorized for the exact account, requesting workspace,
+and immutable initiating human. The public `/knowledge/search` route, SDK
+`searchKnowledge`, and docs-MCP `knowledge_search` all use that same boundary;
+the subject is derived from the authenticated grant rather than request/tool
+input, authorization predicates run before vector/keyword ranking and limits,
+and results retain source plus immutable authority provenance. Agent calls also
+require `agent_access=true`. Legacy workspace and legacy private rows keep the
+workspace bindings established by migration 0165.
