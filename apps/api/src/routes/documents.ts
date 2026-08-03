@@ -6,6 +6,7 @@ import {
   Document,
   DocumentBase,
   DocumentSearchRequest,
+  DocumentSearchResponse,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   MoveDocumentRequest,
@@ -34,7 +35,7 @@ import {
   listDocuments,
   moveDocumentToBase,
   queueDocumentForReindex,
-  searchDocuments,
+  searchEffectiveDocuments,
 } from "@opengeni/documents";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Context, Hono } from "hono";
@@ -279,46 +280,52 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!base) {
       throw new HTTPException(404, { message: "document base not found" });
     }
-    return c.json({
-      results: await searchDocuments(
-        db,
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          baseIds: [base.id],
-          query: payload.query,
-          limit: payload.limit,
-          mode: payload.mode,
-          sourceKinds: payload.sourceKinds,
-          aclTags: payload.aclTags,
-          access: { viewerSubjectId: grant.subjectId },
-        },
-        getDocumentServices(),
-      ),
-    });
+    return c.json(
+      DocumentSearchResponse.parse({
+        results: await searchEffectiveDocuments(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            baseIds: [base.id],
+            query: payload.query,
+            limit: payload.limit,
+            mode: payload.mode,
+            sourceKinds: payload.sourceKinds,
+            aclTags: payload.aclTags,
+            initiatingSubjectId: grant.subjectId,
+            surface: "human",
+          },
+          getDocumentServices(),
+        ),
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/knowledge/search", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
     const payload = await parseDocumentSearchRequest(c, "invalid knowledge search request");
-    return c.json({
-      results: await searchDocuments(
-        db,
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          query: payload.query,
-          baseIds: payload.baseIds,
-          limit: payload.limit,
-          mode: payload.mode,
-          sourceKinds: payload.sourceKinds,
-          aclTags: payload.aclTags,
-          access: { viewerSubjectId: grant.subjectId },
-        },
-        getDocumentServices(),
-      ),
-    });
+    return c.json(
+      DocumentSearchResponse.parse({
+        results: await searchEffectiveDocuments(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            query: payload.query,
+            baseIds: payload.baseIds,
+            limit: payload.limit,
+            mode: payload.mode,
+            sourceKinds: payload.sourceKinds,
+            aclTags: payload.aclTags,
+            initiatingSubjectId: grant.subjectId,
+            surface: "human",
+          },
+          getDocumentServices(),
+        ),
+      }),
+    );
   });
 
   // Knowledge drop: raw text or an uploaded file, no metadata required. Lands
@@ -631,7 +638,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       grant.accountId,
       workspaceId,
       getDocumentServices(),
-      { createdBySessionId: sessionId, viewerSubjectId: grant.subjectId },
+      { createdBySessionId: sessionId, initiatingSubjectId: grant.subjectId },
     );
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);

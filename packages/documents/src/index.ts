@@ -177,6 +177,13 @@ export type DocumentSearchInput = {
   access?: DocumentAccessFilter | undefined;
 };
 
+export type EffectiveDocumentSearchInput = Omit<DocumentSearchInput, "access"> & {
+  /** Immutable human subject accepted for the logical request/turn. */
+  initiatingSubjectId: string;
+  /** Agent retrieval additionally enforces documents.agent_access. */
+  surface: "human" | "agent";
+};
+
 export type DocumentIndexHooks = {
   beforeEmbed?: (input: {
     accountId: string;
@@ -1555,6 +1562,42 @@ export async function searchDocuments(
     rows.push(...(await keywordSearchDocuments(db, input, candidateLimit)));
   }
   return mergeDocumentSearchRows(rows, mode).slice(0, limit);
+}
+
+/**
+ * Canonical effective retrieval composition for API, SDK, and MCP surfaces.
+ * Callers supply the already-authorized immutable initiating subject; no
+ * request/tool input can replace it with another user's personal authority.
+ */
+export async function searchEffectiveDocuments(
+  db: Database,
+  input: EffectiveDocumentSearchInput,
+  services: Pick<DocumentServices, "embedder"> = createDocumentServices(),
+): Promise<DocumentSearchResult[]> {
+  const initiatingSubjectId = cleanString(input.initiatingSubjectId);
+  if (!initiatingSubjectId) {
+    throw new Error("effective document retrieval requires an initiating subject");
+  }
+  return await searchDocuments(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      query: input.query,
+      baseIds: input.baseIds,
+      limit: input.limit,
+      mode: input.mode,
+      sourceKinds: input.sourceKinds,
+      aclTags: input.aclTags,
+      // Construct the lower-level access filter here instead of spreading the
+      // caller input, so an untyped/legacy access override is always ignored.
+      access: {
+        viewerSubjectId: initiatingSubjectId,
+        ...(input.surface === "agent" ? { agentOnly: true } : {}),
+      },
+    },
+    services,
+  );
 }
 
 async function vectorSearchDocuments(

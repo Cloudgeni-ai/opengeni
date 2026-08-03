@@ -3262,6 +3262,11 @@ export const DocumentSearchResult = z.object({
 });
 export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
 
+export const DocumentSearchResponse = z.object({
+  results: z.array(DocumentSearchResult),
+});
+export type DocumentSearchResponse = z.infer<typeof DocumentSearchResponse>;
+
 export const CreateDocumentBaseRequest = z.object({
   name: z.string().min(1),
   description: z.string().optional(),

@@ -1,7 +1,8 @@
+import { DocumentSearchResponse } from "@opengeni/contracts";
 import {
   getDocumentChunk,
   listDocumentBases,
-  searchDocuments,
+  searchEffectiveDocuments,
   type DocumentAccessFilter,
   type DocumentServices,
 } from "@opengeni/documents";
@@ -47,9 +48,9 @@ export function buildDocumentsMcpServer(
   documentServices: DocumentServices,
   options: {
     createdBySessionId?: string | undefined;
-    /** The human subject whose agent is making this retrieval request. */
-    viewerSubjectId?: string | undefined;
-  } = {},
+    /** Immutable human subject whose agent is making this retrieval request. */
+    initiatingSubjectId: string;
+  },
 ): McpServer {
   const server = new McpServer({
     name: "opengeni-documents",
@@ -60,7 +61,7 @@ export function buildDocumentsMcpServer(
   // documents are available only to the creating subject's agent.
   const agentAccess: DocumentAccessFilter = {
     agentOnly: true,
-    ...(options.viewerSubjectId ? { viewerSubjectId: options.viewerSubjectId } : {}),
+    viewerSubjectId: options.initiatingSubjectId,
   };
 
   server.registerTool(
@@ -81,18 +82,34 @@ export function buildDocumentsMcpServer(
       inputSchema: SearchInputSchema,
     },
     async (input) =>
-      searchContent(db, accountId, workspaceId, documentServices, input, agentAccess),
+      searchContent(
+        db,
+        accountId,
+        workspaceId,
+        documentServices,
+        input,
+        options.initiatingSubjectId,
+        false,
+      ),
   );
 
   server.registerTool(
     "knowledge_search",
     {
       description:
-        "Search company knowledge sources with optional base, source-kind, ACL, and retrieval-mode filters.",
+        "Search the effective authorized organization, current-workspace, and immutable initiating-user personal document scope. Authorization is applied before ranking and every result retains source and authority provenance.",
       inputSchema: SearchInputSchema,
     },
     async (input) =>
-      searchContent(db, accountId, workspaceId, documentServices, input, agentAccess),
+      searchContent(
+        db,
+        accountId,
+        workspaceId,
+        documentServices,
+        input,
+        options.initiatingSubjectId,
+        true,
+      ),
   );
 
   server.registerTool(
@@ -229,29 +246,30 @@ async function searchContent(
       | undefined;
     aclTags?: string[] | undefined;
   },
-  access: DocumentAccessFilter,
+  initiatingSubjectId: string,
+  wrapResponse: boolean,
 ) {
+  const results = await searchEffectiveDocuments(
+    db,
+    {
+      accountId,
+      workspaceId,
+      query: input.query,
+      ...(input.baseIds ? { baseIds: input.baseIds } : {}),
+      ...(input.limit ? { limit: input.limit } : {}),
+      ...(input.mode ? { mode: input.mode } : {}),
+      ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
+      ...(input.aclTags ? { aclTags: input.aclTags } : {}),
+      initiatingSubjectId,
+      surface: "agent",
+    },
+    documentServices,
+  );
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(
-          await searchDocuments(
-            db,
-            {
-              accountId,
-              workspaceId,
-              query: input.query,
-              ...(input.baseIds ? { baseIds: input.baseIds } : {}),
-              ...(input.limit ? { limit: input.limit } : {}),
-              ...(input.mode ? { mode: input.mode } : {}),
-              ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
-              ...(input.aclTags ? { aclTags: input.aclTags } : {}),
-              access,
-            },
-            documentServices,
-          ),
-        ),
+        text: JSON.stringify(wrapResponse ? DocumentSearchResponse.parse({ results }) : results),
       },
     ],
   };

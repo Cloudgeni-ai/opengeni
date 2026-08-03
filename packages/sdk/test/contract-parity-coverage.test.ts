@@ -22,6 +22,7 @@ import {
   Document as ContractDocument,
   DocumentBase as ContractDocumentBase,
   DocumentSearchResult as ContractDocumentSearchResult,
+  DocumentSearchResponse as ContractDocumentSearchResponse,
   DocumentStatus as ContractDocumentStatus,
   EnableCapabilityRequest as ContractEnableCapabilityRequest,
   EnablePackRequest as ContractEnablePackRequest,
@@ -96,6 +97,7 @@ import type {
   Document,
   DocumentBase,
   DocumentSearchResult,
+  DocumentSearchResponse,
   DocumentStatus,
   EnableCapabilityRequest,
   EnablePackRequest,
@@ -244,6 +246,16 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptSearchResult = (
       value: z.infer<typeof ContractDocumentSearchResult>,
     ): DocumentSearchResult => value;
+    const acceptContractDocument = (value: Document): z.infer<typeof ContractDocument> => value;
+    const acceptContractSearchResult = (
+      value: DocumentSearchResult,
+    ): z.infer<typeof ContractDocumentSearchResult> => value;
+    const acceptSearchResponse = (
+      value: z.infer<typeof ContractDocumentSearchResponse>,
+    ): DocumentSearchResponse => value;
+    const acceptContractSearchResponse = (
+      value: DocumentSearchResponse,
+    ): z.infer<typeof ContractDocumentSearchResponse> => value;
     const acceptPack = (value: z.infer<typeof ContractCapabilityPack>): CapabilityPack => value;
     const acceptRegisteredPack = (
       value: z.infer<typeof ContractWorkspaceRegisteredPack>,
@@ -279,6 +291,10 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptDocumentBase,
       acceptDocument,
       acceptSearchResult,
+      acceptContractDocument,
+      acceptContractSearchResult,
+      acceptSearchResponse,
+      acceptContractSearchResponse,
       acceptPack,
       acceptRegisteredPack,
       acceptPackInstallation,
