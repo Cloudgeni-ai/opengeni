@@ -32,7 +32,8 @@ import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
 
 const MIB = 1024 * 1024;
-const MAX_HISTORY_BYTES_PER_TURN = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES;
+const MAX_ACTIVE_HISTORY_BYTES_PER_TURN = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES;
+const MAX_INACTIVE_HISTORY_BYTES_PER_TURN = 32 * MIB;
 const MAX_HISTORY_ROW_PAYLOAD_BYTES = 16 * 1024;
 const MIN_HISTORY_ROW_PAYLOAD_BYTES = 512;
 const MAX_HISTORY_ROWS_PER_TURN = 131_072;
@@ -247,16 +248,20 @@ export function historyRowShape(
   if (
     !Number.isSafeInteger(activeBytes) ||
     activeBytes <= 0 ||
-    activeBytes > MAX_HISTORY_BYTES_PER_TURN
+    activeBytes > MAX_ACTIVE_HISTORY_BYTES_PER_TURN
   ) {
-    throw new Error(`active history bytes must be between 1 and ${MAX_HISTORY_BYTES_PER_TURN}`);
+    throw new Error(
+      `active history bytes must be between 1 and ${MAX_ACTIVE_HISTORY_BYTES_PER_TURN}`,
+    );
   }
   if (
     !Number.isSafeInteger(inactiveBytes) ||
     inactiveBytes < 0 ||
-    inactiveBytes > MAX_HISTORY_BYTES_PER_TURN
+    inactiveBytes > MAX_INACTIVE_HISTORY_BYTES_PER_TURN
   ) {
-    throw new Error(`inactive history bytes must be between 0 and ${MAX_HISTORY_BYTES_PER_TURN}`);
+    throw new Error(
+      `inactive history bytes must be between 0 and ${MAX_INACTIVE_HISTORY_BYTES_PER_TURN}`,
+    );
   }
   if (
     !Number.isSafeInteger(rowPayloadTargetBytes) ||
@@ -342,13 +347,13 @@ export function profileConfigFromEnv(
     env,
     "OPENGENI_DENSITY_ACTIVE_HISTORY_BYTES",
     DEFAULT_ACTIVE_HISTORY_BYTES,
-    MAX_HISTORY_BYTES_PER_TURN,
+    MAX_ACTIVE_HISTORY_BYTES_PER_TURN,
   );
   const inactiveHistoryBytes = boundedNonnegativeInteger(
     env,
     "OPENGENI_DENSITY_INACTIVE_HISTORY_BYTES",
     DEFAULT_INACTIVE_HISTORY_BYTES,
-    MAX_HISTORY_BYTES_PER_TURN,
+    MAX_INACTIVE_HISTORY_BYTES_PER_TURN,
   );
   const compactionTailBytes = boundedPositiveInteger(
     env,
@@ -1586,7 +1591,7 @@ export function buildProfileResult(input: {
         activeBytesPerTurn: config.activeHistoryBytes,
         inactiveBytesPerTurn: config.inactiveHistoryBytes,
         compactionTailBytesPerTurn: config.compactionTailBytes,
-        maxHistoryBytesPerTurn: MAX_HISTORY_BYTES_PER_TURN,
+        maxHistoryBytesPerTurn: MAX_ACTIVE_HISTORY_BYTES_PER_TURN,
         productionActiveMaterializationLimits: PRODUCTION_ACTIVE_HISTORY_LIMITS,
         shape: historyRowShape(
           config.activeHistoryBytes,
@@ -1655,7 +1660,7 @@ function canonicalWorkload() {
       activeBytesPerTurn: DEFAULT_ACTIVE_HISTORY_BYTES,
       inactiveBytesPerTurn: DEFAULT_INACTIVE_HISTORY_BYTES,
       compactionTailBytesPerTurn: DEFAULT_COMPACTION_TAIL_BYTES,
-      maxHistoryBytesPerTurn: MAX_HISTORY_BYTES_PER_TURN,
+      maxHistoryBytesPerTurn: MAX_ACTIVE_HISTORY_BYTES_PER_TURN,
       productionActiveMaterializationLimits: PRODUCTION_ACTIVE_HISTORY_LIMITS,
       shape: historyRowShape(
         DEFAULT_ACTIVE_HISTORY_BYTES,
@@ -1923,10 +1928,10 @@ export function verifyDensityProfileArtifactText(
     artifactInteger(
       history.maxHistoryBytesPerTurn,
       "artifact.workload.history.maxHistoryBytesPerTurn",
-    ) !== MAX_HISTORY_BYTES_PER_TURN
+    ) !== MAX_ACTIVE_HISTORY_BYTES_PER_TURN
   ) {
     throw new Error(
-      `artifact.workload.history.maxHistoryBytesPerTurn must equal ${MAX_HISTORY_BYTES_PER_TURN}`,
+      `artifact.workload.history.maxHistoryBytesPerTurn must equal ${MAX_ACTIVE_HISTORY_BYTES_PER_TURN}`,
     );
   }
   assertArtifactEqual(

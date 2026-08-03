@@ -119,6 +119,12 @@ Reaching for the wrong store is the classic mistake.
 | `agent_run_states`      | **Requires-action resume only** — the serialized SDK `RunState` blob to resume a turn paused mid-flight for a human approval or structured-input tool call. | Never use as conversation memory. Historical non-record sandbox `exposedPorts` values receive one exact-path root + `sessionsByAgent[*]` compatibility repair before SDK validation; provider predeclared-port arrays remain provider state.                                                                                                            |
 | `session_events`        | **Redacted human/audit preview** — drives replay/SSE/UI.                                                                                                  | Independently secret-redacted, lossy, and payload-byte-bounded with explicit omission metadata. Generic source output is not an evidence archive and is normally unavailable after omission. **Must never be fed back to the model.** Per-session monotonic `sequence`.                                                                             |
 
+Serving workers fail closed before decoding an active transcript above 3 MiB,
+4,096 rows, 65,536 JSON nodes, or 32,768 object properties. Approval `RunState`
+uses the same byte/node/property envelope. Oversized state is never silently
+trimmed or compacted inside a serving worker; repair and forensic work belongs
+in a bounded non-serving execution class.
+
 Sandbox recovery state is separate again. The group lease is authoritative for
 provider, archive, restore, workspace-readiness, liveness, and epoch truth;
 `sandbox_session_envelopes` retains the per-session provider/manifest descriptor

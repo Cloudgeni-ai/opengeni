@@ -196,14 +196,18 @@ runtime/native headroom; a finite container that cannot safely admit one turn
 does not start. The invariant is checked both before and after Temporal's native
 worker construction, and live retained-memory growth contracts new slot
 availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
-active transcript above any of four materialization limits: 32 MiB UTF-8 JSON,
-4,096 rows, 200,000 decoded JSON nodes, or 100,000 object properties. It never
+active transcript above any of four materialization limits: 3 MiB UTF-8 JSON,
+4,096 rows, 65,536 decoded JSON nodes, or 32,768 object properties. It never
 silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. A missing or malformed Temporal task-queue stats
+sessions under the boundary. Approval `RunState` uses the same 3 MiB, 65,536-node,
+and 32,768-property serving envelope before SDK decoding. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
 normalized into a fresh zero backlog. The release target remains at most
-50 MiB incremental RSS per active turn. See
-[`design/turn-worker-density-2026-07-16.md`](design/turn-worker-density-2026-07-16.md).
+50 MiB incremental RSS per active turn. A production read-only forensic
+fingerprint over 3,823 sessions exited 137 inside a 1 GiB serving API pod; heavy
+forensics and density profiling therefore run only in a bounded non-serving
+execution class and never in API or turn-worker serving pods. See
+[`deployment.md`](deployment.md) for the reproducible density harness.
 
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used

@@ -3226,7 +3226,7 @@ describe("transient provider error classifier", () => {
       agentRunFailurePayload(new ActiveSessionHistoryLimitExceededError(2_048, 1_024)),
     ).toEqual({
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Compact or clear the session context before retrying.",
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
       code: "active_history_too_large",
       retryable: false,
       detail:

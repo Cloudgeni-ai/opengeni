@@ -20288,9 +20288,9 @@ export async function getSessionEventByClientEventId(
   });
 }
 
-export const APPROVAL_RUN_STATE_MAX_JSON_BYTES = 32 * 1024 * 1024;
-export const APPROVAL_RUN_STATE_MAX_JSON_NODES = 200_000;
-export const APPROVAL_RUN_STATE_MAX_JSON_PROPERTIES = 100_000;
+export const APPROVAL_RUN_STATE_MAX_JSON_BYTES = 3 * 1024 * 1024;
+export const APPROVAL_RUN_STATE_MAX_JSON_NODES = 65_536;
+export const APPROVAL_RUN_STATE_MAX_JSON_PROPERTIES = 32_768;
 export const APPROVAL_PENDING_MAX_JSON_BYTES = 256 * 1024;
 export const APPROVAL_PENDING_MAX_ITEMS = 256;
 
@@ -21846,10 +21846,10 @@ export async function getSessionRealtimeContinuityEntries(
  * deterministically before a Postgres driver decodes it instead of using the
  * pod OOM killer as admission.
  */
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 32 * 1024 * 1024;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 3 * 1024 * 1024;
 export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 4_096;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 200_000;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 100_000;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 65_536;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 32_768;
 
 export type ActiveSessionHistoryLimitKind =
   | "json_bytes"

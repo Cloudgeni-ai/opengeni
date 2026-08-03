@@ -281,7 +281,7 @@ describe("standalone context compaction execution", () => {
       saveRunState(client.db, {
         ...saveInput,
         serializedRunState: `{${Array.from(
-          { length: 100_001 },
+          { length: 32_769 },
           (_, index) => `"property_${index}":0`,
         ).join(",")}}`,
       }),

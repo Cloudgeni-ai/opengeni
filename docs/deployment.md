@@ -460,6 +460,15 @@ deployment's user-facing access mode. It creates a run-scoped account and
 workspace, removes both before exit, and prints one
 `OPENGENI_DENSITY_RESULT=...` record for automation.
 
+Run this profile only in a bounded non-serving execution class. A production
+read-only forensic fingerprint over 3,823 sessions exited 137 in a 1 GiB serving
+API pod; neither that forensic scan nor a density sweep may compete with API or
+turn-worker serving memory. The release sweep is the exact
+`1/2/4/8/12/16/24/32` density set with three waves. Boundary runs may select a
+documented subset with `OPENGENI_DENSITY_SWEEP`, but must retain the artifact's
+exact source revision, raw samples, cleanup proof, compaction-shrink proof, and
+provider-isolation facts.
+
 Direct file, Git, and synchronous terminal APIs follow a machine-targeted
 session's active pointer from the first request. They use API → NATS → enrolled
 agent request/reply and do not need a preceding model turn, a turn worker, or a

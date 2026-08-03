@@ -110,10 +110,10 @@ describe("turn density profile release-gate helpers", () => {
       maxRowsPerTurn: 131_072,
     });
     expect(PRODUCTION_ACTIVE_HISTORY_LIMITS).toEqual({
-      jsonBytes: 32 * 1024 * 1024,
+      jsonBytes: 3 * 1024 * 1024,
       rows: 4_096,
-      jsonNodes: 200_000,
-      jsonProperties: 100_000,
+      jsonNodes: 65_536,
+      jsonProperties: 32_768,
     });
 
     const input = {

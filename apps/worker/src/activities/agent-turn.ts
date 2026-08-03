@@ -8860,7 +8860,7 @@ export function agentRunFailurePayload(
   if (error instanceof ActiveSessionHistoryLimitExceededError) {
     return {
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Compact or clear the session context before retrying.",
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
       code: error.code,
       retryable: false,
       detail: error.message,
