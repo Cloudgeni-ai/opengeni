@@ -1017,6 +1017,7 @@ describe("buildConnectionTokenResolver", () => {
       status: "ok",
       headers: { authorization: "Bearer A" },
       connectionId: "conn_1",
+      connectionVersion: 1,
       expiresAt: null,
     });
     expect(counts.recordUsed).toBe(1);
@@ -1168,12 +1169,14 @@ describe("buildConnectionTokenResolver", () => {
         status: "ok",
         headers: { authorization: "Bearer AC2" },
         connectionId: "conn_oauth",
+        connectionVersion: 8,
         expiresAt: refreshed.expiresAt,
       },
       {
         status: "ok",
         headers: { authorization: "Bearer AC2" },
         connectionId: "conn_oauth",
+        connectionVersion: 8,
         expiresAt: refreshed.expiresAt,
       },
     ]);

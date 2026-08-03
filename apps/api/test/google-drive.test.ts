@@ -214,6 +214,14 @@ function googleFixture(
   return { fetch, tokenRequests, apiAuthorizationHeaders, fileListQueries };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Settings> = {}) {
   return createApp({
     settings: { ...settings, ...overrides },
@@ -743,18 +751,89 @@ describe("Google Drive local source preview", () => {
     const responseBody = JSON.stringify(await browse.json());
     expect(responseBody).not.toContain(providerMessage);
     expect(responseBody).not.toContain("insufficientPermissions");
-    expect(
-      await getConnectionMetadata(
-        client.db,
-        workspace.workspaceId,
-        connected.connection.id,
-        "subject-a",
-      ),
-    ).toMatchObject({
+    const persisted = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connected.connection.id,
+      "subject-a",
+    );
+    expect(persisted).toMatchObject({
       status: "needs_reauth",
+      version: connected.connection.version + 1,
       lastError: "google_drive_reconsent_required",
       metadata: { lifecycle: { state: "reconsent_required", recoverable: true } },
     });
+  });
+
+  test("does not let a stale provider response mutate a reconnected generation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const providerRequestStarted = deferred<void>();
+    const staleProviderResponse = deferred<Response>();
+    const fixtureFetch = google.fetch;
+    google.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/drive/v3/files") {
+        providerRequestStarted.resolve();
+        return await staleProviderResponse.promise;
+      }
+      return await fixtureFetch(input, init);
+    };
+    const connected = await connect(workspace, google);
+    const browsePromise = app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    await providerRequestStarted.promise;
+
+    const reconnected = await connect(workspace, googleFixture(), connected.connection.id);
+    expect(reconnected.callback.headers.get("location")).toContain("google_drive=connected");
+    expect(reconnected.connection).toMatchObject({
+      id: connected.connection.id,
+      status: "active",
+      version: connected.connection.version + 1,
+      lastError: null,
+      metadata: { lifecycle: { state: "active", recoverable: true } },
+    });
+
+    staleProviderResponse.resolve(
+      Response.json(
+        {
+          error: {
+            code: 403,
+            message: "stale permission response",
+            errors: [{ reason: "insufficientPermissions" }],
+          },
+        },
+        { status: 403 },
+      ),
+    );
+    const browse = await browsePromise;
+    expect(browse.status).toBe(403);
+
+    const persisted = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connected.connection.id,
+      "subject-a",
+    );
+    expect(persisted).toMatchObject({
+      id: connected.connection.id,
+      status: "active",
+      version: reconnected.connection.version,
+      lastError: null,
+      metadata: {
+        googlePermissionId: "google-permission-a",
+        lifecycle: { state: "active", recoverable: true },
+      },
+    });
+    expect(persisted?.updatedAt).toEqual(reconnected.connection.updatedAt);
   });
 
   test("fails closed on account switching and generic credential writes", async () => {

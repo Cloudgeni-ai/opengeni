@@ -34,7 +34,14 @@ import {
 } from "./index";
 
 export type ResolveConnectionCredentialResult =
-  | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
+  | {
+      status: "ok";
+      headers: Record<string, string>;
+      connectionId: string;
+      /** Exact durable version when the credential came from the local connection store. */
+      connectionVersion?: number;
+      expiresAt?: Date | null;
+    }
   | {
       status: "auth_needed";
       reason: McpCredentialAuthNeededReason;
@@ -463,6 +470,7 @@ export function buildConnectionTokenResolver(
       status: "ok",
       headers,
       connectionId: cred.id,
+      connectionVersion: cred.version,
       expiresAt: cred.expiresAt,
     };
   };

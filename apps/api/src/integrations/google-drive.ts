@@ -966,6 +966,41 @@ async function transitionGoogleDrivePermanentRefreshFailure(
   return true;
 }
 
+async function transitionGoogleDriveProviderResponseFailure(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    connectionVersion: number;
+    lifecycle: GoogleDriveConnectionLifecycle;
+    status: "needs_reauth" | "error";
+    lastError: string;
+  },
+): Promise<void> {
+  const latest = await getConnectionMetadata(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+    input.subjectId,
+  );
+  if (
+    !latest ||
+    latest.version !== input.connectionVersion ||
+    latest.status !== "active"
+  ) {
+    return;
+  }
+  await transitionGoogleDriveConnectionLifecycle(
+    deps,
+    latest,
+    input.subjectId,
+    input.lifecycle,
+    input.status,
+    input.lastError,
+  );
+}
+
 async function googleDriveApiRequest(
   deps: ApiRouteDeps,
   input: {
@@ -1010,6 +1045,10 @@ async function googleDriveApiRequest(
   if (credential.status !== "ok") {
     throw new HTTPException(401, { message: "Google Drive needs to be reconnected" });
   }
+  let providerConnectionVersion = credential.connectionVersion;
+  if (providerConnectionVersion === undefined) {
+    throw new Error("Google Drive credential resolver omitted the connection version");
+  }
   const fetchImpl = deps.googleDriveFetch ?? fetch;
   let response = await providerFetch(fetchImpl, input.url, {
     headers: { ...credential.headers, accept: "application/json" },
@@ -1020,6 +1059,10 @@ async function googleDriveApiRequest(
     if (credential.status !== "ok") {
       throw new HTTPException(401, { message: "Google Drive needs to be reconnected" });
     }
+    providerConnectionVersion = credential.connectionVersion;
+    if (providerConnectionVersion === undefined) {
+      throw new Error("Google Drive credential resolver omitted the connection version");
+    }
     response = await providerFetch(fetchImpl, input.url, {
       headers: { ...credential.headers, accept: "application/json" },
     });
@@ -1027,22 +1070,15 @@ async function googleDriveApiRequest(
   if (!response.ok) {
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
-      const latest = await getConnectionMetadata(
-        deps.db,
-        input.workspaceId,
-        input.connectionId,
-        input.subjectId,
-      );
-      if (latest?.status === "active") {
-        await transitionGoogleDriveConnectionLifecycle(
-          deps,
-          latest,
-          input.subjectId,
-          googleDriveLifecycle("reconnect_required"),
-          "needs_reauth",
-          "google_drive_reconnect_required",
-        );
-      }
+      await transitionGoogleDriveProviderResponseFailure(deps, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        connectionId: input.connectionId,
+        connectionVersion: providerConnectionVersion,
+        lifecycle: googleDriveLifecycle("reconnect_required"),
+        status: "needs_reauth",
+        lastError: "google_drive_reconnect_required",
+      });
       throw new HTTPException(401, { message: "Google Drive needs to be reconnected" });
     }
     const providerErrorCode =
@@ -1055,22 +1091,15 @@ async function googleDriveApiRequest(
       providerErrorCode &&
       GOOGLE_DRIVE_RECONSENT_ERROR_CODES.has(providerErrorCode)
     ) {
-      const latest = await getConnectionMetadata(
-        deps.db,
-        input.workspaceId,
-        input.connectionId,
-        input.subjectId,
-      );
-      if (latest?.status === "active") {
-        await transitionGoogleDriveConnectionLifecycle(
-          deps,
-          latest,
-          input.subjectId,
-          googleDriveLifecycle("reconsent_required"),
-          "needs_reauth",
-          "google_drive_reconsent_required",
-        );
-      }
+      await transitionGoogleDriveProviderResponseFailure(deps, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        connectionId: input.connectionId,
+        connectionVersion: providerConnectionVersion,
+        lifecycle: googleDriveLifecycle("reconsent_required"),
+        status: "needs_reauth",
+        lastError: "google_drive_reconsent_required",
+      });
     }
     throw new HTTPException(response.status === 403 ? 403 : 502, {
       message:
