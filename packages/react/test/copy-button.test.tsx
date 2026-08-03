@@ -53,7 +53,9 @@ describe("Markdown copy chrome", () => {
     const source = "```ts\nconst x = 1;\n```";
     const r = await renderComponent(<Markdown>{source}</Markdown>);
     const button = r.container.querySelector('button[data-og-copy][aria-label="Copy code"]');
+    const codeBlock = r.container.querySelector("pre");
     expect(button).not.toBeNull();
+    expect(codeBlock?.getAttribute("tabindex")).toBe("0");
     // Ghost control: no bordered "Copy code" pill chrome.
     expect(button?.textContent?.trim() ?? "").toBe("");
     expect(button?.className ?? "").not.toContain("border-og-border");
@@ -79,7 +81,9 @@ describe("Markdown copy chrome", () => {
     const source = `| A | B |\n| --- | --- |\n| 1 | 2 |`;
     const r = await renderComponent(<Markdown>{source}</Markdown>);
     const button = r.container.querySelector('button[data-og-copy][aria-label="Copy table"]');
+    const scrollRegion = r.container.querySelector("table")?.parentElement;
     expect(button).not.toBeNull();
+    expect(scrollRegion?.getAttribute("tabindex")).toBe("0");
     expect(button?.textContent?.trim() ?? "").toBe("");
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
