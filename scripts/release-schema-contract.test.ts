@@ -170,12 +170,17 @@ describe("release schema contract", () => {
         (migrations.has("0153_mcp_personal_connection_delegations.sql") ? 1 : 0) +
         (migrations.has("0154_scoped_knowledge_foundation.sql") ? 1 : 0) +
         (migrations.has("0155_connector_action_policies.sql") ? 1 : 0) +
-        (migrations.has("0156_slack_reaction_trigger.sql") ? 1 : 0),
+        (migrations.has("0156_slack_reaction_trigger.sql") ? 1 : 0) +
+        (migrations.has("0157_document_authority_foundation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "b4054ebdde52dce4953bb5f17097471222ab5ffb7d9f58432138a18506f280e7",
+      "bcc1a96376868440b689f305a8a62fd5cebe7d90ebf60c8b6a622dccf4f5f8ae",
     );
-    expect(contract.latestMigration).toBe("0156_slack_reaction_trigger.sql");
+    expect(contract.latestMigration).toBe("0157_document_authority_foundation.sql");
+    expect(migrations.get("0157_document_authority_foundation.sql")).toMatchObject({
+      sha256: "c46bc42e68e16a26833f00b9289d4d4af54e4336c34e54aa369d2fd7e8354028",
+      deploymentMode: "maintenance",
+    });
     expect(migrations.get("0156_slack_reaction_trigger.sql")).toMatchObject({
       sha256: "080cd2840c3fd4c6c81b838cf7b0a4f1fa7e48ab4ced18c05e76da895934a945",
       deploymentMode: "rolling",
