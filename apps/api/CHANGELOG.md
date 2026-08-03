@@ -1,5 +1,12 @@
 # @opengeni/api-router
 
+## 0.16.3
+
+### Patch Changes
+
+- Updated dependencies [c4a0031]
+  - @opengeni/core@0.17.3
+
 ## 0.16.2
 
 ### Patch Changes
