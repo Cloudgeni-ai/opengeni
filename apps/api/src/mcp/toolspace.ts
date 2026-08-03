@@ -45,7 +45,10 @@ import {
   boundedParallelMap,
   cancelMcpResponseBody,
   guardedMcpFetch,
+  mcpJsonRpcErrorPayloadForRequest,
+  mcpRequestReplayInfo,
   mcpSerializedSizeBytes,
+  type McpRequestReplayInfo,
 } from "@opengeni/runtime/mcp-network";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
@@ -899,12 +902,6 @@ function toolspaceRequestOptions(config: McpServerConfig): {
   return config.timeoutMs ? { timeout: config.timeoutMs, maxTotalTimeout: config.timeoutMs } : {};
 }
 
-type McpRequestInfo = {
-  method?: string;
-  id?: string | number | null;
-  toolName?: string;
-};
-
 function mcpRequestDestinationUrl(input: string | URL | Request): string {
   return new URL(input instanceof Request ? input.url : input.toString()).toString();
 }
@@ -958,7 +955,7 @@ export function connectionBrokerFetch(
     ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
   });
   return async (requestInput, init) => {
-    const request = await mcpRequestInfo(requestInput, init);
+    const request = await mcpRequestReplayInfo(requestInput, init);
     const destinationUrl = mcpRequestDestinationUrl(requestInput);
     const resolverSubjectId =
       connectionRef.subjectScope !== "subject" && hostCredentialPort
@@ -986,16 +983,21 @@ export function connectionBrokerFetch(
     );
     if (response.status === 401) {
       await cancelMcpResponseBody(response);
-      const refreshed = await resolve(true);
+      let refreshed: ResolveConnectionCredentialResult;
+      try {
+        refreshed = await resolve(true);
+      } catch {
+        refreshed = authNeededFromStatus(input.config, first, "refresh_failed");
+      }
       if (refreshed.status === "auth_needed") {
-        if (request.method === "tools/call") {
+        if (!request.replaySafeAfter401) {
           await publishToolspaceAuthNeeded(input, request, refreshed);
-          return toolspaceMcpErrorResponse(request.id, TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR);
+          return toolspaceMcpOutcomeUncertainResponse(request);
         }
         return await authNeededFetchResponse(input, request, refreshed);
       }
-      if (request.method === "tools/call") {
-        return toolspaceMcpErrorResponse(request.id, TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR);
+      if (!request.replaySafeAfter401) {
+        return toolspaceMcpOutcomeUncertainResponse(request);
       }
       const retry = await baseFetch(
         fetchInputForAttempt(requestInput),
@@ -1059,7 +1061,7 @@ async function authNeededFetchResponse(
     sessionId: string;
     turn: SessionTurn;
   },
-  request: McpRequestInfo,
+  request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
 ): Promise<Response> {
   await publishToolspaceAuthNeeded(input, request, auth);
@@ -1077,7 +1079,7 @@ async function publishToolspaceAuthNeeded(
     sessionId: string;
     turn: SessionTurn;
   },
-  request: McpRequestInfo,
+  request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
 ): Promise<void> {
   await appendAndPublishEvents(
@@ -1124,45 +1126,16 @@ function toolspaceMcpErrorResponse(
   );
 }
 
-async function mcpRequestInfo(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<McpRequestInfo> {
-  const body =
-    typeof init?.body === "string"
-      ? init.body
-      : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
-        ? await input
-            .clone()
-            .text()
-            .catch(() => "")
-        : "";
-  if (!body) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(body) as {
-      id?: unknown;
-      method?: unknown;
-      params?: { name?: unknown };
-    };
-    const method = typeof parsed.method === "string" ? parsed.method : undefined;
-    const id =
-      typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null
-        ? parsed.id
-        : undefined;
-    const toolName =
-      method === "tools/call" && typeof parsed.params?.name === "string"
-        ? parsed.params.name
-        : undefined;
-    return {
-      ...(method ? { method } : {}),
-      ...(id !== undefined ? { id } : {}),
-      ...(toolName ? { toolName } : {}),
-    };
-  } catch {
-    return {};
-  }
+function toolspaceMcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
+  return new Response(
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR),
+    ),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
 }
 
 function withConnectionHeaders(

@@ -14,7 +14,9 @@ import {
   boundedParallelMap,
   boundMcpResponseBody,
   guardedMcpFetch,
+  mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
+  mcpRequestReplayInfo,
 } from "../src/mcp-network";
 
 const testSettings = {
@@ -27,6 +29,72 @@ describe("MCP network and payload boundary", () => {
     expect(mcpOuterConnectTimeoutMs([])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
     expect(mcpOuterConnectTimeoutMs([5_000, undefined])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
     expect(mcpOuterConnectTimeoutMs([30_000, 15_000, undefined])).toBe(30_000);
+  });
+
+  test("classifies post-401 replay with an explicit fail-closed handshake/list allowlist", async () => {
+    const classify = async (body: BodyInit | null) =>
+      await mcpRequestReplayInfo("https://example.test/mcp", {
+        method: "POST",
+        ...(body !== null ? { body } : {}),
+      });
+
+    for (const method of ["initialize", "notifications/initialized", "tools/list"]) {
+      const request = await classify(JSON.stringify({ jsonrpc: "2.0", id: 1, method }));
+      expect(request.replaySafeAfter401).toBe(true);
+      expect(request.method).toBe(method);
+    }
+
+    const safeBatch = await classify(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 1, method: "initialize" },
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        { jsonrpc: "2.0", id: "list", method: "tools/list" },
+      ]),
+    );
+    expect(safeBatch).toMatchObject({
+      replaySafeAfter401: true,
+      batch: true,
+      responseIds: [1, "list"],
+    });
+
+    const malformed = await classify("{");
+    const unreadable = await classify(new URLSearchParams({ method: "tools/list" }));
+    const unknown = await classify(
+      JSON.stringify({ jsonrpc: "2.0", id: 2, method: "provider/create" }),
+    );
+    const nonList = await classify(
+      JSON.stringify({ jsonrpc: "2.0", id: 3, method: "resources/read" }),
+    );
+    const mixedBatch = await classify(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 4, method: "tools/list" },
+        {
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: { name: "create_issue" },
+        },
+      ]),
+    );
+    for (const request of [malformed, unreadable, unknown, nonList, mixedBatch]) {
+      expect(request.replaySafeAfter401).toBe(false);
+    }
+    expect(mixedBatch).toMatchObject({
+      batch: true,
+      responseIds: [4, 5],
+      toolName: "create_issue",
+    });
+
+    const error = { code: 40_102, message: "outcome uncertain" };
+    expect(mcpJsonRpcErrorPayloadForRequest(malformed, error)).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error,
+    });
+    expect(mcpJsonRpcErrorPayloadForRequest(mixedBatch, error)).toEqual([
+      { jsonrpc: "2.0", id: 4, error },
+      { jsonrpc: "2.0", id: 5, error },
+    ]);
   });
 
   test("pins the final transport, forces manual redirects, and rejects declared oversize", async () => {

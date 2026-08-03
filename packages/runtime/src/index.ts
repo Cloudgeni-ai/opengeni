@@ -56,8 +56,11 @@ import {
   boundedParallelMap,
   cancelMcpResponseBody,
   guardedMcpFetch,
+  mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
+  mcpRequestReplayInfo,
   undiciFetch,
+  type McpRequestReplayInfo,
 } from "./mcp-network";
 import {
   Agent,
@@ -3318,7 +3321,7 @@ function connectionBrokerFetch(
     return baseFetch;
   }
   return async (input, init) => {
-    const request = await mcpRequestInfo(input, init);
+    const request = await mcpRequestReplayInfo(input, init);
     const destinationUrl = mcpRequestDestinationUrl(input);
     const first = await resolveConnectionForRequest(
       options,
@@ -3347,15 +3350,15 @@ function connectionBrokerFetch(
         true,
       );
       if (refreshed.status === "auth_needed") {
-        if (request.method === "tools/call") {
+        if (!request.replaySafeAfter401) {
           await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
-          return mcpToolOutcomeUncertainResponse(request.id);
+          return mcpOutcomeUncertainResponse(request);
         }
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
-      if (request.method === "tools/call") {
-        return mcpToolOutcomeUncertainResponse(request.id);
+      if (!request.replaySafeAfter401) {
+        return mcpOutcomeUncertainResponse(request);
       }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
@@ -3504,7 +3507,7 @@ function insufficientScopeAuth(
 async function authNeededFetchResponse(
   options: PrepareToolsOptions,
   serverId: string,
-  request: McpRequestInfo,
+  request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
 ): Promise<Response> {
@@ -3520,7 +3523,7 @@ async function authNeededFetchResponse(
 async function publishAuthNeededForRequest(
   options: PrepareToolsOptions,
   serverId: string,
-  request: McpRequestInfo,
+  request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
 ): Promise<void> {
@@ -3568,55 +3571,8 @@ async function publishAuthNeeded(
   }
 }
 
-type McpRequestInfo = {
-  method?: string;
-  id?: string | number | null;
-  toolName?: string;
-};
-
 function mcpRequestDestinationUrl(input: string | URL | Request): string {
   return new URL(input instanceof Request ? input.url : input.toString()).toString();
-}
-
-async function mcpRequestInfo(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<McpRequestInfo> {
-  const body =
-    typeof init?.body === "string"
-      ? init.body
-      : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
-        ? await input
-            .clone()
-            .text()
-            .catch(() => "")
-        : "";
-  if (!body) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(body) as {
-      id?: unknown;
-      method?: unknown;
-      params?: { name?: unknown };
-    };
-    const method = typeof parsed.method === "string" ? parsed.method : undefined;
-    const id =
-      typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null
-        ? parsed.id
-        : undefined;
-    const toolName =
-      method === "tools/call" && typeof parsed.params?.name === "string"
-        ? parsed.params.name
-        : undefined;
-    return {
-      ...(method ? { method } : {}),
-      ...(id !== undefined ? { id } : {}),
-      ...(toolName ? { toolName } : {}),
-    };
-  } catch {
-    return {};
-  }
 }
 
 function withConnectionHeaders(
@@ -3702,16 +3658,9 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
   );
 }
 
-function mcpToolOutcomeUncertainResponse(id: string | number | null | undefined): Response {
+function mcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
   return new Response(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: id ?? null,
-      error: {
-        code: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code,
-        message: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message,
-      },
-    }),
+    JSON.stringify(mcpJsonRpcErrorPayloadForRequest(request, MCP_TOOL_OUTCOME_UNCERTAIN_ERROR)),
     {
       status: 200,
       headers: { "content-type": "application/json" },

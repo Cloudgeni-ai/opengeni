@@ -71,8 +71,11 @@ Rules of thumb:
   it is a deliberate server-side proxy through the first-party gate for a
   session-bound `toolspace:call` bearer.
 - A broker may refresh credentials after an upstream 401 for future requests,
-  but it must not replay the current `tools/call`. The result is outcome-unknown
-  and instructs the caller to verify provider state before any new attempt.
+  but it retries the current request only for the explicit replay-safe JSON-RPC
+  allowlist: `initialize`, `notifications/initialized`, and `tools/list`.
+  Malformed bodies, unknown extensions, non-list methods, and any batch with an
+  unsafe entry return secret-free outcome-uncertain error `40102` without a
+  second physical request and instruct the caller to verify provider state.
 - Embedded hosts that already own provider connections should bind
   `ConnectionCredentialsPort.mcpCredentials` on both the API and worker. The
   host's connection remains authoritative; the sandbox bearer is never treated
