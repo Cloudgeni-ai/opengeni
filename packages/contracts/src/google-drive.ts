@@ -3,12 +3,65 @@ import { z } from "zod";
 import { ConnectionMetadata } from "./index";
 
 export const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com" as const;
+export const GOOGLE_DRIVE_FULL_SCOPE = "https://www.googleapis.com/auth/drive" as const;
+export const GOOGLE_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file" as const;
 export const GOOGLE_DRIVE_METADATA_READONLY_SCOPE =
   "https://www.googleapis.com/auth/drive.metadata.readonly" as const;
 export const GOOGLE_DRIVE_READONLY_SCOPE =
   "https://www.googleapis.com/auth/drive.readonly" as const;
 export const GOOGLE_DRIVE_CREDENTIAL_ROLE = "google_drive_metadata" as const;
 export const GOOGLE_DRIVE_CREDENTIAL_LABEL = "Google Drive metadata browser" as const;
+
+export const GoogleDriveOAuthCapability = z.enum([
+  "picker_file_read",
+  "source_metadata_discovery",
+  "source_content_read",
+  "recursive_source_sync",
+]);
+export type GoogleDriveOAuthCapability = z.infer<typeof GoogleDriveOAuthCapability>;
+
+export type GoogleDriveOAuthScopeDecision = {
+  accessMode: "metadata_readonly" | "readonly" | null;
+  capabilities: GoogleDriveOAuthCapability[];
+};
+
+/**
+ * Converts exact Google OAuth grants into the Drive capabilities OpenGeni may
+ * rely on. Unknown or malformed grants add no authority. In particular,
+ * drive.file covers only files explicitly opened or shared with the app and
+ * never authorizes arbitrary recursive descendant discovery.
+ */
+export function googleDriveOAuthScopeDecision(
+  grantedScopes: readonly string[],
+): GoogleDriveOAuthScopeDecision {
+  const granted = new Set(grantedScopes);
+  const hasFullDrive = granted.has(GOOGLE_DRIVE_FULL_SCOPE);
+  const hasSourceContentRead = hasFullDrive || granted.has(GOOGLE_DRIVE_READONLY_SCOPE);
+  const hasSourceMetadataDiscovery =
+    hasSourceContentRead || granted.has(GOOGLE_DRIVE_METADATA_READONLY_SCOPE);
+  const hasPickerFileRead = hasSourceContentRead || granted.has(GOOGLE_DRIVE_FILE_SCOPE);
+  const capabilities: GoogleDriveOAuthCapability[] = [];
+  if (hasPickerFileRead) capabilities.push("picker_file_read");
+  if (hasSourceMetadataDiscovery) capabilities.push("source_metadata_discovery");
+  if (hasSourceContentRead) {
+    capabilities.push("source_content_read", "recursive_source_sync");
+  }
+  return {
+    accessMode: hasSourceContentRead
+      ? "readonly"
+      : hasSourceMetadataDiscovery
+        ? "metadata_readonly"
+        : null,
+    capabilities,
+  };
+}
+
+export function googleDriveScopesAllowCapability(
+  grantedScopes: readonly string[],
+  capability: GoogleDriveOAuthCapability,
+): boolean {
+  return googleDriveOAuthScopeDecision(grantedScopes).capabilities.includes(capability);
+}
 
 export const GoogleDriveTargetScope = z.enum(["user", "workspace", "organization"]);
 export type GoogleDriveTargetScope = z.infer<typeof GoogleDriveTargetScope>;

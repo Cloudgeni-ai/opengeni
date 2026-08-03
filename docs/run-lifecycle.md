@@ -302,6 +302,20 @@ logical turn `recovering`; Steer closes it as `superseded`, makes the steered
 human prompt first, and does not revive the old turn. A missing or already
 closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
+Terminal Cancel uses the same exact-attempt interruption fence but settles the
+live turn as `cancelled`, marks the selected session and every existing
+descendant terminal, and drains their queued/non-running work in the same
+transaction. The workspace-control lock orders concurrent prompts and child
+creation around that terminal write, so no work can appear behind the final
+empty snapshot. A cancelled ancestor permanently rejects Send, Steer, Resume,
+and new descendants. The cancellation transaction also advances the durable
+workflow wake for every affected session, including an approval or capacity
+wait with no live attempt, so the terminal row cannot leave a Temporal workflow
+parked indefinitely. When the selected root is a child, the same transaction
+also enqueues one deduplicated `child_terminal_result` with status `cancelled`
+for its surviving parent and copies the causal parent-turn delegation snapshot;
+cancelled descendants do not notify parents inside the same terminal subtree.
+Only physical attempt quiescence can clear the stopping projection.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
 For Agent Steer, accepting that signal is not an admission acknowledgement: if
@@ -547,7 +561,7 @@ split failure settlement.
 items, so a failed turn does not invalidate history. A new `user.message`
 into a failed session transitions it failed → queued, restarts the session
 workflow (signalWithStart), and the next turn runs from the stored items.
-Only `cancelled` — an explicit user act — is terminal.
+Only `cancelled` — an explicit terminal Cancel — is irreversible.
 
 Every transaction that creates or re-enables workflow work also increments the
 session's durable wake revision. An active goal has a second, goal-owned
