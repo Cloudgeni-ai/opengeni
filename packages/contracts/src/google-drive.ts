@@ -171,6 +171,12 @@ export const GoogleDriveLifecycleActionRequest = z.object({
 });
 export type GoogleDriveLifecycleActionRequest = z.infer<typeof GoogleDriveLifecycleActionRequest>;
 
+export const GoogleDriveDisconnectRequest = z.object({
+  expectedVersion: z.number().int().positive(),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type GoogleDriveDisconnectRequest = z.infer<typeof GoogleDriveDisconnectRequest>;
+
 export const GoogleDriveBrowseItem = z.object({
   id: z.string().min(1).max(256),
   name: z.string().min(1).max(1024),

@@ -386,6 +386,7 @@ export type {
   GoogleDriveConnectionLifecycle,
   GoogleDriveConnectionLifecycleState,
   GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
   GoogleDriveLifecycleActionRequest,
   GoogleDriveOAuthStartRequest,
   GoogleDriveOAuthStartResponse,

@@ -50,6 +50,7 @@ export type {
   GoogleDriveConnectionLifecycle,
   GoogleDriveConnectionLifecycleState,
   GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
   GoogleDriveLifecycleActionRequest,
   GoogleDriveOAuthStartResponse,
   GoogleDriveReadPolicy,

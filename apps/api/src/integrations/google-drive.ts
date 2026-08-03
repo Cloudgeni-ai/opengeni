@@ -13,6 +13,7 @@ import {
   SaveGoogleDriveSourceRequest,
   googleDriveOAuthScopeDecision,
   googleDriveScopesAllowCapability,
+  type GoogleDriveDisconnectRequest,
   type GoogleDriveLifecycleActionRequest,
   type GoogleDriveOAuthStartRequest,
 } from "@opengeni/contracts/google-drive";
@@ -20,9 +21,12 @@ import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
+  ConnectionDisconnectGenerationError,
+  ConnectionDisconnectIdempotencyError,
   consumeIntegrationOAuthStateNonce,
   createConnection,
   decryptEnvironmentValue,
+  disconnectConnectionIdempotently,
   encryptEnvironmentValue,
   getConnectionMetadata,
   getWorkspaceGrant,
@@ -384,42 +388,38 @@ export async function disconnectGoogleDrive(
     workspaceId: string;
     subjectId: string;
     connection: GoogleDriveConnectionRecord;
+    payload: GoogleDriveDisconnectRequest;
   },
 ) {
   const metadata = requireGoogleDriveConnection(input.connection, input.subjectId);
-  if (
-    input.connection.status === "revoked" &&
-    effectiveGoogleDriveLifecycle(input.connection, metadata).state === "disconnected"
-  ) {
-    return input.connection;
-  }
-  const disconnected = await transitionConnectionState(deps.db, {
-    workspaceId: input.workspaceId,
-    connectionId: input.connection.id,
-    visibleToSubjectId: input.subjectId,
-    expectedVersion: input.connection.version,
-    status: "revoked",
-    metadata: GoogleDriveConnectionMetadata.parse({
-      ...metadata,
-      lifecycle: googleDriveLifecycle("disconnected"),
-    }),
-    lastError: null,
-    updatedBySubjectId: input.subjectId,
-  });
-  if (disconnected) return disconnected;
-  const converged = await getConnectionMetadata(
-    deps.db,
-    input.workspaceId,
-    input.connection.id,
-    input.subjectId,
-  );
-  if (converged?.status === "revoked") {
-    const convergedMetadata = requireGoogleDriveConnection(converged, input.subjectId);
-    if (effectiveGoogleDriveLifecycle(converged, convergedMetadata).state === "disconnected") {
-      return converged;
+  try {
+    return await disconnectConnectionIdempotently(deps.db, {
+      accountId: input.connection.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      connectionId: input.connection.id,
+      expectedVersion: input.payload.expectedVersion,
+      idempotencyKey: input.payload.idempotencyKey,
+      metadata: GoogleDriveConnectionMetadata.parse({
+        ...metadata,
+        lifecycle: googleDriveLifecycle("disconnected"),
+      }),
+      lastError: null,
+      updatedBySubjectId: input.subjectId,
+    });
+  } catch (error) {
+    if (error instanceof ConnectionDisconnectIdempotencyError) {
+      throw new HTTPException(409, {
+        message: "Google Drive disconnect key was already used for another operation",
+      });
     }
+    if (error instanceof ConnectionDisconnectGenerationError) {
+      throw new HTTPException(409, {
+        message: "Google Drive connection changed; refresh before disconnecting",
+      });
+    }
+    throw error;
   }
-  return null;
 }
 
 export async function browseGoogleDrive(

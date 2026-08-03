@@ -20,8 +20,10 @@ import { useAppContext } from "@/context";
 import {
   googleDriveAccountState,
   googleDriveConnectionMetadata,
+  googleDriveDisconnectAttempt,
   preferredGoogleDriveConnection,
   type GoogleDriveAccountState,
+  type GoogleDriveDisconnectAttempt,
 } from "@/lib/google-drive-connection";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type {
@@ -54,6 +56,9 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [pendingDisconnect, setPendingDisconnect] = useState<GoogleDriveDisconnectAttempt | null>(
+    null,
+  );
   const [items, setItems] = useState<GoogleDriveBrowseItem[]>([]);
   const [crumbs, setCrumbs] = useState<FolderCrumb[]>([{ id: "root", name: "My Drive" }]);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
@@ -166,8 +171,14 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     if (!connection || !canWrite) return true;
     setBusy(true);
     try {
-      const revoked = await client.deleteConnection(workspaceId, connection.id);
+      const attempt = googleDriveDisconnectAttempt(connection, pendingDisconnect);
+      setPendingDisconnect(attempt);
+      const revoked = await client.disconnectGoogleDriveConnection(workspaceId, connection.id, {
+        expectedVersion: attempt.expectedVersion,
+        idempotencyKey: attempt.idempotencyKey,
+      });
       setConnections((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
+      setPendingDisconnect(null);
       setBrowseOpen(false);
       toast.success("Google Drive disconnected");
       return true;

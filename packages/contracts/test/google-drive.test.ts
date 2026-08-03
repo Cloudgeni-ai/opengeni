@@ -5,6 +5,7 @@ import {
   GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
   GOOGLE_DRIVE_READONLY_SCOPE,
   GoogleDriveConnectionLifecycle,
+  GoogleDriveDisconnectRequest,
   GoogleDriveLifecycleActionRequest,
   googleDriveOAuthScopeDecision,
   googleDriveScopesAllowCapability,
@@ -85,6 +86,18 @@ describe("Google Drive OAuth scope capabilities", () => {
     ).toEqual({ action: "pause", expectedVersion: 7 });
     expect(() =>
       GoogleDriveLifecycleActionRequest.parse({ action: "resume", expectedVersion: 0 }),
+    ).toThrow();
+    expect(
+      GoogleDriveDisconnectRequest.parse({
+        expectedVersion: 7,
+        idempotencyKey: "  disconnect-generation-7  ",
+      }),
+    ).toEqual({ expectedVersion: 7, idempotencyKey: "disconnect-generation-7" });
+    expect(() =>
+      GoogleDriveDisconnectRequest.parse({ expectedVersion: 0, idempotencyKey: "disconnect" }),
+    ).toThrow();
+    expect(() =>
+      GoogleDriveDisconnectRequest.parse({ expectedVersion: 7, idempotencyKey: "" }),
     ).toThrow();
     expect(() =>
       GoogleDriveConnectionLifecycle.parse({

@@ -3509,6 +3509,36 @@ export type TransitionConnectionStateInput = {
   updatedBySubjectId?: string | null;
 };
 
+export type DisconnectConnectionIdempotentlyInput = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  connectionId: string;
+  expectedVersion: number;
+  idempotencyKey: string;
+  metadata: Record<string, unknown>;
+  lastError?: string | null;
+  updatedBySubjectId?: string | null;
+};
+
+export class ConnectionDisconnectIdempotencyError extends Error {
+  readonly code = "IDEMPOTENCY_KEY_REUSED";
+
+  constructor() {
+    super("The disconnect idempotency key was already used with different input");
+    this.name = "ConnectionDisconnectIdempotencyError";
+  }
+}
+
+export class ConnectionDisconnectGenerationError extends Error {
+  readonly code = "CONNECTION_GENERATION_CHANGED";
+
+  constructor() {
+    super("The disconnect operation belongs to an older connection generation");
+    this.name = "ConnectionDisconnectGenerationError";
+  }
+}
+
 /** Server-owned verification facts; public schemas expose them read-only and nullable. */
 export type ConnectionMetadataWithVerification = ConnectionMetadata & {
   verifiedInstallAt: string | null;
@@ -5382,6 +5412,144 @@ export async function transitionConnectionState(
     input.workspaceId,
     input.visibleToSubjectId,
     async (scopedDb) => await transitionConnectionStateInScope(scopedDb, input),
+  );
+}
+
+const connectionDisconnectOperationColumns = {
+  accountId: schema.connectionDisconnectOperations.accountId,
+  workspaceId: schema.connectionDisconnectOperations.workspaceId,
+  connectionId: schema.connectionDisconnectOperations.connectionId,
+  subjectId: schema.connectionDisconnectOperations.subjectId,
+  idempotencyKey: schema.connectionDisconnectOperations.idempotencyKey,
+  expectedVersion: schema.connectionDisconnectOperations.expectedVersion,
+  resultVersion: schema.connectionDisconnectOperations.resultVersion,
+};
+
+/**
+ * Disconnects one exact subject-owned connection generation and records the
+ * caller's durable operation identity in the same transaction. Exact retries
+ * converge only while the produced generation remains current; a reconnect or
+ * any other later transition fences the old operation permanently.
+ */
+export async function disconnectConnectionIdempotently(
+  db: Database,
+  input: DisconnectConnectionIdempotentlyInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const [connectionRow] = await scopedDb
+        .select(connectionMetadataColumns)
+        .from(schema.connections)
+        .where(
+          and(
+            eq(schema.connections.accountId, input.accountId),
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.id, input.connectionId),
+            eq(schema.connections.subjectId, input.subjectId),
+          ),
+        )
+        .for("update");
+      if (!connectionRow) return null;
+      const connection = mapConnectionMetadata(connectionRow);
+
+      const [replayed] = await scopedDb
+        .select(connectionDisconnectOperationColumns)
+        .from(schema.connectionDisconnectOperations)
+        .where(
+          and(
+            eq(schema.connectionDisconnectOperations.workspaceId, input.workspaceId),
+            eq(schema.connectionDisconnectOperations.subjectId, input.subjectId),
+            eq(schema.connectionDisconnectOperations.idempotencyKey, input.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      if (replayed) {
+        if (
+          replayed.accountId !== input.accountId ||
+          replayed.connectionId !== input.connectionId ||
+          replayed.expectedVersion !== input.expectedVersion
+        ) {
+          throw new ConnectionDisconnectIdempotencyError();
+        }
+        if (connection.version !== replayed.resultVersion) {
+          throw new ConnectionDisconnectGenerationError();
+        }
+        return connection;
+      }
+
+      if (connection.version !== input.expectedVersion) {
+        throw new ConnectionDisconnectGenerationError();
+      }
+
+      const [inserted] = await scopedDb
+        .insert(schema.connectionDisconnectOperations)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId: input.connectionId,
+          subjectId: input.subjectId,
+          idempotencyKey: input.idempotencyKey,
+          expectedVersion: input.expectedVersion,
+          resultVersion: input.expectedVersion + 1,
+        })
+        .onConflictDoNothing()
+        .returning(connectionDisconnectOperationColumns);
+      if (!inserted) {
+        const [conflictingKey] = await scopedDb
+          .select(connectionDisconnectOperationColumns)
+          .from(schema.connectionDisconnectOperations)
+          .where(
+            and(
+              eq(schema.connectionDisconnectOperations.workspaceId, input.workspaceId),
+              eq(schema.connectionDisconnectOperations.subjectId, input.subjectId),
+              eq(schema.connectionDisconnectOperations.idempotencyKey, input.idempotencyKey),
+            ),
+          )
+          .limit(1);
+        if (
+          !conflictingKey ||
+          conflictingKey.accountId !== input.accountId ||
+          conflictingKey.connectionId !== input.connectionId ||
+          conflictingKey.expectedVersion !== input.expectedVersion
+        ) {
+          throw new ConnectionDisconnectIdempotencyError();
+        }
+        if (connection.version !== conflictingKey.resultVersion) {
+          throw new ConnectionDisconnectGenerationError();
+        }
+        return connection;
+      }
+
+      const [updated] = await scopedDb
+        .update(schema.connections)
+        .set({
+          status: "revoked",
+          metadata: input.metadata,
+          ...(input.lastError !== undefined ? { lastError: input.lastError } : {}),
+          version: sql`${schema.connections.version} + 1`,
+          ...(input.updatedBySubjectId !== undefined
+            ? { updatedBySubjectId: input.updatedBySubjectId }
+            : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.connections.accountId, input.accountId),
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.id, input.connectionId),
+            eq(schema.connections.subjectId, input.subjectId),
+            eq(schema.connections.version, input.expectedVersion),
+          ),
+        )
+        .returning(connectionMetadataColumns);
+      if (!updated) {
+        throw new ConnectionDisconnectGenerationError();
+      }
+      return mapConnectionMetadata(updated);
+    },
   );
 }
 

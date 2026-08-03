@@ -4,6 +4,7 @@ import type { ConnectionMetadata, GoogleDriveConnectionMetadata } from "@/types"
 import {
   googleDriveAccountState,
   googleDriveConnections,
+  googleDriveDisconnectAttempt,
   preferredGoogleDriveConnection,
 } from "./google-drive-connection";
 
@@ -58,6 +59,23 @@ function lifecycle(
 }
 
 describe("Google Drive connection lifecycle projection", () => {
+  test("reuses a disconnect operation key only for the same connection generation", () => {
+    const first = googleDriveDisconnectAttempt(connection(), null, () => "disconnect-1");
+    expect(first).toEqual({
+      connectionId: connection().id,
+      expectedVersion: 1,
+      idempotencyKey: "disconnect-1",
+    });
+    expect(googleDriveDisconnectAttempt(connection(), first, () => "must-not-be-used")).toBe(first);
+    expect(
+      googleDriveDisconnectAttempt(connection({ version: 2 }), first, () => "disconnect-2"),
+    ).toEqual({
+      connectionId: connection().id,
+      expectedVersion: 2,
+      idempotencyKey: "disconnect-2",
+    });
+  });
+
   test("selects only the current subject-owned Drive connection and retains disconnected truth", () => {
     const disconnected = connection({
       id: "44444444-4444-4444-8444-444444444444",

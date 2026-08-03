@@ -13,6 +13,7 @@ import {
 import {
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
   GoogleDriveLifecycleActionRequest,
   GoogleDriveOAuthStartRequest,
   GoogleDriveOAuthStartResponse,
@@ -452,6 +453,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
       existing.kind === "oauth2" &&
       GoogleDriveConnectionMetadata.safeParse(existing.metadata).success;
+    const googleDriveDisconnect = isGoogleDrive
+      ? GoogleDriveDisconnectRequest.safeParse(await c.req.json().catch(() => null))
+      : null;
+    if (googleDriveDisconnect && !googleDriveDisconnect.success) {
+      throw new HTTPException(400, {
+        message:
+          googleDriveDisconnect.error.issues[0]?.message ??
+          "invalid Google Drive disconnect request",
+      });
+    }
     if (existing.status === "revoked" && !isGoogleDrive) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
@@ -460,6 +471,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           connection: existing,
+          payload: googleDriveDisconnect!.data,
         })
       : isOpenGeniSlackBotConnection(existing)
         ? await revokeConnectionWithSlackBotSuccessAudit(db, {

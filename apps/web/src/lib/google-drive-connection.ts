@@ -1,4 +1,8 @@
-import type { ConnectionMetadata, GoogleDriveConnectionMetadata } from "@/types";
+import type {
+  ConnectionMetadata,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
+} from "@/types";
 
 const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
 
@@ -12,6 +16,26 @@ export type GoogleDriveAccountState =
   | { state: "reconnect_required"; connection: ConnectionMetadata; recoverable: true }
   | { state: "reconsent_required"; connection: ConnectionMetadata; recoverable: true }
   | { state: "disconnected"; connection: ConnectionMetadata; recoverable: true };
+
+export type GoogleDriveDisconnectAttempt = GoogleDriveDisconnectRequest & {
+  connectionId: string;
+};
+
+/** Preserve one operation key across retries of the same immutable connection generation. */
+export function googleDriveDisconnectAttempt(
+  connection: Pick<ConnectionMetadata, "id" | "version">,
+  previous: GoogleDriveDisconnectAttempt | null,
+  createIdempotencyKey: () => string = () => crypto.randomUUID(),
+): GoogleDriveDisconnectAttempt {
+  if (previous?.connectionId === connection.id && previous.expectedVersion === connection.version) {
+    return previous;
+  }
+  return {
+    connectionId: connection.id,
+    expectedVersion: connection.version,
+    idempotencyKey: createIdempotencyKey(),
+  };
+}
 
 export function googleDriveConnectionMetadata(
   value: Record<string, unknown>,

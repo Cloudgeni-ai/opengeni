@@ -698,6 +698,11 @@ export type GoogleDriveLifecycleActionRequest = {
   expectedVersion: number;
 };
 
+export type GoogleDriveDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
 export type GoogleDriveBrowseItem = {
   id: string;
   name: string;

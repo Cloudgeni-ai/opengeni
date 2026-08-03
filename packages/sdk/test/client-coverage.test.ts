@@ -997,6 +997,11 @@ describe("OpenGeniClient connections", () => {
     expect(updated).toEqual(connection);
     const deleted = await client.deleteConnection(WORKSPACE_ID, connection.id);
     expect(deleted).toEqual(connection);
+    const disconnected = await client.disconnectGoogleDriveConnection(WORKSPACE_ID, connection.id, {
+      expectedVersion: connection.version,
+      idempotencyKey: "disconnect-generation-1",
+    });
+    expect(disconnected).toEqual(connection);
     const paused = await client.transitionGoogleDriveLifecycle(WORKSPACE_ID, connection.id, {
       action: "pause",
       expectedVersion: connection.version,
@@ -1008,9 +1013,14 @@ describe("OpenGeniClient connections", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/connections`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/connections/google-drive/${connection.id}/lifecycle`,
       ],
     );
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      expectedVersion: connection.version,
+      idempotencyKey: "disconnect-generation-1",
+    });
   });
 
   test("startConnectionOAuth POSTs to the oauth/start route and returns the authorization URL", async () => {
