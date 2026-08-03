@@ -32,7 +32,7 @@ describe("document access migrations", () => {
 
   test("backfills immutable document and chunk authority before replacing FORCE-RLS policy", async () => {
     const sql = await readFile(
-      join(migrationsDir, "0158_document_authority_foundation.sql"),
+      join(migrationsDir, "0165_document_authority_foundation.sql"),
       "utf8",
     );
 
@@ -45,7 +45,7 @@ describe("document access migrations", () => {
     expect(sql).toContain("parent.base_id IS DISTINCT FROM NEW.base_id");
     expect(sql).toContain("document_chunks_authority_guard");
     expect(sql).toContain("document authority is immutable");
-    expect(sql).toContain("migration 0158 requires every queued/indexing document to settle");
+    expect(sql).toContain("migration 0165 requires every queued/indexing document to settle");
     expect(sql.match(/requires all opengeni_app sessions to be stopped/g)).toHaveLength(2);
     expect(sql).toContain('ALTER TABLE "documents" NO FORCE ROW LEVEL SECURITY');
     expect(sql).toContain('ALTER TABLE "document_chunks" NO FORCE ROW LEVEL SECURITY');

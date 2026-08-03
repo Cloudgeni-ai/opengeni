@@ -17,6 +17,7 @@ import {
   createSession,
   forceDrainOverLimitViewerOnlyBoxes,
   getSession,
+  listSessionEvents,
   listSessionMcpServersForRun,
   listSessionTurns,
   reapStaleLeaseHolders,
@@ -189,6 +190,25 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     );
     // Queued work is not yet the session's active execution pointer.
     expect(session.activeTurnId).toBeNull();
+  }, 60_000);
+
+  test("realtime-first create returns an idle session without fabricating an initial turn", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSessionForRequest(
+      deps(new MemoryEventBus()),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { startMode: "realtime" },
+    );
+
+    expect(session.status).toBe("idle");
+    expect(session.initialTurnId).toBeNull();
+    expect(session.activeTurnId).toBeNull();
+    expect(await listSessionTurns(db, workspaceId, session.id)).toEqual([]);
+    expect(
+      (await listSessionEvents(db, workspaceId, session.id)).map((event) => event.type),
+    ).toEqual(["session.created"]);
   }, 60_000);
 
   test("from-inside-a-session (parent claim) ⇒ default 'shared' (joins the creator's group)", async () => {

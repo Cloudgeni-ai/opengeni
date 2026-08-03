@@ -53,6 +53,8 @@ export type ChatComposerProps = {
   hint?: string | undefined;
   /** App controls in the footer row, replacing the hint. */
   controlsStart?: ReactNode | undefined;
+  /** App actions beside Pause/Send, ordered before the built-in actions. */
+  actionsStart?: ReactNode | undefined;
   /** Provider-neutral speech capability. Provider configuration stays in workspace settings. */
   transcription?: ComposerTranscriptionControlProps | undefined;
   /** Content rendered above the textarea, inside the field chrome. */
@@ -89,6 +91,7 @@ export function ChatComposer({
   autoFocus,
   hint,
   controlsStart,
+  actionsStart,
   transcription,
   header,
   onPaste,
@@ -119,6 +122,7 @@ export function ChatComposer({
     messages,
   });
   const hasControls = Boolean(attachments || models || controlsStart || transcription);
+  const stackActions = hasControls && Boolean(actionsStart);
 
   return (
     <Root controller={controller} className={className}>
@@ -133,9 +137,9 @@ export function ChatComposer({
           {controller.confirmState ? (
             <Confirmation />
           ) : (
-            <Footer>
+            <Footer className={stackActions ? "flex-wrap" : undefined}>
               {hasControls ? (
-                <Controls>
+                <Controls className={stackActions ? "w-full sm:w-auto" : undefined}>
                   <AttachButton />
                   {transcription ? <ComposerTranscriptionControl {...transcription} /> : null}
                   {models ? (
@@ -146,7 +150,8 @@ export function ChatComposer({
               ) : (
                 <Hint>{hint}</Hint>
               )}
-              <Actions>
+              <Actions className={stackActions ? "w-full justify-end sm:w-auto" : undefined}>
+                {actionsStart}
                 <PauseButton />
                 <SendButton />
               </Actions>

@@ -503,6 +503,21 @@ describe("contracts", () => {
     expect(payload.rigId).toBeNull();
   });
 
+  test("accepts only an explicit realtime start without an initial message", () => {
+    expect(CreateSessionRequest.parse({ startMode: "realtime" })).toMatchObject({
+      startMode: "realtime",
+      resources: [],
+      tools: [],
+    });
+    expect(CreateSessionRequest.safeParse({}).success).toBe(false);
+    expect(
+      CreateSessionRequest.safeParse({
+        startMode: "realtime",
+        initialMessage: "do not fabricate this turn",
+      }).success,
+    ).toBe(false);
+  });
+
   test("accepts validated inline session skills", () => {
     const parsed = CreateSessionRequest.parse({
       initialMessage: "prepare release",

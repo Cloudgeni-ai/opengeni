@@ -124,10 +124,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           });
           break;
         }
+        const voiceMessage = realtimeVoiceMessage(payload);
         items.push({
           kind: "user-message",
           id: event.id,
-          text: stringValue(payload.text),
+          text: voiceMessage?.text ?? stringValue(payload.text),
+          ...(voiceMessage ? { presentation: voiceMessage.presentation } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           occurredAt: event.occurredAt,
@@ -685,6 +687,24 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     }
   }
   return items;
+}
+
+function realtimeVoiceMessage(payload: Record<string, unknown>): {
+  text: string;
+  presentation: {
+    kind: "realtime_voice" | "realtime_voice_handoff";
+    context: string;
+  };
+} | null {
+  const presentation = asRecord(payload.presentation);
+  const visibleText = stringValue(payload.text);
+  if (presentation.kind === "realtime_voice" || presentation.kind === "realtime_voice_handoff") {
+    const context = stringValue(presentation.context);
+    return visibleText && context
+      ? { text: visibleText, presentation: { kind: presentation.kind, context } }
+      : null;
+  }
+  return null;
 }
 
 function providerNativeToolStatus(rawValue: unknown): ToolCallItem["status"] {

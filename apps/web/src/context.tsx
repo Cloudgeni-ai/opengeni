@@ -207,6 +207,8 @@ export type AppContextValue = {
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
+      /** Create a session shell without starting an underlying agent turn. */
+      startMode?: "realtime";
     },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
@@ -785,6 +787,7 @@ export function RootRouteComponent() {
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
+      startMode?: "realtime";
     },
   ): Promise<Session | null> {
     setBusy(true);
@@ -821,6 +824,7 @@ export function RootRouteComponent() {
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
           expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
+          startMode: options?.startMode,
         }),
       });
       pendingCreateAttempt.current = attempt.pending;

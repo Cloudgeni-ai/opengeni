@@ -62,7 +62,7 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM "documents" WHERE "status" IN ('queued', 'indexing')
   ) THEN
-    RAISE EXCEPTION 'migration 0158 requires every queued/indexing document to settle before cutover'
+    RAISE EXCEPTION 'migration 0165 requires every queued/indexing document to settle before cutover'
       USING ERRCODE = '55000',
         HINT = 'Stop API/workers, close document-index workflows, and retry after documents are ready or failed.';
   END IF;

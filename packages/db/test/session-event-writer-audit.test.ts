@@ -158,7 +158,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#initializeSessionStartAtomically": {
-    inserts: 2,
+    inserts: 3,
     contract: "canonical",
   },
   "packages/db/src/index.ts#claimSessionWorkForAttempt": {
@@ -260,6 +260,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/session-queue-commands.ts#steerAgentSessionInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/session-realtime.ts#appendRealtimeLifecycleEvent": {
     inserts: 1,
     contract: "canonical",
   },

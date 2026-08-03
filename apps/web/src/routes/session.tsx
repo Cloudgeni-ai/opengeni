@@ -60,7 +60,7 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
+import type { ComposerDraft, LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const LazySessionInspector = lazy(() =>
@@ -69,16 +69,32 @@ const LazySessionInspector = lazy(() =>
   })),
 );
 
+const LazyCodexRealtimeControl = lazy(() =>
+  import("@/components/session/codex-realtime-control").then(({ SessionCodexRealtimeControl }) => ({
+    default: SessionCodexRealtimeControl,
+  })),
+);
+
 export function SessionRoute({
   workspaceId,
   sessionId,
+  realtimeAutostartModel,
 }: {
   workspaceId: string;
   sessionId: string;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
 }) {
   const context = useAppContext();
   const rail = useRail();
   const navigate = useNavigate();
+  const consumeRealtimeAutostart = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId },
+      search: {},
+      replace: true,
+    });
+  }, [navigate, sessionId, workspaceId]);
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
@@ -354,6 +370,8 @@ export function SessionRoute({
       events={events}
       timeline={timeline}
       initialLoading={initialLoading}
+      realtimeAutostartModel={realtimeAutostartModel}
+      onRealtimeAutostartConsumed={consumeRealtimeAutostart}
       approvals={approvals}
       humanInput={humanInput}
       failure={failure}
@@ -499,6 +517,8 @@ function SessionChatPane(props: {
   events: SessionEvent[];
   timeline: TimelineItem[];
   initialLoading: boolean;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  onRealtimeAutostartConsumed: () => void;
   approvals: PendingApproval[];
   humanInput: ReturnType<typeof useHumanInputRequests>;
   failure: ReturnType<typeof summarizeSessionFailure> | null;
@@ -569,6 +589,11 @@ function SessionChatPane(props: {
         | "neutral",
     };
   }, [props.agentNodes]);
+  const codexConnected = modelCatalog.models.some(
+    (candidate) =>
+      candidate.provider === "codex-subscription" &&
+      candidate.credentialReadiness.status === "ready",
+  );
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -1019,7 +1044,6 @@ function SessionChatPane(props: {
           <SessionPersonalConnectionDisclosure connections={delegatedPersonalConnections} />
         </div>
       ) : null}
-
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
@@ -1055,6 +1079,26 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+            actions={
+              !terminal ? (
+                <Suspense fallback={null}>
+                  <LazyCodexRealtimeControl
+                    client={context.client}
+                    workspaceId={props.session.workspaceId}
+                    sessionId={props.session.id}
+                    sessionStatus={props.session.status}
+                    effectiveControl={
+                      props.queue.effectiveControl ?? props.session.effectiveControl
+                    }
+                    events={props.events}
+                    eventsReady={!props.initialLoading}
+                    codexConnected={codexConnected}
+                    realtimeAutostartModel={props.realtimeAutostartModel}
+                    onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
+                  />
+                </Suspense>
+              ) : null
+            }
             placeholder={
               props.session.status === "cancelled"
                 ? "This session was cancelled."

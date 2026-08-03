@@ -223,6 +223,19 @@ import {
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
 } from "./session-control";
+import {
+  sessionRealtimeIsActiveInTransaction,
+  settleExpiredSessionRealtimeInTransaction,
+} from "./session-realtime";
+import {
+  isSessionRealtimeDelegationTurnMetadata,
+  projectSessionRealtimeDelegationProgressInTransaction,
+  projectSessionRealtimeDelegationTerminalInTransaction,
+} from "./session-realtime-ledger";
+import {
+  listSessionRealtimeContinuityEntriesInTransaction,
+  type SessionRealtimeContinuityEntry,
+} from "./session-realtime-context";
 import * as schema from "./schema";
 import {
   AGENT_VISIBLE_MEMORY_STATUSES,
@@ -244,6 +257,9 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./session-control";
 export * from "./session-queue-commands";
+export * from "./session-realtime";
+export * from "./session-realtime-context";
+export * from "./session-realtime-ledger";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./preference-registry";
@@ -21397,6 +21413,29 @@ export async function getActiveSessionHistoryItems(
   });
 }
 
+/** Bounded finalized voice turns used only to resume a later realtime call. */
+export async function getSessionRealtimeContinuityEntries(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  maximumEntries = 20,
+): Promise<SessionRealtimeContinuityEntry[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [session] = await scopedDb
+      .select({ accountId: schema.sessions.accountId })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!session) return [];
+    return await listSessionRealtimeContinuityEntriesInTransaction(scopedDb, {
+      accountId: session.accountId,
+      workspaceId,
+      sessionId,
+      maximumEntries,
+    });
+  });
+}
+
 /**
  * Count of ACTIVE (live, model-facing) history rows for a session. This is the
  * length of the history the next turn is seeded from — the dual-write slice
@@ -36173,6 +36212,8 @@ export type InitializeSessionStartInput = {
     subjectId: string;
     expectedRevision: number;
   } | null;
+  /** Persist session.created only; realtime will supply the first human turn. */
+  deferInitialTurn?: boolean;
 };
 
 export type InitializeSessionStartResult = {
@@ -36256,6 +36297,95 @@ export async function initializeSessionStartAtomically(
             })
             .returning();
           if (!goal) throw new Error("Failed to create initial session goal");
+        }
+
+        if (input.deferInitialTurn) {
+          const [existingCreatedEvent] = await tx
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, session.id),
+                eq(schema.sessionEvents.type, "session.created"),
+              ),
+            )
+            .limit(1);
+          let sequence = session.lastSequence;
+          let initializedNow = false;
+          let insertedEvents: Array<typeof schema.sessionEvents.$inferSelect> = [];
+          if (!existingCreatedEvent) {
+            insertedEvents = await tx
+              .insert(schema.sessionEvents)
+              .values([
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  sequence: ++sequence,
+                  type: "session.created",
+                  payload: sanitizeEventPayload({
+                    ...input.createdEventPayload,
+                    status: "idle",
+                    createdBy: creator.initiator,
+                  }),
+                },
+                ...(goal
+                  ? [
+                      {
+                        accountId: session.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: session.id,
+                        sequence: ++sequence,
+                        type: "goal.set" as const,
+                        payload: sanitizeEventPayload({
+                          goalId: goal.id,
+                          text: goal.text,
+                          ...(goal.successCriteria
+                            ? { successCriteria: goal.successCriteria }
+                            : {}),
+                          version: goal.version,
+                          actor: "api",
+                          replaced: false,
+                        }),
+                      },
+                    ]
+                  : []),
+              ])
+              .returning();
+            initializedNow = true;
+          }
+          await tx
+            .update(schema.sessions)
+            .set({
+              temporalWorkflowId,
+              lastSequence: sequence,
+              ...(initializedNow && session.status === "queued" ? { status: "idle" } : {}),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, session.id),
+              ),
+            );
+          if (initializedNow && input.consumeNewSessionDraft) {
+            await setSubjectRlsContext(
+              tx as unknown as Database,
+              input.consumeNewSessionDraft.subjectId,
+            );
+            await seedNewSessionDraftInTransaction(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              subjectId: input.consumeNewSessionDraft.subjectId,
+              expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+            });
+          }
+          return {
+            events: insertedEvents.map(mapEvent),
+            turn: null,
+            temporalWorkflowId,
+            workflowWakeRevision: null,
+          };
         }
 
         const existingUserEvents = await tx
@@ -37002,8 +37132,14 @@ export async function claimSessionWorkForAttempt(
           sessionId,
           { workspaceControl },
         );
-        const session = prefix.sessions[0];
+        let session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
+        // Work and realtime may coexist, but claim remains the lazy lifecycle
+        // cleanup point for an expired voice lease.
+        session = await settleExpiredSessionRealtimeInTransaction(
+          tx as unknown as Database,
+          session,
+        );
         if (effectiveControl.state !== "active") {
           return { action: "unclaimed", reason: "gate-closed" };
         }
@@ -38044,13 +38180,28 @@ export async function claimSessionWorkForAttempt(
           }),
           producerCodexCredentialId: null,
         });
-        const delivered = await deliverPendingUpdates(
-          session.accountId,
-          row.id,
-          row.executionGeneration,
-          session.lastSequence + 1,
-          now,
-        );
+        const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
+        // Cross-session updates are already projected through
+        // delegation.context.append. Keep them pending instead of consuming
+        // them as hidden context on the provider-delegated ordinary turn.
+        const delivered = providerDelegatedTurn
+          ? {
+              count: 0,
+              lastSequence: session.lastSequence,
+              triggerEventId: null,
+              historyItemId: null,
+              historyItem: null,
+              updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+              events: [] as Array<typeof schema.sessionEvents.$inferInsert>,
+              event: null,
+            }
+          : await deliverPendingUpdates(
+              session.accountId,
+              row.id,
+              row.executionGeneration,
+              session.lastSequence + 1,
+              now,
+            );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
         if (delivered.events.length > 0) {
           await tx.insert(schema.sessionEvents).values(delivered.events);
@@ -39607,6 +39758,13 @@ export type ApplySessionTurnSettlementResult =
       activeTurnId: string | null;
     };
 
+export type ApplySessionTurnSettlementHooks = {
+  /** Test-only failure injection after terminal projection but before commit. */
+  afterRealtimeDelegationProjection?:
+    | ((projection: { entryId: string; turnId: string }) => void | Promise<void>)
+    | undefined;
+};
+
 function attemptOutcomeForTurnStatus(status: SessionTurnStatus): SessionTurnAttemptOutcome | null {
   switch (status) {
     case "completed":
@@ -39620,6 +39778,40 @@ function attemptOutcomeForTurnStatus(status: SessionTurnStatus): SessionTurnAtte
   }
 }
 
+type TerminalSessionTurnStatus = "completed" | "failed" | "cancelled" | "superseded";
+type TerminalSessionTurnEventType =
+  | "turn.completed"
+  | "turn.failed"
+  | "turn.cancelled"
+  | "turn.superseded";
+
+function terminalSessionTurnEventType(
+  status: TerminalSessionTurnStatus,
+): TerminalSessionTurnEventType {
+  switch (status) {
+    case "completed":
+      return "turn.completed";
+    case "failed":
+      return "turn.failed";
+    case "cancelled":
+      return "turn.cancelled";
+    case "superseded":
+      return "turn.superseded";
+  }
+}
+
+function isTerminalSessionTurnStatus(
+  status: SessionTurnStatus,
+): status is TerminalSessionTurnStatus {
+  return ["completed", "failed", "cancelled", "superseded"].includes(status);
+}
+
+function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : {};
+}
+
 /**
  * Atomically append terminal/requires-action truth, update the exact turn, and
  * transition the owning session. A superseded dispatch or closed control gate
@@ -39630,6 +39822,7 @@ export async function applySessionTurnSettlement(
   db: Database,
   workspaceId: string,
   input: ApplySessionTurnSettlementInput,
+  hooks: ApplySessionTurnSettlementHooks = {},
 ): Promise<ApplySessionTurnSettlementResult> {
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   const eventTypes = [
@@ -40058,11 +40251,37 @@ export async function applySessionTurnSettlement(
       });
       const inserted =
         values.length > 0 ? await tx.insert(schema.sessionEvents).values(values).returning() : [];
-      const terminal =
-        input.turnStatus === "completed" ||
-        input.turnStatus === "cancelled" ||
-        input.turnStatus === "failed" ||
-        input.turnStatus === "superseded";
+      const terminal = isTerminalSessionTurnStatus(input.turnStatus);
+      if (isTerminalSessionTurnStatus(input.turnStatus)) {
+        const terminalType = terminalSessionTurnEventType(input.turnStatus);
+        const persistedTerminal = inserted.find((event) => event.type === terminalType);
+        const projection = await projectSessionRealtimeDelegationTerminalInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnStatus: input.turnStatus,
+            terminalEvent: {
+              type: terminalType,
+              payload: persistedTerminal
+                ? sessionEventPayloadRecord(persistedTerminal.payload)
+                : {
+                    code: "delegation_terminal_event_missing",
+                    error: `Delegated turn reached ${input.turnStatus} without its canonical terminal event.`,
+                  },
+            },
+            now,
+          },
+        );
+        if (projection) {
+          await hooks.afterRealtimeDelegationProjection?.({
+            entryId: projection.entry.id,
+            turnId: input.turnId,
+          });
+        }
+      }
       if (input.turnStatus === "running") {
         // Approval resume re-enters the same logical turn after a new fenced
         // dispatch has advanced its trigger. It is an authorized inference
@@ -40350,6 +40569,20 @@ export async function settleCodexCredentialLeaseLoss(
         const settlementEvent = inserted[0];
         if (!settlementEvent) {
           throw new Error("Codex lease-loss settlement did not persist its checkpoint event");
+        }
+        if (!input.checkpointDurable) {
+          await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnStatus: "failed",
+            terminalEvent: {
+              type: "turn.failed",
+              payload: sessionEventPayloadRecord(settlementEvent.payload),
+            },
+            now,
+          });
         }
 
         await tx
@@ -41080,6 +41313,22 @@ export async function recoverSessionDispatch(
             },
           ])
           .returning();
+        const failedEvent = inserted.find((event) => event.type === "turn.failed");
+        if (!failedEvent) {
+          throw new Error("Worker-death exhaustion did not persist its terminal event");
+        }
+        await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          turnStatus: "failed",
+          terminalEvent: {
+            type: "turn.failed",
+            payload: sessionEventPayloadRecord(failedEvent.payload),
+          },
+          now,
+        });
         await tx
           .update(schema.sessionTurns)
           .set({
@@ -41818,8 +42067,14 @@ export async function enqueueSessionWorkflowWakeIfRunnable(
           .for("update")
           .limit(1);
         if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+        const realtimeActive = await sessionRealtimeIsActiveInTransaction(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
         const runnable =
           session.status !== "cancelled" &&
+          !realtimeActive &&
           session.activeTurnId === null &&
           effectiveControl.state === "active";
         return runnable
@@ -42312,7 +42567,13 @@ export async function addSessionSystemUpdateWithSourceMutation(
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
         await mutateSource(tx as unknown as Database, event.id);
-        const shouldWake = session.activeTurnId === null && effectiveControl.state === "active";
+        const realtimeActive = await sessionRealtimeIsActiveInTransaction(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
+        const shouldWake =
+          !realtimeActive && session.activeTurnId === null && effectiveControl.state === "active";
         const wake = shouldWake
           ? await registerInternalUpdateWakeInTransaction(tx as unknown as Database, {
               accountId: session.accountId,
@@ -42876,6 +43137,21 @@ export async function appendSessionEventsForTurnAttempt(
           };
         });
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        if (fence.allowed) {
+          await projectSessionRealtimeDelegationProgressInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId,
+            turnId,
+            events: inserted.map((event) => ({
+              id: event.id,
+              sequence: event.sequence,
+              type: event.type,
+              payload: event.payload,
+            })),
+            now,
+          });
+        }
         await tx
           .update(schema.sessions)
           .set({

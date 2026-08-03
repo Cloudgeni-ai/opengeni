@@ -3,7 +3,7 @@ import { ModelItem } from "@openai/agents-core/types";
 import type { FileAsset } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
-import type { AgentSegmentInput, OpenGeniRuntime } from "@opengeni/runtime";
+import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createHash } from "node:crypto";
 import {
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
@@ -429,6 +429,68 @@ describe("turnInput attachment projection", () => {
       expect(requireFile).toHaveBeenCalledTimes(1);
     } finally {
       requireFile.mockRestore();
+      listUpdates.mockRestore();
+      getHistory.mockRestore();
+      getEnvelope.mockRestore();
+    }
+  });
+
+  test("uses only canonical history and recovery context after realtime", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000060";
+    const sessionId = "00000000-0000-4000-8000-000000000061";
+    const projectedTurnId = "00000000-0000-4000-8000-000000000062";
+    const laterTurnId = "00000000-0000-4000-8000-000000000063";
+    const storedUser = user("continue after voice");
+    const modelInputs: unknown[] = [];
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockImplementation(
+      async () => [],
+    );
+    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
+      { position: 0, item: storedUser, producerCodexCredentialId: null },
+    ]);
+    const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
+    const runtime = {
+      prepareInput: async (agent: unknown, input: AgentSegmentInput) => {
+        const prepared = await prepareRunInput(agent as never, input);
+        modelInputs.push(prepared.input);
+        return prepared;
+      },
+    } as unknown as OpenGeniRuntime;
+    const trigger = {
+      id: "00000000-0000-4000-8000-000000000065",
+      workspaceId,
+      sessionId,
+      sequence: 1,
+      type: "user.message" as const,
+      payload: { text: "continue after voice", resources: [] },
+      occurredAt: "2026-07-29T00:00:00.000Z",
+    };
+
+    try {
+      await turnInput(
+        {} as Database,
+        runtime,
+        {},
+        trigger,
+        { currentCodexCredentialId: null },
+        { turnId: projectedTurnId, recovering: true },
+      );
+      await turnInput(
+        {} as Database,
+        runtime,
+        {},
+        trigger,
+        { currentCodexCredentialId: null },
+        { turnId: laterTurnId },
+      );
+
+      const recoveryInput = modelInputs[0] as Array<Record<string, unknown>>;
+      expect(recoveryInput[0]).toEqual(storedUser);
+      expect(recoveryInput[1]).toMatchObject({ type: "message", role: "system" });
+      const recoverySystemContent = (recoveryInput[1] as { content: string }).content;
+      expect(recoverySystemContent).toContain("[OpenGeni inference recovery]");
+      expect(modelInputs[1]).toEqual([storedUser]);
+    } finally {
       listUpdates.mockRestore();
       getHistory.mockRestore();
       getEnvelope.mockRestore();

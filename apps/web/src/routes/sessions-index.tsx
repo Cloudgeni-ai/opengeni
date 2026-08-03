@@ -23,7 +23,7 @@ import {
   type ComposerState,
 } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { OpenGeniApiError, type SessionRealtimeModel } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
@@ -38,6 +38,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
+import { NewSessionRealtimeControl } from "@/components/session/codex-realtime-control";
 import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,7 +56,10 @@ import {
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import {
+  useWorkspaceModelCatalog,
+  type WorkspaceModelCatalogState,
+} from "@/lib/use-workspace-model-catalog";
 import {
   emptySessionDraft,
   isSessionDraftComputeReady,
@@ -94,6 +98,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
 function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
+  const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
@@ -208,6 +213,11 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
   });
   const busy = context.busy || submitting;
+  const codexConnected = modelCatalog.models.some(
+    (candidate) =>
+      candidate.provider === "codex-subscription" &&
+      candidate.credentialReadiness.status === "ready",
+  );
 
   useEffect(() => {
     if (createComposerFocusGen === 0 || newSessionDraft.loading) return;
@@ -215,6 +225,87 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     if (!textarea || textarea.disabled) return;
     textarea.focus();
   }, [createComposerFocusGen, newSessionDraft.loading]);
+
+  const submitNewSession = async (realtimeModel: SessionRealtimeModel | null): Promise<boolean> => {
+    const typedText = message.trim();
+    const text = typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+    if (busy || newSessionDraft.loading || newSessionDraft.conflict) return false;
+    if (
+      createdSessionAuthority === null &&
+      ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
+    ) {
+      return false;
+    }
+    setSubmitting(true);
+    try {
+      return await runNewSessionRouteSubmission({
+        authority: createdSessionAuthority,
+        onAuthorityChange: setCreatedSessionAuthority,
+        create: async () => {
+          const submittedResources =
+            draft.compute.kind === "machine"
+              ? attachments.readyResources
+              : persistedValue.resources;
+          const flushed = await newSessionDraft.flush();
+          if (!flushed) return null;
+          const submission = submissionFromSessionDraft(draft);
+          const created = await context.startSession(
+            workspaceId,
+            {
+              text,
+              resources: submittedResources,
+              tools: persistedValue.tools,
+              model: persistedValue.model,
+              reasoningEffort: persistedValue.reasoningEffort,
+              latencyMode: persistedValue.latencyMode,
+              ...submission.extras,
+            },
+            {
+              targetSandboxId: submission.options.targetSandboxId,
+              workingDir: submission.options.workingDir,
+              omitWorkspaceResources: submission.omitWorkspaceResources,
+              expectedNewSessionDraftRevision: flushed.revision,
+              ...(realtimeModel && !typedText ? { startMode: "realtime" as const } : {}),
+            },
+          );
+          if (!created) return null;
+          return {
+            sessionId: created.id,
+            settleDraft: async () => {
+              const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+              if (acknowledged?.kind === "consumed") {
+                setMessage("");
+                setDraft(emptySessionDraft());
+                attachments.removeReadyFiles(
+                  submittedResources.flatMap((resource) =>
+                    resource.kind === "file" ? [resource.fileId] : [],
+                  ),
+                );
+              } else if (
+                !acknowledged ||
+                !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+              ) {
+                const preserved = await newSessionDraft.flush();
+                if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                  return false;
+                }
+              }
+              return true;
+            },
+          };
+        },
+        navigate: async (sessionId) => {
+          await navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId, sessionId },
+            search: realtimeModel ? { realtime: realtimeModel } : {},
+          });
+        },
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   // The session does not exist yet, so this surface cannot use `useComposer`
   // (that hook sends to a session). It still renders the package ChatComposer
@@ -252,96 +343,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     removeRestoredResource: () => {},
     error: newSessionDraft.error,
     clearError: newSessionDraft.clearError,
-    send: async () => {
-      const text =
-        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-      if (busy || newSessionDraft.loading || newSessionDraft.conflict) {
-        return false;
-      }
-      if (
-        createdSessionAuthority === null &&
-        (!text || attachments.hasUnresolved || !computeReady)
-      ) {
-        return false;
-      }
-      setSubmitting(true);
-      try {
-        return await runNewSessionRouteSubmission({
-          authority: createdSessionAuthority,
-          onAuthorityChange: setCreatedSessionAuthority,
-          create: async () => {
-            // This render's resources are the immutable create snapshot. Files
-            // can still be added through paste/drop/picker while the request is
-            // in flight; those newer ids belong to the next draft.
-            const submittedResources =
-              draft.compute.kind === "machine"
-                ? attachments.readyResources
-                : persistedValue.resources;
-            const flushed = await newSessionDraft.flush();
-            if (!flushed) return null;
-            const submission = submissionFromSessionDraft(draft);
-            const created = await context.startSession(
-              workspaceId,
-              {
-                text,
-                resources: submittedResources,
-                tools: persistedValue.tools,
-                model: persistedValue.model,
-                reasoningEffort: persistedValue.reasoningEffort,
-                latencyMode: persistedValue.latencyMode,
-                ...submission.extras,
-              },
-              {
-                targetSandboxId: submission.options.targetSandboxId,
-                workingDir: submission.options.workingDir,
-                omitWorkspaceResources: submission.omitWorkspaceResources,
-                expectedNewSessionDraftRevision: flushed.revision,
-              },
-            );
-            if (!created) return null;
-            return {
-              sessionId: created.id,
-              settleDraft: async () => {
-                // A programmatic edit made while create was in flight was not
-                // submitted and must not be abandoned when this route unmounts.
-                // A sibling-tab OCC conflict remains visible, while the route
-                // retains exact authority for the already-created session.
-                const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
-                if (acknowledged?.kind === "consumed") {
-                  setMessage("");
-                  setDraft(emptySessionDraft());
-                  attachments.removeReadyFiles(
-                    submittedResources.flatMap((resource) =>
-                      resource.kind === "file" ? [resource.fileId] : [],
-                    ),
-                  );
-                } else if (
-                  !acknowledged ||
-                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-                ) {
-                  // A non-conflict revision-zero insert can fail transiently.
-                  // Retry it (or prove a concurrently saved current signature)
-                  // before allowing this route to unmount through navigation.
-                  const preserved = await newSessionDraft.flush();
-                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                    return false;
-                  }
-                }
-                return true;
-              },
-            };
-          },
-          navigate: async (sessionId) => {
-            await navigate({
-              to: "/workspaces/$workspaceId/sessions/$sessionId",
-              params: { workspaceId, sessionId },
-            });
-          },
-        });
-      } finally {
-        setSubmitting(false);
-      }
-    },
+    send: async () => await submitNewSession(null),
     steer: async () => {
       const text =
         message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
@@ -370,9 +372,37 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
             disabled={newSessionDraft.loading}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
+            actions={
+              <NewSessionRealtimeControl
+                client={context.client}
+                workspaceId={workspaceId}
+                codexConnected={codexConnected}
+                disabled={
+                  busy ||
+                  newSessionDraft.loading ||
+                  newSessionDraft.conflict !== null ||
+                  attachments.hasUnresolved ||
+                  !computeReady ||
+                  !context.workspaceMcpCatalogReady
+                }
+                disabledReason={
+                  newSessionDraft.conflict
+                    ? "Resolve the draft conflict before starting voice."
+                    : attachments.hasUnresolved
+                      ? "Wait for attachments to finish before starting voice."
+                      : !computeReady
+                        ? "Choose where this session should run first."
+                        : !context.workspaceMcpCatalogReady
+                          ? "Wait for session tools to finish loading."
+                          : null
+                }
+                onStart={async (model) => await submitNewSession(model)}
+              />
+            }
             controls={
               <SessionControlStrip
                 workspaceId={workspaceId}
+                modelCatalog={modelCatalog}
                 disabled={busy || newSessionDraft.loading}
                 showRepos={draft.compute.kind === "sandbox"}
                 selection={{
@@ -534,19 +564,20 @@ function RecentSessionRow({
 // only shows when rigs / variable sets exist.
 function SessionControlStrip({
   workspaceId,
+  modelCatalog,
   disabled,
   showRepos,
   selection,
   onToolSelectionChange,
 }: {
   workspaceId: string;
+  modelCatalog: WorkspaceModelCatalogState;
   disabled: boolean;
   showRepos: boolean;
   selection: SessionToolSelection;
   onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
   const context = useAppContext();
-  const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   useEffect(() => {
     const row = findPickerRow(modelCatalog.rows, context.model);
     if (!row?.selectable) {

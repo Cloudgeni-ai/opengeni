@@ -13,6 +13,11 @@ export type UserMessageItem = {
   kind: "user-message";
   id: string;
   text: string;
+  presentation?: {
+    kind: "realtime_voice" | "realtime_voice_handoff";
+    /** Full bounded execution context sent with this visible voice request. */
+    context: string;
+  };
   /** Resources attached to this message (file uploads, repositories). */
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
-const migration = "0158_document_authority_foundation.sql";
+const migration = "0165_document_authority_foundation.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -13,11 +13,11 @@ let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0158-document-authority");
+  blank = await acquireBlankTestDatabase("migration-0165-document-authority");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0158-document-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0165-document-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     available = false;
@@ -28,7 +28,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("migration 0158 (document authority)", () => {
+describe("migration 0165 (document authority)", () => {
   test("rejects an undrained queue, rolls back, then backfills and restores FORCE RLS", async () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
@@ -62,17 +62,17 @@ describe("migration 0158 (document authority)", () => {
       );
 
       const [account] = await sql<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0158-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0165-account') returning id`;
       const [workspace] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${account!.id}, 'migration-0158-workspace') returning id`;
+        values (${account!.id}, 'migration-0165-workspace') returning id`;
       const [file] = await sql<{ id: string }[]>`
         insert into files (
           account_id, workspace_id, status, filename, safe_filename, content_type,
           size_bytes, bucket, object_key
         ) values (
           ${account!.id}, ${workspace!.id}, 'ready', 'legacy.txt', 'legacy.txt',
-          'text/plain', 1, 'test', 'migration-0158/legacy.txt'
+          'text/plain', 1, 'test', 'migration-0165/legacy.txt'
         ) returning id`;
       const [base] = await sql<{ id: string }[]>`
         insert into document_bases (account_id, workspace_id, name)
@@ -104,7 +104,7 @@ describe("migration 0158 (document authority)", () => {
         drainError = error;
       }
       expect(String(drainError)).toContain(
-        "migration 0158 requires every queued/indexing document to settle",
+        "migration 0165 requires every queued/indexing document to settle",
       );
 
       const rolledBack = await sql<

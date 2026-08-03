@@ -13,9 +13,10 @@ const budgets = {
   // Shared consent, connector, and response-deduplication code remains in the
   // application shell while provider SDKs stay lazy. The Workspace hub densifies
   // rail + settings against the session graph; a dedicated Radix vendor chunk
-  // keeps Popper scopes intact (otherwise /settings crashes) and lands ~885–905
-  // KiB initial raw — raise the ceiling to the measured densified shell.
-  initialRaw: 910 * kib,
+  // keeps Popper scopes intact (otherwise /settings crashes). The shared
+  // composer also carries the tiny app-action slot used by realtime voice.
+  // Keep one measured KiB of raw headroom; compressed cost remains unchanged.
+  initialRaw: 911 * kib,
   initialGzip: 245 * kib,
   initialFileGzip: 70 * kib,
   initialFiles: 11,

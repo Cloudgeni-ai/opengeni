@@ -225,6 +225,8 @@ export type ComposerState = {
   send: (text?: string) => Promise<boolean>;
   /** Supersede current direction with the draft. */
   steer: (text?: string) => Promise<boolean>;
+  /** Optimistic-to-durable projection for a Steer that has not started yet. */
+  steering?: ComposerSteeringState | null | undefined;
   sending: boolean;
   canSend: boolean;
   /** Pause the session without deleting its prompt queue. */
@@ -250,6 +252,59 @@ export type ComposerState = {
   clearError: () => void;
 };
 
+export type ComposerSteeringState = {
+  phase: "submitting" | "accepted";
+  text: string;
+  clientEventId: string | null;
+  triggerEventId: string | null;
+  turnId: string | null;
+};
+
+const STEERING_SETTLEMENT_EVENT_TYPES = new Set([
+  "turn.started",
+  "turn.completed",
+  "turn.failed",
+  "turn.cancelled",
+  "turn.superseded",
+]);
+
+function isSteeringSettlementEvent(event: SessionEvent): boolean {
+  return STEERING_SETTLEMENT_EVENT_TYPES.has(event.type);
+}
+
+function steeringAcceptedEvent(
+  steering: ComposerSteeringState,
+  events: readonly SessionEvent[],
+): SessionEvent | undefined {
+  return events.find(
+    (event) =>
+      event.type === "user.message" &&
+      steering.clientEventId !== null &&
+      event.clientEventId === steering.clientEventId,
+  );
+}
+
+function steeringSettledByEvents(
+  steering: ComposerSteeringState,
+  events: readonly SessionEvent[],
+): boolean {
+  const acceptedEventId =
+    steering.triggerEventId ?? steeringAcceptedEvent(steering, events)?.id ?? null;
+  return events.some((event) => {
+    if (steering.turnId && event.turnId === steering.turnId && isSteeringSettlementEvent(event)) {
+      return true;
+    }
+    if (event.type !== "turn.started" || !acceptedEventId) return false;
+    const payload = event.payload;
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      "triggerEventId" in payload &&
+      payload.triggerEventId === acceptedEventId
+    );
+  });
+}
+
 /**
  * Draft + send + Pause/Resume state for the chat composer — the only
  * human-to-agent input surface. The draft survives a failed send (nothing is
@@ -271,6 +326,17 @@ export function useComposer(
   // a parent may switch sessionId without remounting this public hook.
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [sending, setSending] = useState(false);
+  const [steering, setSteering] = useState<ComposerSteeringState | null>(() =>
+    initialPendingOperation?.delivery === "steer"
+      ? {
+          phase: "submitting",
+          text: initialPendingOperation.input.text,
+          clientEventId: initialPendingOperation.input.clientEventId ?? null,
+          triggerEventId: null,
+          turnId: null,
+        }
+      : null,
+  );
   const [pausing, setPausing] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -282,6 +348,8 @@ export function useComposer(
     () => initialShadow?.resources ?? [],
   );
   const pendingOperationRef = useRef<PendingComposerOperation | null>(initialPendingOperation);
+  const steeringSettlementEventsRef = useRef<SessionEvent[]>([]);
+  const steeringRef = useRef(steering);
   const pendingClientEventId = useRef<string | null>(
     initialPendingOperation?.input.clientEventId ?? null,
   );
@@ -303,6 +371,9 @@ export function useComposer(
   useLayoutEffect(() => {
     onDraftAppliedRef.current = onDraftApplied;
   }, [onDraftApplied]);
+  useLayoutEffect(() => {
+    steeringRef.current = steering;
+  }, [steering]);
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
@@ -320,6 +391,7 @@ export function useComposer(
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
     pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
+    steeringSettlementEventsRef.current = [];
     pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
     const shadow = pendingOperationRef.current?.newerShadow;
     localEditRevision.current = shadow ? 1 : 0;
@@ -333,6 +405,17 @@ export function useComposer(
     setStateTargetKey(targetKey);
     setValue(shadow?.text ?? "");
     setSending(false);
+    setSteering(
+      pendingOperationRef.current?.delivery === "steer"
+        ? {
+            phase: "submitting",
+            text: pendingOperationRef.current.input.text,
+            clientEventId: pendingOperationRef.current.input.clientEventId ?? null,
+            triggerEventId: null,
+            turnId: null,
+          }
+        : null,
+    );
     setPausing(false);
     setResuming(false);
     setError(null);
@@ -503,17 +586,75 @@ export function useComposer(
     if (!sessionId || !durableDrafts) return;
     return registerSessionReconciler(sessionId, "composer", async () => await loadDraft(false));
   }, [durableDrafts, loadDraft, registerSessionReconciler, sessionId]);
+  const reconcileSteering = useCallback(async (): Promise<void> => {
+    if (!sessionId || !steeringRef.current) return;
+    const ownedTargetKey = targetKey;
+    let events: SessionEvent[];
+    try {
+      events = await client.listEvents(workspaceId, sessionId, {
+        includeTypes: [
+          "user.message",
+          "turn.started",
+          "turn.completed",
+          "turn.failed",
+          "turn.cancelled",
+          "turn.superseded",
+        ],
+        limit: 250,
+        payloadMode: "full",
+      });
+    } catch {
+      // Best effort: the live stream still settles steering when its event arrives.
+      return;
+    }
+    if (targetKeyRef.current !== ownedTargetKey) return;
+    setSteering((current) => {
+      if (!current) return current;
+      if (steeringSettledByEvents(current, events)) {
+        steeringSettlementEventsRef.current = [];
+        return null;
+      }
+      const accepted = steeringAcceptedEvent(current, events);
+      if (!accepted || current.triggerEventId) return current;
+      return {
+        ...current,
+        phase: "accepted",
+        triggerEventId: accepted.id,
+      };
+    });
+  }, [client, sessionId, targetKey, workspaceId]);
   useSessionEventTrigger(
     client,
     workspaceId,
     sessionId,
-    isComposerDraftEvent,
-    () => void loadDraft(false),
+    (event) => isComposerDraftEvent(event) || isSteeringSettlementEvent(event),
+    (event) => {
+      if (isComposerDraftEvent(event)) void loadDraft(false);
+      if (!isSteeringSettlementEvent(event)) return;
+      steeringSettlementEventsRef.current = [
+        ...steeringSettlementEventsRef.current.slice(-15),
+        event,
+      ];
+      setSteering((current) => {
+        if (!current || !steeringSettledByEvents(current, [event])) return current;
+        steeringSettlementEventsRef.current = [];
+        return null;
+      });
+    },
     {
-      enabled: Boolean(sessionId) && durableDrafts,
+      enabled: Boolean(sessionId) && (durableDrafts || steering !== null),
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
+    reconcileSteering,
   );
+
+  useEffect(() => {
+    if (!steering) return;
+    const observed = [...(options.events ?? []), ...steeringSettlementEventsRef.current];
+    if (!steeringSettledByEvents(steering, observed)) return;
+    steeringSettlementEventsRef.current = [];
+    setSteering(null);
+  }, [options.events, steering]);
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
@@ -667,6 +808,8 @@ export function useComposer(
         forgetPendingComposerOperation(operationKey);
       };
 
+      let keepSteering = pending?.delivery === "steer";
+
       const settleAccepted = (operation: PendingComposerOperation): void => {
         clearPending();
         const draftWasUnchanged = valueRef.current === operation.draftAtSend;
@@ -699,30 +842,40 @@ export function useComposer(
         onSent?.(operation.input.text, operation.input);
       };
 
-      const deliver = async (operation: PendingComposerOperation): Promise<void> => {
+      const deliver = async (operation: PendingComposerOperation) => {
         if (operation.delivery === "steer") {
-          await client.steerMessage(workspaceId, sessionId, operation.input);
-        } else {
-          await client.sendMessage(workspaceId, sessionId, operation.input);
+          return await client.steerMessage(workspaceId, sessionId, operation.input);
         }
+        await client.sendMessage(workspaceId, sessionId, operation.input);
+        return null;
       };
 
+      if (delivery === "steer") {
+        setSteering({
+          phase: "submitting",
+          text: rawText,
+          clientEventId: pending?.input.clientEventId ?? pendingClientEventId.current,
+          triggerEventId: null,
+          turnId: null,
+        });
+      }
       setSending(true);
       setError(null);
       try {
         if (pending) {
-          let accepted = false;
+          let acceptedEvent: SessionEvent | null = null;
           try {
             const events = await client.listEvents(workspaceId, sessionId, {
               includeTypes: ["user.message"],
               limit: 100,
               payloadMode: "none",
             });
-            accepted = events.some(
-              (event) =>
-                event.type === "user.message" &&
-                event.clientEventId === pending.input.clientEventId,
-            );
+            acceptedEvent =
+              events.find(
+                (event) =>
+                  event.type === "user.message" &&
+                  event.clientEventId === pending.input.clientEventId,
+              ) ?? null;
           } catch (cause) {
             if (
               targetKeyRef.current === ownedTargetKey &&
@@ -738,7 +891,17 @@ export function useComposer(
           ) {
             return false;
           }
-          if (accepted) {
+          if (acceptedEvent) {
+            if (pending.delivery === "steer") {
+              keepSteering = true;
+              setSteering({
+                phase: "accepted",
+                text: pending.input.text,
+                clientEventId: pending.input.clientEventId ?? null,
+                triggerEventId: acceptedEvent.id,
+                turnId: null,
+              });
+            }
             settleAccepted(pending);
             return true;
           }
@@ -751,8 +914,19 @@ export function useComposer(
             return false;
           }
           try {
-            await deliver(pending);
+            const result = await deliver(pending);
+            if (pending.delivery === "steer" && result) {
+              keepSteering = true;
+              setSteering({
+                phase: "accepted",
+                text: pending.input.text,
+                clientEventId: pending.input.clientEventId ?? null,
+                triggerEventId: result.accepted.id,
+                turnId: result.turn.id,
+              });
+            }
           } catch (cause) {
+            if (pending.delivery === "steer") keepSteering = true;
             if (
               targetKeyRef.current === ownedTargetKey &&
               targetGeneration.current === ownedGeneration
@@ -812,11 +986,32 @@ export function useComposer(
         };
         pendingOperationRef.current = operation;
         rememberPendingComposerOperation(operationKey, operation);
+        if (delivery === "steer") {
+          setSteering({
+            phase: "submitting",
+            text: sendText,
+            clientEventId: input.clientEventId ?? null,
+            triggerEventId: null,
+            turnId: null,
+          });
+        }
         try {
-          await deliver(operation);
+          const result = await deliver(operation);
+          if (delivery === "steer" && result) {
+            keepSteering = true;
+            setSteering({
+              phase: "accepted",
+              text: sendText,
+              clientEventId: input.clientEventId ?? null,
+              triggerEventId: result.accepted.id,
+              turnId: result.turn.id,
+            });
+          }
         } catch (cause) {
           if (!isOutcomeUnknownError(cause)) {
             clearPending();
+          } else if (delivery === "steer") {
+            keepSteering = true;
           }
           if (
             targetKeyRef.current === ownedTargetKey &&
@@ -840,6 +1035,7 @@ export function useComposer(
           targetGeneration.current === ownedGeneration
         ) {
           setSending(false);
+          if (delivery === "steer" && !keepSteering) setSteering(null);
         }
       }
     },
@@ -1095,6 +1291,7 @@ export function useComposer(
     hasDraftContent,
     send,
     steer,
+    steering: identityMatches ? steering : null,
     sending: identityMatches ? sending : false,
     canSend:
       identityMatches &&

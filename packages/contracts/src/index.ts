@@ -4006,6 +4006,267 @@ export const SessionAuthorizationSurface = z.enum([
 ]);
 export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
 
+// Native connected-Codex GPT-Live WebRTC negotiation. The browser sends its
+// SDP offer, non-provider session configuration, and proof of the exact active
+// ordinary-session realtime owner. The API consumes that proof before resolving
+// the subscription credential and returns only the provider's SDP answer.
+export const CodexRealtimeWebrtcVersion = z.literal("v3");
+export type CodexRealtimeWebrtcVersion = z.infer<typeof CodexRealtimeWebrtcVersion>;
+
+export const CodexRealtimeVoice = z.enum([
+  "juniper",
+  "maple",
+  "spruce",
+  "ember",
+  "vale",
+  "breeze",
+  "arbor",
+  "sol",
+  "cove",
+]);
+export type CodexRealtimeVoice = z.infer<typeof CodexRealtimeVoice>;
+
+const SessionRealtimeOwnerProof = z.object({
+  browserInstanceId: z.string().min(1).max(256),
+  ownerKey: z.string().min(32).max(1024),
+});
+
+export const CodexRealtimeWebrtcRequest = SessionRealtimeOwnerProof.extend({
+  realtimeId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+  expectedConnectionEpoch: z.number().int().positive(),
+  rotate: z.boolean(),
+  browserActivation: z.literal("required").optional(),
+  sdp: z
+    .string()
+    .min(1)
+    .max(1024 * 1024),
+  version: CodexRealtimeWebrtcVersion,
+  instructions: z.string().max(32_768).optional(),
+  voice: CodexRealtimeVoice.optional(),
+}).strict();
+export type CodexRealtimeWebrtcRequest = z.infer<typeof CodexRealtimeWebrtcRequest>;
+
+export const CodexRealtimeWebrtcResponse = z
+  .object({
+    sdp: z
+      .string()
+      .min(1)
+      .max(1024 * 1024),
+    version: CodexRealtimeWebrtcVersion,
+    model: z.literal("gpt-live-1-boulder-alpha"),
+    connectionId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    startupFenceSequence: z.number().int().nonnegative(),
+    modeVersion: z.number().int().positive(),
+    replay: z.boolean(),
+  })
+  .strict();
+export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
+
+export const GatewayRealtimeConnectRequest = SessionRealtimeOwnerProof.extend({
+  realtimeId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+  expectedConnectionEpoch: z.number().int().positive(),
+  rotate: z.boolean(),
+}).strict();
+export type GatewayRealtimeConnectRequest = z.infer<typeof GatewayRealtimeConnectRequest>;
+
+export const GatewayRealtimeInitialItem = z.object({
+  role: z.enum(["user", "developer", "assistant"]),
+  text: z.string().min(1).max(131_072),
+});
+export type GatewayRealtimeInitialItem = z.infer<typeof GatewayRealtimeInitialItem>;
+
+export const GatewayRealtimeConnectResponse = z
+  .object({
+    token: z.string().min(1).max(16_384),
+    url: z.string().url(),
+    upstreamModelId: z.string().min(1).max(256),
+    expiresAt: z.number().int().positive().nullable(),
+    connectionId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    startupFenceSequence: z.number().int().nonnegative(),
+    modeVersion: z.number().int().positive(),
+    initialItems: z.array(GatewayRealtimeInitialItem).max(128),
+    instructions: z.string().min(1).max(32_768),
+    replay: z.literal(false),
+  })
+  .strict();
+export type GatewayRealtimeConnectResponse = z.infer<typeof GatewayRealtimeConnectResponse>;
+
+export const ActivateCodexRealtimeConnectionRequest = SessionRealtimeOwnerProof.extend({
+  operationId: z.string().uuid(),
+  connectionEpoch: z.number().int().positive(),
+  expectedVersion: z.number().int().positive(),
+  expectedConnectionEpoch: z.number().int().positive(),
+}).strict();
+export type ActivateCodexRealtimeConnectionRequest = z.infer<
+  typeof ActivateCodexRealtimeConnectionRequest
+>;
+
+export const SessionRealtimeLedgerDirection = z.enum(["provider_in", "provider_out"]);
+export type SessionRealtimeLedgerDirection = z.infer<typeof SessionRealtimeLedgerDirection>;
+
+export const SessionRealtimeLedgerKind = z.enum([
+  "user_transcript",
+  "assistant_transcript",
+  "delegation_call",
+  "delegation_progress",
+  "delegation_result",
+  "interruption",
+  "session_update",
+  "error",
+]);
+export type SessionRealtimeLedgerKind = z.infer<typeof SessionRealtimeLedgerKind>;
+
+export const SessionRealtimeLedgerEntry = z
+  .object({
+    id: z.string().uuid(),
+    realtimeId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    sequence: z.number().int().positive(),
+    direction: SessionRealtimeLedgerDirection,
+    kind: SessionRealtimeLedgerKind,
+    role: z.enum(["user", "assistant"]).nullable(),
+    providerEventId: z.string().nullable(),
+    delegationItemId: z.string().nullable(),
+    sourceUpdateId: z.string().uuid().nullable(),
+    historyItemId: z.string().uuid().nullable(),
+    turnId: z.string().uuid().nullable(),
+    text: z.string().nullable(),
+    payload: z.record(z.string(), z.unknown()),
+    clientAckedAt: z.string().datetime().nullable(),
+    providerAckedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type SessionRealtimeLedgerEntry = z.infer<typeof SessionRealtimeLedgerEntry>;
+
+export const SessionRealtimeInboundEntry = z
+  .object({
+    operationId: z.string().uuid(),
+    kind: z.enum([
+      "user_transcript",
+      "assistant_transcript",
+      "delegation_call",
+      "interruption",
+      "error",
+    ]),
+    role: z.enum(["user", "assistant"]).nullable().optional(),
+    providerEventId: z.string().max(1024).nullable().optional(),
+    delegationItemId: z.string().max(1024).nullable().optional(),
+    text: z.string().max(131_072).nullable().optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
+
+export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend({
+  expectedVersion: z.number().int().positive(),
+  connectionId: z.string().uuid(),
+  connectionEpoch: z.number().int().positive(),
+  entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
+  clientAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
+  providerAckSequences: z.array(z.number().int().positive()).max(100).optional(),
+  providerStarted: z
+    .object({
+      providerSessionId: z.string().min(1).max(1024),
+      providerEventId: z.string().min(1).max(1024).nullable().optional(),
+    })
+    .strict()
+    .optional(),
+}).strict();
+export type SyncSessionRealtimeLedgerRequest = z.infer<typeof SyncSessionRealtimeLedgerRequest>;
+
+export const SyncSessionRealtimeLedgerResponse = z
+  .object({
+    accepted: z.array(
+      z.object({ entry: SessionRealtimeLedgerEntry, replay: z.boolean() }).strict(),
+    ),
+    outbound: z.array(SessionRealtimeLedgerEntry),
+  })
+  .strict();
+export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
+
+export const SessionRealtimeModel = z.enum([
+  "gpt-live-1-boulder-alpha",
+  "opengeni-gateway/openai/gpt-realtime-2.1",
+  "opengeni-gateway/openai/gpt-realtime-mini",
+  "opengeni-gateway/xai/grok-voice-think-fast-2.0",
+  "workspace-gateway/openai/gpt-realtime-2.1",
+  "workspace-gateway/openai/gpt-realtime-mini",
+  "workspace-gateway/xai/grok-voice-think-fast-2.0",
+]);
+export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
+
+export const WorkspaceRealtimeModelCatalogItem = z.object({
+  id: SessionRealtimeModel,
+  label: z.string().min(1),
+  provider: z.enum(["OpenGeni", "Connected Codex", "Your Gateway"]),
+  description: z.string().min(1),
+  available: z.boolean(),
+  unavailableReason: z.string().nullable(),
+  recommended: z.boolean(),
+});
+export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
+
+export const WorkspaceRealtimeModelCatalogResponse = z.object({
+  models: z.array(WorkspaceRealtimeModelCatalogItem),
+});
+export type WorkspaceRealtimeModelCatalogResponse = z.infer<
+  typeof WorkspaceRealtimeModelCatalogResponse
+>;
+
+export const SessionRealtimeState = z.enum(["active", "ended"]);
+export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
+
+export const SessionRealtimeEndReason = z.enum(["user_stop", "browser_unload", "lease_expired"]);
+export type SessionRealtimeEndReason = z.infer<typeof SessionRealtimeEndReason>;
+
+export const SessionRealtimeMode = z.object({
+  id: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  browserInstanceId: z.string().min(1).max(256),
+  model: SessionRealtimeModel,
+  state: SessionRealtimeState,
+  version: z.number().int().positive(),
+  connectionEpoch: z.number().int().positive(),
+  leaseExpiresAt: z.string().datetime(),
+  lastHeartbeatAt: z.string().datetime(),
+  startedAt: z.string().datetime(),
+  endedAt: z.string().datetime().nullable(),
+  endReason: SessionRealtimeEndReason.nullable(),
+});
+export type SessionRealtimeMode = z.infer<typeof SessionRealtimeMode>;
+
+export const BeginSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
+  operationId: z.string().uuid(),
+  model: SessionRealtimeModel,
+});
+export type BeginSessionRealtimeRequest = z.infer<typeof BeginSessionRealtimeRequest>;
+
+export const RenewSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
+  expectedVersion: z.number().int().positive(),
+});
+export type RenewSessionRealtimeRequest = z.infer<typeof RenewSessionRealtimeRequest>;
+
+export const EndSessionRealtimeRequest = RenewSessionRealtimeRequest.extend({
+  reason: z.enum(["user_stop", "browser_unload"]),
+});
+export type EndSessionRealtimeRequest = z.infer<typeof EndSessionRealtimeRequest>;
+
+export const SessionRealtimeMutationResponse = z.object({
+  mode: SessionRealtimeMode,
+  replay: z.boolean(),
+});
+export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
+
 export const SessionAuthorizationOperation = z.enum([
   "session.read",
   "session.events.read",
@@ -4032,6 +4293,8 @@ export const SessionAuthorizationOperation = z.enum([
   "session.toolspace.call",
   "session.pin.write",
   "session.codex_account.write",
+  "session.realtime.start",
+  "session.realtime.control",
   "session.context.write",
   "session.approval.write",
   "session.human_input.read",
@@ -6071,6 +6334,8 @@ export const SessionEventType = z.enum([
   // crossing NATS, SSE, REST, or browser boundaries.
   "session.event.envelope_omitted",
   "session.status.changed",
+  "session.realtime.started",
+  "session.realtime.ended",
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",
@@ -7466,7 +7731,12 @@ function compactFailure(
   const code = compactResultStringField(payload.code);
   const recovery = compactResultStringField(payload.recovery);
   const retryable = typeof payload.retryable === "boolean" ? payload.retryable : null;
-  const value = { error: error.value, code: code.value, retryable, recovery: recovery.value };
+  const value = {
+    error: error.value,
+    code: code.value,
+    retryable,
+    recovery: recovery.value,
+  };
   const originalBytes = [error, code, recovery]
     .map((field) => field.originalBytes ?? 0)
     .reduce((sum, bytes) => sum + bytes, 0);
@@ -8170,7 +8440,11 @@ export const CreateSessionRequest = withVariableSetIdAlias({
    * identity or authorization from the UUID.
    */
   requestedSessionId: z.string().uuid().optional(),
-  initialMessage: z.string().min(1),
+  initialMessage: z.string().min(1).optional(),
+  // Creates the durable session shell without fabricating a user message or
+  // starting an underlying agent turn. Realtime can then become the first
+  // interaction and use the ordinary Send/Steer path when it delegates.
+  startMode: z.literal("realtime").optional(),
   // System-level host context for the initial turn only. Unlike `instructions`,
   // this does not persist into later turns and is never emitted as a user event.
   turnInstructions: z.string().trim().min(1).max(32768).optional(),
@@ -8281,6 +8555,21 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   sandbox: z
     .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
     .optional(),
+}).superRefine((value, context) => {
+  if (value.startMode !== "realtime" && value.initialMessage === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["initialMessage"],
+      message: "initialMessage is required unless startMode is realtime",
+    });
+  }
+  if (value.startMode === "realtime" && value.initialMessage !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["initialMessage"],
+      message: "initialMessage must be omitted when startMode is realtime",
+    });
+  }
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
@@ -9209,9 +9498,8 @@ function defineModelContractSchema<Schema>(factory: () => Schema): Schema {
   return factory();
 }
 
-export const ModelCapabilitySupportV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["supported", "unsupported", "unknown"]),
-);
+export const ModelCapabilitySupportV1 =
+  /* @__PURE__ */ defineModelContractSchema(() => z.enum(["supported", "unsupported", "unknown"]));
 export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
 
 export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -9258,37 +9546,54 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
 
-export const ModelCredentialSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.union([
-    z
-      .object({ kind: z.literal("deployment"), mechanism: z.enum(["api_key", "azure_ad_bearer"]) })
-      .strict(),
-    z.object({ kind: z.literal("connected_subscription"), provider: z.literal("codex") }).strict(),
-    z.object({ kind: z.literal("workspace_connection"), mechanism: z.literal("api_key") }).strict(),
-  ]),
-);
+export const ModelCredentialSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.union([
+      z
+        .object({
+          kind: z.literal("deployment"),
+          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("connected_subscription"),
+          provider: z.literal("codex"),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("workspace_connection"),
+          mechanism: z.literal("api_key"),
+        })
+        .strict(),
+    ]),
+  );
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
 
-export const ModelBillingAttributionV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z
-    .object({
-      upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
-      metering: z.enum(["opengeni_credits", "external"]),
-    })
-    .strict(),
-);
+export const ModelBillingAttributionV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z
+      .object({
+        upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+        metering: z.enum(["opengeni_credits", "external"]),
+      })
+      .strict(),
+  );
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
 export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
 
-export const TurnExecutionModelSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionModelSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
 
-export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionReasoningSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
 export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -9493,59 +9798,60 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
 );
 export type ClientModel = z.infer<typeof ClientModel>;
 
-export const ModelCredentialReadinessV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z
-    .object({
-      status: z.enum(["ready", "not_ready", "error"]),
-      reason: z
-        .enum([
-          "missing_credential",
-          "needs_reauth",
-          "prerequisites_missing",
-          "resolver_error",
-          "observation_stale",
-        ])
-        .nullable(),
-      basis: z.enum(["configuration", "connection", "resolver"]),
-      checkedAt: z.string().datetime().nullable(),
-    })
-    .strict()
-    .superRefine((readiness, context) => {
-      if ((readiness.status === "ready") !== (readiness.reason === null)) {
-        context.addIssue({
-          code: "custom",
-          path: ["reason"],
-          message: "ready credential state requires no reason; non-ready state requires a reason",
-        });
-      }
-      if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
-        context.addIssue({
-          code: "custom",
-          path: ["reason"],
-          message:
-            "credential errors require resolver_error and resolver_error requires error status",
-        });
-      }
-      if (
-        readiness.basis === "resolver" &&
-        readiness.status === "ready" &&
-        readiness.checkedAt === null
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["checkedAt"],
-          message: "resolver readiness requires an observation timestamp",
-        });
-      }
-      if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
-        context.addIssue({
-          code: "custom",
-          path: ["checkedAt"],
-          message: "a stale observation requires its observation timestamp",
-        });
-      }
-    }),
-);
+export const ModelCredentialReadinessV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z
+      .object({
+        status: z.enum(["ready", "not_ready", "error"]),
+        reason: z
+          .enum([
+            "missing_credential",
+            "needs_reauth",
+            "prerequisites_missing",
+            "resolver_error",
+            "observation_stale",
+          ])
+          .nullable(),
+        basis: z.enum(["configuration", "connection", "resolver"]),
+        checkedAt: z.string().datetime().nullable(),
+      })
+      .strict()
+      .superRefine((readiness, context) => {
+        if ((readiness.status === "ready") !== (readiness.reason === null)) {
+          context.addIssue({
+            code: "custom",
+            path: ["reason"],
+            message: "ready credential state requires no reason; non-ready state requires a reason",
+          });
+        }
+        if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+          context.addIssue({
+            code: "custom",
+            path: ["reason"],
+            message:
+              "credential errors require resolver_error and resolver_error requires error status",
+          });
+        }
+        if (
+          readiness.basis === "resolver" &&
+          readiness.status === "ready" &&
+          readiness.checkedAt === null
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["checkedAt"],
+            message: "resolver readiness requires an observation timestamp",
+          });
+        }
+        if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+          context.addIssue({
+            code: "custom",
+            path: ["checkedAt"],
+            message: "a stale observation requires its observation timestamp",
+          });
+        }
+      }),
+  );
 export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
 
 export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -9568,19 +9874,21 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
-export const WorkspaceModelCatalogModel = /* @__PURE__ */ defineModelContractSchema(() =>
-  ClientModel.extend({
-    credentialReadiness: ModelCredentialReadinessV1,
-    availability: ModelAvailabilityV1,
-  }),
-);
+export const WorkspaceModelCatalogModel =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    ClientModel.extend({
+      credentialReadiness: ModelCredentialReadinessV1,
+      availability: ModelAvailabilityV1,
+    }),
+  );
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
-export const WorkspaceModelCatalogResponse = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.object({
-    models: z.array(WorkspaceModelCatalogModel),
-  }),
-);
+export const WorkspaceModelCatalogResponse =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.object({
+      models: z.array(WorkspaceModelCatalogModel),
+    }),
+  );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
 
 /**
