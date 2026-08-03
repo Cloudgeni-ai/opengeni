@@ -34,6 +34,7 @@ const OBSERVABILITY_PROBE_PERMISSIONS = [
 ] as const;
 const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
+const CAPTURE_FILE_PATH = /\/sessions\/[^/]+\/workspace\/capture\/file$/;
 const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
 const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
@@ -1806,13 +1807,22 @@ function observePage(page: Page): BrowserProblems {
     const path = safePath(request.url());
     if (CHANNEL_A_PATH.test(path)) problems.channelA.push(path);
   });
-  page.on("requestfailed", (request) => problems.failedRequests.push(safePath(request.url())));
+  page.on("requestfailed", (request) => {
+    const path = safePath(request.url());
+    const errorText = request.failure()?.errorText ?? "unknown request failure";
+    if (isExpectedCaptureFileCancellation(path, errorText)) return;
+    problems.failedRequests.push(`${sanitizeDiagnostic(errorText)} ${path}`);
+  });
   page.on("response", (response) => {
     if (response.status() >= 400) {
       problems.badResponses.push(`${response.status()} ${safePath(response.url())}`);
     }
   });
   return problems;
+}
+
+export function isExpectedCaptureFileCancellation(path: string, errorText: string): boolean {
+  return errorText === "net::ERR_ABORTED" && CAPTURE_FILE_PATH.test(path);
 }
 
 function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolean): void {
