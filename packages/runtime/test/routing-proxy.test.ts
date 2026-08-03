@@ -292,6 +292,35 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     );
   });
 
+  test("materializeEntry preserves the connected-machine no-op contract", async () => {
+    const calls: string[] = [];
+    const backend: RoutableBackendSession = {
+      async materializeEntry() {
+        calls.push("materialize");
+      },
+      async execCommand() {
+        calls.push("verify");
+        return "";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: "machine", activeEpoch: 3 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: "machine",
+        kind: "selfhosted",
+        activeEpoch: 3,
+        leaseEpoch: 7,
+        providerInstanceId: "enrollment-1",
+      }),
+    });
+
+    await expect(
+      proxy.materializeEntry({ path: "files/example", entry: {} }),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual(["materialize"]);
+  });
+
   test("mutation admission runs after exact route resolution and before the provider", async () => {
     const events: string[] = [];
     const backend: RoutableBackendSession = {
