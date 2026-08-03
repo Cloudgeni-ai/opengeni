@@ -446,6 +446,7 @@ describe("workspace instruction-policy onboarding proposals", () => {
       "/instruction-policies/onboarding-proposals",
       {
         method: "POST",
+        subjectId: "user:proposal-cross-workspace",
         targetWorkspaceId: siblingWorkspaceGrant.workspaceId,
         body: proposalBody({ sourceVersion: "cross-workspace-denied" }),
       },
