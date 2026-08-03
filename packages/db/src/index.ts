@@ -5772,6 +5772,52 @@ export async function getSlackInteractionByRoute(
   });
 }
 
+/**
+ * Resolve an already-durable Slack task to its bound canonical interaction.
+ *
+ * Client event ids are unique only inside one session, so this lookup also
+ * fences the exact workspace and Slack connection and joins only sessions
+ * already bound to an interaction. Two matches indicate a cross-session
+ * collision and fail closed rather than choosing an arbitrary route.
+ */
+export async function getSlackInteractionByClientEventId(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  clientEventId: string,
+): Promise<(SlackInteraction & { sessionId: string }) | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ interaction: schema.slackInteractions })
+      .from(schema.slackInteractions)
+      .innerJoin(
+        schema.sessionEvents,
+        and(
+          eq(schema.sessionEvents.workspaceId, schema.slackInteractions.workspaceId),
+          eq(schema.sessionEvents.sessionId, schema.slackInteractions.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, workspaceId),
+          eq(schema.slackInteractions.connectionId, connectionId),
+          eq(schema.sessionEvents.clientEventId, clientEventId),
+          eq(schema.sessionEvents.type, "user.message"),
+        ),
+      )
+      .limit(2);
+    if (rows.length > 1) {
+      throw new Error("Slack client event id resolved to multiple canonical interactions");
+    }
+    const interaction = rows[0] ? mapSlackInteraction(rows[0].interaction) : null;
+    if (!interaction) return null;
+    if (!interaction.sessionId) {
+      throw new Error("Slack client event id resolved to an unbound interaction");
+    }
+    return { ...interaction, sessionId: interaction.sessionId };
+  });
+}
+
 export async function getSlackInteractionSessionAccess(
   db: Database,
   workspaceId: string,

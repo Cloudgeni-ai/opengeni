@@ -26,7 +26,9 @@ import {
   getOrCreateSlackInteraction,
   getLatestSessionModelForSubject,
   getSlackBotUserLink,
+  getSlackInteractionByClientEventId,
   getSlackInteractionByRoute,
+  getSessionEventByClientEventId,
   getWorkspace,
   getWorkspaceGrant,
   listSessionEventPage,
@@ -712,6 +714,24 @@ async function processSlackReactionInboxEntry(
     throw new SlackInteractionPermanentError("reaction_session_permissions_denied");
   }
 
+  const clientEventId = `slack:${entry.providerEventId}`;
+  const durableInteraction = await getSlackInteractionByClientEventId(
+    deps.db,
+    entry.workspaceId,
+    entry.connectionId,
+    clientEventId,
+  );
+  if (durableInteraction) {
+    if (
+      durableInteraction.visibility === "private" &&
+      durableInteraction.owningSubjectId !== grant.subjectId
+    ) {
+      throw new SlackInteractionPermanentError("session_owner_mismatch");
+    }
+    await reopenSlackInteractionDelivery(deps.db, durableInteraction);
+    return;
+  }
+
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
     accountId: entry.accountId,
     workspaceId: entry.workspaceId,
@@ -921,14 +941,18 @@ async function acceptSlackReactionTask(
   entry: SlackInteractionInboxEntry,
 ) {
   const clientEventId = `slack:${entry.providerEventId}`;
-  const initialMessages = await listSessionEventPage(deps.db, entry.workspaceId, sessionId, {
-    after: 0,
-    limit: 1,
-    includeTypes: ["user.message"],
-    payloadMode: "none",
-    maxBytes: 16 * 1024,
-  });
-  if (initialMessages.events[0]?.clientEventId === clientEventId) return;
+  const existing = await getSessionEventByClientEventId(
+    deps.db,
+    entry.workspaceId,
+    sessionId,
+    clientEventId,
+  );
+  if (existing) {
+    if (existing.type !== "user.message") {
+      throw new SlackInteractionPermanentError("slack_reaction_event_conflict");
+    }
+    return;
+  }
   await acceptSessionUserMessage(deps, grant, entry.workspaceId, sessionId, {
     text: entry.text,
     turnInstructions: SLACK_TASK_INSTRUCTIONS,

@@ -890,7 +890,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         await waitForBlockedAppQueries(blocker.pid, 2);
 
         const [duringBind] = await shared!.admin<
-          { sessions: number; routes: number; inboxes: number; messages: number }[]
+          {
+            sessions: number;
+            routes: number;
+            inboxes: number;
+            messages: number;
+          }[]
         >`
           select
             (select count(*)::int from sessions
@@ -904,7 +909,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
               where workspace_id = ${value.owner.workspaceId}
                 and session_id = ${interaction.sessionReservationId}
                 and type = 'user.message') as messages`;
-        expect(duringBind).toEqual({ sessions: 1, routes: 1, inboxes: 2, messages: 2 });
+        expect(duringBind).toEqual({
+          sessions: 1,
+          routes: 1,
+          inboxes: 2,
+          messages: 2,
+        });
       });
       expect(await Promise.all(drains)).toEqual([true, true]);
 
@@ -932,7 +942,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         route_key: `${channelId}:${rootTimestamp}`,
       });
       let inboxRows = await shared!.admin<
-        { id: string; provider_event_id: string; status: string; attempt_count: number }[]
+        {
+          id: string;
+          provider_event_id: string;
+          status: string;
+          attempt_count: number;
+        }[]
       >`
         select id, provider_event_id, status, attempt_count
         from slack_interaction_inbox
@@ -946,7 +961,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         expect(await drainSlackInteractionsOnce(replicaADeps)).toBe(true);
       }
       inboxRows = await shared!.admin<
-        { id: string; provider_event_id: string; status: string; attempt_count: number }[]
+        {
+          id: string;
+          provider_event_id: string;
+          status: string;
+          attempt_count: number;
+        }[]
       >`
         select id, provider_event_id, status, attempt_count
         from slack_interaction_inbox
@@ -1002,6 +1022,278 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       await Promise.allSettled(drains);
       await Promise.all([replicaA.close(), replicaB.close()]);
     }
+  }, 60_000);
+
+  test("an already-durable non-initial reaction settles after an ambiguous inbox outcome without mutable context replay", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_AMBIGUOUS_RETRY";
+    const rootTimestamp = "1706070000.000001";
+    const firstTimestamp = "1706070000.000002";
+    const secondTimestamp = "1706070000.000003";
+    const thirdTimestamp = "1706070000.000004";
+    const firstEventId = `E_REACTION_AMBIGUOUS_A_${crypto.randomUUID()}`;
+    const secondEventId = `E_REACTION_AMBIGUOUS_B_${crypto.randomUUID()}`;
+    const thirdEventId = `E_REACTION_AMBIGUOUS_C_${crypto.randomUUID()}`;
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    const rootMessage = {
+      ts: rootTimestamp,
+      user: "U_AMBIGUOUS_ROOT",
+      text: "Preserve each independent signal while this thread evolves.",
+    };
+    value.slack.reactionContexts.set(`${channelId}:${firstTimestamp}`, {
+      messages: [
+        rootMessage,
+        {
+          ts: firstTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Durable event A establishes the canonical session.",
+        },
+      ],
+    });
+    value.slack.reactionContexts.set(`${channelId}:${secondTimestamp}`, {
+      messages: [
+        rootMessage,
+        {
+          ts: secondTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Original durable event B task text.",
+        },
+      ],
+    });
+    value.slack.reactionContexts.set(`${channelId}:${thirdTimestamp}`, {
+      messages: [
+        rootMessage,
+        {
+          ts: secondTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Original durable event B task text.",
+        },
+        {
+          ts: thirdTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Later durable event C changes the session tail.",
+        },
+      ],
+    });
+    const firstEvent = reactionEvent({
+      teamId: value.teamId,
+      eventId: firstEventId,
+      userId: value.ownerSlackUserId,
+      channelId,
+      timestamp: firstTimestamp,
+    });
+    const secondEvent = reactionEvent({
+      teamId: value.teamId,
+      eventId: secondEventId,
+      userId: value.ownerSlackUserId,
+      channelId,
+      timestamp: secondTimestamp,
+    });
+    const thirdEvent = reactionEvent({
+      teamId: value.teamId,
+      eventId: thirdEventId,
+      userId: value.ownerSlackUserId,
+      channelId,
+      timestamp: thirdTimestamp,
+    });
+
+    expect((await postEvent(value.app, firstEvent)).status).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await shared!.admin<
+      {
+        session_id: string;
+        owning_subject_id: string;
+        workspace_id: string;
+        connection_id: string;
+      }[]
+    >`
+      select session_id, owning_subject_id, workspace_id, connection_id
+      from slack_interactions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(route).toEqual({
+      session_id: expect.any(String),
+      owning_subject_id: value.owner.subjectId,
+      workspace_id: value.owner.workspaceId,
+      connection_id: value.connectionId,
+    });
+
+    expect((await postEvent(value.app, secondEvent)).status).toBe(200);
+    const [secondInbox] = await shared!.admin<{ id: string }[]>`
+      select id
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${secondEventId}`;
+    if (!secondInbox || !/^[0-9a-f-]{36}$/.test(secondInbox.id)) {
+      throw new Error("expected a valid event B inbox id");
+    }
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `og_test_slack_inbox_ambiguity_${suffix}`;
+    const triggerName = `og_test_slack_inbox_ambiguity_${suffix}`;
+    await shared!.admin.unsafe(`
+      create function ${functionName}() returns trigger language plpgsql as $$
+      begin
+        if old.id = '${secondInbox.id}'::uuid
+          and old.status = 'processing'
+          and new.status = 'processed'
+        then
+          raise exception 'fixture ambiguous Slack inbox settlement';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger ${triggerName}
+        before update on slack_interaction_inbox
+        for each row execute function ${functionName}();
+    `);
+    try {
+      expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    } finally {
+      await shared!.admin.unsafe(`
+        drop trigger if exists ${triggerName} on slack_interaction_inbox;
+        drop function if exists ${functionName}();
+      `);
+    }
+
+    const [afterAmbiguousOutcome] = await shared!.admin<
+      {
+        status: string;
+        attempt_count: number;
+        retry_at: Date | null;
+        processed_at: Date | null;
+        last_error_code: string | null;
+        messages: number;
+      }[]
+    >`
+      select status, attempt_count, retry_at, processed_at, last_error_code,
+        (select count(*)::int
+          from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = ${route!.session_id}
+            and client_event_id = ${`slack:${secondEventId}`}
+            and type = 'user.message') as messages
+      from slack_interaction_inbox
+      where id = ${secondInbox.id}`;
+    expect(afterAmbiguousOutcome).toMatchObject({
+      status: "pending",
+      attempt_count: 1,
+      retry_at: expect.any(Date),
+      processed_at: null,
+      last_error_code: expect.any(String),
+      messages: 1,
+    });
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now() + interval '1 hour'
+      where id = ${secondInbox.id}`;
+
+    expect((await postEvent(value.app, thirdEvent)).status).toBe(200);
+    await drainAll(value.deps);
+    const [thirdInbox] = await shared!.admin<{ status: string }[]>`
+      select status
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${thirdEventId}`;
+    expect(thirdInbox).toEqual({ status: "processed" });
+
+    const secondContextKey = `${channelId}:${secondTimestamp}`;
+    const secondContextHitsBeforeRetry = value.slack.reactionContextHits.filter(
+      (hit) => hit === secondContextKey,
+    ).length;
+    expect(secondContextHitsBeforeRetry).toBe(1);
+    value.slack.reactionContexts.set(secondContextKey, {
+      messages: [
+        {
+          ...rootMessage,
+          text: "Mutated root context that must not affect retry settlement.",
+        },
+        {
+          ts: secondTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "MUTATED event B text that would change the command hash.",
+        },
+        {
+          ts: thirdTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Later durable event C changes the session tail.",
+        },
+      ],
+    });
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now()
+      where id = ${secondInbox.id}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(value.slack.reactionContextHits.filter((hit) => hit === secondContextKey).length).toBe(
+      secondContextHitsBeforeRetry,
+    );
+
+    const [settledSecondInbox] = await shared!.admin<
+      {
+        status: string;
+        attempt_count: number;
+        processed_at: Date | null;
+        last_error_code: string | null;
+      }[]
+    >`
+      select status, attempt_count, processed_at, last_error_code
+      from slack_interaction_inbox
+      where id = ${secondInbox.id}`;
+    expect(settledSecondInbox).toEqual({
+      status: "processed",
+      attempt_count: 2,
+      processed_at: expect.any(Date),
+      last_error_code: null,
+    });
+    const messages = await shared!.admin<
+      {
+        client_event_id: string;
+        text: string;
+        workspace_id: string;
+        session_id: string;
+      }[]
+    >`
+      select client_event_id, payload ->> 'text' as text, workspace_id, session_id
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${route!.session_id}
+        and type = 'user.message'
+      order by sequence`;
+    expect(messages.map((message) => message.client_event_id)).toEqual([
+      `slack:${firstEventId}`,
+      `slack:${secondEventId}`,
+      `slack:${thirdEventId}`,
+    ]);
+    expect(messages.every((message) => message.workspace_id === value.owner.workspaceId)).toBe(
+      true,
+    );
+    expect(messages.every((message) => message.session_id === route!.session_id)).toBe(true);
+    expect(messages[1]!.text).toContain("Original durable event B task text.");
+    expect(messages[1]!.text).not.toContain("MUTATED event B text");
+    expect(messages[2]!.text).toContain("Later durable event C changes the session tail.");
+
+    expect((await postEvent(value.app, secondEvent)).status).toBe(200);
+    const [afterExactIngressReplay] = await shared!.admin<{ inboxes: number; messages: number }[]>`
+      select
+        (select count(*)::int from slack_interaction_inbox
+          where workspace_id = ${value.owner.workspaceId}) as inboxes,
+        (select count(*)::int from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = ${route!.session_id}
+            and type = 'user.message') as messages`;
+    expect(afterExactIngressReplay).toEqual({ inboxes: 3, messages: 3 });
   }, 60_000);
 
   test("reaction retrieval paginates to the exact message and pins it under the prompt budget", async () => {
