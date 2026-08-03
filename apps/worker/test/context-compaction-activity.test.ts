@@ -474,6 +474,129 @@ describe("standalone context compaction execution", () => {
     ]);
   });
 
+  test("uses the injected summarizer when model resolution is unavailable", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Injected compaction summarizer test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Injected compaction summarizer test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          item: { type: "message", role: "user", content: "retain this request" },
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "summarize these bounded notes ".repeat(1_000),
+              },
+            ],
+          },
+        },
+      ]);
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+
+    let injectedSummarizerCalls = 0;
+    let forbiddenRuntimeCalls = 0;
+    const forbid = () => {
+      forbiddenRuntimeCalls += 1;
+      throw new Error("null-resolution compaction entered the agent/sandbox runtime");
+    };
+    const runtime = {
+      configure: () => undefined,
+      resolveTurnModel: () => null,
+      buildAgent: forbid,
+      prepareTools: forbid,
+      prepareInput: forbid,
+      runStream: forbid,
+      serializeApprovals: forbid,
+    } as unknown as OpenGeniRuntime;
+    const bus = {
+      publish: async () => undefined,
+      subscribe: async function* () {},
+      close: async () => undefined,
+    } as unknown as EventBus;
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiApiKey: "unused-test-key",
+        openaiBaseUrl: "http://127.0.0.1:9/v1",
+        openaiModel: "scripted-compactor",
+        sandboxBackend: "none",
+      }),
+      db: client.db,
+      bus,
+      runtime,
+      summarizeContextForCompaction: async (_settings, input, options) => {
+        injectedSummarizerCalls += 1;
+        expect(input.length).toBeGreaterThan(1);
+        expect(options.model).toBe("scripted-compactor");
+        return "Injected deterministic compaction summary.";
+      },
+    });
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+
+    expect(result).toMatchObject({ status: "idle", attemptId });
+    if (result.status === "unclaimed") throw new Error("Compaction was not claimed");
+    expect(injectedSummarizerCalls).toBe(1);
+    expect(forbiddenRuntimeCalls).toBe(0);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
+      source: "compaction",
+      status: "completed",
+    });
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual([
+      { type: "message", role: "user", content: "retain this request" },
+      expect.objectContaining({
+        type: "message",
+        role: "user",
+        content: expect.stringContaining("Injected deterministic compaction summary"),
+      }),
+    ]);
+  });
+
   test("never replays an invalidated provider artifact into the compaction model", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {

@@ -103,7 +103,6 @@ import {
   composeAgentInstructions,
   hasActiveWorkspaceInstructionPolicy,
   renderWorkspaceGovernanceContext,
-  summarizeForCompaction,
   requestRemoteCompactionV2,
   serializedToolsForRemoteCompaction,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
@@ -4406,7 +4405,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }),
               )
           : (s: Settings, m: Array<Record<string, unknown>>) =>
-              summarizeForCompaction(s, m, {
+              summarizeContextForCompaction(s, m, {
                 model: turnExecutionPolicy.upstreamModelId,
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                 onUsage: recordCompactionUsage,
