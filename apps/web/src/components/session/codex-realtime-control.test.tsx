@@ -208,9 +208,11 @@ describe("ordinary session Codex realtime control", () => {
     );
     expect(region).not.toBeNull();
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Start voice");
-    expect(
-      container.querySelector('button[aria-label="Choose voice model and options"]'),
-    ).not.toBeNull();
+    const voiceOptions = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Choose voice model and options"]',
+    );
+    expect(voiceOptions).not.toBeNull();
+    expect(voiceOptions?.classList.contains("w-6")).toBe(true);
     expect(container.textContent).not.toContain("Realtime diagnostics");
     expect(start?.disabled).toBe(false);
     await act(async () => start?.click());

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   PreferenceRegistrySnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
@@ -21,13 +21,14 @@ import type {
   WorkspaceInstructionPolicySnapshotEntry,
   WorkspaceInstructionPolicyTarget,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, lt, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./index";
 import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./index";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
-type DraftInput = WorkspaceInstructionPolicyTarget & {
+type DraftRequestInput = WorkspaceInstructionPolicyTarget & {
+  operationId: string;
   accountId: string;
   workspaceId: string;
   content: string;
@@ -37,8 +38,33 @@ type DraftInput = WorkspaceInstructionPolicyTarget & {
   createdBySubjectId: string;
 };
 
-type CallerDraftInput = Omit<DraftInput, "provenanceSource"> & {
+type DraftInput = DraftRequestInput & {
+  requestFingerprint: string;
+};
+
+type CallerDraftInput = Omit<DraftRequestInput, "operationId" | "provenanceSource"> & {
+  operationId?: string;
   provenanceSource: WorkspaceInstructionPolicyDraftProvenanceSource;
+};
+
+type ImportLegacyRequestInput = {
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  createdBySubjectId: string;
+  supersedesRevisionId: string | null;
+};
+
+type ActiveRevisionInput = {
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  targetRevisionId: string;
+  expectedCurrentRevisionId: string | null;
+  expectedActivationVersion?: number;
+  actorSubjectId: string;
+  reason: string;
+  type: WorkspaceInstructionPolicyActivationType;
 };
 
 export class WorkspaceInstructionPolicyConflictError extends Error {
@@ -47,6 +73,15 @@ export class WorkspaceInstructionPolicyConflictError extends Error {
 
   constructor(readonly currentHead: WorkspaceInstructionPolicyHead | null) {
     super("The active workspace instruction policy changed in another request");
+  }
+}
+
+export class WorkspaceInstructionPolicyOperationReuseError extends Error {
+  readonly name = "WorkspaceInstructionPolicyOperationReuseError";
+  readonly code = "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED";
+
+  constructor() {
+    super("The workspace instruction-policy operation id was already used for another request");
   }
 }
 
@@ -105,6 +140,75 @@ export type WorkspaceStateAcceptedAttemptGovernance = {
 
 function contentHash(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+type OperationFingerprintField = readonly [
+  name: string,
+  present: boolean,
+  value: string | number | null,
+];
+
+function hasOwnField(value: object, field: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, field);
+}
+
+function operationRequestFingerprint(
+  operation: string,
+  fields: readonly OperationFingerprintField[],
+): string {
+  const canonicalRequest = JSON.stringify([
+    "workspace_instruction_policy_operation",
+    1,
+    operation,
+    fields,
+  ]);
+  return createHash("sha256").update(canonicalRequest, "utf8").digest("hex");
+}
+
+function draftRequestFingerprint(input: DraftRequestInput): string {
+  return operationRequestFingerprint("create_draft", [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["kind", true, input.kind],
+    ["scope", true, input.scope],
+    ["roleKey", true, input.roleKey],
+    ["content", true, input.content],
+    ["provenanceSource", true, input.provenanceSource],
+    ["provenanceSourceId", true, input.provenanceSourceId],
+    ["supersedesRevisionId", true, input.supersedesRevisionId],
+    ["createdBySubjectId", true, input.createdBySubjectId],
+  ]);
+}
+
+function importLegacyRequestFingerprint(input: ImportLegacyRequestInput): string {
+  return operationRequestFingerprint("import_legacy", [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["createdBySubjectId", true, input.createdBySubjectId],
+    ["supersedesRevisionId", true, input.supersedesRevisionId],
+  ]);
+}
+
+function activeRevisionRequestFingerprint(input: ActiveRevisionInput): string {
+  const expectedCurrentRevisionIdPresent = hasOwnField(input, "expectedCurrentRevisionId");
+  const expectedActivationVersionPresent = hasOwnField(input, "expectedActivationVersion");
+  return operationRequestFingerprint(`change_active_revision:${input.type}`, [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["targetRevisionId", true, input.targetRevisionId],
+    [
+      "expectedCurrentRevisionId",
+      expectedCurrentRevisionIdPresent,
+      input.expectedCurrentRevisionId ?? null,
+    ],
+    [
+      "expectedActivationVersion",
+      expectedActivationVersionPresent,
+      input.expectedActivationVersion ?? null,
+    ],
+    ["actorSubjectId", true, input.actorSubjectId],
+    ["reason", true, input.reason],
+  ]);
 }
 
 function iso(value: Date | string): string {
@@ -246,6 +350,7 @@ type EventRow = typeof schema.workspaceInstructionPolicyActivationEvents.$inferS
 function revisionFromRow(row: RevisionRow): WorkspaceInstructionPolicyRevision {
   return {
     id: row.id,
+    operationId: row.operationId ?? row.id,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     revision: row.revision,
@@ -281,6 +386,7 @@ function headFromRow(row: HeadRow): WorkspaceInstructionPolicyHead {
 function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent {
   return {
     id: row.id,
+    operationId: row.operationId ?? row.id,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     kind: row.kind as WorkspaceInstructionPolicyKind,
@@ -304,6 +410,20 @@ function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent 
     actorSubjectId: row.actorSubjectId,
     reason: row.reason,
     createdAt: iso(row.createdAt),
+  };
+}
+
+function headFromEventRow(row: EventRow): WorkspaceInstructionPolicyHead {
+  return {
+    workspaceId: row.workspaceId,
+    kind: row.kind as WorkspaceInstructionPolicyKind,
+    scope: row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: row.roleKey,
+    revisionId: row.newRevisionId,
+    revision: row.newRevision,
+    contentHash: row.newContentHash,
+    activationVersion: row.activationVersion,
+    activatedAt: iso(row.createdAt),
   };
 }
 
@@ -374,6 +494,54 @@ async function getRevisionInTransaction(
   return row ?? null;
 }
 
+async function getRevisionByOperationInTransaction(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<RevisionRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceInstructionPolicyRevisions)
+    .where(
+      and(
+        eq(schema.workspaceInstructionPolicyRevisions.workspaceId, workspaceId),
+        or(
+          eq(schema.workspaceInstructionPolicyRevisions.operationId, operationId),
+          and(
+            isNull(schema.workspaceInstructionPolicyRevisions.operationId),
+            eq(schema.workspaceInstructionPolicyRevisions.id, operationId),
+          ),
+        ),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+async function getEventByOperationInTransaction(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<EventRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceInstructionPolicyActivationEvents)
+    .where(
+      and(
+        eq(schema.workspaceInstructionPolicyActivationEvents.workspaceId, workspaceId),
+        or(
+          eq(schema.workspaceInstructionPolicyActivationEvents.operationId, operationId),
+          and(
+            isNull(schema.workspaceInstructionPolicyActivationEvents.operationId),
+            eq(schema.workspaceInstructionPolicyActivationEvents.id, operationId),
+          ),
+        ),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
 async function getHeadInTransaction(
   db: Database,
   workspaceId: string,
@@ -395,10 +563,41 @@ function sameTarget(
   return left.kind === right.kind && left.scope === right.scope && left.roleKey === right.roleKey;
 }
 
+function draftReceiptMatches(row: RevisionRow, input: DraftInput): boolean {
+  return (
+    row.createdBySubjectId === input.createdBySubjectId &&
+    row.kind === input.kind &&
+    row.scope === input.scope &&
+    row.roleKey === input.roleKey &&
+    row.content === input.content &&
+    row.provenanceSource === input.provenanceSource &&
+    row.provenanceSourceId === input.provenanceSourceId &&
+    row.supersedesRevisionId === input.supersedesRevisionId
+  );
+}
+
 async function createDraftInTransaction(
   db: Database,
   input: DraftInput,
 ): Promise<WorkspaceInstructionPolicyRevision> {
+  if (await getEventByOperationInTransaction(db, input.workspaceId, input.operationId)) {
+    throw new WorkspaceInstructionPolicyOperationReuseError();
+  }
+  const existing = await getRevisionByOperationInTransaction(
+    db,
+    input.workspaceId,
+    input.operationId,
+  );
+  if (existing) {
+    if (
+      existing.requestFingerprint === null
+        ? !draftReceiptMatches(existing, input)
+        : existing.requestFingerprint !== input.requestFingerprint
+    ) {
+      throw new WorkspaceInstructionPolicyOperationReuseError();
+    }
+    return revisionFromRow(existing);
+  }
   if (input.supersedesRevisionId !== null) {
     const superseded = await getRevisionInTransaction(
       db,
@@ -414,6 +613,8 @@ async function createDraftInTransaction(
   const [created] = await db
     .insert(schema.workspaceInstructionPolicyRevisions)
     .values({
+      operationId: input.operationId,
+      requestFingerprint: input.requestFingerprint,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       kind: input.kind,
@@ -435,12 +636,14 @@ export async function createWorkspaceInstructionPolicyDraft(
   db: Database,
   input: CallerDraftInput,
 ): Promise<WorkspaceInstructionPolicyRevision> {
+  const request = { ...input, operationId: input.operationId ?? randomUUID() };
+  const normalized = { ...request, requestFingerprint: draftRequestFingerprint(request) };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       await lockWorkspace(scopedDb, input);
-      return await createDraftInTransaction(scopedDb, input);
+      return await createDraftInTransaction(scopedDb, normalized);
     },
   );
 }
@@ -448,18 +651,44 @@ export async function createWorkspaceInstructionPolicyDraft(
 /** Import only the stored legacy override; never materialize a deployment default or activate it. */
 export async function importLegacyWorkspaceInstructionPolicyDraft(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    createdBySubjectId: string;
-    supersedesRevisionId: string | null;
-  },
+  input: Omit<ImportLegacyRequestInput, "operationId"> & { operationId?: string },
 ): Promise<WorkspaceInstructionPolicyRevision> {
+  const request = { ...input, operationId: input.operationId ?? randomUUID() };
+  const normalized = {
+    ...request,
+    requestFingerprint: importLegacyRequestFingerprint(request),
+  };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const workspace = await lockWorkspace(scopedDb, input);
+      if (
+        await getEventByOperationInTransaction(scopedDb, input.workspaceId, normalized.operationId)
+      ) {
+        throw new WorkspaceInstructionPolicyOperationReuseError();
+      }
+      const existing = await getRevisionByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        normalized.operationId,
+      );
+      if (existing) {
+        if (
+          existing.requestFingerprint === null
+            ? existing.createdBySubjectId !== input.createdBySubjectId ||
+              existing.kind !== "charter" ||
+              existing.scope !== "global" ||
+              existing.roleKey !== null ||
+              existing.provenanceSource !== "legacy_import" ||
+              existing.provenanceSourceId !== "workspaces.agent_instructions" ||
+              existing.supersedesRevisionId !== input.supersedesRevisionId
+            : existing.requestFingerprint !== normalized.requestFingerprint
+        ) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return revisionFromRow(existing);
+      }
       if (workspace.agentInstructions === null) {
         throw new WorkspaceInstructionPolicyLegacyUnavailableError();
       }
@@ -472,7 +701,7 @@ export async function importLegacyWorkspaceInstructionPolicyDraft(
         );
       }
       return await createDraftInTransaction(scopedDb, {
-        ...input,
+        ...normalized,
         kind: "charter",
         scope: "global",
         roleKey: null,
@@ -642,16 +871,9 @@ export async function diffWorkspaceInstructionPolicyRevisions(
 
 async function changeActiveRevision(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    targetRevisionId: string;
-    expectedCurrentRevisionId: string | null;
-    actorSubjectId: string;
-    reason: string;
-    type: WorkspaceInstructionPolicyActivationType;
-  },
+  input: ActiveRevisionInput,
 ): Promise<WorkspaceInstructionPolicyActivationResponse> {
+  const requestFingerprint = activeRevisionRequestFingerprint(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -659,6 +881,34 @@ async function changeActiveRevision(
       // This row lock serializes both an absent-head first activation and later
       // updates, so every loser can return the authoritative typed conflict.
       await lockWorkspace(scopedDb, input);
+      if (
+        await getRevisionByOperationInTransaction(scopedDb, input.workspaceId, input.operationId)
+      ) {
+        throw new WorkspaceInstructionPolicyOperationReuseError();
+      }
+      const existingEvent = await getEventByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        input.operationId,
+      );
+      if (existingEvent) {
+        const legacyRequestMatches =
+          hasOwnField(input, "expectedCurrentRevisionId") &&
+          !hasOwnField(input, "expectedActivationVersion") &&
+          existingEvent.type === input.type &&
+          existingEvent.newRevisionId === input.targetRevisionId &&
+          existingEvent.oldRevisionId === input.expectedCurrentRevisionId &&
+          existingEvent.actorSubjectId === input.actorSubjectId &&
+          existingEvent.reason === input.reason;
+        if (
+          existingEvent.requestFingerprint === null
+            ? !legacyRequestMatches
+            : existingEvent.requestFingerprint !== requestFingerprint
+        ) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return { head: headFromEventRow(existingEvent), event: eventFromRow(existingEvent) };
+      }
       const targetRow = await getRevisionInTransaction(
         scopedDb,
         input.workspaceId,
@@ -673,7 +923,11 @@ async function changeActiveRevision(
       };
       const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, targetIdentity);
       const currentHead = currentRow ? headFromRow(currentRow) : null;
-      if ((currentHead?.revisionId ?? null) !== input.expectedCurrentRevisionId) {
+      if (
+        (currentHead?.revisionId ?? null) !== input.expectedCurrentRevisionId ||
+        (input.expectedActivationVersion !== undefined &&
+          (currentHead?.activationVersion ?? 0) !== input.expectedActivationVersion)
+      ) {
         throw new WorkspaceInstructionPolicyConflictError(currentHead);
       }
       if (currentHead?.revisionId === target.id) {
@@ -708,6 +962,8 @@ async function changeActiveRevision(
       const [eventRow] = await scopedDb
         .insert(schema.workspaceInstructionPolicyActivationEvents)
         .values({
+          operationId: input.operationId,
+          requestFingerprint,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           ...targetIdentity,
@@ -762,16 +1018,19 @@ async function changeActiveRevision(
 export async function activateWorkspaceInstructionPolicyRevision(
   db: Database,
   input: {
+    operationId?: string;
     accountId: string;
     workspaceId: string;
     revisionId: string;
     expectedCurrentRevisionId: string | null;
+    expectedActivationVersion?: number;
     actorSubjectId: string;
     reason: string;
   },
 ): Promise<WorkspaceInstructionPolicyActivationResponse> {
   return await changeActiveRevision(db, {
     ...input,
+    operationId: input.operationId ?? randomUUID(),
     targetRevisionId: input.revisionId,
     type: "activate",
   });
@@ -780,15 +1039,21 @@ export async function activateWorkspaceInstructionPolicyRevision(
 export async function rollbackWorkspaceInstructionPolicyRevision(
   db: Database,
   input: {
+    operationId?: string;
     accountId: string;
     workspaceId: string;
     targetRevisionId: string;
     expectedCurrentRevisionId: string;
+    expectedActivationVersion?: number;
     actorSubjectId: string;
     reason: string;
   },
 ): Promise<WorkspaceInstructionPolicyActivationResponse> {
-  return await changeActiveRevision(db, { ...input, type: "rollback" });
+  return await changeActiveRevision(db, {
+    ...input,
+    operationId: input.operationId ?? randomUUID(),
+    type: "rollback",
+  });
 }
 
 /**

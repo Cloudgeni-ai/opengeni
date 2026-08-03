@@ -188,9 +188,10 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
     });
     expect(invalidScope.status).toBe(422);
 
+    const legacyImportOperationId = crypto.randomUUID();
     const importedResponse = await request(legacyGrant, "/instruction-policies/import-legacy", {
       method: "POST",
-      body: {},
+      body: { operationId: legacyImportOperationId },
     });
     expect(importedResponse.status).toBe(201);
     const imported = (await importedResponse.json()) as Record<string, any>;
@@ -200,6 +201,23 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
       roleKey: null,
       content: "LEGACY WORKSPACE PERSONA {{core}}",
       provenance: { source: "legacy_import", sourceId: "workspaces.agent_instructions" },
+      operationId: legacyImportOperationId,
+    });
+    await updateWorkspace(client.db, legacyGrant.workspaceId, {
+      agentInstructions: "CHANGED AFTER IMPORT",
+    });
+    const importedRetryResponse = await request(
+      legacyGrant,
+      "/instruction-policies/import-legacy",
+      {
+        method: "POST",
+        body: { operationId: legacyImportOperationId },
+      },
+    );
+    expect(importedRetryResponse.status).toBe(201);
+    expect(await importedRetryResponse.json()).toEqual(imported);
+    await updateWorkspace(client.db, legacyGrant.workspaceId, {
+      agentInstructions: "LEGACY WORKSPACE PERSONA {{core}}",
     });
     const callerLabeledImport = await request(legacyGrant, "/instruction-policies/import-legacy", {
       method: "POST",
@@ -256,13 +274,113 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
     });
     expect((await getWorkspace(client.db, defaultGrant.workspaceId))?.agentInstructions).toBeNull();
 
-    const globalA = await createDraft(legacyGrant, {
+    const omittedVersionOperationId = crypto.randomUUID();
+    const omittedVersionBody = {
+      operationId: omittedVersionOperationId,
+      expectedCurrentRevisionId: null,
+      reason: "Activate imported charter without an activation-version precondition",
+    };
+    const omittedVersionResponse = await request(
+      legacyGrant,
+      `/instruction-policies/${imported.id}/activate`,
+      { method: "POST", body: omittedVersionBody },
+    );
+    expect(omittedVersionResponse.status).toBe(200);
+    const omittedVersionActivation = (await omittedVersionResponse.json()) as Record<string, any>;
+    expect(omittedVersionActivation).toMatchObject({
+      head: { revisionId: imported.id, activationVersion: 1 },
+      event: { operationId: omittedVersionOperationId, activationVersion: 1 },
+    });
+    const omittedVersionRetry = await request(
+      legacyGrant,
+      `/instruction-policies/${imported.id}/activate`,
+      { method: "POST", body: omittedVersionBody },
+    );
+    expect(omittedVersionRetry.status).toBe(200);
+    expect(await omittedVersionRetry.json()).toEqual(omittedVersionActivation);
+    const explicitZeroReuse = await request(
+      legacyGrant,
+      `/instruction-policies/${imported.id}/activate`,
+      {
+        method: "POST",
+        body: { ...omittedVersionBody, expectedActivationVersion: 0 },
+      },
+    );
+    expect(explicitZeroReuse.status).toBe(409);
+    expect(await explicitZeroReuse.json()).toMatchObject({
+      code: "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED",
+    });
+    const [omittedVersionReceipt] = await shared.admin<
+      Array<{ operationId: string; requestFingerprint: string }>
+    >`
+      SELECT
+        operation_id::text AS "operationId",
+        request_fingerprint AS "requestFingerprint"
+      FROM workspace_instruction_policy_activation_events
+      WHERE workspace_id = ${legacyGrant.workspaceId}
+        AND operation_id = ${omittedVersionOperationId}::uuid
+    `;
+    expect(omittedVersionReceipt).toEqual({
+      operationId: omittedVersionOperationId,
+      requestFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    const postReuseListResponse = await request(legacyGrant, "/instruction-policies?limit=100", {
+      permissions: ["workspace:read"],
+    });
+    expect(postReuseListResponse.status).toBe(200);
+    const postReuseList = (await postReuseListResponse.json()) as Record<string, any>;
+    expect(
+      postReuseList.activationEvents.filter(
+        (event: Record<string, unknown>) => event.operationId === omittedVersionOperationId,
+      ),
+    ).toHaveLength(1);
+    expect(postReuseList.activeHeads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "charter",
+          revisionId: imported.id,
+          activationVersion: 1,
+        }),
+      ]),
+    );
+
+    const globalAOperationId = crypto.randomUUID();
+    const globalARequest = {
+      operationId: globalAOperationId,
       kind: "policy",
       scope: "global",
       roleKey: null,
       content: "Prefer additive changes.\nRequire targeted tests.",
       provenanceSource: "onboarding",
       provenanceSourceId: "onboarding:v1",
+    };
+    const globalA = await createDraft(legacyGrant, globalARequest);
+    expect(globalA.operationId).toBe(globalAOperationId);
+    expect(await createDraft(legacyGrant, globalARequest)).toEqual(globalA);
+    const reusedDraftOperation = await request(legacyGrant, "/instruction-policies/drafts", {
+      method: "POST",
+      body: { ...globalARequest, content: "Different payload" },
+    });
+    expect(reusedDraftOperation.status).toBe(409);
+    expect(await reusedDraftOperation.json()).toMatchObject({
+      code: "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED",
+    });
+    const crossMutationOperationReuse = await request(
+      legacyGrant,
+      `/instruction-policies/${globalA.id}/activate`,
+      {
+        method: "POST",
+        body: {
+          operationId: globalAOperationId,
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+          reason: "Operation ids span every policy-admin mutation",
+        },
+      },
+    );
+    expect(crossMutationOperationReuse.status).toBe(409);
+    expect(await crossMutationOperationReuse.json()).toMatchObject({
+      code: "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED",
     });
     const globalB = await createDraft(legacyGrant, {
       kind: "policy",
@@ -321,15 +439,21 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
     );
     expect(crossTargetDiff.status).toBe(422);
 
-    const activationBody = { expectedCurrentRevisionId: null, reason: "Initial policy" };
+    const activationAOperationId = crypto.randomUUID();
+    const activationBOperationId = crypto.randomUUID();
+    const activationBody = {
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      reason: "Initial policy",
+    };
     const concurrent = await Promise.all([
       request(legacyGrant, `/instruction-policies/${globalA.id}/activate`, {
         method: "POST",
-        body: activationBody,
+        body: { ...activationBody, operationId: activationAOperationId },
       }),
       request(legacyGrant, `/instruction-policies/${globalB.id}/activate`, {
         method: "POST",
-        body: activationBody,
+        body: { ...activationBody, operationId: activationBOperationId },
       }),
     ]);
     expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
@@ -339,6 +463,8 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
     const conflict = (await conflictResponse.json()) as Record<string, any>;
     const winnerId = firstActivation.head.revisionId as string;
     const loserId = winnerId === globalA.id ? globalB.id : globalA.id;
+    const winnerOperationId =
+      winnerId === globalA.id ? activationAOperationId : activationBOperationId;
     expect(conflict).toMatchObject({
       code: "WORKSPACE_INSTRUCTION_POLICY_CONFLICT",
       currentHead: { revisionId: winnerId, activationVersion: 1 },
@@ -350,6 +476,53 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
       newRevision: { id: winnerId },
       actorSubjectId: legacyGrant.subjectId,
       reason: "Initial policy",
+      operationId: winnerOperationId,
+    });
+
+    const activationRetry = await request(
+      legacyGrant,
+      `/instruction-policies/${winnerId}/activate`,
+      {
+        method: "POST",
+        body: { ...activationBody, operationId: winnerOperationId },
+      },
+    );
+    expect(activationRetry.status).toBe(200);
+    expect(await activationRetry.json()).toEqual(firstActivation);
+    const activationReuse = await request(
+      legacyGrant,
+      `/instruction-policies/${winnerId}/activate`,
+      {
+        method: "POST",
+        body: {
+          ...activationBody,
+          operationId: winnerOperationId,
+          reason: "Different request",
+        },
+      },
+    );
+    expect(activationReuse.status).toBe(409);
+    expect(await activationReuse.json()).toMatchObject({
+      code: "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED",
+    });
+
+    const staleActivationVersion = await request(
+      legacyGrant,
+      `/instruction-policies/${loserId}/activate`,
+      {
+        method: "POST",
+        body: {
+          operationId: crypto.randomUUID(),
+          expectedCurrentRevisionId: winnerId,
+          expectedActivationVersion: 99,
+          reason: "Stale version",
+        },
+      },
+    );
+    expect(staleActivationVersion.status).toBe(409);
+    expect(await staleActivationVersion.json()).toMatchObject({
+      code: "WORKSPACE_INSTRUCTION_POLICY_CONFLICT",
+      currentHead: { revisionId: winnerId, activationVersion: 1 },
     });
 
     const prematureRollback = await request(legacyGrant, "/instruction-policies/rollback", {
@@ -357,6 +530,7 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
       body: {
         targetRevisionId: loserId,
         expectedCurrentRevisionId: winnerId,
+        expectedActivationVersion: 1,
         reason: "Never active",
       },
     });
@@ -378,7 +552,12 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
       `/instruction-policies/${loserId}/activate`,
       {
         method: "POST",
-        body: { expectedCurrentRevisionId: winnerId, reason: "Adopt reviewed draft" },
+        body: {
+          operationId: crypto.randomUUID(),
+          expectedCurrentRevisionId: winnerId,
+          expectedActivationVersion: 1,
+          reason: "Adopt reviewed draft",
+        },
       },
     );
     expect(secondActivationResponse.status).toBe(200);
@@ -392,13 +571,17 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
       reason: "Adopt reviewed draft",
     });
 
+    const rollbackOperationId = crypto.randomUUID();
+    const rollbackBody = {
+      operationId: rollbackOperationId,
+      targetRevisionId: winnerId,
+      expectedCurrentRevisionId: loserId,
+      expectedActivationVersion: 2,
+      reason: "Restore known-good policy",
+    };
     const rollbackResponse = await request(legacyGrant, "/instruction-policies/rollback", {
       method: "POST",
-      body: {
-        targetRevisionId: winnerId,
-        expectedCurrentRevisionId: loserId,
-        reason: "Restore known-good policy",
-      },
+      body: rollbackBody,
     });
     expect(rollbackResponse.status).toBe(200);
     const rollback = (await rollbackResponse.json()) as Record<string, any>;
@@ -411,18 +594,30 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
         newRevision: { id: winnerId },
         actorSubjectId: legacyGrant.subjectId,
         reason: "Restore known-good policy",
+        operationId: rollbackOperationId,
       },
     });
     expect(Date.parse(rollback.event.createdAt)).not.toBeNaN();
     expect(rollback.event.oldRevision.contentHash).toHaveLength(64);
     expect(rollback.event.newRevision.contentHash).toHaveLength(64);
+    const rollbackRetry = await request(legacyGrant, "/instruction-policies/rollback", {
+      method: "POST",
+      body: rollbackBody,
+    });
+    expect(rollbackRetry.status).toBe(200);
+    expect(await rollbackRetry.json()).toEqual(rollback);
 
     const roleActivation = await request(
       legacyGrant,
       `/instruction-policies/${rolePolicy.id}/activate`,
       {
         method: "POST",
-        body: { expectedCurrentRevisionId: null, reason: "Enable responder policy" },
+        body: {
+          operationId: crypto.randomUUID(),
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+          reason: "Enable responder policy",
+        },
       },
     );
     expect(roleActivation.status).toBe(200);
