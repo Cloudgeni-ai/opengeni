@@ -1,5 +1,27 @@
 # @opengeni/worker-bundle
 
+## 0.15.2
+
+### Patch Changes
+
+- b4982fa: Pin DeepSeek V4 Flash and Kimi K3 to ordered, approved Vercel AI Gateway
+  provider routes, meter managed usage from Gateway-reported cost, and preserve
+  Kimi Responses tool continuity without exposing provider details in the UI.
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+- Updated dependencies [70e6d56]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/core@0.18.2
+  - @opengeni/config@0.10.2
+  - @opengeni/runtime@0.17.2
+  - @opengeni/db@0.22.3
+  - @opengeni/documents@0.2.71
+  - @opengeni/events@0.3.61
+  - @opengeni/github@0.4.18
+  - @opengeni/observability@0.4.5
+  - @opengeni/storage@0.2.55
+
 ## 0.15.1
 
 ### Patch Changes
