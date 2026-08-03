@@ -56,6 +56,7 @@ describe("workspace instruction-policy contracts", () => {
   test("requires complete immutable activation audit evidence", () => {
     const event = WorkspaceInstructionPolicyActivationEvent.parse({
       id: "00000000-0000-4000-8000-000000000001",
+      operationId: "00000000-0000-4000-8000-000000000006",
       accountId: "00000000-0000-4000-8000-000000000002",
       workspaceId: "00000000-0000-4000-8000-000000000003",
       kind: "policy",
@@ -78,6 +79,7 @@ describe("workspace instruction-policy contracts", () => {
       createdAt: "2026-07-28T12:00:00.000Z",
     });
     expect(event.type).toBe("rollback");
+    expect(event.operationId).toBe("00000000-0000-4000-8000-000000000006");
     expect(event.oldRevision?.revision).toBe(11);
     expect(event.newRevision.revision).toBe(7);
   });

@@ -274,6 +274,76 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
     });
     expect((await getWorkspace(client.db, defaultGrant.workspaceId))?.agentInstructions).toBeNull();
 
+    const omittedVersionOperationId = crypto.randomUUID();
+    const omittedVersionBody = {
+      operationId: omittedVersionOperationId,
+      expectedCurrentRevisionId: null,
+      reason: "Activate imported charter without an activation-version precondition",
+    };
+    const omittedVersionResponse = await request(
+      legacyGrant,
+      `/instruction-policies/${imported.id}/activate`,
+      { method: "POST", body: omittedVersionBody },
+    );
+    expect(omittedVersionResponse.status).toBe(200);
+    const omittedVersionActivation = (await omittedVersionResponse.json()) as Record<string, any>;
+    expect(omittedVersionActivation).toMatchObject({
+      head: { revisionId: imported.id, activationVersion: 1 },
+      event: { operationId: omittedVersionOperationId, activationVersion: 1 },
+    });
+    const omittedVersionRetry = await request(
+      legacyGrant,
+      `/instruction-policies/${imported.id}/activate`,
+      { method: "POST", body: omittedVersionBody },
+    );
+    expect(omittedVersionRetry.status).toBe(200);
+    expect(await omittedVersionRetry.json()).toEqual(omittedVersionActivation);
+    const explicitZeroReuse = await request(
+      legacyGrant,
+      `/instruction-policies/${imported.id}/activate`,
+      {
+        method: "POST",
+        body: { ...omittedVersionBody, expectedActivationVersion: 0 },
+      },
+    );
+    expect(explicitZeroReuse.status).toBe(409);
+    expect(await explicitZeroReuse.json()).toMatchObject({
+      code: "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED",
+    });
+    const [omittedVersionReceipt] = await shared.admin<
+      Array<{ operationId: string; requestFingerprint: string }>
+    >`
+      SELECT
+        operation_id::text AS "operationId",
+        request_fingerprint AS "requestFingerprint"
+      FROM workspace_instruction_policy_activation_events
+      WHERE workspace_id = ${legacyGrant.workspaceId}
+        AND operation_id = ${omittedVersionOperationId}::uuid
+    `;
+    expect(omittedVersionReceipt).toEqual({
+      operationId: omittedVersionOperationId,
+      requestFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    const postReuseListResponse = await request(legacyGrant, "/instruction-policies?limit=100", {
+      permissions: ["workspace:read"],
+    });
+    expect(postReuseListResponse.status).toBe(200);
+    const postReuseList = (await postReuseListResponse.json()) as Record<string, any>;
+    expect(
+      postReuseList.activationEvents.filter(
+        (event: Record<string, unknown>) => event.operationId === omittedVersionOperationId,
+      ),
+    ).toHaveLength(1);
+    expect(postReuseList.activeHeads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "charter",
+          revisionId: imported.id,
+          activationVersion: 1,
+        }),
+      ]),
+    );
+
     const globalAOperationId = crypto.randomUUID();
     const globalARequest = {
       operationId: globalAOperationId,

@@ -22,6 +22,7 @@ export const workspaceInstructionPolicyRevisions = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     operationId: uuid("operation_id"),
+    requestFingerprint: text("request_fingerprint"),
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     revision: bigint("revision", { mode: "number" })
@@ -42,6 +43,16 @@ export const workspaceInstructionPolicyRevisions = pgTable(
     workspaceOperation: uniqueIndex("workspace_instruction_policy_revisions_workspace_operation_uq")
       .on(table.workspaceId, table.operationId)
       .where(sql`${table.operationId} is not null`),
+    operationReceipt: check(
+      "workspace_instruction_policy_revisions_operation_receipt_chk",
+      sql`(
+        (${table.operationId} is null and ${table.requestFingerprint} is null)
+        or (
+          ${table.operationId} is not null
+          and ${table.requestFingerprint} ~ '^[0-9a-f]{64}$'
+        )
+      )`,
+    ),
     workspaceRevision: uniqueIndex(
       "workspace_instruction_policy_revisions_workspace_revision_uq",
     ).on(table.workspaceId, table.revision),
@@ -104,6 +115,7 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     operationId: uuid("operation_id"),
+    requestFingerprint: text("request_fingerprint"),
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     kind: text("kind").notNull(),
@@ -125,6 +137,16 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
     workspaceOperation: uniqueIndex("workspace_instruction_policy_events_workspace_operation_uq")
       .on(table.workspaceId, table.operationId)
       .where(sql`${table.operationId} is not null`),
+    operationReceipt: check(
+      "workspace_instruction_policy_events_operation_receipt_chk",
+      sql`(
+        (${table.operationId} is null and ${table.requestFingerprint} is null)
+        or (
+          ${table.operationId} is not null
+          and ${table.requestFingerprint} ~ '^[0-9a-f]{64}$'
+        )
+      )`,
+    ),
     workspaceActivationVersion: uniqueIndex(
       "workspace_instruction_policy_events_target_version_uq",
     ).on(

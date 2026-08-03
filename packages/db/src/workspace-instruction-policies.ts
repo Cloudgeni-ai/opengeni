@@ -27,7 +27,7 @@ import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./ind
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
-type DraftInput = WorkspaceInstructionPolicyTarget & {
+type DraftRequestInput = WorkspaceInstructionPolicyTarget & {
   operationId: string;
   accountId: string;
   workspaceId: string;
@@ -38,9 +38,33 @@ type DraftInput = WorkspaceInstructionPolicyTarget & {
   createdBySubjectId: string;
 };
 
-type CallerDraftInput = Omit<DraftInput, "operationId" | "provenanceSource"> & {
+type DraftInput = DraftRequestInput & {
+  requestFingerprint: string;
+};
+
+type CallerDraftInput = Omit<DraftRequestInput, "operationId" | "provenanceSource"> & {
   operationId?: string;
   provenanceSource: WorkspaceInstructionPolicyDraftProvenanceSource;
+};
+
+type ImportLegacyRequestInput = {
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  createdBySubjectId: string;
+  supersedesRevisionId: string | null;
+};
+
+type ActiveRevisionInput = {
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  targetRevisionId: string;
+  expectedCurrentRevisionId: string | null;
+  expectedActivationVersion?: number;
+  actorSubjectId: string;
+  reason: string;
+  type: WorkspaceInstructionPolicyActivationType;
 };
 
 export class WorkspaceInstructionPolicyConflictError extends Error {
@@ -116,6 +140,75 @@ export type WorkspaceStateAcceptedAttemptGovernance = {
 
 function contentHash(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+type OperationFingerprintField = readonly [
+  name: string,
+  present: boolean,
+  value: string | number | null,
+];
+
+function hasOwnField(value: object, field: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, field);
+}
+
+function operationRequestFingerprint(
+  operation: string,
+  fields: readonly OperationFingerprintField[],
+): string {
+  const canonicalRequest = JSON.stringify([
+    "workspace_instruction_policy_operation",
+    1,
+    operation,
+    fields,
+  ]);
+  return createHash("sha256").update(canonicalRequest, "utf8").digest("hex");
+}
+
+function draftRequestFingerprint(input: DraftRequestInput): string {
+  return operationRequestFingerprint("create_draft", [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["kind", true, input.kind],
+    ["scope", true, input.scope],
+    ["roleKey", true, input.roleKey],
+    ["content", true, input.content],
+    ["provenanceSource", true, input.provenanceSource],
+    ["provenanceSourceId", true, input.provenanceSourceId],
+    ["supersedesRevisionId", true, input.supersedesRevisionId],
+    ["createdBySubjectId", true, input.createdBySubjectId],
+  ]);
+}
+
+function importLegacyRequestFingerprint(input: ImportLegacyRequestInput): string {
+  return operationRequestFingerprint("import_legacy", [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["createdBySubjectId", true, input.createdBySubjectId],
+    ["supersedesRevisionId", true, input.supersedesRevisionId],
+  ]);
+}
+
+function activeRevisionRequestFingerprint(input: ActiveRevisionInput): string {
+  const expectedCurrentRevisionIdPresent = hasOwnField(input, "expectedCurrentRevisionId");
+  const expectedActivationVersionPresent = hasOwnField(input, "expectedActivationVersion");
+  return operationRequestFingerprint(`change_active_revision:${input.type}`, [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["targetRevisionId", true, input.targetRevisionId],
+    [
+      "expectedCurrentRevisionId",
+      expectedCurrentRevisionIdPresent,
+      input.expectedCurrentRevisionId ?? null,
+    ],
+    [
+      "expectedActivationVersion",
+      expectedActivationVersionPresent,
+      input.expectedActivationVersion ?? null,
+    ],
+    ["actorSubjectId", true, input.actorSubjectId],
+    ["reason", true, input.reason],
+  ]);
 }
 
 function iso(value: Date | string): string {
@@ -496,7 +589,11 @@ async function createDraftInTransaction(
     input.operationId,
   );
   if (existing) {
-    if (!draftReceiptMatches(existing, input)) {
+    if (
+      existing.requestFingerprint === null
+        ? !draftReceiptMatches(existing, input)
+        : existing.requestFingerprint !== input.requestFingerprint
+    ) {
       throw new WorkspaceInstructionPolicyOperationReuseError();
     }
     return revisionFromRow(existing);
@@ -517,6 +614,7 @@ async function createDraftInTransaction(
     .insert(schema.workspaceInstructionPolicyRevisions)
     .values({
       operationId: input.operationId,
+      requestFingerprint: input.requestFingerprint,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       kind: input.kind,
@@ -538,7 +636,8 @@ export async function createWorkspaceInstructionPolicyDraft(
   db: Database,
   input: CallerDraftInput,
 ): Promise<WorkspaceInstructionPolicyRevision> {
-  const normalized = { ...input, operationId: input.operationId ?? randomUUID() };
+  const request = { ...input, operationId: input.operationId ?? randomUUID() };
+  const normalized = { ...request, requestFingerprint: draftRequestFingerprint(request) };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -552,15 +651,13 @@ export async function createWorkspaceInstructionPolicyDraft(
 /** Import only the stored legacy override; never materialize a deployment default or activate it. */
 export async function importLegacyWorkspaceInstructionPolicyDraft(
   db: Database,
-  input: {
-    operationId?: string;
-    accountId: string;
-    workspaceId: string;
-    createdBySubjectId: string;
-    supersedesRevisionId: string | null;
-  },
+  input: Omit<ImportLegacyRequestInput, "operationId"> & { operationId?: string },
 ): Promise<WorkspaceInstructionPolicyRevision> {
-  const normalized = { ...input, operationId: input.operationId ?? randomUUID() };
+  const request = { ...input, operationId: input.operationId ?? randomUUID() };
+  const normalized = {
+    ...request,
+    requestFingerprint: importLegacyRequestFingerprint(request),
+  };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -578,13 +675,15 @@ export async function importLegacyWorkspaceInstructionPolicyDraft(
       );
       if (existing) {
         if (
-          existing.createdBySubjectId !== input.createdBySubjectId ||
-          existing.kind !== "charter" ||
-          existing.scope !== "global" ||
-          existing.roleKey !== null ||
-          existing.provenanceSource !== "legacy_import" ||
-          existing.provenanceSourceId !== "workspaces.agent_instructions" ||
-          existing.supersedesRevisionId !== input.supersedesRevisionId
+          existing.requestFingerprint === null
+            ? existing.createdBySubjectId !== input.createdBySubjectId ||
+              existing.kind !== "charter" ||
+              existing.scope !== "global" ||
+              existing.roleKey !== null ||
+              existing.provenanceSource !== "legacy_import" ||
+              existing.provenanceSourceId !== "workspaces.agent_instructions" ||
+              existing.supersedesRevisionId !== input.supersedesRevisionId
+            : existing.requestFingerprint !== normalized.requestFingerprint
         ) {
           throw new WorkspaceInstructionPolicyOperationReuseError();
         }
@@ -772,18 +871,9 @@ export async function diffWorkspaceInstructionPolicyRevisions(
 
 async function changeActiveRevision(
   db: Database,
-  input: {
-    operationId: string;
-    accountId: string;
-    workspaceId: string;
-    targetRevisionId: string;
-    expectedCurrentRevisionId: string | null;
-    expectedActivationVersion?: number;
-    actorSubjectId: string;
-    reason: string;
-    type: WorkspaceInstructionPolicyActivationType;
-  },
+  input: ActiveRevisionInput,
 ): Promise<WorkspaceInstructionPolicyActivationResponse> {
+  const requestFingerprint = activeRevisionRequestFingerprint(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -802,15 +892,18 @@ async function changeActiveRevision(
         input.operationId,
       );
       if (existingEvent) {
-        const expectedActivationVersion = input.expectedActivationVersion;
+        const legacyRequestMatches =
+          hasOwnField(input, "expectedCurrentRevisionId") &&
+          !hasOwnField(input, "expectedActivationVersion") &&
+          existingEvent.type === input.type &&
+          existingEvent.newRevisionId === input.targetRevisionId &&
+          existingEvent.oldRevisionId === input.expectedCurrentRevisionId &&
+          existingEvent.actorSubjectId === input.actorSubjectId &&
+          existingEvent.reason === input.reason;
         if (
-          existingEvent.type !== input.type ||
-          existingEvent.newRevisionId !== input.targetRevisionId ||
-          existingEvent.oldRevisionId !== input.expectedCurrentRevisionId ||
-          existingEvent.actorSubjectId !== input.actorSubjectId ||
-          existingEvent.reason !== input.reason ||
-          (expectedActivationVersion !== undefined &&
-            existingEvent.activationVersion - 1 !== expectedActivationVersion)
+          existingEvent.requestFingerprint === null
+            ? !legacyRequestMatches
+            : existingEvent.requestFingerprint !== requestFingerprint
         ) {
           throw new WorkspaceInstructionPolicyOperationReuseError();
         }
@@ -870,6 +963,7 @@ async function changeActiveRevision(
         .insert(schema.workspaceInstructionPolicyActivationEvents)
         .values({
           operationId: input.operationId,
+          requestFingerprint,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           ...targetIdentity,
