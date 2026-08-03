@@ -1,5 +1,25 @@
 # @opengeni/core
 
+## 0.19.0
+
+### Minor Changes
+
+- 13b961e: Add an atomic terminal session-subtree cancellation command that drains queued work, fences concurrent prompts and child creation, interrupts live attempts, durably reports cancelled children to surviving parents, and exposes the operation through the API/core/SDK control surface.
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/db@0.23.0
+  - @opengeni/config@0.10.3
+  - @opengeni/documents@0.2.72
+  - @opengeni/events@0.3.62
+  - @opengeni/observability@0.4.6
+  - @opengeni/runtime@0.17.3
+  - @opengeni/storage@0.2.56
+
 ## 0.18.2
 
 ### Patch Changes
