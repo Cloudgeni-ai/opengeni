@@ -199,6 +199,7 @@ import {
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+import { appendWorkspaceGovernance } from "./workspace-governance";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -218,6 +219,13 @@ export {
 } from "./skill-library";
 
 export type { RuntimeMetricsHooks } from "./metrics";
+export {
+  appendWorkspaceGovernance,
+  hasActiveWorkspaceInstructionPolicy,
+  renderWorkspaceGovernanceContext,
+  WorkspaceGovernancePromptLimitError,
+  type WorkspaceGovernanceContext,
+} from "./workspace-governance";
 export {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -1812,6 +1820,10 @@ export type BuildAgentOptions = {
   // Composed after the workspace persona/CORE/toolspace substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
   workspaceMemory?: string;
+  // Exact-attempt active policy and preference descriptor block. When present,
+  // runtime uses the structured governance precedence branch; absent preserves
+  // the historical instruction composition byte-for-byte.
+  workspaceGovernance?: string;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
   // M3 rig runtime binding (all absent ⇒ a rig-less turn, byte-for-byte today).
   //  - `rig`: renders the non-bypassable rig doctrine block in the CORE.
@@ -2065,6 +2077,65 @@ export function appendWorkspaceMemory(composed: string, workspaceMemory?: string
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
+function composedPersistentAgentInstructions(
+  settings: Settings,
+  options: BuildAgentOptions,
+): string {
+  const personaAndCore = composeAgentInstructions(
+    options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+    options.workspaceEnvironment,
+    options.rig,
+  );
+  if (!options.workspaceGovernance?.trim()) {
+    // Preserve the legacy path byte-for-byte when no structured governance
+    // authority is active for this exact attempt.
+    return appendPersistentSessionSettings(
+      appendTurnInstructions(
+        appendSessionInstructions(
+          appendWorkspaceMemory(
+            appendGitCredentialBindingInstructions(
+              appendToolspaceInstructions(
+                personaAndCore,
+                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+              ),
+              options.gitCredentialBindings,
+              options.activeSandboxBackend,
+            ),
+            options.workspaceMemory,
+          ),
+          options.sessionInstructions,
+        ),
+        options.turnInstructions,
+      ),
+      options.persistentSessionSettings,
+    );
+  }
+
+  // Structured governance precedence after CORE:
+  // governance (org -> workspace -> initiating user -> matching role), then
+  // session/task state, then tool/repository substrate, then bounded memory.
+  return appendWorkspaceMemory(
+    appendGitCredentialBindingInstructions(
+      appendToolspaceInstructions(
+        appendPersistentSessionSettings(
+          appendTurnInstructions(
+            appendSessionInstructions(
+              appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
+              options.sessionInstructions,
+            ),
+            options.turnInstructions,
+          ),
+          options.persistentSessionSettings,
+        ),
+        settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+      ),
+      options.gitCredentialBindings,
+      options.activeSandboxBackend,
+    ),
+    options.workspaceMemory,
+  );
+}
+
 /**
  * Appends the generic programmatic-tool-calling (toolspace) directive to the
  * composed workspace + CORE instructions, joined by " ". This is GENERIC
@@ -2287,30 +2358,7 @@ export function buildOpenGeniAgent(
     //      mode), when supplied by the worker,
     // The genesis title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
-    instructions: appendPersistentSessionSettings(
-      appendTurnInstructions(
-        appendSessionInstructions(
-          appendWorkspaceMemory(
-            appendGitCredentialBindingInstructions(
-              appendToolspaceInstructions(
-                composeAgentInstructions(
-                  options.instructionsTemplate ?? settings.agentInstructionsTemplate,
-                  options.workspaceEnvironment,
-                  options.rig,
-                ),
-                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
-              ),
-              options.gitCredentialBindings,
-              options.activeSandboxBackend,
-            ),
-            options.workspaceMemory,
-          ),
-          options.sessionInstructions,
-        ),
-        options.turnInstructions,
-      ),
-      options.persistentSessionSettings,
-    ),
+    instructions: composedPersistentAgentInstructions(settings, options),
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,

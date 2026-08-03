@@ -5,9 +5,12 @@ plane for versioned workspace charters and policies. They are intentionally
 separate from `workspace_model_policies`: instruction governance does not choose
 models, providers, tools, integrations, or Linear behavior.
 
-This document describes the backend-first slice. It establishes authoritative
-storage, contracts, API, and SDK operations. It does **not** compose active
-revisions into agent prompts or change session/runtime behavior.
+The backend remains the sole charter/policy authority. Migration
+`0157_session_policy_role_snapshots.sql` adds the runtime delivery layer: an
+immutable session policy-role binding, accepted-turn policy snapshots, and
+deterministic composition with the existing structured preference registry.
+It does not create another policy, preference, memory, document, or skills
+store.
 
 ## Targets and normalization
 
@@ -95,20 +98,85 @@ The routes live below
 `workspace:read`. Draft creation, legacy import, activation, and rollback require
 `workspace:admin`.
 
+## Session role binding and accepted-turn snapshots
+
+`CreateSessionRequest.policyRole` binds one normalized policy role to the
+session. The value is immutable after creation and is deliberately separate
+from human workspace membership roles and hierarchical-memory role selectors.
+When the binding is absent, runtime keeps the compatibility fallback to a
+normalized `session.metadata.role`. An invalid present fallback fails closed to
+no role policy; metadata such as `membershipRole` is never consulted.
+
+Each accepted logical turn has one immutable `created_at` boundary. Every exact
+execution attempt for that turn installs or replays one
+`workspace_instruction_policy_snapshots` row containing at most:
+
+1. the active workspace charter;
+2. the active global policy;
+3. the active policy matching the session policy role.
+
+The snapshot is reconstructed from immutable activation events at the accepted
+turn boundary and records exact revision IDs, hashes, activation versions,
+activation timestamps, bounded provenance, role source, canonical ordering,
+and one aggregate hash. A policy activated after a turn was queued cannot move
+that turn; a recovery attempt for the same logical turn resolves the same
+accepted state. A newly accepted human turn, goal continuation, system turn, or
+compaction receives the then-current state.
+
+Snapshots use `FORCE ROW LEVEL SECURITY`, ownership-parent foreign keys that
+cascade only with account/workspace/session/turn/attempt lifecycle deletion,
+immutable-history triggers, and SELECT-only application table privileges. One
+target-schema-local security-definer function validates the exact active
+session/turn/attempt/generation and is the only runtime insert path.
+
+## Runtime composition and precedence
+
+For an exact attempt, the worker combines the policy snapshot with the existing
+preference-registry descriptor snapshot. Automatic model context follows this
+order after the non-bypassable platform CORE:
+
+1. organization preference descriptors;
+2. workspace charter;
+3. workspace global policy;
+4. workspace preference descriptors;
+5. immutable initiating-user preference descriptors;
+6. matching session role policy;
+7. session and exact-turn instructions;
+8. selected skills and repository/tool substrate;
+9. bounded retrieved memory/knowledge.
+
+Preference entries are sanitized descriptors only. Full content remains behind
+the exact attempt's authorized retrieval handle. Documents, imports, Slack
+messages, transcripts, connectors, knowledge results, RAG evidence, and memory
+proposals are not prompt-policy authorities and never enter this block unless an
+authorized activation first creates an immutable policy or preference revision.
+
+The complete governance block is deterministic and fails closed above 131,072
+UTF-8 bytes. Evidence includes snapshot IDs/hashes, revision IDs/hashes,
+ordering, role source, descriptor counts, truncation, provenance, and retrieval
+handles without copying private full preference content.
+
 ## Legacy compatibility and inactive workspaces
 
 Migration `0130_workspace_instruction_policies.sql` performs no backfill.
 Creating or importing a draft does not create an active head.
 
-When a workspace has no instruction-policy activation head, this backend slice
-does not participate in prompt composition at all. Existing runtime behavior is
-therefore preserved exactly:
+When an exact attempt has no active policy revision and no active preference
+descriptor, structured governance does not participate in prompt composition.
+Existing runtime behavior is therefore preserved byte-for-byte:
 
 - a stored `workspaces.agent_instructions` override remains the workspace
   instruction source;
 - a workspace without that override continues to use the deployment/default
   persona template behavior;
 - no default template is copied into revision storage.
+
+If preference descriptors are active but no charter/policy is active, the
+legacy workspace/deployment persona remains the instruction template and the
+descriptor block is appended after CORE. Once any charter or policy is active,
+the structured policy authority replaces the legacy workspace
+`agent_instructions` override for that attempt; the deployment persona still
+supplies the generic runtime substrate beneath CORE.
 
 Legacy import reads only the stored `agent_instructions` value and creates one
 inactive global charter draft with `legacy_import` provenance. It never imports
@@ -123,16 +191,18 @@ heads; revision and activation evidence are append-only.
 
 This slice deliberately does not implement:
 
-- worker/runtime prompt composition or active-head reads;
-- per-session role selection or session behavior changes;
-- web UI;
+- web UI or onboarding administration;
 - workspace memory, knowledge ingestion, or automatic proposal ingestion;
 - model, tool, integration, or Linear enforcement;
-- downstream runtime integration, governance UI, or authoring workflows.
+- governance authoring workflows or activation authority beyond the existing
+  policy backend.
 
 Canonical implementation: `packages/contracts/src/workspace-instruction-policies.ts`,
 `packages/db/src/workspace-instruction-policies-schema.ts`,
 `packages/db/src/workspace-instruction-policies.ts`,
 `packages/db/drizzle/0130_workspace_instruction_policies.sql`,
+`packages/db/drizzle/0157_session_policy_role_snapshots.sql`,
 `apps/api/src/routes/workspace-instruction-policies.ts`, and
-`packages/sdk/src/workspace-instruction-policies.ts`.
+`packages/sdk/src/workspace-instruction-policies.ts`, plus runtime composition in
+`packages/runtime/src/workspace-governance.ts` and
+`apps/worker/src/activities/agent-turn.ts`.

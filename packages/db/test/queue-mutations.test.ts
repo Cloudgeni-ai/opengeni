@@ -1259,6 +1259,9 @@ describe("canonical queue commands", () => {
       expect(storedTurn).toMatchObject({
         model: "xai/grok-4.5",
         reasoningEffort: "high",
+        initiatorKind: "subject",
+        initiatorSubjectId: value.grant.subjectId,
+        initiatingHumanSubjectId: value.grant.subjectId,
       });
       expect(readTurnExecutionPolicyV1(storedTurn.metadata)).toEqual({
         kind: "valid",

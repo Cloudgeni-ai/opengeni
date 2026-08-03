@@ -998,7 +998,10 @@ async function withPreferenceRegistryAttemptAuthority<T>(
       ), locked_turn AS MATERIALIZED (
         SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
           turn.active_attempt_id, turn.execution_generation,
-          turn.initiator_kind, turn.initiator_subject_id
+          coalesce(
+            turn.initiating_human_subject_id,
+            case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
+          ) as initiating_human_subject_id
         FROM session_turns turn
         JOIN locked_session session
           ON session.id = turn.session_id
@@ -1008,8 +1011,10 @@ async function withPreferenceRegistryAttemptAuthority<T>(
           AND turn.active_attempt_id = ${input.attemptId}::uuid
           AND turn.execution_generation = ${input.executionGeneration}
           AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
-          AND turn.initiator_kind = 'subject'
-          AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
+          AND length(btrim(coalesce(
+            turn.initiating_human_subject_id,
+            case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
+          ))) BETWEEN 1 AND 1024
         FOR SHARE OF turn
       ), locked_attempt AS MATERIALIZED (
         SELECT attempt.id, attempt.account_id, attempt.workspace_id,
@@ -1032,7 +1037,7 @@ async function withPreferenceRegistryAttemptAuthority<T>(
           )
         FOR SHARE OF attempt
       )
-      SELECT turn.initiator_subject_id
+      SELECT turn.initiating_human_subject_id
       FROM locked_workspace workspace
       JOIN locked_session session ON true
       JOIN locked_turn turn ON true
@@ -1041,8 +1046,8 @@ async function withPreferenceRegistryAttemptAuthority<T>(
         AND workspace.id = attempt.workspace_id
         AND session.id = attempt.session_id
         AND turn.id = attempt.turn_id
-    `)) as unknown as Array<{ initiator_subject_id: string }>;
-    const initiatingHumanSubjectId = rows[0]?.initiator_subject_id;
+    `)) as unknown as Array<{ initiating_human_subject_id: string }>;
+    const initiatingHumanSubjectId = rows[0]?.initiating_human_subject_id;
     if (!initiatingHumanSubjectId) {
       throw new PreferenceRegistryInitiatorError(
         "Preference retrieval requires the exact current attempt, generation, and immutable human initiator",
