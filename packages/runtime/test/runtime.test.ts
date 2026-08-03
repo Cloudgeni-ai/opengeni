@@ -1432,6 +1432,206 @@ describe("runtime event normalization", () => {
         fixture.mcp.close();
       }
     });
+
+    test("subject-scoped generic refs enforce Allow/Ask/Block with the broker-frozen connection", async () => {
+      const connectionId = "11111111-1111-4111-8111-111111111111";
+      const initiatingSubjectId = "user:immutable-initiator";
+      const rawRequestValue = "raw-request-must-not-bypass-policy";
+
+      for (const decision of ["allow", "ask", "block"] as const) {
+        const mcp = startTestMcpServer();
+        const serverConfig = {
+          id: "docs",
+          name: "Personal Documents",
+          url: mcp.url,
+          cacheToolsList: false,
+          connectionRef: {
+            providerDomain: "example.test",
+            kind: "oauth2" as const,
+            subjectScope: "subject" as const,
+          },
+        };
+        const settings = testSettings({
+          sandboxBackend: "none",
+          mcpServers: [serverConfig],
+        });
+        const resolverCalls: ResolveConnectionCredentialInput[] = [];
+        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          credentialSubjectId: initiatingSubjectId,
+          resolveCredential: async (request) => {
+            resolverCalls.push(request);
+            return {
+              status: "ok",
+              connectionId,
+              headers: { authorization: "Bearer broker-token" },
+            };
+          },
+        });
+        let approved = decision !== "ask";
+        const policyCalls: Array<{
+          phase: "prepare" | "begin";
+          call: Parameters<ConnectorActionPolicyHooks["prepare"]>[0];
+        }> = [];
+        const completions: Array<{ requestId: string; outcome: "completed" | "uncertain" }> = [];
+        const hooks: ConnectorActionPolicyHooks = {
+          prepare: async (call) => {
+            policyCalls.push({ phase: "prepare", call });
+            return { managed: true, decision };
+          },
+          begin: async (call) => {
+            policyCalls.push({ phase: "begin", call });
+            if (decision === "block") {
+              return {
+                allowed: false,
+                managed: true,
+                requestId: "request-block",
+                reason: "blocked",
+              };
+            }
+            if (!approved) {
+              return {
+                allowed: false,
+                managed: true,
+                requestId: "request-ask",
+                reason: "approval_required",
+              };
+            }
+            return {
+              allowed: true,
+              managed: true,
+              requestId: `request-${decision}`,
+            };
+          },
+          complete: async (completion) => {
+            completions.push(completion);
+          },
+        };
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
+          connectorActionPolicy: hooks,
+        });
+
+        try {
+          expect(prepared.resolvedMcpConnectionIds.get("docs")).toBe(connectionId);
+          expect(resolverCalls.length).toBeGreaterThan(0);
+          expect(
+            resolverCalls.every(
+              (request) =>
+                request.subjectId === initiatingSubjectId &&
+                request.connectionRef.subjectScope === "subject" &&
+                request.connectionRef.connectionId === undefined,
+            ),
+          ).toBe(true);
+
+          const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: rawRequestValue },
+              `call-${decision}`,
+            ),
+          ).toBe(decision === "ask");
+
+          if (decision === "ask") approved = true;
+          const invocation = tool.invoke(
+            new RunContext(),
+            JSON.stringify({ query: rawRequestValue }),
+            { toolCall: { callId: `call-${decision}` } } as any,
+          );
+          if (decision === "block") {
+            await expect(invocation).rejects.toThrow("Connector action was not executed: blocked");
+            expect(mcp.calls).toHaveLength(0);
+            expect(completions).toEqual([]);
+          } else {
+            await expect(invocation).resolves.toBeDefined();
+            expect(mcp.calls).toEqual([
+              { tool: "search_documents", args: { query: rawRequestValue } },
+            ]);
+            expect(completions).toEqual([
+              { requestId: `request-${decision}`, outcome: "completed" },
+            ]);
+          }
+          expect(policyCalls.map(({ phase }) => phase)).toEqual(["prepare", "begin"]);
+          expect(
+            policyCalls.every(
+              ({ call }) =>
+                call.connectionId === connectionId &&
+                call.serverId === "docs" &&
+                call.toolName === "search_documents" &&
+                call.approvalId === `call-${decision}`,
+            ),
+          ).toBe(true);
+        } finally {
+          await prepared.close();
+          mcp.close();
+        }
+      }
+    });
+
+    test("connection-backed tools fail closed when no resolved identity reaches policy", async () => {
+      const mcp = startTestMcpServer();
+      const baseConfig = {
+        id: "docs",
+        name: "Personal Documents",
+        url: mcp.url,
+        cacheToolsList: false,
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            ...baseConfig,
+            connectionRef: {
+              providerDomain: "example.test",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+          },
+        ],
+      });
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => ({ managed: true, decision: "block" }),
+        begin: async () => ({
+          allowed: false,
+          managed: true,
+          requestId: "request-missing",
+          reason: "blocked",
+        }),
+        complete: async () => {},
+      };
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        await expect(
+          tool.needsApproval(new RunContext(), { query: "blocked" }, "call-missing"),
+        ).rejects.toThrow("missing its resolved connection identity");
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ query: "blocked" }), {
+            toolCall: { callId: "call-missing" },
+          } as any),
+        ).rejects.toThrow("missing its resolved connection identity");
+        expect(mcp.calls).toHaveLength(0);
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
   });
 
   test("uses normal Azure CLI service principal login hook", () => {

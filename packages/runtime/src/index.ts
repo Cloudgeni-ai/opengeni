@@ -1480,6 +1480,8 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  /** Exact broker-resolved connection identity frozen during MCP preparation. */
+  resolvedMcpConnectionIds?: ReadonlyMap<string, string>;
   /** Attempt-bound connector Allow/Ask/Block enforcement and safe audit hooks. */
   connectorActionPolicy?: ConnectorActionPolicyHooks;
   // Workspace Memory V1 working-set block, resolved by the worker per turn.
@@ -2021,7 +2023,12 @@ export function buildOpenGeniAgent(
       agentsNeedingGenesisTitleDirective.add(agent);
     }
     maybeInstallCodexToolSearch(agent, settings, options);
-    applyMcpApprovalPolicy(agent, settings, options.connectorActionPolicy);
+    applyMcpApprovalPolicy(
+      agent,
+      settings,
+      options.connectorActionPolicy,
+      options.resolvedMcpConnectionIds,
+    );
     return agent;
   }
 
@@ -2116,7 +2123,12 @@ export function buildOpenGeniAgent(
     agentRigCredentialHooks.set(agent, sandboxLifecycleHooksForIds(options.rigCredentialHookIds));
   }
   maybeInstallCodexToolSearch(agent, settings, options);
-  applyMcpApprovalPolicy(agent, settings, options.connectorActionPolicy);
+  applyMcpApprovalPolicy(
+    agent,
+    settings,
+    options.connectorActionPolicy,
+    options.resolvedMcpConnectionIds,
+  );
   return agent;
 }
 
@@ -2169,6 +2181,7 @@ type McpApprovalPolicy = {
   prefix: string;
   serverId: string;
   requireApproval: boolean | ReadonlySet<string>;
+  connectorBacked: boolean;
   connectionId: string | null;
 };
 
@@ -2214,17 +2227,22 @@ function installMcpApprovalPolicy(
       const unprefixed = tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
-      const connectorManaged = Boolean(connectorActionPolicy && policy.connectionId);
+      const connectorManaged = Boolean(connectorActionPolicy && policy.connectorBacked);
       if (!connectorManaged && !mcpToolRequiresApproval(policy.requireApproval, unprefixed)) {
         return tool;
       }
-      const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => ({
-        approvalId,
-        connectionId: policy.connectionId,
-        serverId: policy.serverId,
-        toolName: unprefixed,
-        arguments: args,
-      });
+      const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
+        if (!policy.connectionId) {
+          throw new Error("Connector action is missing its resolved connection identity");
+        }
+        return {
+          approvalId,
+          connectionId: policy.connectionId,
+          serverId: policy.serverId,
+          toolName: unprefixed,
+          arguments: args,
+        };
+      };
       return {
         ...tool,
         needsApproval: async (
@@ -2324,21 +2342,34 @@ function applyMcpApprovalPolicy(
   agent: Agent<any, any>,
   settings: Settings,
   connectorActionPolicy?: ConnectorActionPolicyHooks,
+  resolvedMcpConnectionIds?: ReadonlyMap<string, string>,
 ): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
     .filter(
       (server) =>
-        Boolean(connectorActionPolicy && server.connectionRef?.connectionId) ||
+        Boolean(connectorActionPolicy && server.connectionRef) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
-    .map((server) => ({
-      prefix: prefixedMcpToolName(server.id, ""),
-      serverId: server.id,
-      requireApproval:
-        server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
-      connectionId: server.connectionRef?.connectionId ?? null,
-    }))
+    .map((server) => {
+      const staticConnectionId = server.connectionRef?.connectionId ?? null;
+      const resolvedConnectionId = resolvedMcpConnectionIds?.get(server.id) ?? null;
+      if (
+        staticConnectionId &&
+        resolvedConnectionId &&
+        staticConnectionId !== resolvedConnectionId
+      ) {
+        throw new Error("MCP connection identity changed between configuration and preparation");
+      }
+      return {
+        prefix: prefixedMcpToolName(server.id, ""),
+        serverId: server.id,
+        requireApproval:
+          server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
+        connectorBacked: Boolean(server.connectionRef),
+        connectionId: resolvedConnectionId ?? staticConnectionId,
+      };
+    })
     .sort((a, b) => b.prefix.length - a.prefix.length);
   if (policies.length === 0) {
     return;
@@ -2567,6 +2598,8 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 
 export type PreparedAgentTools = {
   mcpServers: MCPServer[];
+  /** Attempt-frozen successful broker identity for each prepared MCP server. */
+  resolvedMcpConnectionIds: ReadonlyMap<string, string>;
   close: () => Promise<void>;
   // P4 (Part B.1): the live, by-reference Set of ORIGINAL-dotted connector
   // namespaces the codex_apps transport saw across this turn's tools/list calls.
@@ -2684,9 +2717,15 @@ export async function prepareAgentTools(
   // codex_apps sanitizing fetch so every tools/list this turn accumulates the
   // account's connector namespaces. Surfaced on PreparedAgentTools for the worker.
   const codexConnectorNamespaces = new Set<string>();
+  const resolvedMcpConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
   if (tools.length === 0) {
-    return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
+    return {
+      mcpServers: [],
+      resolvedMcpConnectionIds,
+      close: async () => {},
+      codexConnectorNamespaces,
+    };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const aggregateToolBudget = new McpAggregateToolListBudget();
@@ -2719,7 +2758,7 @@ export async function prepareAgentTools(
         },
       );
       const fetchImpl = config.connectionRef
-        ? connectionBrokerFetch(guardedFetch, config, options)
+        ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
         : firstParty
           ? firstPartyAuthFetch(guardedFetch, settings, options)
           : guardedFetch;
@@ -2826,6 +2865,7 @@ export async function prepareAgentTools(
   }
   return {
     mcpServers: [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])],
+    resolvedMcpConnectionIds: new Map(resolvedMcpConnectionIds),
     close: async () => {
       let firstError: unknown;
       if (connectedBestEffort) {
@@ -2850,6 +2890,7 @@ function connectionBrokerFetch(
   baseFetch: FetchLike,
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
+  resolvedMcpConnectionIds: Map<string, string>,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
@@ -2869,6 +2910,7 @@ function connectionBrokerFetch(
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
     }
+    recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     const response = await baseFetch(
       fetchInputForAttempt(input),
       withConnectionHeaders(input, init, first.headers),
@@ -2886,6 +2928,7 @@ function connectionBrokerFetch(
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
+      recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       const retry = await baseFetch(
         fetchInputForAttempt(input),
         withConnectionHeaders(input, init, refreshed.headers),
@@ -2931,6 +2974,23 @@ function connectionBrokerFetch(
     }
     return response;
   };
+}
+
+function recordResolvedMcpConnectionId(
+  resolvedMcpConnectionIds: Map<string, string>,
+  config: Settings["mcpServers"][number],
+  connectionId: string,
+): void {
+  const staticConnectionId = config.connectionRef?.connectionId;
+  const existingConnectionId = resolvedMcpConnectionIds.get(config.id);
+  if (
+    connectionId.length === 0 ||
+    (staticConnectionId !== undefined && staticConnectionId !== connectionId) ||
+    (existingConnectionId !== undefined && existingConnectionId !== connectionId)
+  ) {
+    throw new Error("MCP connection identity changed during attempt preparation");
+  }
+  resolvedMcpConnectionIds.set(config.id, connectionId);
 }
 
 async function resolveConnectionForRequest(

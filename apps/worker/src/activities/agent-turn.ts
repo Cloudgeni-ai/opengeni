@@ -5546,6 +5546,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
