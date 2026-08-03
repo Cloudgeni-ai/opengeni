@@ -54,6 +54,13 @@ describe("documents", () => {
     ).toThrow("personal documents require an initiating subject");
     expect(() =>
       resolveDocumentAuthority({
+        kind: "personal",
+        workspaceId,
+        initiatingSubjectId: "ø".repeat(513),
+      }),
+    ).toThrow("exceeds 1024 UTF-8 bytes");
+    expect(() =>
+      resolveDocumentAuthority({
         kind: "organization",
         legacyVisibility: "private",
         workspaceId,

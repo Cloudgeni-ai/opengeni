@@ -16,6 +16,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   requireFile,
+  rlsContextForWorkspace,
   setSubjectRlsContext,
   withRlsContext,
   withWorkspaceRls,
@@ -37,6 +38,7 @@ export const DEFAULT_DOCUMENT_CURATION_MODEL = "gpt-4o-mini";
 // Curator input is a preview, not the whole document — enough to name and
 // classify without paying for a full-document prompt on every drop.
 export const DOCUMENT_CURATION_MAX_INPUT_CHARS = 24_000;
+export const DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES = 1024;
 // A base move is applied automatically only at or above this curator
 // confidence; below it the suggestion is surfaced for human review instead.
 export const DOCUMENT_CURATION_AUTO_FILE_CONFIDENCE = 0.75;
@@ -164,6 +166,7 @@ const DOCUMENT_INVENTORY_MAX_TOPIC_LIMIT = 100;
 const DOCUMENT_INVENTORY_MAX_TOPIC_CHARS = 256;
 
 export type DocumentSearchInput = {
+  accountId: string;
   workspaceId: string;
   query: string;
   baseIds?: string[] | undefined;
@@ -660,7 +663,7 @@ export async function getDocumentInventory(
     const baseJoin = and(
       eq(schema.documents.workspaceId, workspaceId),
       eq(schema.documents.baseId, schema.documentBases.id),
-      ...documentAccessConditions(input.access),
+      ...documentAccessConditions(workspaceId, input.access),
     );
     const baseRows = await scopedDb
       .select({
@@ -682,7 +685,7 @@ export async function getDocumentInventory(
 
     const documentWhere = and(
       eq(schema.documents.workspaceId, workspaceId),
-      ...documentAccessConditions(input.access),
+      ...documentAccessConditions(workspaceId, input.access),
     );
     const [summary] = await scopedDb
       .select({
@@ -874,6 +877,7 @@ export async function addDocumentToBase(
     baseId: string;
     createdBy?: string | null | undefined;
     initiatingSubjectId?: string | null | undefined;
+    organizationAuthorityGranted?: boolean | undefined;
     curationStatus?: DocumentCurationStatus | undefined;
     access?: DocumentAccessFilter | undefined;
   },
@@ -889,6 +893,9 @@ export async function addDocumentToBase(
         workspaceId: input.workspaceId,
         initiatingSubjectId: input.initiatingSubjectId,
       });
+      if (authority.kind === "organization" && input.organizationAuthorityGranted !== true) {
+        throw new Error("organization document writes require exact account authority");
+      }
       if (
         authority.kind === "personal" &&
         (viewerSubjectId !== authority.subjectId ||
@@ -916,6 +923,10 @@ export async function addDocumentToBase(
         if (!documentMatchesAccess(existing, input.access)) {
           throw new Error(`Document not found: ${existing.id}`);
         }
+        assertOrganizationDocumentAuthority(
+          existing.authorityKind,
+          input.organizationAuthorityGranted,
+        );
         // Idempotent re-add: refresh caller-supplied source metadata on the
         // existing row instead of silently discarding it (aclTags especially —
         // a re-add that tightens tags must not be a no-op). Access policy is
@@ -940,7 +951,7 @@ export async function addDocumentToBase(
             and(
               eq(schema.documents.workspaceId, input.workspaceId),
               eq(schema.documents.id, existing.id),
-              ...documentAccessConditions(input.access),
+              ...documentAccessConditions(input.workspaceId, input.access),
             ),
           )
           .returning();
@@ -993,6 +1004,7 @@ export async function moveDocumentToBase(
     workspaceId: string;
     documentId: string;
     targetBaseId?: string | null | undefined;
+    organizationAuthorityGranted?: boolean | undefined;
     access?: DocumentAccessFilter | undefined;
   },
 ): Promise<Document> {
@@ -1009,11 +1021,12 @@ export async function moveDocumentToBase(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
             eq(schema.documents.id, input.documentId),
-            ...documentAccessConditions(input.access),
+            ...documentAccessConditions(input.workspaceId, input.access),
           ),
         )
         .limit(1);
       if (!row) throw new Error(`Document not found: ${input.documentId}`);
+      assertOrganizationDocumentAuthority(row.authorityKind, input.organizationAuthorityGranted);
       const suggestion = (row.curation as { suggestedBaseId?: string | null } | null)
         ?.suggestedBaseId;
       const targetBaseId = input.targetBaseId ?? suggestion;
@@ -1052,7 +1065,7 @@ export async function moveDocumentToBase(
             and(
               eq(schema.documents.workspaceId, input.workspaceId),
               eq(schema.documents.id, input.documentId),
-              ...documentAccessConditions(input.access),
+              ...documentAccessConditions(input.workspaceId, input.access),
             ),
           )
           .returning();
@@ -1082,6 +1095,7 @@ export async function deleteDocumentFromBase(
     workspaceId: string;
     baseId: string;
     documentId: string;
+    organizationAuthorityGranted?: boolean | undefined;
     access?: DocumentAccessFilter | undefined;
   },
 ): Promise<void> {
@@ -1098,13 +1112,17 @@ export async function deleteDocumentFromBase(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
             eq(schema.documents.id, input.documentId),
-            ...documentAccessConditions(input.access),
+            ...documentAccessConditions(input.workspaceId, input.access),
           ),
         )
         .limit(1);
       if (!document) {
         throw new Error(`Document not found: ${input.documentId}`);
       }
+      assertOrganizationDocumentAuthority(
+        document.authorityKind,
+        input.organizationAuthorityGranted,
+      );
       if (document.baseId !== input.baseId) {
         throw new Error(`Document not found: ${input.documentId}`);
       }
@@ -1114,7 +1132,7 @@ export async function deleteDocumentFromBase(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
             eq(schema.documents.id, input.documentId),
-            ...documentAccessConditions(input.access),
+            ...documentAccessConditions(input.workspaceId, input.access),
           ),
         );
     },
@@ -1135,7 +1153,7 @@ export async function listDocuments(
         and(
           eq(schema.documents.workspaceId, workspaceId),
           eq(schema.documents.baseId, baseId),
-          ...documentAccessConditions(access),
+          ...documentAccessConditions(workspaceId, access),
         ),
       )
       .orderBy(asc(schema.documents.createdAt));
@@ -1157,7 +1175,7 @@ export async function getDocument(
         and(
           eq(schema.documents.workspaceId, workspaceId),
           eq(schema.documents.id, documentId),
-          ...documentAccessConditions(access),
+          ...documentAccessConditions(workspaceId, access),
         ),
       )
       .limit(1);
@@ -1170,8 +1188,22 @@ export async function queueDocumentForReindex(
   workspaceId: string,
   documentId: string,
   access?: DocumentAccessFilter,
+  organizationAuthorityGranted?: boolean,
 ): Promise<Document> {
   return await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
+    const [document] = await scopedDb
+      .select({ authorityKind: schema.documents.authorityKind })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.workspaceId, workspaceId),
+          eq(schema.documents.id, documentId),
+          ...documentAccessConditions(workspaceId, access),
+        ),
+      )
+      .limit(1);
+    if (!document) throw new Error(`Document not found: ${documentId}`);
+    assertOrganizationDocumentAuthority(document.authorityKind, organizationAuthorityGranted);
     const [row] = await scopedDb
       .update(schema.documents)
       .set({
@@ -1183,13 +1215,22 @@ export async function queueDocumentForReindex(
         and(
           eq(schema.documents.workspaceId, workspaceId),
           eq(schema.documents.id, documentId),
-          ...documentAccessConditions(access),
+          ...documentAccessConditions(workspaceId, access),
         ),
       )
       .returning();
     if (!row) throw new Error(`Document not found: ${documentId}`);
     return mapDocument(row);
   });
+}
+
+function assertOrganizationDocumentAuthority(
+  authorityKind: string,
+  organizationAuthorityGranted: boolean | undefined,
+): void {
+  if (authorityKind === "organization" && organizationAuthorityGranted !== true) {
+    throw new Error("organization document mutations require exact account authority");
+  }
 }
 
 export async function indexDocumentNow(
@@ -1489,6 +1530,7 @@ export async function searchDocuments(
   input: DocumentSearchInput,
   services: Pick<DocumentServices, "embedder"> = createDocumentServices(),
 ): Promise<DocumentSearchResult[]> {
+  await assertDocumentAccountWorkspace(db, input.accountId, input.workspaceId);
   const mode = input.mode ?? "hybrid";
   const limit = Math.min(Math.max(input.limit ?? 5, 1), 50);
   const candidateLimit = mode === "hybrid" ? Math.min(limit * 4, 100) : limit;
@@ -1524,14 +1566,16 @@ async function vectorSearchDocuments(
   const queryEmbedding = await services.embedder.embedQuery(input.query);
   validateEmbedding(queryEmbedding, services.embedder.dimensions, services.embedder.model);
   const distance = sql<number>`${schema.documentChunks.embedding} <=> ${vectorLiteral(queryEmbedding)}::vector`;
-  const rows = await withDocumentRls(
+  const rows = await withDocumentAccountRls(
     db,
+    input.accountId,
     input.workspaceId,
     input.access,
     async (scopedDb) =>
       await scopedDb
         .select({
           chunkId: schema.documentChunks.id,
+          workspaceId: schema.documentChunks.workspaceId,
           documentId: schema.documentChunks.documentId,
           baseId: schema.documentChunks.baseId,
           fileId: schema.documentChunks.fileId,
@@ -1560,7 +1604,7 @@ async function vectorSearchDocuments(
         .limit(limit),
   );
   return rows.map((row) => ({
-    ...mapSearchRowBase(row, input.workspaceId),
+    ...mapSearchRowBase(row),
     vectorScore: 1 / (1 + Number(row.distance)),
     keywordScore: null,
   }));
@@ -1572,14 +1616,16 @@ async function keywordSearchDocuments(
   limit: number,
 ): Promise<CombinedSearchRow[]> {
   const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.documentChunks.text}), plainto_tsquery('simple', ${input.query}))`;
-  const rows = await withDocumentRls(
+  const rows = await withDocumentAccountRls(
     db,
+    input.accountId,
     input.workspaceId,
     input.access,
     async (scopedDb) =>
       await scopedDb
         .select({
           chunkId: schema.documentChunks.id,
+          workspaceId: schema.documentChunks.workspaceId,
           documentId: schema.documentChunks.documentId,
           baseId: schema.documentChunks.baseId,
           fileId: schema.documentChunks.fileId,
@@ -1613,7 +1659,7 @@ async function keywordSearchDocuments(
         .limit(limit),
   );
   return rows.map((row) => ({
-    ...mapSearchRowBase(row, input.workspaceId),
+    ...mapSearchRowBase(row),
     vectorScore: null,
     keywordScore: normalizeKeywordScore(Number(row.rank)),
   }));
@@ -1621,18 +1667,21 @@ async function keywordSearchDocuments(
 
 export async function getDocumentChunk(
   db: Database,
+  accountId: string,
   workspaceId: string,
   chunkId: string,
   access?: DocumentAccessFilter,
 ): Promise<DocumentSearchResult | null> {
-  const [row] = await withDocumentRls(
+  const [row] = await withDocumentAccountRls(
     db,
+    accountId,
     workspaceId,
     access,
     async (scopedDb) =>
       await scopedDb
         .select({
           chunkId: schema.documentChunks.id,
+          workspaceId: schema.documentChunks.workspaceId,
           documentId: schema.documentChunks.documentId,
           baseId: schema.documentChunks.baseId,
           fileId: schema.documentChunks.fileId,
@@ -1657,17 +1706,18 @@ export async function getDocumentChunk(
         .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
         .where(
           and(
-            eq(schema.documentChunks.workspaceId, workspaceId),
+            eq(schema.documents.accountId, accountId),
+            eq(schema.documentChunks.accountId, accountId),
             eq(schema.documentChunks.id, chunkId),
             eq(schema.documents.status, "ready"),
-            ...documentAccessConditions(access),
+            ...documentAccessConditions(workspaceId, access),
           ),
         )
         .limit(1),
   );
   if (!row) return null;
   return {
-    ...mapSearchRowBase(row, workspaceId),
+    ...mapSearchRowBase(row),
     score: 1,
     matchType: "hybrid",
     vectorScore: null,
@@ -1707,6 +1757,11 @@ export function resolveDocumentAuthority(input: {
   }
   const subjectId = cleanString(input.initiatingSubjectId ?? null);
   if (!subjectId) throw new Error("personal documents require an initiating subject");
+  if (new TextEncoder().encode(subjectId).byteLength > DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES) {
+    throw new Error(
+      `personal document initiating subject exceeds ${DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES} UTF-8 bytes`,
+    );
+  }
   return { kind, workspaceId: input.workspaceId, subjectId };
 }
 
@@ -1722,20 +1777,57 @@ async function withDocumentRls<T>(
     : await withWorkspaceRls(db, workspaceId, fn);
 }
 
+async function withDocumentAccountRls<T>(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  access: DocumentAccessFilter | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  const context = await assertDocumentAccountWorkspace(db, accountId, workspaceId);
+  const subjectId = cleanString(access?.viewerSubjectId ?? null);
+  return await withRlsContext(db, context, async (scopedDb) => {
+    if (subjectId) await setSubjectRlsContext(scopedDb, subjectId);
+    return await fn(scopedDb);
+  });
+}
+
+async function assertDocumentAccountWorkspace(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+) {
+  const context = await rlsContextForWorkspace(db, workspaceId);
+  if (context.accountId !== accountId) {
+    throw new Error("document account/workspace authority mismatch");
+  }
+  return context;
+}
+
 /**
  * Visibility/agent scoping shared by every document read path. Fail-closed:
  * with no filter supplied, private documents are invisible.
  */
-function documentAccessConditions(access: DocumentAccessFilter | undefined): SQL[] {
-  const nonPersonal = inArray(schema.documents.authorityKind, ["organization", "workspace"]);
+function documentAccessConditions(
+  workspaceId: string,
+  access: DocumentAccessFilter | undefined,
+): SQL[] {
+  const organization = eq(schema.documents.authorityKind, "organization");
+  const workspace = and(
+    eq(schema.documents.authorityKind, "workspace"),
+    eq(schema.documents.authorityWorkspaceId, workspaceId),
+  );
   const viewer = cleanString(access?.viewerSubjectId ?? null);
   const personal = viewer
     ? and(
         eq(schema.documents.authorityKind, "personal"),
+        eq(schema.documents.authorityWorkspaceId, workspaceId),
         eq(schema.documents.authoritySubjectId, viewer),
       )
     : undefined;
-  const authority = viewer ? (or(nonPersonal, personal) ?? nonPersonal) : nonPersonal;
+  const authority = viewer
+    ? (or(organization, workspace, personal) ?? organization)
+    : (or(organization, workspace) ?? organization);
   if (access?.agentOnly) {
     return [eq(schema.documents.agentAccess, true), authority];
   }
@@ -1772,8 +1864,9 @@ type DocumentAccessRecord = {
 function documentSearchConditions(input: DocumentSearchInput, embeddingModel?: string): SQL[] {
   const conditions: SQL[] = [
     eq(schema.documents.status, "ready"),
-    eq(schema.documentChunks.workspaceId, input.workspaceId),
-    ...documentAccessConditions(input.access),
+    eq(schema.documents.accountId, input.accountId),
+    eq(schema.documentChunks.accountId, input.accountId),
+    ...documentAccessConditions(input.workspaceId, input.access),
   ];
   if (embeddingModel) {
     conditions.push(eq(schema.documentChunks.embeddingModel, embeddingModel));
@@ -1791,34 +1884,32 @@ function documentSearchConditions(input: DocumentSearchInput, embeddingModel?: s
   return conditions;
 }
 
-function mapSearchRowBase(
-  row: {
-    chunkId: string;
-    documentId: string;
-    baseId: string;
-    fileId: string;
-    title: string;
-    text: string;
-    chunkIndex: number;
-    metadata: Record<string, unknown>;
-    sourceKind: string;
-    sourceUri: string | null;
-    sourceExternalId: string | null;
-    sourceTitle: string | null;
-    sourceAuthor: string | null;
-    sourceCreatedAt: Date | null;
-    sourceUpdatedAt: Date | null;
-    sourceVersion: string | null;
-    aclTags: string[];
-    authorityKind: string;
-    authorityWorkspaceId: string | null;
-    authoritySubjectId: string | null;
-  },
-  workspaceId: string,
-): SearchRowBase {
+function mapSearchRowBase(row: {
+  chunkId: string;
+  workspaceId: string;
+  documentId: string;
+  baseId: string;
+  fileId: string;
+  title: string;
+  text: string;
+  chunkIndex: number;
+  metadata: Record<string, unknown>;
+  sourceKind: string;
+  sourceUri: string | null;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceAuthor: string | null;
+  sourceCreatedAt: Date | null;
+  sourceUpdatedAt: Date | null;
+  sourceVersion: string | null;
+  aclTags: string[];
+  authorityKind: string;
+  authorityWorkspaceId: string | null;
+  authoritySubjectId: string | null;
+}): SearchRowBase {
   return {
     chunkId: row.chunkId,
-    workspaceId,
+    workspaceId: row.workspaceId,
     documentId: row.documentId,
     baseId: row.baseId,
     fileId: row.fileId,

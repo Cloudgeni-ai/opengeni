@@ -3222,6 +3222,9 @@ export type Document = z.infer<typeof Document>;
 
 export const DocumentSearchResult = z.object({
   chunkId: z.string().uuid(),
+  // The workspace that ingested the document. Organization-authority results
+  // may originate in another workspace in the same account; this identifier
+  // is provenance and does not grant access to that workspace or its resources.
   workspaceId: z.string().uuid(),
   documentId: z.string().uuid(),
   baseId: z.string().uuid(),

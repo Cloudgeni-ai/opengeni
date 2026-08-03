@@ -50,6 +50,16 @@ runtime-role FORCE-RLS policy calls the same
 The older `visibility` field remains only as a compatibility projection
 (`personal` → `private`, organization/workspace → `workspace`).
 
+Migration 0158 is a drained maintenance cutover, not a legacy-payload fallback.
+Stop every API and worker, close all `document-index-*` Temporal workflows, and
+settle every queued/indexing document before applying it; the migration rejects
+both live `opengeni_app` sessions and an undrained document queue. After commit,
+only the new image may run and every direct
+or Temporal indexing input must carry the exact six-field document and authority
+identity. Publishing an organization-authority document requires an exact
+`account:admin` account grant; workspace-admin permission expansion is not
+account-wide publication authority.
+
 ## Source and lifecycle ledgers
 
 The source side records:

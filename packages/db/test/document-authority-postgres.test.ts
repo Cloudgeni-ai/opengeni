@@ -216,6 +216,17 @@ describe("document authority (real PostgreSQL + pgvector + FORCE RLS)", () => {
         await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
         await tx`select set_config('opengeni.subject_id', 'user:alice', true)`;
         await tx`
+          update document_chunks set base_id = ${crypto.randomUUID()}
+          where document_id = ${personal.documentId}`;
+      }),
+    ).rejects.toThrow("document chunk parent identity mismatch");
+
+    await expect(
+      app.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+        await tx`select set_config('opengeni.subject_id', 'user:alice', true)`;
+        await tx`
           update documents set authority_kind = 'workspace', visibility = 'workspace'
           where id = ${personal.documentId}`;
       }),

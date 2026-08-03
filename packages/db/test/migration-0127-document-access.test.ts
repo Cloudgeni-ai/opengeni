@@ -41,10 +41,32 @@ describe("document access migrations", () => {
       `CASE WHEN "visibility" = 'private' THEN 'personal' ELSE 'workspace' END`,
     );
     expect(sql).toContain(`"authority_subject_id" = CASE WHEN "visibility" = 'private'`);
+    expect(sql).toContain('chunk."base_id" IS DISTINCT FROM document."base_id"');
+    expect(sql).toContain("parent.base_id IS DISTINCT FROM NEW.base_id");
     expect(sql).toContain("document_chunks_authority_guard");
     expect(sql).toContain("document authority is immutable");
+    expect(sql).toContain("migration 0158 requires every queued/indexing document to settle");
+    expect(sql.match(/requires all opengeni_app sessions to be stopped/g)).toHaveLength(2);
+    expect(sql).toContain('ALTER TABLE "documents" NO FORCE ROW LEVEL SECURITY');
+    expect(sql).toContain('ALTER TABLE "document_chunks" NO FORCE ROW LEVEL SECURITY');
+    expect(sql.indexOf('ALTER TABLE "documents" NO FORCE ROW LEVEL SECURITY')).toBeLessThan(
+      sql.indexOf("$document_index_drain$"),
+    );
+    expect(sql.indexOf("$document_writer_drain_after_lock$;")).toBeLessThan(
+      sql.indexOf("$document_index_drain$"),
+    );
+    expect(sql.indexOf("$document_index_drain$;")).toBeLessThan(
+      sql.indexOf('ALTER TABLE "documents" ADD COLUMN "authority_kind"'),
+    );
+    expect(
+      sql.match(/octet_length\(convert_to\("authority_subject_id", 'UTF8'\)\) <= 1024/g),
+    ).toHaveLength(2);
     expect(sql).toContain("opengeni_private.scoped_knowledge_scope_visible");
     expect(sql).toContain("DROP POLICY workspace_isolation");
+    expect(sql.match(/ALTER TABLE %I FORCE ROW LEVEL SECURITY/g)).toHaveLength(1);
+    expect(sql.lastIndexOf("ALTER TABLE %I FORCE ROW LEVEL SECURITY")).toBeGreaterThan(
+      sql.indexOf("CREATE POLICY document_authority_isolation"),
+    );
     expect(sql.indexOf('UPDATE "documents"')).toBeLessThan(
       sql.indexOf('ALTER TABLE "documents" ALTER COLUMN "authority_kind" SET NOT NULL'),
     );

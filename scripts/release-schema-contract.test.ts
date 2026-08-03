@@ -175,11 +175,11 @@ describe("release schema contract", () => {
         (migrations.has("0158_document_authority_foundation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "3dfbb5719bb7b788fbc4b908bcd64e3eeb481a3321170e058310d507be89489b",
+      "1bbb44284810bed9db17dd50b2fa43759b68d1d571612b8bf9ace828ff3d0354",
     );
     expect(contract.latestMigration).toBe("0158_document_authority_foundation.sql");
     expect(migrations.get("0158_document_authority_foundation.sql")).toMatchObject({
-      sha256: "c46bc42e68e16a26833f00b9289d4d4af54e4336c34e54aa369d2fd7e8354028",
+      sha256: "8d264a505af6c5a01ca54784e4e564a7e6db2d58ee8554861fb7b959abb58814",
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0157_session_policy_role_snapshots.sql")).toMatchObject({

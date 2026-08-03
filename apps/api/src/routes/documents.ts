@@ -39,7 +39,7 @@ import {
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
@@ -85,7 +85,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/documents", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
+    const { grant } = access;
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -96,6 +97,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       quantity: 0,
     });
     const payload = AddDocumentRequest.parse(await c.req.json());
+    const organizationAuthorityGranted =
+      access.accountGrant?.permissions.includes("account:admin") === true;
+    if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
     try {
       const document = await addDocumentToBase(db, {
         ...payload,
@@ -104,6 +110,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         baseId: c.req.param("baseId"),
         createdBy: grant.subjectId,
         initiatingSubjectId: grant.subjectId,
+        organizationAuthorityGranted,
         access: { viewerSubjectId: grant.subjectId },
       });
       const wasCreated =
@@ -154,13 +161,28 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "documents:manage",
+      );
+      const { grant } = authorization;
+      const organizationAuthorityGranted = hasAccountAdminAuthority(authorization);
       try {
+        const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
+          viewerSubjectId: grant.subjectId,
+        });
+        if (!document || document.baseId !== c.req.param("baseId")) {
+          throw new HTTPException(404, { message: "document not found" });
+        }
+        requireOrganizationDocumentAuthority(document.authorityKind, organizationAuthorityGranted);
         await deleteDocumentFromBase(db, {
           accountId: grant.accountId,
           workspaceId,
           baseId: c.req.param("baseId"),
           documentId: c.req.param("documentId"),
+          organizationAuthorityGranted,
           access: { viewerSubjectId: grant.subjectId },
         });
         return c.body(null, 204);
@@ -177,7 +199,14 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "documents:manage",
+      );
+      const { grant } = authorization;
+      const organizationAuthorityGranted = hasAccountAdminAuthority(authorization);
       if (!objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
@@ -194,15 +223,22 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (!document) {
           throw new HTTPException(404, { message: "document not found" });
         }
+        requireOrganizationDocumentAuthority(document.authorityKind, organizationAuthorityGranted);
         if (document.status !== "failed") {
           throw new HTTPException(422, { message: "only failed documents can be retried" });
         }
         if (document.baseId !== c.req.param("baseId")) {
           throw new HTTPException(404, { message: "document not found" });
         }
-        const queued = await queueDocumentForReindex(db, workspaceId, document.id, {
-          viewerSubjectId: grant.subjectId,
-        });
+        const queued = await queueDocumentForReindex(
+          db,
+          workspaceId,
+          document.id,
+          {
+            viewerSubjectId: grant.subjectId,
+          },
+          organizationAuthorityGranted,
+        );
         const indexed =
           (await documentIndexer.indexDocument({
             accountId: grant.accountId,
@@ -247,6 +283,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       results: await searchDocuments(
         db,
         {
+          accountId: grant.accountId,
           workspaceId,
           baseIds: [base.id],
           query: payload.query,
@@ -269,6 +306,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       results: await searchDocuments(
         db,
         {
+          accountId: grant.accountId,
           workspaceId,
           query: payload.query,
           baseIds: payload.baseIds,
@@ -289,7 +327,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // curation is disabled.
   app.post("/v1/workspaces/:workspaceId/knowledge/drops", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
+    const { grant } = access;
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -300,6 +339,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       quantity: 0,
     });
     const payload = CreateKnowledgeDropRequest.parse(await c.req.json());
+    const organizationAuthorityGranted =
+      access.accountGrant?.permissions.includes("account:admin") === true;
+    if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
     try {
       let fileId: string;
       if (payload.text !== undefined) {
@@ -368,6 +412,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         baseId: defaultBase.id,
         createdBy: grant.subjectId,
         initiatingSubjectId: grant.subjectId,
+        organizationAuthorityGranted,
         curationStatus: "pending",
         access: { viewerSubjectId: grant.subjectId },
       });
@@ -409,7 +454,14 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Apply a curation suggestion (no body target) or move to an explicit base.
   app.post("/v1/workspaces/:workspaceId/documents/:documentId/move", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "documents:manage",
+    );
+    const { grant } = authorization;
+    const organizationAuthorityGranted = hasAccountAdminAuthority(authorization);
     const payload = MoveDocumentRequest.parse(await c.req.json().catch(() => ({})));
     try {
       const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
@@ -418,6 +470,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!document) {
         throw new HTTPException(404, { message: "document not found" });
       }
+      requireOrganizationDocumentAuthority(document.authorityKind, organizationAuthorityGranted);
       return c.json(
         Document.parse(
           await moveDocumentToBase(db, {
@@ -425,6 +478,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             documentId: document.id,
             targetBaseId: payload.targetBaseId ?? null,
+            organizationAuthorityGranted,
             access: { viewerSubjectId: grant.subjectId },
           }),
         ),
@@ -603,6 +657,9 @@ function dropFilename(preferred: string | undefined): string {
 
 function documentHttpException(error: unknown): HTTPException {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("organization document") && message.includes("exact account authority")) {
+    return new HTTPException(403, { message: "missing permission: account:admin" });
+  }
   if (message.includes("not found")) {
     return new HTTPException(404, { message });
   }
@@ -626,4 +683,19 @@ function documentHttpException(error: unknown): HTTPException {
     return new HTTPException(400, { message });
   }
   return new HTTPException(500, { message });
+}
+
+function hasAccountAdminAuthority(
+  authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
+): boolean {
+  return authorization.accountGrant?.permissions.includes("account:admin") === true;
+}
+
+function requireOrganizationDocumentAuthority(
+  authorityKind: string,
+  organizationAuthorityGranted: boolean,
+): void {
+  if (authorityKind === "organization" && !organizationAuthorityGranted) {
+    throw new HTTPException(403, { message: "missing permission: account:admin" });
+  }
 }

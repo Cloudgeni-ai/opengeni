@@ -7,4 +7,4 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks, enforce it with FORCE RLS, and preserve it through API and worker indexing.
+Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.

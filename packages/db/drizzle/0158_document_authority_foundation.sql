@@ -7,6 +7,68 @@
 SET lock_timeout = '5s';
 SET statement_timeout = '10min';
 
+-- Reject a mixed-version cutover before taking table locks. Repeat after the
+-- locks to close the connect-before-lock race. Deployment still owns the
+-- external stop/no-restart protocol after this migration commits.
+DO $document_writer_drain_before_lock$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
+    AND EXISTS (
+      SELECT 1
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND usename = 'opengeni_app'
+        AND pid <> pg_backend_pid()
+    )
+  THEN
+    RAISE EXCEPTION 'document authority activation requires all opengeni_app sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$document_writer_drain_before_lock$;
+
+-- Both tables already use FORCE RLS. The migration role owns them but may not
+-- be a superuser, so temporarily restore the ordinary owner bypass inside this
+-- transaction. Runtime roles remain subject to RLS throughout the cutover.
+-- The final policy block restores FORCE before this migration can commit.
+ALTER TABLE "documents" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "document_chunks" NO FORCE ROW LEVEL SECURITY;
+
+DO $document_writer_drain_after_lock$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
+    AND EXISTS (
+      SELECT 1
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND usename = 'opengeni_app'
+        AND pid <> pg_backend_pid()
+    )
+  THEN
+    RAISE EXCEPTION 'document authority activation requires all opengeni_app sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$document_writer_drain_after_lock$;
+
+-- This is a protocol cutover, not a replay adapter. Stop the API and every
+-- worker, wait for all document-index Temporal workflows to close, and settle
+-- every queued/indexing document before applying the migration. The row check
+-- is the database-verifiable half of that drain and prevents a legacy
+-- three-field activity payload from being resumed under the new authority
+-- contract.
+DO $document_index_drain$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM "documents" WHERE "status" IN ('queued', 'indexing')
+  ) THEN
+    RAISE EXCEPTION 'migration 0158 requires every queued/indexing document to settle before cutover'
+      USING ERRCODE = '55000',
+        HINT = 'Stop API/workers, close document-index workflows, and retry after documents are ready or failed.';
+  END IF;
+END
+$document_index_drain$;
+
 ALTER TABLE "documents" ADD COLUMN "authority_kind" text;
 ALTER TABLE "documents" ADD COLUMN "authority_workspace_id" uuid;
 ALTER TABLE "documents" ADD COLUMN "authority_subject_id" text;
@@ -21,6 +83,22 @@ UPDATE "documents"
 SET "authority_kind" = CASE WHEN "visibility" = 'private' THEN 'personal' ELSE 'workspace' END,
     "authority_workspace_id" = "workspace_id",
     "authority_subject_id" = CASE WHEN "visibility" = 'private' THEN "created_by" ELSE NULL END;
+
+-- The document is the canonical parent for every chunk identity field. Repair
+-- any legacy drift before freezing future writes with the trigger below.
+UPDATE "document_chunks" AS chunk
+SET "account_id" = document."account_id",
+    "workspace_id" = document."workspace_id",
+    "base_id" = document."base_id",
+    "file_id" = document."file_id"
+FROM "documents" AS document
+WHERE document."id" = chunk."document_id"
+  AND (
+    chunk."account_id" IS DISTINCT FROM document."account_id"
+    OR chunk."workspace_id" IS DISTINCT FROM document."workspace_id"
+    OR chunk."base_id" IS DISTINCT FROM document."base_id"
+    OR chunk."file_id" IS DISTINCT FROM document."file_id"
+  );
 
 UPDATE "document_chunks" AS chunk
 SET "authority_kind" = document."authority_kind",
@@ -50,6 +128,7 @@ ALTER TABLE "documents" ADD CONSTRAINT "documents_authority_chk" CHECK (
     "authority_kind" = 'personal'
     AND "authority_workspace_id" = "workspace_id"
     AND NULLIF(btrim("authority_subject_id"), '') IS NOT NULL
+    AND octet_length(convert_to("authority_subject_id", 'UTF8')) <= 1024
     AND "authority_subject_id" = "created_by"
   )
 );
@@ -63,6 +142,7 @@ ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_authority_chk" CHE
     "authority_kind" = 'personal'
     AND "authority_workspace_id" = "workspace_id"
     AND NULLIF(btrim("authority_subject_id"), '') IS NOT NULL
+    AND octet_length(convert_to("authority_subject_id", 'UTF8')) <= 1024
   )
 );
 
@@ -137,6 +217,7 @@ BEGIN
   IF NOT FOUND
     OR parent.account_id IS DISTINCT FROM NEW.account_id
     OR parent.workspace_id IS DISTINCT FROM NEW.workspace_id
+    OR parent.base_id IS DISTINCT FROM NEW.base_id
     OR parent.file_id IS DISTINCT FROM NEW.file_id
   THEN
     RAISE EXCEPTION 'document chunk parent identity mismatch';
@@ -171,6 +252,8 @@ BEGIN
       || 'account_id, authority_kind, authority_workspace_id, authority_subject_id))',
       table_name
     );
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', table_name);
+    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', table_name);
   END LOOP;
 END
 $$;

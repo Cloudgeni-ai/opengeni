@@ -80,7 +80,8 @@ export function buildDocumentsMcpServer(
       description: "Search indexed documents with hybrid, vector, or keyword retrieval.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input, agentAccess),
+    async (input) =>
+      searchContent(db, accountId, workspaceId, documentServices, input, agentAccess),
   );
 
   server.registerTool(
@@ -90,7 +91,8 @@ export function buildDocumentsMcpServer(
         "Search company knowledge sources with optional base, source-kind, ACL, and retrieval-mode filters.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input, agentAccess),
+    async (input) =>
+      searchContent(db, accountId, workspaceId, documentServices, input, agentAccess),
   );
 
   server.registerTool(
@@ -102,7 +104,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId, agentAccess);
+      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -121,7 +123,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId, agentAccess);
+      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -205,6 +207,7 @@ export function buildDocumentsMcpServer(
 
 async function searchContent(
   db: Database,
+  accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
   input: {
@@ -236,6 +239,7 @@ async function searchContent(
           await searchDocuments(
             db,
             {
+              accountId,
               workspaceId,
               query: input.query,
               ...(input.baseIds ? { baseIds: input.baseIds } : {}),
