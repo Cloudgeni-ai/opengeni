@@ -658,7 +658,7 @@ export function CodexRealtimeControl(props: {
             title={`Voice model: ${selectedModel.label}`}
             disabled={props.selectionDisabled}
             className={cn(
-              "inline-flex h-8 w-5 items-center justify-center rounded-r-og-md border border-l-0 outline-none",
+              "inline-flex h-8 w-6 items-center justify-center rounded-r-og-md border border-l-0 outline-none",
               "transition-[background-color,border-color,color] duration-200 ease-og-out",
               "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
               "pointer-coarse:h-11 pointer-coarse:w-7",
