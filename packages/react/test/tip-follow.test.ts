@@ -4,7 +4,9 @@ import {
   readerScrollUpPx,
   tipFollowCancel,
   tipFollowCompensateShrink,
+  tipFollowCompensateViewportShrink,
   tipFollowNoteGrowth,
+  tipFollowNoteViewportShrink,
   tipFollowStep,
   tipFollowTauMs,
   TIP_FOLLOW_HOT_IDLE_MS,
@@ -33,6 +35,20 @@ describe("tipFollowCompensateShrink", () => {
 
   test("tiny reflow shrink is ignored (no micro bob)", () => {
     expect(tipFollowCompensateShrink(1600, 2000, 1998, 400)).toBe(1600);
+  });
+});
+
+describe("tipFollowCompensateViewportShrink", () => {
+  test("at tip, chrome dock keeps the tip glued", () => {
+    expect(tipFollowCompensateViewportShrink(1500, 500, 440, 2000)).toBe(1560);
+  });
+
+  test("mid-document preserves tip distance", () => {
+    expect(tipFollowCompensateViewportShrink(1400, 500, 440, 2000)).toBe(1460);
+  });
+
+  test("tiny reflow shrink is ignored", () => {
+    expect(tipFollowCompensateViewportShrink(1500, 500, 498, 2000)).toBe(1500);
   });
 });
 
@@ -81,6 +97,37 @@ describe("tipFollowNoteGrowth", () => {
     state = tipFollowNoteGrowth(state, 1024, 1100);
     expect(state.hotUntil).toBe(1100 + TIP_FOLLOW_HOT_IDLE_MS);
     expect(state.lastHeight).toBe(1024);
+  });
+});
+
+describe("tipFollowNoteViewportShrink", () => {
+  test("viewport shrink heats like content growth", () => {
+    let state = createTipFollowState();
+    state = tipFollowNoteViewportShrink(state, 500, 1000);
+    expect(state.lastClientHeight).toBe(500);
+    expect(state.hotUntil).toBe(0);
+    state = tipFollowNoteViewportShrink(state, 440, 1100);
+    expect(state.lastClientHeight).toBe(440);
+    expect(state.hotUntil).toBe(1100 + TIP_FOLLOW_HOT_IDLE_MS);
+    expect(state.growthVelocity).toBeGreaterThan(0);
+  });
+
+  test("sub-eps shrink does not heat and HOLDS the baseline (deadband with memory)", () => {
+    let state = createTipFollowState();
+    state = tipFollowNoteViewportShrink(state, 500, 1000);
+    state = tipFollowNoteViewportShrink(state, 498, 1100);
+    expect(state.hotUntil).toBe(0);
+    // Adopting 498 here was the animated-chrome leak: every ≤eps frame of an
+    // eased dock was silently absorbed, so the tail never glued.
+    expect(state.lastClientHeight).toBe(500);
+  });
+
+  test("viewport growth is adopted immediately (no stale shrink debt invented)", () => {
+    let state = createTipFollowState();
+    state = tipFollowNoteViewportShrink(state, 500, 1000);
+    state = tipFollowNoteViewportShrink(state, 503, 1100);
+    expect(state.lastClientHeight).toBe(503);
+    expect(state.hotUntil).toBe(0);
   });
 });
 
@@ -160,6 +207,152 @@ describe("tipFollowStep", () => {
     expect(first.scrollTop).toBeGreaterThan(1400);
     expect(first.scrollTop).toBeLessThan(1628);
     expect(first.state.running).toBe(true);
+  });
+
+  test("viewport shrink (chrome/composer) tip-glues instead of soft-settle under bar", () => {
+    // Parked at tip, then chrome docks (−60 clientHeight). Same-frame tip glue.
+    const parked = {
+      ...createTipFollowState(),
+      lastHeight: 2000,
+      lastClientHeight: 500,
+      hotUntil: 0,
+      lastTs: 5_000,
+      scrollVelocity: 0,
+      growthVelocity: 0,
+    };
+    const glued = tipFollowStep(parked, {
+      scrollTop: 1500,
+      scrollHeight: 2000,
+      clientHeight: 440,
+      now: 5_016,
+      pinned: true,
+      reducedMotion: false,
+      revealed: true,
+    });
+    expect(glued.scrollTop).toBe(1560);
+    expect(glued.state.lastClientHeight).toBe(440);
+    expect(glued.state.hotUntil).toBeGreaterThan(5_000);
+
+    // Without a prior clientHeight baseline there is nothing to glue — stay put
+    // until ease (first observe only arms lastClientHeight).
+    const coldArm = tipFollowStep(createTipFollowState(), {
+      scrollTop: 1500,
+      scrollHeight: 2000,
+      clientHeight: 440,
+      now: 5_016,
+      pinned: true,
+      reducedMotion: false,
+      revealed: true,
+    });
+    expect(coldArm.state.lastClientHeight).toBe(440);
+    expect(coldArm.scrollTop).toBeLessThan(1560);
+  });
+
+  test("animated chrome dock: sub-eps shrink frames accumulate and glue once past eps", () => {
+    // SessionChrome eases its height, so a dock arrives as many small
+    // clientHeight drops. Sub-eps frames must not be silently adopted — the
+    // held baseline accumulates them and the glue recovers the FULL delta.
+    const parked = {
+      ...createTipFollowState(),
+      lastHeight: 2000,
+      lastClientHeight: 500,
+      hotUntil: 0,
+      lastTs: 5_000,
+      scrollVelocity: 0,
+      growthVelocity: 0,
+    };
+    const first = tipFollowStep(parked, {
+      scrollTop: 1500,
+      scrollHeight: 2000,
+      clientHeight: 497, // −3, sub-eps: hold, no glue yet
+      now: 5_016,
+      pinned: true,
+      reducedMotion: false,
+      revealed: true,
+    });
+    expect(first.state.lastClientHeight).toBe(500);
+    expect(first.scrollTop).toBeLessThan(1503);
+
+    const second = tipFollowStep(first.state, {
+      scrollTop: first.scrollTop,
+      scrollHeight: 2000,
+      clientHeight: 494, // accumulated −6 vs held 500: glue the full delta
+      now: 5_032,
+      pinned: true,
+      reducedMotion: false,
+      revealed: true,
+    });
+    expect(second.scrollTop).toBe(1506);
+    expect(second.state.lastClientHeight).toBe(494);
+  });
+
+  test("quantizing scroller: settle-phase sub-pixel steps accumulate — no park short of tip", () => {
+    // Real browsers snap scrollTop writes to device pixels (whole px at
+    // dpr 1). In the settle phase desiredVel = debt/τ soon yields per-frame
+    // steps under 1px; deriving the camera from the quantized DOM each frame
+    // discarded the fraction, so the write never accumulated and the follow
+    // loop spun forever ~20-50px short — the screenshot park where the tip
+    // row sits clipped under SessionChrome while still inside the pin band.
+    // The fractional camera carried in state must converge to the exact tip.
+    let state = {
+      ...createTipFollowState(),
+      lastHeight: 2100,
+      lastClientHeight: 500,
+    };
+    let dom = 1576; // target 1600 → 24px of post-burst debt, hot window lapsed
+    let now = 10_000;
+    let frames = 0;
+    while (frames < 2_000) {
+      frames += 1;
+      now += 16;
+      const result = tipFollowStep(state, {
+        scrollTop: dom,
+        scrollHeight: 2100,
+        clientHeight: 500,
+        now,
+        pinned: true,
+        reducedMotion: false,
+        revealed: true,
+      });
+      state = result.state;
+      dom = Math.floor(result.scrollTop); // the browser floors sub-pixel writes
+      if (!state.running) {
+        break;
+      }
+    }
+    expect(dom).toBe(1600);
+    expect(frames).toBeLessThan(2_000);
+  });
+
+  test("quantizing scroller: a real scroll jump beyond the 1px window resyncs the camera", () => {
+    // Prime a fractional camera position near the tip…
+    let state = {
+      ...createTipFollowState(),
+      lastHeight: 2100,
+      lastClientHeight: 500,
+    };
+    const primed = tipFollowStep(state, {
+      scrollTop: 1580,
+      scrollHeight: 2100,
+      clientHeight: 500,
+      now: 10_000,
+      pinned: true,
+      reducedMotion: false,
+      revealed: true,
+    });
+    // …then the DOM lands far away (clamp / external write). The stale
+    // fraction must NOT be trusted: the camera re-bases on the DOM position.
+    const resynced = tipFollowStep(primed.state, {
+      scrollTop: 1300,
+      scrollHeight: 2100,
+      clientHeight: 500,
+      now: 10_016,
+      pinned: true,
+      reducedMotion: false,
+      revealed: true,
+    });
+    expect(resynced.scrollTop).toBeGreaterThanOrEqual(1300);
+    expect(resynced.scrollTop).toBeLessThan(1320);
   });
 
   test("idle settle decelerates into the tip; growth breaks out to catch-up", () => {

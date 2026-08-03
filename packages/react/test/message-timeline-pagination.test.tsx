@@ -1669,6 +1669,213 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     await r.unmount();
   });
+
+  /**
+   * Park the timeline pinned at the tip with camera baselines armed against
+   * the mocked geometry (an extra commit runs driveFollow → tipFollowStep,
+   * which adopts lastHeight/lastClientHeight).
+   */
+  async function renderPinnedAtTip(frames: FrameRequestCallback[], quantize = false) {
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+      quantize,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    // Arm the camera baselines against the mocked metrics.
+    await r.rerender(<MessageTimeline events={initial} status="idle" />);
+    await drainFrames(frames);
+    expect(distanceFromBottom(scroller)).toBe(0);
+    return { r, scroller, layout, initial };
+  }
+
+  async function runFrames(frames: FrameRequestCallback[], count: number): Promise<void> {
+    for (let i = 0; i < count && frames.length > 0; i += 1) {
+      await runNextFrame(frames);
+    }
+  }
+
+  test("same-commit settle-fold + chrome dock glues BOTH shrinks in one write", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const { r, scroller, layout, initial } = await renderPinnedAtTip(frames);
+
+    // The "turn blocked" moment: an activity cluster settle-folds (−30 content)
+    // on the same frame SessionChrome docks (−60 viewport). The shrink
+    // compensation must not adopt the shrunk clientHeight without gluing it.
+    layout.setContentHeight(1970);
+    layout.setClientHeight(340);
+    await r.rerender(<MessageTimeline events={initial} status="running" />);
+
+    // Same-commit: content glue (1600−30) + viewport glue (+60) → new tip 1630.
+    expect(scroller.scrollTop).toBe(1630);
+    expect(distanceFromBottom(scroller)).toBe(0);
+    await drainFrames(frames);
+    expect(distanceFromBottom(scroller)).toBe(0);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("SessionChrome dock via ResizeObserver glues to the tip on the next frame", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const resizeCallbacks: ResizeObserverCallback[] = [];
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      const { r, scroller, layout } = await renderPinnedAtTip(frames);
+
+      // Chrome docks with no commit and no scroll event — only the RO fires.
+      layout.setClientHeight(340);
+      await actRun(() => {
+        for (const callback of resizeCallbacks) {
+          callback([], {} as ResizeObserver);
+        }
+      });
+      await runFrames(frames, 1);
+      // Tip-glue, not cold soft-settle: at the new tip within one frame.
+      expect(scroller.scrollTop).toBe(1660);
+      expect(distanceFromBottom(scroller)).toBe(0);
+      layout.restore();
+      await r.unmount();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  test("camera-write scroll echoes must not eat growth heat (nested tools keep the tip in reach)", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const { r, scroller, layout, initial } = await renderPinnedAtTip(frames);
+
+    // Kick the camera with one committed token so it is writing scrollTop.
+    layout.setContentHeight(2012);
+    await r.rerender(
+      <MessageTimeline events={[...initial, agentDelta(21, "x")]} status="running" />,
+    );
+
+    // Nested tool pills grow via motion/Radix height animation — no commit,
+    // only late layout. The browser fires the echo of the camera's previous
+    // write BEFORE the next rAF, so each frame is: grow → echo → step.
+    // Adopting lastHeight on the echo starved the step of every growth frame:
+    // the hot window lapsed mid-stream and the cold settle ceiling let the
+    // debt ratchet away under the chrome.
+    for (let i = 0; i < 30; i += 1) {
+      layout.setContentHeight(2012 + (i + 1) * 12);
+      await actRun(() => {
+        scroller.dispatchEvent(new Event("scroll"));
+      });
+      if (frames.length === 0) {
+        // Camera parked between bursts: any late-layout growth re-drives via
+        // RO in production; model that with a commit.
+        await r.rerender(
+          <MessageTimeline
+            events={[...initial, agentDelta(21, "x".repeat(i + 2))]}
+            status="running"
+          />,
+        );
+      }
+      await runFrames(frames, 1);
+    }
+
+    // The stream pauses; a HOT camera closes the remaining debt quickly.
+    await runFrames(frames, 40);
+    expect(distanceFromBottom(scroller)).toBeLessThan(48);
+    await drainFrames(frames);
+    expect(distanceFromBottom(scroller)).toBe(0);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("quantizing scroller: bursty growth then quiet converges to the exact tip (no sub-pixel park)", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    // Real browsers floor sub-pixel scrollTop writes. A nested tool burst
+    // lands (one commit, +88px), the stream pauses, and the settle-phase
+    // camera slows below 1px/frame: without a fractional camera every write
+    // is discarded, the rAF loop spins forever, and the tip parks ~20-50px
+    // under SessionChrome while still pinned (no Jump-to-latest).
+    const { r, scroller, layout, initial } = await renderPinnedAtTip(frames, true);
+
+    layout.setContentHeight(2088);
+    await r.rerender(
+      <MessageTimeline events={[...initial, agentDelta(21, "burst")]} status="running" />,
+    );
+
+    await drainFrames(frames);
+    expect(distanceFromBottom(scroller)).toBe(0);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("near-bottom reader jiggle must not eat growth heat inside the pin band", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const { r, scroller, layout, initial } = await renderPinnedAtTip(frames);
+
+    // Content grows 40px (inside PIN_THRESHOLD) with the camera idle, then a
+    // non-programmatic scroll event lands near-bottom (reader jiggle / echo of
+    // an outside write). The quiet path must not adopt the unseen growth.
+    layout.setContentHeight(2040);
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(distanceFromBottom(scroller)).toBe(40);
+
+    // The next commit's driveFollow must still see the 40px as fresh growth
+    // (hot, line-τ) — not settle cold at ~42px/s and park inside the band.
+    await r.rerender(<MessageTimeline events={initial} status="running" />);
+    await runFrames(frames, 25);
+    expect(distanceFromBottom(scroller)).toBeLessThan(8);
+    await drainFrames(frames);
+    expect(distanceFromBottom(scroller)).toBe(0);
+    layout.restore();
+    await r.unmount();
+  });
 });
 
 /**
@@ -1717,6 +1924,8 @@ function mockScrollerLayout(
     contentHeight: number;
     tipHeight: number;
     paddingBottom: number;
+    /** Snap scrollTop writes to whole pixels like a real browser at dpr 1. */
+    quantize?: boolean;
   },
 ) {
   let contentHeight = options.contentHeight;
@@ -1750,7 +1959,8 @@ function mockScrollerLayout(
     get: () => currentScrollTop,
     set: (value: number) => {
       const max = Math.max(0, contentHeight - options.clientHeight);
-      currentScrollTop = Math.max(0, Math.min(max, value));
+      const clamped = Math.max(0, Math.min(max, value));
+      currentScrollTop = options.quantize ? Math.floor(clamped) : clamped;
     },
   });
 
@@ -1810,6 +2020,10 @@ function mockScrollerLayout(
     setContentHeight(next: number) {
       contentHeight = next;
       tipTopInScroller = contentHeight - options.paddingBottom - options.tipHeight;
+    },
+    /** SessionChrome/composer dock: the scroller viewport shrinks in place. */
+    setClientHeight(next: number) {
+      options.clientHeight = next;
     },
     syncTipAtBottom() {
       currentScrollTop = Math.max(0, contentHeight - options.clientHeight);

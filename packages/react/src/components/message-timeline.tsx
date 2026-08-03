@@ -41,6 +41,7 @@ import {
   readerScrollUpPx,
   tipFollowCancel,
   tipFollowCompensateShrink,
+  tipFollowCompensateViewportShrink,
   tipFollowStep,
   supportsScrollEndEvent,
   TIP_FOLLOW_READER_UP_EPS_PX,
@@ -391,11 +392,18 @@ export function MessageTimeline({
 
   const writeScrollTop = useCallback((node: HTMLElement, top: number) => {
     const next = Math.max(0, top);
-    if (node.scrollTop === next) {
+    const before = node.scrollTop;
+    if (before === next) {
       return;
     }
     programmaticScrollRef.current += 1;
     node.scrollTop = next;
+    if (node.scrollTop === before) {
+      // The engine floored a sub-device-pixel write to a no-op: no scroll echo
+      // will ever fire. Counting it would leak the echo count and silently eat
+      // a later REAL reader scroll as programmatic.
+      programmaticScrollRef.current -= 1;
+    }
   }, []);
 
   const cancelLeaveFallback = useCallback(() => {
@@ -545,6 +553,8 @@ export function MessageTimeline({
       followRef.current = {
         ...followRef.current,
         lastHeight: node.scrollHeight,
+        lastClientHeight: node.clientHeight,
+        cameraTop: null,
       };
     },
     [cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
@@ -578,19 +588,35 @@ export function MessageTimeline({
       // hard stop → flick. Do NOT tip-ease on the same frame as a real shrink
       // (that fight was the top-of-viewport flicker).
       if (previousHeight > 0 && node.scrollHeight < previousHeight - TIP_FOLLOW_SHRINK_EPS_PX) {
-        const nextTop = tipFollowCompensateShrink(
+        let nextTop = tipFollowCompensateShrink(
           lastScrollTopRef.current,
           previousHeight,
           node.scrollHeight,
           node.clientHeight,
         );
+        // A chrome/composer dock can land on the same frame as a settle-fold
+        // (the "turn blocked" moment). Compensate BOTH in one write — adopting
+        // the shrunk clientHeight below without gluing left the chrome height
+        // behind as cold tip debt.
+        const previousClient = followRef.current.lastClientHeight;
+        if (previousClient > 0 && node.clientHeight < previousClient - TIP_FOLLOW_SHRINK_EPS_PX) {
+          nextTop = tipFollowCompensateViewportShrink(
+            nextTop,
+            previousClient,
+            node.clientHeight,
+            node.scrollHeight,
+          );
+        }
         writeScrollTop(node, nextTop);
         syncScrollBaseline(node);
         followRef.current = {
           ...followRef.current,
           lastHeight: node.scrollHeight,
+          lastClientHeight: node.clientHeight,
           running: true,
           lastTs: now,
+          // A direct glue write re-based the camera — drop any stale fraction.
+          cameraTop: null,
         };
         if (followFrameRef.current === null) {
           followFrameRef.current = requestFrame((frameNow) => {
@@ -603,7 +629,9 @@ export function MessageTimeline({
         }
         return;
       }
-      // Sub-eps height noise: adopt height without moving the camera.
+      // Sub-eps height noise: adopt height without moving the camera. Do NOT
+      // adopt clientHeight here — tipFollowStep (next line) owns that baseline
+      // and must still see a same-frame viewport shrink to glue it.
       if (previousHeight > 0 && node.scrollHeight < previousHeight) {
         followRef.current = {
           ...followRef.current,
@@ -1005,20 +1033,29 @@ export function MessageTimeline({
     }
 
     if (autoFollow && pinnedRef.current && !hasNewer) {
-      // Fold / composer shrink: compensate before baseline sync so driveFollow
-      // still sees the pre-shrink scrollTop (avoid double-subtract after clamp).
-      if (heightShrunk || maxFell) {
+      // Fold / composer / SessionChrome: viewport shrink raises maxScroll without
+      // growing content. Must hit tipFollow before we adopt the new clientHeight
+      // (the near-bottom branch used to poison lastClientHeight and skip glue).
+      const previousClient = followRef.current.lastClientHeight;
+      const viewportShrunk =
+        previousClient > 0 && node.clientHeight < previousClient - TIP_FOLLOW_SHRINK_EPS_PX;
+      // Fold / composer content shrink: compensate before baseline sync so
+      // driveFollow still sees the pre-shrink scrollTop (avoid double-subtract).
+      if (heightShrunk || maxFell || viewportShrunk) {
         readerIntentArmRef.current = false;
         clearPendingReaderLeave();
         driveFollow(node);
         return;
       }
       if (programmatic) {
+        // Camera-write echo: consume it, sync the SHELL baselines only. The
+        // camera's growth baselines (lastHeight / lastClientHeight) belong to
+        // tipFollowStep — adopting them here made every echo "consume" growth
+        // that arrived without a commit (motion/Radix height animations of
+        // nested tools, late layout). Echoes fire before rAF callbacks, so the
+        // step saw frameGrowth=0, never heated, and the cold ~42px/s settle
+        // let bursty growth park the tip under the chrome.
         syncScrollBaseline(node);
-        followRef.current = {
-          ...followRef.current,
-          lastHeight: nextHeight,
-        };
         return;
       }
       syncScrollBaseline(node);
@@ -1037,6 +1074,8 @@ export function MessageTimeline({
       }
       // Tip grew under a still viewport (no reader-up): ease back to the tip.
       // Reader/extension scroll-up in progress: do not yank — scrollend decides.
+      // Near-bottom with tipDebt≈0 stays the quiet path (do not broaden follow
+      // inside PIN_THRESHOLD — that fights small intentional scroll-ups).
       if (!nearBottomPinned && readerUp <= TIP_FOLLOW_READER_UP_EPS_PX) {
         if (!pendingReaderLeaveRef.current) {
           driveFollow(node);
@@ -1044,12 +1083,11 @@ export function MessageTimeline({
       } else if (!nearBottomPinned && readerUp > TIP_FOLLOW_READER_UP_EPS_PX) {
         pendingReaderLeaveRef.current = true;
         scheduleLeaveFallback();
-      } else {
-        followRef.current = {
-          ...followRef.current,
-          lastHeight: nextHeight,
-        };
       }
+      // Near-bottom reader jiggle: stay quiet, and leave the camera's growth
+      // baselines alone — adopting them here stole the heat of growth the
+      // step had not seen yet (the next driveFollow then settled cold and
+      // parked short inside the pin band).
       return;
     }
 
