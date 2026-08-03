@@ -4,7 +4,7 @@ import type {
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { MessageCircleQuestionIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 
@@ -33,12 +33,15 @@ export type HumanInputFormMessages = {
   /** Shown when the question list overflows the card and more content is below. */
   moreBelow: string;
   questionCount: (count: number) => string;
+  collapse: string;
+  expand: string;
   selectionHint: (min: number | null | undefined, max: number | null | undefined) => string | null;
 };
 
 export const defaultHumanInputFormMessages: HumanInputFormMessages = {
   title: "Input required",
-  description: "Answer so the agent can continue.",
+  /** Multi-question chrome has no default subtitle; hosts may still override. */
+  description: "",
   submit: "Continue",
   skip: "Skip",
   submitting: "Submitting…",
@@ -54,6 +57,8 @@ export const defaultHumanInputFormMessages: HumanInputFormMessages = {
   optional: "Optional",
   moreBelow: "More below",
   questionCount: (count) => `${count} questions`,
+  collapse: "Collapse",
+  expand: "Expand",
   selectionHint: (min, max) => {
     if (min != null && max != null) return `Choose ${min}–${max}.`;
     if (min != null) return `Choose at least ${min}.`;
@@ -75,6 +80,8 @@ export type HumanInputFormProps = {
   skipLabel?: string | undefined;
   messages?: Partial<HumanInputFormMessages> | undefined;
   autoFocus?: boolean | undefined;
+  /** Start collapsed to a compact bar (drafts still retained). */
+  defaultCollapsed?: boolean | undefined;
   className?: string | undefined;
 };
 
@@ -96,6 +103,7 @@ export function HumanInputForm({
   skipLabel,
   messages: messageOverrides,
   autoFocus = true,
+  defaultCollapsed = false,
   className,
 }: HumanInputFormProps) {
   const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
@@ -112,7 +120,7 @@ export function HumanInputForm({
         ? singleQuestion.label
           ? singleQuestion.prompt
           : (singleQuestion.helpText ?? null)
-        : messages.description
+        : messages.description || null
       : description;
   const resolvedSubmitLabel = submitLabel ?? messages.submit;
   const resolvedSkipLabel = skipLabel ?? messages.skip;
@@ -126,6 +134,7 @@ export function HumanInputForm({
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [submittingInternally, setSubmittingInternally] = useState(false);
   const [overflowBelow, setOverflowBelow] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
   const busy = submitting || submittingInternally;
@@ -137,9 +146,14 @@ export function HumanInputForm({
     setValidationErrors({});
     setSubmissionError(null);
     setSubmittingInternally(false);
-  }, [request.id, request.questions]);
+    setCollapsed(defaultCollapsed);
+  }, [request.id, request.questions, defaultCollapsed]);
 
   useEffect(() => {
+    if (collapsed) {
+      setOverflowBelow(false);
+      return;
+    }
     const node = scrollRef.current;
     if (!node) return;
     const sync = () => {
@@ -158,7 +172,7 @@ export function HumanInputForm({
       node.removeEventListener("scroll", sync);
       observer?.disconnect();
     };
-  }, [request.id, request.questions]);
+  }, [request.id, request.questions, collapsed]);
 
   const update = (
     questionId: string,
@@ -224,13 +238,67 @@ export function HumanInputForm({
     await submitResponse({ outcome: "answered", answers: result.answers });
   };
 
+  const metaBits = [
+    progressLabel,
+    !singleQuestion ? messages.questionCount(request.questions.length) : null,
+    request.expiresAt ? (
+      <>
+        {messages.deadlineLabel}{" "}
+        <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
+          {messages.formatDeadline(request.expiresAt)}
+        </time>
+      </>
+    ) : null,
+  ].filter(Boolean);
+
+  if (collapsed) {
+    return (
+      <div
+        data-human-input-request={request.id}
+        data-human-input-collapsed=""
+        aria-labelledby={titleId}
+        className={cn(
+          "og-root flex w-full items-center gap-3 rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 px-3 py-2.5 shadow-og-sm",
+          className,
+        )}
+      >
+        <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+          <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 id={titleId} className="truncate text-og-sm font-semibold text-og-fg">
+            {resolvedTitle}
+          </h2>
+          {metaBits.length > 0 ? (
+            <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">
+              {metaBits.map((bit, index) => (
+                <span key={index}>
+                  {index > 0 ? " · " : null}
+                  {bit}
+                </span>
+              ))}
+            </p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={() => setCollapsed(false)}
+          className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-og-md border border-og-border px-2.5 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg"
+        >
+          {messages.expand}
+          <ChevronDownIcon aria-hidden="true" className="size-3.5" />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <form
       data-human-input-request={request.id}
       onSubmit={(event) => void submit(event)}
       aria-labelledby={titleId}
       className={cn(
-        "og-root flex max-h-[min(28rem,50dvh)] w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
+        "og-root flex min-h-0 max-h-[min(28rem,50dvh)] w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
         className,
       )}
     >
@@ -250,9 +318,7 @@ export function HumanInputForm({
                 ) : null}
               </h2>
               {progressLabel ? (
-                <span className="text-og-xs font-medium text-og-status-waiting">
-                  {progressLabel}
-                </span>
+                <span className="text-og-xs font-medium text-og-status-waiting">{progressLabel}</span>
               ) : null}
               {!singleQuestion ? (
                 <span className="text-og-xs font-medium text-og-fg-subtle">
@@ -266,27 +332,40 @@ export function HumanInputForm({
             {request.expiresAt ? (
               <p className="mt-1 text-og-xs text-og-fg-subtle">
                 {messages.deadlineLabel}{" "}
-                <time
-                  dateTime={request.expiresAt}
-                  title={new Date(request.expiresAt).toLocaleString()}
-                >
+                <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
                   {messages.formatDeadline(request.expiresAt)}
                 </time>
               </p>
             ) : null}
             {request.allowSkip && singleQuestion ? (
-              <p className="mt-1 text-og-xs text-og-fg-subtle">Or skip and let the agent decide.</p>
+              <p className="mt-1 text-og-xs text-og-fg-subtle">
+                Or skip and let the agent decide.
+              </p>
             ) : null}
           </div>
+          <button
+            type="button"
+            onClick={() => setCollapsed(true)}
+            aria-label={messages.collapse}
+            title={messages.collapse}
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg"
+          >
+            <ChevronUpIcon aria-hidden="true" className="size-4" />
+          </button>
         </div>
       </header>
 
-      <div className="relative min-h-0 flex-1">
+      {/*
+        Outer flex-1 + overflow-hidden gets a definite height under max-h;
+        the inner scroller fills it. Putting overflow only on a growing
+        content-sized child never engages scroll.
+      */}
+      <div className="relative min-h-0 flex-1 overflow-hidden">
         <div
           ref={scrollRef}
-          className="h-full min-h-0 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+          className="h-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
         >
-          <fieldset disabled={busy} className="space-y-4 px-4 py-3">
+          <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
             {request.questions.map((question, index) => {
               if (singleQuestion) {
                 // Title already carries the question; only render the control + help extras.
@@ -334,7 +413,7 @@ export function HumanInputForm({
         </div>
         {overflowBelow ? (
           <div
-            className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
             aria-hidden="true"
           >
             <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/80 to-transparent" />
@@ -346,10 +425,7 @@ export function HumanInputForm({
       </div>
 
       {(error ?? submissionError) ? (
-        <p
-          role="alert"
-          className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
-        >
+        <p role="alert" className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed">
           {error ?? submissionError}
         </p>
       ) : null}
@@ -445,7 +521,9 @@ function QuestionControls({
               ) : null}
             </label>
           </div>
-          {question.label ? <p className="text-og-sm text-og-fg-muted">{question.prompt}</p> : null}
+          {question.label ? (
+            <p className="text-og-sm text-og-fg-muted">{question.prompt}</p>
+          ) : null}
           {question.helpText ? (
             <p id={helpId} className="text-og-xs text-og-fg-subtle">
               {question.helpText}

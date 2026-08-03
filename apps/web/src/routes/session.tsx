@@ -27,7 +27,6 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { SessionPersonalConnectionDisclosure } from "@/components/capabilities/session-personal-connection-disclosure";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
@@ -542,18 +541,6 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const terminal = isTerminalSessionStatus(props.session.status);
-  const delegatedPersonalConnections = useMemo(() => {
-    const byServer = new Map<string, { serverId: string; providerDomain: string }>();
-    for (const connection of props.queue.activePersonalConnections) {
-      byServer.set(connection.serverId, connection);
-    }
-    for (const turn of props.queue.queue) {
-      for (const connection of turn.personalConnections ?? []) {
-        byServer.set(connection.serverId, connection);
-      }
-    }
-    return [...byServer.values()];
-  }, [props.queue.activePersonalConnections, props.queue.queue]);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
     if (agents.length === 0) return undefined;
@@ -1018,11 +1005,6 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {delegatedPersonalConnections.length ? (
-        <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <SessionPersonalConnectionDisclosure connections={delegatedPersonalConnections} />
-        </div>
-      ) : null}
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">

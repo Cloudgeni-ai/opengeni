@@ -317,6 +317,47 @@ describe("HumanInputForm async host boundary", () => {
     expect(mounted.container.querySelectorAll("[data-human-input-request]")).toHaveLength(1);
   });
 
+  test("collapse hides the form body; expand brings the form back", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-collapse",
+          questions: [
+            {
+              id: "color",
+              kind: "text",
+              prompt: "Favorite color?",
+              options: [],
+              required: true,
+              allowOther: false,
+              validation: { maxLength: 40 },
+            },
+          ],
+          allowSkip: true,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+      }),
+    );
+    expect(mounted.container.querySelector("form")).not.toBeNull();
+    const collapse = mounted.container.querySelector('button[aria-label="Collapse"]');
+    expect(collapse).not.toBeNull();
+    await act(async () => {
+      (collapse as HTMLButtonElement).click();
+    });
+    expect(mounted.container.querySelector("[data-human-input-collapsed]")).not.toBeNull();
+    expect(mounted.container.querySelector("form")).toBeNull();
+    expect(mounted.container.textContent).toContain("Expand");
+    await act(async () => {
+      const expand = [...mounted!.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Expand"),
+      );
+      expand?.click();
+    });
+    expect(mounted.container.querySelector("form")).not.toBeNull();
+    expect(mounted.container.querySelector("[data-human-input-collapsed]")).toBeNull();
+  });
+
   test("admits only one callback while the first submission is unresolved", async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => {

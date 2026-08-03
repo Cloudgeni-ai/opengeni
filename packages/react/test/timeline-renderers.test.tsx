@@ -79,7 +79,7 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
-  test("renders a delivered coalesced batch with source and typed members", async () => {
+  test("renders a collapsed landmark pill; details hold typed members", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
       <MessageTimeline
@@ -108,12 +108,44 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("2 updates joined this turn");
+    expect(r.container.textContent).toContain("2 updates · Agent update, Agent finished");
+    expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(r.container.textContent).not.toContain("Input batch");
     expect(r.container.textContent).not.toContain('"sourceId"');
+    const details = r.container.querySelector("details[data-og-machine-input-batch]");
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    // Detail rows stay in the DOM for expand-on-demand audit.
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
     expect(r.container.textContent).toContain("Agent finished");
+    await r.unmount();
+  });
+
+  test("identical agent-finished members collapse to one plural pill", async () => {
+    resetTimelineEvents();
+    const members = Array.from({ length: 15 }, (_, index) => ({
+      id: `update-${index}`,
+      kind: "child_terminal_result" as const,
+      classification: "success" as const,
+      sourceId: `aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa${index.toString(16)}`,
+      summary: `A worker session you spawned has finished its work and gone idle. Worker session id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa${index.toString(16)}`,
+    }));
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-agents",
+            count: members.length,
+            members,
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("15 agents finished");
+    expect(r.container.textContent).not.toContain("updates joined this turn");
+    expect(r.container.querySelector("details[data-og-machine-input-batch]")?.open).toBe(false);
     await r.unmount();
   });
 });

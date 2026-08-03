@@ -75,6 +75,13 @@ import {
   useTurnSettleOpen,
 } from "../timeline";
 import { CopyHoverFrame } from "./copy-button";
+import {
+  MACHINE_INPUT_META,
+  cleanMachineInputSummary,
+  machineInputBatchLabel,
+  machineInputSummaryIsUseful,
+  readableMachineInputSource,
+} from "./machine-input-display";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
@@ -599,7 +606,10 @@ export function MessageTimeline({
         // the shrunk clientHeight below without gluing left the chrome height
         // behind as cold tip debt.
         const previousClient = followRef.current.lastClientHeight;
-        if (previousClient > 0 && node.clientHeight < previousClient - TIP_FOLLOW_SHRINK_EPS_PX) {
+        if (
+          previousClient > 0 &&
+          node.clientHeight < previousClient - TIP_FOLLOW_SHRINK_EPS_PX
+        ) {
           nextTop = tipFollowCompensateViewportShrink(
             nextTop,
             previousClient,
@@ -1038,7 +1048,8 @@ export function MessageTimeline({
       // (the near-bottom branch used to poison lastClientHeight and skip glue).
       const previousClient = followRef.current.lastClientHeight;
       const viewportShrunk =
-        previousClient > 0 && node.clientHeight < previousClient - TIP_FOLLOW_SHRINK_EPS_PX;
+        previousClient > 0 &&
+        node.clientHeight < previousClient - TIP_FOLLOW_SHRINK_EPS_PX;
       // Fold / composer content shrink: compensate before baseline sync so
       // driveFollow still sees the pre-shrink scrollTop (avoid double-subtract).
       if (heightShrunk || maxFell || viewportShrunk) {
@@ -2442,52 +2453,49 @@ function GoalRow({ item }: { item: GoalItem }) {
   );
 }
 
-const MACHINE_INPUT_META: Record<MachineInputBatchItem["members"][number]["kind"], string> = {
-  scheduled_occurrence: "Scheduled update",
-  goal_continuation: "Goal continued",
-  agent_message: "Agent update",
-  agent_steer_instruction: "Agent direction",
-  child_terminal_result: "Agent finished",
-};
-
 function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
   const enter = useEntranceAnimation();
-  const visible = item.members.slice(0, 3);
+  const label = machineInputBatchLabel(item.members);
+  const single = item.members.length === 1 ? item.members[0]! : null;
+  const singleSummary = single ? cleanMachineInputSummary(single.summary) : "";
+  const showCollapsedSummary =
+    single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
+
   return (
-    <div
-      className={cn(
-        enter && "animate-og-enter",
-        "rounded-og-md border border-og-border/70 bg-og-surface-1/55 px-3 py-2.5",
-      )}
-    >
-      {item.members.length > 1 && (
-        <div className="mb-2 text-xs font-medium text-og-fg-subtle">
-          {item.members.length} updates joined this turn
+    <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
+      <details className="group w-full max-w-full" data-og-machine-input-batch="">
+        <summary className="flex cursor-pointer list-none justify-center [&::-webkit-details-marker]:hidden">
+          <span
+            className={cn(
+              "inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-og-sm",
+              NEUTRAL_PILL,
+            )}
+          >
+            <ChevronRightIcon
+              aria-hidden
+              className="size-3.5 shrink-0 transition-transform group-open:rotate-90"
+            />
+            <span className="truncate">{label}</span>
+          </span>
+        </summary>
+        <div className="mx-auto mt-2 w-full max-w-lg space-y-2 border-t border-og-border/50 pt-2">
+          {item.members.map((member) => (
+            <MachineInputRow key={member.id} member={member} />
+          ))}
         </div>
-      )}
-      <div className="space-y-2">
-        {visible.map((member) => (
-          <MachineInputRow key={member.id} member={member} />
-        ))}
-      </div>
-      {item.members.length > visible.length && (
-        <details className="mt-2 pl-8 text-xs text-og-fg-muted">
-          <summary className="cursor-pointer select-none hover:text-og-fg">
-            Show {item.members.length - visible.length} more
-          </summary>
-          <div className="mt-2 space-y-2">
-            {item.members.slice(visible.length).map((member) => (
-              <MachineInputRow key={member.id} member={member} />
-            ))}
-          </div>
-        </details>
-      )}
+      </details>
+      {showCollapsedSummary ? (
+        <p className="max-w-lg px-3 text-center text-og-xs leading-4 text-og-fg-subtle">
+          {truncate(singleSummary, 160)}
+        </p>
+      ) : null}
     </div>
   );
 }
 
 function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][number] }) {
   const source = readableMachineInputSource(member.sourceId);
+  const summary = cleanMachineInputSummary(member.summary);
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
@@ -2496,25 +2504,14 @@ function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][
           {MACHINE_INPUT_META[member.kind]}
         </span>
         {source && <span className="ml-1.5 text-xs text-og-fg-subtle">from {source}</span>}
-        {member.summary && (
+        {summary ? (
           <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-og-fg">
-            {truncate(cleanMachineInputSummary(member.summary), 320)}
+            {truncate(summary, 320)}
           </p>
-        )}
+        ) : null}
       </div>
     </div>
   );
-}
-
-function readableMachineInputSource(sourceId: string): string | null {
-  const value = sourceId.trim();
-  if (!value || /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(value)) return null;
-  if (/^(goal|schedule|system):/i.test(value)) return null;
-  return value.replaceAll("_", " ");
-}
-
-function cleanMachineInputSummary(summary: string): string {
-  return summary.replace(/^\[[A-Z][A-Z _-]*(?:\s+\d+\/\d+)?\]\s*/, "").trim();
 }
 
 function NoticeRow({ item }: { item: NoticeItem }) {
