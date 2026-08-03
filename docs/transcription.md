@@ -23,14 +23,16 @@ message by itself.
 - Audio chunks and their manifest are persisted in browser IndexedDB before the UI marks
   them locally saved. Stop assembles those persisted chunks for the existing one-shot API
   upload. A failed or interrupted finalization remains recoverable across reload and Retry
-  reuses the same recording. Per-tab ownership prevents another live tab from retrying or
-  discarding active work; stale captures may be reclaimed, and retained recordings are
-  surfaced oldest-first until each is resolved. The provider result is saved locally before
-  draft mutation. If handoff confirmation is uncertain after a crash or storage failure, the
-  UI exposes an explicit saved-transcript insertion action instead of auto-transcribing or
+  reuses the same recording. A reload-stable owner ID is protected by a browser-document Web
+  Lock, with a BroadcastChannel handshake fallback, so opener-created or duplicated tabs
+  cannot reuse the same live owner. Stale captures may be reclaimed, and retained recordings
+  are surfaced oldest-first until each is resolved. The provider result is saved locally before
+  draft mutation. If handoff confirmation is uncertain after a crash or storage failure, the UI
+  exposes an explicit saved-transcript insertion action instead of auto-transcribing or
   auto-appending again. Audio and locally saved transcript results are removed only after
-  handoff is durably represented. The transcription path does not log audio or write it to
-  server object storage, and does not store transcript text server-side.
+  handoff is durably represented; transient cleanup failures are retried and garbage-collected
+  owner-safely. The transcription path does not log audio or write it to server object storage,
+  and does not store transcript text server-side.
 - Controlled error codes map to local UI copy. Provider names, secrets, and raw upstream
   detail never appear in client config or composer chrome.
 
@@ -75,7 +77,7 @@ use `voiceInput`.
 | Service port | `packages/core/src/transcription.ts` |
 | API providers + route | `apps/api/src/transcription/`, `apps/api/src/routes/transcriptions.ts` |
 | SDK binary call | `packages/sdk/src/client.ts` (`transcribeAudio`) |
-| React MediaRecorder lifecycle + recovery | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-store.ts` |
+| React MediaRecorder lifecycle + recovery | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
 | Microphone control | `packages/react/src/components/composer-transcription-control.tsx` |
 | Workspace toggle UI | `apps/web/src/components/transcription-settings.tsx` |
 
@@ -126,16 +128,19 @@ an active workspace Codex credential at selection/request time.
    `transcribeAudio` through the existing one-shot multipart endpoint.
 4. Upload/provider errors and aborts retain the recording. Mount/reload recovery claims the
    oldest available manifest, Retry reuses it without reopening the microphone, explicit
-   discard advances to the next retained recording, and live owner heartbeats prevent
-   cross-tab retry/discard until the owner releases or becomes stale.
+   discard advances to the next retained recording, and a document-held owner lock/handshake
+   plus manifest heartbeats prevents cross-tab retry/discard until the owner releases or becomes
+   stale.
 5. A successful provider result is persisted as `transcript-ready` before draft mutation.
    Handoff is then marked durably before local cleanup. A reload never auto-retranscribes or
    auto-appends `transcript-ready` data; it offers an explicit insertion action with copy that
    tells the user to check the draft first.
 6. React associates an abort controller before every finalization await and fences callbacks
-   before and after storage enumeration, upload, result persistence, and handoff. Late work
-   after Escape/unmount/workspace replacement cannot upload or append, and every acquired
-   microphone track is stopped when setup or capture exits.
+   before and after recorder-stop persistence, storage enumeration, upload, result persistence,
+   and handoff. Late work after Escape/unmount/workspace replacement cannot restore a stale
+   recording, upload, or append, and every acquired microphone track is stopped when setup or
+   capture exits. A failed post-handoff delete is retried immediately; later mounts owner-safely
+   garbage-collect any handed-off manifest and its audio chunks.
 7. Empty/whitespace transcripts do not change the draft. Workspace disablement and
    missing deployment configuration hide or block the mic without inventing provider
    controls in product UI.

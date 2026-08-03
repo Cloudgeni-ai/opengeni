@@ -99,6 +99,8 @@ export type ComposerTranscriptionControlProps = {
   className?: string | undefined;
   /** Test/embed seam. Production defaults to origin-scoped IndexedDB. */
   createRecordingStore?: (() => VoiceRecordingStore) | undefined;
+  /** Test/embed seam. Production acquires a coordinated browser-document owner lease. */
+  createOwnerId?: (() => string) | undefined;
 };
 
 const WAVEFORM_BARS = 18;
@@ -116,6 +118,7 @@ export function ComposerTranscriptionControl({
   messages: overrides,
   className,
   createRecordingStore,
+  createOwnerId,
 }: ComposerTranscriptionControlProps) {
   const composer = useChatComposer();
   const messages = { ...defaultMessages, ...overrides };
@@ -129,6 +132,7 @@ export function ComposerTranscriptionControl({
     focusInput: composer.focusInput,
     disabled: composer.disabled,
     createRecordingStore,
+    createOwnerId,
   });
   const { status } = transcription;
   const active =

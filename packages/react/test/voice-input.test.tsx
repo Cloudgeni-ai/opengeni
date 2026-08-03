@@ -119,10 +119,13 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
   readonly chunks = new Map<string, VoiceRecordingChunk>();
   failNextPersist: Error | null = null;
   failNextDiscard: Error | null = null;
+  failNextCleanup: Error | null = null;
   failNextCreate: Error | null = null;
   failHandedOffUpdate: Error | null = null;
   listChunksStarted: (() => void) | null = null;
   listChunksGate: Promise<void> | null = null;
+  stopUpdateStarted: (() => void) | null = null;
+  stopUpdateGate: Promise<void> | null = null;
 
   async createManifest(manifest: VoiceRecordingManifest): Promise<void> {
     if (this.failNextCreate) {
@@ -245,6 +248,14 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
       this.failHandedOffUpdate = null;
       throw error;
     }
+    if (
+      update.captureState === "stopped" &&
+      Object.keys(update).length === 1 &&
+      this.stopUpdateGate
+    ) {
+      this.stopUpdateStarted?.();
+      await this.stopUpdateGate;
+    }
     const updated = { ...manifest, ...update, updatedAt };
     this.manifests.set(recordingId, updated);
     return updated;
@@ -263,6 +274,32 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
     for (const [key, chunk] of this.chunks) {
       if (chunk.recordingId === recordingId) this.chunks.delete(key);
     }
+  }
+
+  async cleanupHandedOffManifests(ownership: {
+    ownerId: string;
+    staleBefore: string;
+  }): Promise<number> {
+    if (this.failNextCleanup) {
+      const error = this.failNextCleanup;
+      this.failNextCleanup = null;
+      throw error;
+    }
+    const handedOff = [...this.manifests.values()].filter(
+      (manifest) =>
+        manifest.finalizationState === "handed-off" &&
+        (!manifest.ownerId ||
+          manifest.ownerId === ownership.ownerId ||
+          !manifest.ownerHeartbeatAt ||
+          manifest.ownerHeartbeatAt <= ownership.staleBefore),
+    );
+    for (const manifest of handedOff) {
+      this.manifests.delete(manifest.recordingId);
+      for (const [key, chunk] of this.chunks) {
+        if (chunk.recordingId === manifest.recordingId) this.chunks.delete(key);
+      }
+    }
+    return handedOff.length;
   }
 
   async close(): Promise<void> {}
@@ -597,6 +634,7 @@ describe("useVoiceInput", () => {
             capability,
             workspaceEnabled: true,
             createRecordingStore: () => store,
+            createOwnerId: () => "composer-auto-owner",
           }}
         />
       );
@@ -652,6 +690,7 @@ describe("useVoiceInput", () => {
             capability,
             workspaceEnabled: true,
             createRecordingStore: () => store,
+            createOwnerId: () => "composer-cancel-owner",
           }}
         />
       );
@@ -696,6 +735,7 @@ describe("useVoiceInput", () => {
           setValue: () => undefined,
           focusInput: () => undefined,
           createRecordingStore: () => store,
+          createOwnerId: () => "size-limit-owner",
           createRecordingId: () => "recording-size-limit",
         }),
       undefined,
@@ -939,6 +979,7 @@ describe("useVoiceInput", () => {
           setValue: () => undefined,
           focusInput: () => undefined,
           createRecordingStore: () => store,
+          createOwnerId: () => "workspace-boundary-owner",
         }),
       { workspaceId: "ws-1" },
     );
@@ -970,6 +1011,66 @@ describe("useVoiceInput", () => {
       await settle(24);
     });
     expect(calls).toEqual(["ws-1"]);
+    await hook.unmount();
+  });
+
+  test("does not restore a stopped manifest after its workspace generation is replaced", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    let releaseStopUpdate!: () => void;
+    store.stopUpdateGate = new Promise<void>((resolve) => {
+      releaseStopUpdate = resolve;
+    });
+    let markStopUpdateStarted: (() => void) | null = null;
+    const stopUpdateStarted = new Promise<void>((resolve) => {
+      markStopUpdateStarted = resolve;
+    });
+    store.stopUpdateStarted = () => markStopUpdateStarted?.();
+    let recordingSequence = 0;
+    const hook = await renderHook(
+      (props: { workspaceId: string }) =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "unused", languages: [] }) },
+          workspaceId: props.workspaceId,
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => `recording-workspace-stop-${recordingSequence++}`,
+          createOwnerId: () => "workspace-stop-owner",
+        }),
+      { workspaceId: "ws-1" },
+    );
+
+    await act(async () => {
+      await hook.result.current.start();
+      hook.result.current.stop();
+      await stopUpdateStarted;
+    });
+    await hook.rerender({ workspaceId: "ws-2" });
+    await act(async () => {
+      await settle(16);
+    });
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.recordingId).toBeNull();
+
+    store.stopUpdateGate = null;
+    releaseStopUpdate();
+    await act(async () => {
+      await settle(24);
+    });
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.recordingId).toBeNull();
+
+    let startedInNewWorkspace = false;
+    await act(async () => {
+      startedInNewWorkspace = await hook.result.current.start();
+    });
+    expect(startedInNewWorkspace).toBe(true);
+    expect(hook.result.current.status).toBe("recording");
+    expect(hook.result.current.recordingId).toBe("recording-workspace-stop-1");
     await hook.unmount();
   });
 
@@ -1175,13 +1276,11 @@ describe("useVoiceInput", () => {
     expect(recoveredDraft).toBe("existing draft saved transcript");
     expect(calls).toBe(1);
     expect(recovered.result.current.status).toBe("idle");
-    expect(store.manifests.get("recording-handoff-uncertain")?.finalizationState).toBe(
-      "handed-off",
-    );
+    expect(store.manifests.has("recording-handoff-uncertain")).toBe(false);
     await recovered.unmount();
   });
 
-  test("does not expose retry after transcript handoff when local discard fails", async () => {
+  test("retries handed-off cleanup after the first local discard fails", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
     store.failNextDiscard = new Error("temporary IndexedDB cleanup failure");
@@ -1219,13 +1318,81 @@ describe("useVoiceInput", () => {
     expect(calls).toBe(1);
     expect(hook.result.current.status).toBe("idle");
     expect(hook.result.current.hasRecoverableRecording).toBe(false);
-    expect(store.manifests.get("recording-cleanup-failure")?.finalizationState).toBe("handed-off");
+    expect(store.manifests.has("recording-cleanup-failure")).toBe(false);
     await act(async () => {
       hook.result.current.retry();
       await settle();
     });
     expect(calls).toBe(1);
     await hook.unmount();
+  });
+
+  test("garbage-collects a retained handed-off record on the next same-tab mount", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    store.failNextDiscard = new Error("temporary IndexedDB discard failure");
+    let calls = 0;
+    const first = await renderHook(
+      () =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              calls += 1;
+              return { text: "delivered before cleanup", languages: [] };
+            },
+          },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-cleanup-remount",
+          createOwnerId: () => "cleanup-same-tab",
+        }),
+      undefined,
+    );
+
+    await act(async () => {
+      await first.result.current.start();
+      store.failNextCleanup = new Error("temporary IndexedDB cleanup failure");
+      first.result.current.stop();
+      await settle(30);
+    });
+    expect(calls).toBe(1);
+    expect(first.result.current.status).toBe("idle");
+    expect(store.manifests.get("recording-cleanup-remount")?.finalizationState).toBe("handed-off");
+    await first.unmount();
+
+    const recovered = await renderHook(
+      () =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              calls += 1;
+              return { text: "must not retranscribe", languages: [] };
+            },
+          },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createOwnerId: () => "cleanup-same-tab",
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await settle(20);
+    });
+    expect(recovered.result.current.status).toBe("idle");
+    expect(recovered.result.current.hasRecoverableRecording).toBe(false);
+    expect(store.manifests.has("recording-cleanup-remount")).toBe(false);
+    expect(calls).toBe(1);
+    await recovered.unmount();
   });
 
   test("surfaces a stopped recording after reload and retries without reopening the microphone", async () => {
@@ -1247,6 +1414,7 @@ describe("useVoiceInput", () => {
           focusInput: () => undefined,
           createRecordingStore: () => store,
           createRecordingId: () => "recording-reload",
+          createOwnerId: () => "reload-owner",
         }),
       undefined,
     );
@@ -1275,6 +1443,7 @@ describe("useVoiceInput", () => {
           },
           focusInput: () => undefined,
           createRecordingStore: () => store,
+          createOwnerId: () => "reload-owner",
         }),
       undefined,
     );

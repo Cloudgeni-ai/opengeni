@@ -97,6 +97,7 @@ export interface VoiceRecordingStore {
     ownerId?: string | undefined,
   ): Promise<VoiceRecordingManifest>;
   discard(recordingId: string, ownerId?: string | undefined): Promise<void>;
+  cleanupHandedOffManifests(ownership: { ownerId: string; staleBefore: string }): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -411,6 +412,36 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
     for (const key of chunkKeys) chunks.delete(key);
     manifests.delete(recordingId);
     await transactionComplete(transaction);
+  }
+
+  async cleanupHandedOffManifests(ownership: {
+    ownerId: string;
+    staleBefore: string;
+  }): Promise<number> {
+    const database = await this.database;
+    const transaction = database.transaction([MANIFEST_STORE, CHUNK_STORE], "readwrite");
+    const manifests = transaction.objectStore(MANIFEST_STORE);
+    const chunks = transaction.objectStore(CHUNK_STORE);
+    const handedOff = (await requestResult<VoiceRecordingManifest[]>(manifests.getAll()))
+      .map(normalizeManifest)
+      .filter(
+        (manifest) =>
+          manifest.finalizationState === "handed-off" &&
+          manifestAvailableToOwner(manifest, ownership),
+      );
+    const chunkKeys = await Promise.all(
+      handedOff.map((manifest) =>
+        requestResult<IDBValidKey[]>(
+          chunks.index(CHUNKS_BY_RECORDING).getAllKeys(manifest.recordingId),
+        ),
+      ),
+    );
+    handedOff.forEach((manifest, index) => {
+      for (const key of chunkKeys[index] ?? []) chunks.delete(key);
+      manifests.delete(manifest.recordingId);
+    });
+    await transactionComplete(transaction);
+    return handedOff.length;
   }
 
   async close(): Promise<void> {

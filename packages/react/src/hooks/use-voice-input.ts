@@ -8,6 +8,10 @@ import {
   type VoiceRecordingManifest,
   type VoiceRecordingStore,
 } from "../voice-recording-store";
+import {
+  acquireDefaultVoiceRecordingOwnerLease,
+  type VoiceRecordingOwnerLease,
+} from "../voice-recording-owner";
 import { appendFinalTranscript } from "./use-transcription";
 
 export type VoiceInputStatus =
@@ -67,18 +71,6 @@ export const VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS = 600;
 
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const createDefaultVoiceRecordingId = () => crypto.randomUUID();
-const VOICE_RECORDING_OWNER_SESSION_KEY = "opengeni.voice-recording-owner.v1";
-const createDefaultVoiceRecordingOwnerId = () => {
-  try {
-    const existing = globalThis.sessionStorage?.getItem(VOICE_RECORDING_OWNER_SESSION_KEY);
-    if (existing) return existing;
-    const created = crypto.randomUUID();
-    globalThis.sessionStorage?.setItem(VOICE_RECORDING_OWNER_SESSION_KEY, created);
-    return created;
-  } catch {
-    return crypto.randomUUID();
-  }
-};
 const currentDate = () => new Date();
 
 export function useVoiceInput({
@@ -92,7 +84,7 @@ export function useVoiceInput({
   disabled = false,
   createRecordingStore,
   createRecordingId = createDefaultVoiceRecordingId,
-  createOwnerId = createDefaultVoiceRecordingOwnerId,
+  createOwnerId,
   now = currentDate,
 }: UseVoiceInputOptions): UseVoiceInputResult {
   const [status, setStatus] = useState<VoiceInputStatus>("idle");
@@ -111,7 +103,9 @@ export function useVoiceInput({
   const readNow = useCallback(() => nowRef.current(), []);
   const generationRef = useRef(0);
   const ownerIdRef = useRef<string | null>(null);
-  if (!ownerIdRef.current) ownerIdRef.current = createOwnerId();
+  const ownerLeaseRef = useRef<VoiceRecordingOwnerLease | null>(null);
+  const ownerIdPromiseRef = useRef<Promise<string> | null>(null);
+  const createOwnerIdRef = useRef(createOwnerId);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,6 +127,22 @@ export function useVoiceInput({
   const statusRef = useRef(status);
   valueRef.current = value;
   statusRef.current = status;
+
+  const ensureOwnerId = useCallback(async (): Promise<string> => {
+    if (ownerIdRef.current) return ownerIdRef.current;
+    ownerIdPromiseRef.current ??= (async () => {
+      const injectedOwnerId = createOwnerIdRef.current?.();
+      if (injectedOwnerId) {
+        ownerIdRef.current = injectedOwnerId;
+        return injectedOwnerId;
+      }
+      const lease = await acquireDefaultVoiceRecordingOwnerLease();
+      ownerLeaseRef.current = lease;
+      ownerIdRef.current = lease.ownerId;
+      return lease.ownerId;
+    })();
+    return await ownerIdPromiseRef.current;
+  }, []);
 
   const stopOwnerHeartbeat = useCallback(() => {
     if (ownerHeartbeatTimerRef.current) clearInterval(ownerHeartbeatTimerRef.current);
@@ -252,13 +262,13 @@ export function useVoiceInput({
 
   const loadNextRecoverable = useCallback(
     async (generation: number): Promise<void> => {
-      const store = await ensureStore();
+      const [store, ownerId] = await Promise.all([ensureStore(), ensureOwnerId()]);
       if (generation !== generationRef.current) return;
-      const ownerId = ownerIdRef.current;
-      if (!ownerId) return;
       const staleBefore = new Date(
         readNow().getTime() - VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
       ).toISOString();
+      await store.cleanupHandedOffManifests({ ownerId, staleBefore }).catch(() => undefined);
+      if (generation !== generationRef.current) return;
       const manifests = await store.listRecoverableManifests(workspaceId, {
         ownerId,
         staleBefore,
@@ -303,7 +313,7 @@ export function useVoiceInput({
         setError(null);
       }
     },
-    [beginOwnerHeartbeat, ensureStore, readNow, rememberManifest, workspaceId],
+    [beginOwnerHeartbeat, ensureOwnerId, ensureStore, readNow, rememberManifest, workspaceId],
   );
 
   const finalizePersistedRecording = useCallback(
@@ -475,8 +485,9 @@ export function useVoiceInput({
       return false;
     }
     let store: VoiceRecordingStore;
+    let ownerId: string;
     try {
-      store = await ensureStore();
+      [store, ownerId] = await Promise.all([ensureStore(), ensureOwnerId()]);
     } catch (reason) {
       setStatus("error");
       setError(
@@ -484,6 +495,15 @@ export function useVoiceInput({
           ? "storage_unavailable"
           : errorCode(reason),
       );
+      return false;
+    }
+    if (
+      manifestRef.current !== null ||
+      statusRef.current === "requesting-permission" ||
+      statusRef.current === "recording" ||
+      statusRef.current === "saving" ||
+      statusRef.current === "transcribing"
+    ) {
       return false;
     }
     const generation = ++generationRef.current;
@@ -509,12 +529,12 @@ export function useVoiceInput({
         workspaceId,
         mimeType: recorder.mimeType || mimeType || "audio/webm",
         createdAt: createdAt.toISOString(),
-        ownerId: ownerIdRef.current,
+        ownerId,
       });
       createdManifest = manifest;
       await store.createManifest(manifest);
       if (generation !== generationRef.current) {
-        await store.discard(manifest.recordingId, ownerIdRef.current ?? undefined);
+        await store.discard(manifest.recordingId, ownerId);
         clearCaptureRuntime();
         return false;
       }
@@ -545,7 +565,7 @@ export function useVoiceInput({
           .then(async () => {
             const result = await store.persistChunk({
               recordingId: manifest.recordingId,
-              ownerId: ownerIdRef.current ?? undefined,
+              ownerId,
               chunkNumber,
               capturedAt: readNow().toISOString(),
               startMilliseconds,
@@ -575,9 +595,24 @@ export function useVoiceInput({
             const resolveSettled = resolveCaptureSettledRef.current;
             resolveCaptureSettledRef.current = null;
             resolveSettled?.();
-            if (generation !== generationRef.current) return;
-            const current = manifestRef.current ?? manifest;
+            const captureIsCurrent = () =>
+              generation === generationRef.current &&
+              ownerIdRef.current === ownerId &&
+              manifestRef.current?.recordingId === manifest.recordingId &&
+              manifestRef.current.workspaceId === workspaceId &&
+              manifestRef.current.ownerId === ownerId;
+            if (!captureIsCurrent()) return;
+            const current = manifestRef.current;
+            if (!current) return;
             const stopped = await updateManifestBestEffort(current, { captureState: "stopped" });
+            if (
+              !captureIsCurrent() ||
+              stopped.recordingId !== manifest.recordingId ||
+              stopped.workspaceId !== workspaceId ||
+              stopped.ownerId !== ownerId
+            ) {
+              return;
+            }
             rememberManifest(stopped);
             if (persistenceErrorRef.current) {
               await preserveForRetry(stopped, "storage_unavailable", generation);
@@ -614,7 +649,7 @@ export function useVoiceInput({
       const failedManifest = createdManifest as VoiceRecordingManifest | null;
       if (failedManifest && !recorderStarted) {
         const discarded = await store
-          .discard(failedManifest.recordingId, ownerIdRef.current ?? undefined)
+          .discard(failedManifest.recordingId, ownerId)
           .then(() => true)
           .catch(() => false);
         if (!discarded) {
@@ -623,7 +658,7 @@ export function useVoiceInput({
               failedManifest.recordingId,
               { captureState: "stopped", ownerId: null, ownerHeartbeatAt: null },
               readNow().toISOString(),
-              ownerIdRef.current ?? undefined,
+              ownerId,
             )
             .catch(() => undefined);
         }
@@ -647,6 +682,7 @@ export function useVoiceInput({
     createRecordingId,
     disabled,
     enabled,
+    ensureOwnerId,
     ensureStore,
     finalizePersistedRecording,
     readNow,
@@ -875,7 +911,7 @@ export function useVoiceInput({
       controllerRef.current?.abort();
       controllerRef.current = null;
       const manifest = manifestRef.current;
-      const ownerId = ownerIdRef.current;
+      const ownerReady = ownerIdPromiseRef.current;
       stopOwnerHeartbeat();
       const recorder = recorderRef.current;
       let captureSettled = persistenceQueueRef.current;
@@ -887,6 +923,8 @@ export function useVoiceInput({
       void captureSettled
         .catch(() => undefined)
         .then(async () => {
+          const ownerId =
+            ownerIdRef.current ?? (ownerReady ? await ownerReady.catch(() => null) : null);
           const store = storeRef.current;
           if (store && manifest && ownerId) {
             const wasProcessing =
@@ -914,7 +952,11 @@ export function useVoiceInput({
           }
           if (ownsStoreRef.current) await store?.close();
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => {
+          ownerLeaseRef.current?.release();
+          ownerLeaseRef.current = null;
+        });
     },
     [clearCaptureRuntime, readNow, stopOwnerHeartbeat],
   );
