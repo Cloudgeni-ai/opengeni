@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 
-const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
+export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
 
 export function sessionSupportsFleetSwitching(sandboxBackend: SandboxBackend): boolean {
   return sandboxBackend !== "none";

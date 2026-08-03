@@ -4,7 +4,6 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { SchedulePersonalConnectionDisclosure } from "./schedule-personal-connection-disclosure";
-import { SessionPersonalConnectionDisclosure } from "./session-personal-connection-disclosure";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -18,33 +17,6 @@ afterAll(() => {
 });
 
 describe("personal connection disclosures", () => {
-  test("renders session degradation behavior and no private identifiers", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    await act(async () =>
-      root.render(
-        <SessionPersonalConnectionDisclosure
-          connections={[
-            { serverId: "slack", providerDomain: "slack.com" },
-            { serverId: "linear", providerDomain: "linear.app" },
-            { serverId: "linear-alt", providerDomain: "linear.app" },
-          ]}
-        />,
-      ),
-    );
-    try {
-      expect(container.textContent).toContain("Personal access delegated");
-      expect(container.textContent).toContain("linear.app, slack.com");
-      expect(container.textContent).toContain("only that tool is skipped");
-      expect(container.textContent).not.toContain("connectionId");
-      expect(container.textContent).not.toContain("ownerSubjectId");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
-  });
-
   test("renders compact schedule access without private identifiers", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

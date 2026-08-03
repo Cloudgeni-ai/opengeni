@@ -6,7 +6,7 @@ import type {
   SessionRealtimeMode,
   SessionRealtimeModel,
 } from "@opengeni/contracts";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./index";
@@ -16,6 +16,10 @@ import {
   lockSessionEventWriteRows,
   registerSessionWorkflowWakeInTransaction,
 } from "./session-control";
+import {
+  mirrorSessionRealtimeContextInTransaction,
+  renderRealtimeHumanInputRequestContext,
+} from "./session-realtime-mirror";
 import * as schema from "./schema";
 
 export { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
@@ -445,6 +449,50 @@ export async function beginSessionRealtimeInTransaction(
     now,
   );
   eventIds.push(event.id);
+  const pendingHumanInputs = await db
+    .select({
+      id: schema.sessionHumanInputRequests.id,
+      turnId: schema.sessionHumanInputRequests.turnId,
+      questions: schema.sessionHumanInputRequests.questions,
+      allowSkip: schema.sessionHumanInputRequests.allowSkip,
+      expiresAt: schema.sessionHumanInputRequests.expiresAt,
+    })
+    .from(schema.sessionHumanInputRequests)
+    .where(
+      and(
+        eq(schema.sessionHumanInputRequests.accountId, input.accountId),
+        eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+        eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+        eq(schema.sessionHumanInputRequests.status, "pending"),
+        or(
+          isNull(schema.sessionHumanInputRequests.expiresAt),
+          gt(schema.sessionHumanInputRequests.expiresAt, now),
+        ),
+      ),
+    )
+    .orderBy(
+      asc(schema.sessionHumanInputRequests.createdAt),
+      asc(schema.sessionHumanInputRequests.id),
+    );
+  if (pendingHumanInputs.length > 0) {
+    const sourceTurnIds = new Set(pendingHumanInputs.map((request) => request.turnId));
+    await mirrorSessionRealtimeContextInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceKind: "human_input_request",
+      sourceId: `startup:${pendingHumanInputs.map((request) => request.id).join(":")}`,
+      turnId: sourceTurnIds.size === 1 ? pendingHumanInputs[0]!.turnId : null,
+      channel: "speakable",
+      text: renderRealtimeHumanInputRequestContext({ requests: pendingHumanInputs }),
+      payload: {
+        status: "waiting_for_user",
+        requestIds: pendingHumanInputs.map((request) => request.id),
+        trigger: "realtime_start",
+      },
+      now,
+    });
+  }
   return {
     mode: mapRealtimeMode(row),
     replay: false,

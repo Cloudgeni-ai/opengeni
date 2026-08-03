@@ -6,10 +6,11 @@
 // Native <details> (not Radix DropdownMenu): the densified hub otherwise pulls
 // Popper into an entriesAware share-chunk with the session graph and crashes
 // lazy /settings (`createPopperScope is not a function`).
-import { Link, useRouterState } from "@tanstack/react-router";
+import { useRouterState } from "@tanstack/react-router";
 import { ChevronUpIcon, SettingsIcon } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef } from "react";
 
+import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import { useRail } from "@/components/rail/rail-context";
 import {
   filterWorkspaceConfigGroups,
@@ -17,9 +18,7 @@ import {
   isWorkspaceConfigPath,
   WORKSPACE_CONFIG_GROUPS,
   type WorkspaceConfigGroup,
-  type WorkspaceConfigTarget,
 } from "@/components/rail/workspace-nav-data";
-import { WORKSPACE_CONFIG_ICONS } from "@/components/rail/workspace-nav-icons";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
@@ -48,7 +47,6 @@ export function WorkspaceNav() {
   const groups = filterWorkspaceConfigGroups(WORKSPACE_CONFIG_GROUPS, canReadInsights);
   const settingsActive = isWorkspaceConfigPath(pathname, rail.workspaceId);
 
-  // Mobile already has a Workspace tab — show the groups inline there.
   if (rail.isMobile) {
     return (
       <nav aria-label="Workspace" className="grid gap-2 px-2">
@@ -57,21 +55,16 @@ export function WorkspaceNav() {
             <p className="px-2 pb-0.5 pt-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
               {group.label}
             </p>
-            {group.items.map((item) => {
-              const Icon = WORKSPACE_CONFIG_ICONS[item.icon];
-              return (
-                <RailNavItem
-                  key={item.to}
-                  to={item.to}
-                  workspaceId={rail.workspaceId}
-                  icon={<Icon className="size-4" />}
-                  label={item.label}
-                  description={item.description}
-                  collapsed={false}
-                  active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
-                />
-              );
-            })}
+            {group.items.map((item) => (
+              <WorkspaceConfigLink
+                key={item.to}
+                item={item}
+                workspaceId={rail.workspaceId}
+                variant="rail"
+                collapsed={false}
+                active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+              />
+            ))}
           </div>
         ))}
       </nav>
@@ -134,85 +127,28 @@ function WorkspaceSettingsMenu(props: {
           </>
         ) : null}
       </summary>
-      <div
-        className={cn(
-          "absolute bottom-full z-50 mb-1.5 max-h-[min(36rem,75vh)] w-64 overflow-y-auto rounded-md border border-border bg-surface p-1 shadow-md",
-          props.collapsed ? "left-0" : "left-0",
-        )}
-      >
+      <div className="absolute bottom-full left-0 z-50 mb-1.5 max-h-[min(36rem,75vh)] w-64 overflow-y-auto rounded-md border border-border bg-surface p-1 shadow-md">
         {props.groups.map((group, index) => (
           <div key={group.id}>
             {index > 0 ? <div className="my-1 h-px bg-border" /> : null}
             <p className="px-2 py-1.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
               {group.label}
             </p>
-            {group.items.map((item) => {
-              const active = isConfigItemActive(props.pathname, props.workspaceId, item.to);
-              const Icon = WORKSPACE_CONFIG_ICONS[item.icon];
-              return (
-                <Link
-                  key={item.to}
-                  to={item.to}
-                  params={{ workspaceId: props.workspaceId }}
-                  data-active={active ? "true" : undefined}
-                  className={cn(
-                    "flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none",
-                    "hover:bg-accent hover:text-accent-foreground",
-                    active ? "bg-accent text-accent-foreground" : "text-fg",
-                  )}
-                  onClick={() => {
-                    if (detailsRef.current) detailsRef.current.open = false;
-                  }}
-                >
-                  <Icon className="size-4" />
-                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                </Link>
-              );
-            })}
+            {group.items.map((item) => (
+              <WorkspaceConfigLink
+                key={item.to}
+                item={item}
+                workspaceId={props.workspaceId}
+                variant="menu"
+                active={isConfigItemActive(props.pathname, props.workspaceId, item.to)}
+                onNavigate={() => {
+                  if (detailsRef.current) detailsRef.current.open = false;
+                }}
+              />
+            ))}
           </div>
         ))}
       </div>
     </details>
-  );
-}
-
-export function RailNavItem(props: {
-  to: WorkspaceConfigTarget;
-  workspaceId: string;
-  icon: ReactNode;
-  label: string;
-  /** One-line orientation for an opaque label — surfaced in the tooltip. */
-  description?: string;
-  collapsed: boolean;
-  /** Optional search params (Capabilities Packs subsection, etc.). */
-  search?: Record<string, string>;
-  /** When set, overrides Link activeProps for explicit active highlighting. */
-  active?: boolean;
-}) {
-  return (
-    <Link
-      to={props.to}
-      params={{ workspaceId: props.workspaceId }}
-      {...(props.search ? { search: props.search } : {})}
-      {...(props.active === undefined
-        ? { activeProps: { "data-active": "true" as const } }
-        : { "data-active": props.active ? ("true" as const) : undefined })}
-      aria-label={props.collapsed ? props.label : undefined}
-      title={
-        props.collapsed
-          ? [props.label, props.description].filter(Boolean).join(" — ")
-          : (props.description ?? undefined)
-      }
-      className={cn(
-        "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted transition-colors pointer-coarse:h-10",
-        "hover:bg-surface-2 hover:text-fg",
-        "data-[active=true]:bg-surface-2 data-[active=true]:text-fg",
-        props.collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",
-      )}
-    >
-      <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
-      <span className="shrink-0">{props.icon}</span>
-      {!props.collapsed ? <span className="min-w-0 truncate">{props.label}</span> : null}
-    </Link>
   );
 }

@@ -155,6 +155,7 @@ import { fileURLToPath } from "node:url";
 import {
   computerCallNormalizingFetch,
   normalizeComputerCallActions,
+  repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
@@ -271,7 +272,9 @@ setSelfhostedApplyDiff(
 
 export {
   elideSupersededViewImagePairs,
+  repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
+  stripInternalModelMetadata,
   stripReasoningEncryptedContent,
   stripReasoningIdentityFromSerializedRunState,
   neutralizeToolSearchItemsInSerializedRunState,
@@ -468,6 +471,8 @@ export type AgentSegmentInput =
       // message; ordinary messages never deserialize an SDK RunState.
       historyItems?: AgentInputItem[] | null;
       sandboxEnvelope?: Record<string, unknown> | null;
+      /** Internal proof that the caller projected the durable history clone. */
+      modelInputAlreadyProjected?: boolean;
     }
   | {
       kind: "approval";
@@ -485,6 +490,7 @@ export type AgentSegmentInput =
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   sandboxSessionState?: SandboxSessionState;
+  modelInputAlreadyProjected?: boolean;
 };
 
 export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
@@ -502,6 +508,8 @@ export type SandboxFileDownload = {
   content?: Uint8Array;
   expiresAt?: Date | string;
   sizeBytes?: number;
+  /** Finalized lowercase SHA-256 hex for integrity verification when available. */
+  sha256?: string;
 };
 
 export type SandboxFileDownloadFailure = {
@@ -1773,6 +1781,14 @@ export type BuildAgentOptions = {
   hostedWebSearch?: boolean;
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
+  // Whether this turn's resolved model accepts image input. This is derived
+  // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
+  // False removes image-only sandbox tools and projects images out of each
+  // provider request without mutating OpenGeni's durable history. Omitted keeps
+  // the legacy built-in path image-capable.
+  supportsImageInput?: boolean;
+  /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
+  inputFileMediaTypes?: readonly string[];
   // EXPLICIT computer-use tool transport, decided where provider identity is
   // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
   // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
@@ -2211,6 +2227,10 @@ const agentToolspaceTokenSessionId = new WeakMap<object, string>();
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
+// Per-turn model modality used by the literal pre-provider input filter. The
+// durable session history remains canonical; only the request clone is shaped.
+const agentSupportsImageInput = new WeakMap<object, boolean>();
+const agentInputFileMediaTypes = new WeakMap<object, readonly string[]>();
 // The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
 // backend). Read by runStream's owned branch to keep platform box-setup hooks off
 // connected machines (a user's real computer).
@@ -2394,6 +2414,10 @@ export function buildOpenGeniAgent(
     if (options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
+    agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
+    if (options.inputFileMediaTypes) {
+      agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
+    }
     maybeInstallCodexToolSearch(agent, settings, options);
     applyMcpApprovalPolicy(
       agent,
@@ -2423,6 +2447,9 @@ export function buildOpenGeniAgent(
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
+      ...(options.supportsImageInput !== undefined
+        ? { supportsImageInput: options.supportsImageInput }
+        : {}),
       ...(options.computerToolMode !== undefined
         ? { computerToolMode: options.computerToolMode }
         : {}),
@@ -2448,6 +2475,10 @@ export function buildOpenGeniAgent(
   );
   if (options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
+  }
+  agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
+  if (options.inputFileMediaTypes) {
+    agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
   }
   agentFileDownloads.set(
     agent,
@@ -2859,6 +2890,13 @@ export function withStructuredViewImageFunctionResults(tools: Tool<unknown>[]): 
   });
 }
 
+/** Remove filesystem tools whose successful output necessarily contains pixels. */
+function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.filter(
+    (capabilityTool) => capabilityTool.type !== "function" || capabilityTool.name !== "view_image",
+  );
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
@@ -2867,6 +2905,7 @@ export function buildAgentCapabilities(
     sessionSkills?: PackSkill[];
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
+    supportsImageInput?: boolean;
     // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode).
     // Omitted/unproven transport fails closed with no computer tools.
     computerToolMode?: ComputerToolMode;
@@ -2888,9 +2927,18 @@ export function buildAgentCapabilities(
   // `apply_patch` + text `view_image` variants the backend accepts — the SDK
   // handles their function_call round-trip natively, so no reimplementation.
   // Scoped to filesystem: shell() is always a function-tool transport.
+  const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
+    const transportTools =
+      options.structuredToolTransport === false
+        ? withStructuredViewImageFunctionResults(tools)
+        : tools;
+    return options.supportsImageInput === false
+      ? withoutImageInputTools(transportTools)
+      : transportTools;
+  };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false
-      ? { configureTools: withStructuredViewImageFunctionResults }
+    ...(options.structuredToolTransport === false || options.supportsImageInput === false
+      ? { configureTools: configureFilesystemTools }
       : {}),
   });
   if (options.structuredToolTransport === false) {
@@ -2934,6 +2982,7 @@ export function buildAgentCapabilities(
   // run time (the SandboxAgent merge); xdotool drives :0 regardless of whether any
   // viewer is attached, so no pixel-tunnel dependency.
   if (
+    options.supportsImageInput !== false &&
     settings.computerUseEnabled &&
     settings.sandboxDesktopEnabled &&
     desktopCapableBackend(settings.sandboxBackend)
@@ -4284,6 +4333,7 @@ export async function prepareRunInput(
           ? input.text
           : assembled,
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
+      ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
   }
   // An interrupted tool can only be resumed against a real saved run state. If the
@@ -4594,13 +4644,226 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
   };
 }
 
+const IMAGE_CONTENT_TYPES = new Set(["image", "input_image", "image_url", "computer_screenshot"]);
+const FILE_CONTENT_TYPES = new Set(["file", "input_file"]);
+const IMAGE_OMITTED_TEXT =
+  "[Image content omitted because the selected model does not support image input.]";
+const FILE_OMITTED_TEXT =
+  "[File content omitted because the selected model does not support this file type.]";
+
+function modelInputItemType(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = (value as Record<string, unknown>).type;
+  return typeof type === "string" ? type : null;
+}
+
+function modelInputFileMediaType(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const field of ["contentType", "content_type", "mediaType", "media_type", "mimeType"]) {
+    const candidate = record[field];
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.toLowerCase().split(";", 1)[0]!.trim();
+    }
+  }
+  const fileValue = record.file;
+  if (typeof fileValue === "string") {
+    const match = /^data:([^;,]+)[;,]/i.exec(fileValue);
+    if (match?.[1]) return match[1].toLowerCase();
+  }
+  if (fileValue && typeof fileValue === "object") return modelInputFileMediaType(fileValue);
+  return null;
+}
+
+function acceptsModelInputFile(value: unknown, accepted: readonly string[] | undefined): boolean {
+  if (accepted === undefined) return true;
+  const mediaType = modelInputFileMediaType(value);
+  if (!mediaType) return false;
+  return accepted.some(
+    (candidate) =>
+      candidate === mediaType ||
+      (candidate.endsWith("/*") && mediaType.startsWith(candidate.slice(0, -1))),
+  );
+}
+
+export type ModelInputProjectionPolicy = {
+  supportsImageInput: boolean;
+  inputFileMediaTypes?: readonly string[];
+};
+
+function omittedContentTextPart(kind: "image" | "file"): Record<string, string> {
+  return { type: "input_text", text: kind === "image" ? IMAGE_OMITTED_TEXT : FILE_OMITTED_TEXT };
+}
+
+function unsupportedContentKind(
+  value: unknown,
+  policy: ModelInputProjectionPolicy,
+): "image" | "file" | null {
+  const type = modelInputItemType(value) ?? "";
+  if (IMAGE_CONTENT_TYPES.has(type) && !policy.supportsImageInput) return "image";
+  if (FILE_CONTENT_TYPES.has(type) && !acceptsModelInputFile(value, policy.inputFileMediaTypes)) {
+    return "file";
+  }
+  return null;
+}
+
+function stripUnsupportedContentParts(
+  value: unknown,
+  policy: ModelInputProjectionPolicy,
+): { value: unknown; removed: boolean } {
+  if (Array.isArray(value)) {
+    let removed = false;
+    const kept: unknown[] = [];
+    for (const part of value) {
+      const kind = unsupportedContentKind(part, policy);
+      if (kind) {
+        removed = true;
+        kept.push(omittedContentTextPart(kind));
+        continue;
+      }
+      kept.push(part);
+    }
+    return { value: removed ? kept : value, removed };
+  }
+  if (unsupportedContentKind(value, policy)) {
+    return { value: undefined, removed: true };
+  }
+  return { value, removed: false };
+}
+
+function stripUnsupportedContentFromModelInputItem<T extends Record<string, unknown>>(
+  item: T,
+  policy: ModelInputProjectionPolicy,
+): T | null {
+  if (unsupportedContentKind(item, policy)) return null;
+  let clone: Record<string, unknown> | null = null;
+  for (const field of ["content", "output"] as const) {
+    if (!(field in item)) continue;
+    const originalField = item[field];
+    const projected = stripUnsupportedContentParts(originalField, policy);
+    if (!projected.removed) continue;
+    clone ??= { ...item };
+    const omittedKind = unsupportedContentKind(originalField, policy) ?? "file";
+    clone[field] =
+      projected.value === undefined ||
+      (Array.isArray(projected.value) && projected.value.length === 0)
+        ? [omittedContentTextPart(omittedKind)]
+        : projected.value;
+  }
+  return (clone ?? item) as T;
+}
+
+/** Build the non-mutating model-wire view for images and typed files. */
+export function projectModelInputForCapabilities<T extends Record<string, unknown>>(
+  items: readonly T[],
+  policy: ModelInputProjectionPolicy,
+): T[] {
+  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return items as T[];
+
+  let changed = false;
+  const projected: T[] = [];
+  for (const item of items) {
+    const type = modelInputItemType(item);
+    if (!policy.supportsImageInput && type === "computer_call") {
+      while (modelInputItemType(projected.at(-1)) === "reasoning") projected.pop();
+      changed = true;
+      continue;
+    }
+    if (!policy.supportsImageInput && type === "computer_call_result") {
+      changed = true;
+      continue;
+    }
+    const stripped = stripUnsupportedContentFromModelInputItem(item, policy);
+    if (!stripped) {
+      changed = true;
+      continue;
+    }
+    if (stripped !== item) changed = true;
+    projected.push(stripped);
+  }
+  return changed ? (repairHistoryProtocolItems(projected) as T[]) : (items as T[]);
+}
+
+/**
+ * Build the per-request view for a model's input modalities. Image-capable
+ * models receive the exact original array. Text-only models replace ordinary
+ * image parts with a visible text marker. Hosted computer call/result pairs are
+ * removed because `computer_call_result.output` cannot legally carry text.
+ * Durable history is never mutated.
+ */
+export function projectModelInputForImageSupport<T extends Record<string, unknown>>(
+  items: readonly T[],
+  supportsImageInput: boolean,
+): T[] {
+  return projectModelInputForCapabilities(items, { supportsImageInput });
+}
+
+export function incrementalModelInputProjectionFilter(
+  policy: ModelInputProjectionPolicy,
+  initialInputAlreadyProjected: boolean,
+): CallModelInputFilter | undefined {
+  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return undefined;
+  let sourcePrefixLength: number | null = initialInputAlreadyProjected ? null : -1;
+  let cachedProjectedPrefix: Array<Record<string, unknown>> | null = null;
+  return async ({ modelData }) => ({
+    ...modelData,
+    input: (() => {
+      const input = modelData.input as unknown as Array<Record<string, unknown>>;
+      if (sourcePrefixLength === null) {
+        // This exact prefix was projected before SDK state construction. Record
+        // its length; future calls inspect only items generated this turn.
+        sourcePrefixLength = input.length;
+        return modelData.input;
+      }
+      if (sourcePrefixLength < 0 || input.length < sourcePrefixLength) {
+        // Approval/human resumes restore an SDK RunState rather than receiving a
+        // preprojected durable array. Project that request once and retain only
+        // its request-local view; later calls reuse it without mutating RunState.
+        const projected = projectModelInputForCapabilities(input, policy);
+        sourcePrefixLength = input.length;
+        cachedProjectedPrefix = projected === input ? null : projected;
+        return projected as typeof modelData.input;
+      }
+      const tail = input.slice(sourcePrefixLength);
+      if (tail.length === 0) return modelData.input;
+      const projectedTail = projectModelInputForCapabilities(tail, policy);
+      const tailUnchanged =
+        projectedTail.length === tail.length &&
+        projectedTail.every((item, index) => item === tail[index]);
+      if (tailUnchanged && cachedProjectedPrefix === null) {
+        return modelData.input;
+      }
+      return [
+        ...(cachedProjectedPrefix ?? input.slice(0, sourcePrefixLength)),
+        ...projectedTail,
+      ] as typeof modelData.input;
+    })(),
+  });
+}
+
+function modelModalityProjectionFilterForAgent(
+  agent: object,
+  initialInputAlreadyProjected: boolean,
+): CallModelInputFilter | undefined {
+  return incrementalModelInputProjectionFilter(
+    {
+      supportsImageInput: agentSupportsImageInput.get(agent) !== false,
+      ...(agentInputFileMediaTypes.has(agent)
+        ? { inputFileMediaTypes: agentInputFileMediaTypes.get(agent)! }
+        : {}),
+    },
+    initialInputAlreadyProjected,
+  );
+}
+
 /**
  * The model-input filter applied before every model call. The computer_call
  * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
  * the provider-item-id strip is layered on top when the configured policy
  * selects it; the context-robustness guard then raises the proactive durable
- * compaction signal on the client-compaction path. It never trims history from
- * an individual request.
+ * compaction signal on the client-compaction path. Model-specific modality
+ * projection is composed by runAgentStream immediately before that final
+ * accounting guard.
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
@@ -4762,6 +5025,7 @@ export async function runAgentStream(
         // canonical bound at the literal final seam before accounting/provider
         // serialization so no extension can bypass the policy.
         boundModelToolOutputsFilterForSettings(settings),
+        modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
         contextRobustnessFilterForSettings(settings, {
           throwOnCompactionNeeded: Boolean(
             overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -4861,16 +5125,18 @@ export async function runAgentStream(
     : undefined;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
-  // provider-id stripping, image/budget guard), then any per-turn filter
-  // (genesis title directive). A callModelInputFilter only shapes the per-call
-  // model input; the SDK persists filtered clones into its session view, while
-  // OpenGeni's durable conversation truth is still reconciled explicitly below.
+  // provider-id stripping, output bounds), then any per-turn filter, the model's
+  // modality projection, and finally context accounting over the exact payload
+  // that can reach the provider. The SDK invokes filters on a deep request clone;
+  // OpenGeni does not pass an SDK session here and reconciles durable conversation
+  // truth from the untouched run-state history.
   const callModelInputFilter = composeCallModelInputFilters(
     [
       callModelInputFilterForSettings(settings),
       genesisTitleInputFilter,
       overrides.callModelInputFilter,
       boundModelToolOutputsFilterForSettings(settings),
+      modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
       contextRobustnessFilterForSettings(settings, {
         throwOnCompactionNeeded: Boolean(
           overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -5350,30 +5616,30 @@ export async function runOwnedSandboxSetup(
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
     await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
-    // FILE RESOURCES: withSandboxFileDownloads has the IDENTICAL provided-session
-    // blind spot (it too wraps only create/resume), so signed-URL file
-    // materialization must also run directly against the pinned box. The download
-    // command is idempotent (skips an existing file) and atomic (tmp + rename).
-    if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
-      const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
-        ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
-        ...(runAs ? { runAs } : {}),
-        ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
-      });
-      if (opts.preparedInput) {
-        appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
-      }
-    }
   } else {
-    // SELFHOSTED TOOLSPACE (parity): the platform setup hooks and file
-    // materialization stay OFF the user's real machine — but the toolspace token
-    // seed is the ONE piece of per-turn material that must reach it (a scoped,
+    // SELFHOSTED TOOLSPACE (parity): platform setup hooks stay OFF the user's
+    // real machine. The toolspace token is one narrowly-scoped per-turn input
+    // that must reach it (a scoped,
     // own-session-bound token written to $OPENGENI_TOOLSPACE_TOKEN_FILE over the
     // same off-manifest exec channel the clone-seed uses; the machine's only path
     // to programmatic tool calling). Seed it (only) here.
     const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
     if (toolspaceHooks.length > 0) {
       await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
+    }
+  }
+  // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
+  // Deliver them on every backend, including connected machines. The command is
+  // workspace-relative, integrity-verified, read-only, and atomic; repository,
+  // rig, credential, and Azure setup remain excluded above on selfhosted.
+  if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
+    const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+      ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
+      ...(runAs ? { runAs } : {}),
+      ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
+    });
+    if (opts.preparedInput) {
+      appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
     }
   }
 }
@@ -5466,7 +5732,8 @@ export async function materializeSandboxFileDownloads(
   }
   const failures: SandboxFileDownloadFailure[] = [];
   for (const download of normalizedDownloads) {
-    const targetPath = sandboxDownloadTargetPath(download);
+    const targetRelativePath = sandboxDownloadRelativePath(download);
+    const targetPath = sandboxDownloadLogicalPath(download);
     const payload = {
       fileId: download.fileId,
       path: targetPath,
@@ -5499,7 +5766,7 @@ export async function materializeSandboxFileDownloads(
       result = await runSandboxLifecycleCommand(
         session,
         {
-          cmd: sandboxFileDownloadCommand(download, targetPath),
+          cmd: sandboxFileDownloadCommand(download, targetRelativePath),
           workdir: "/workspace",
           ...(context.runAs ? { runAs: context.runAs } : {}),
           yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
@@ -6349,9 +6616,20 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
         `File download materialization requires content or a URL for ${download.fileId}`,
       );
     }
+    if (
+      download.sizeBytes !== undefined &&
+      (!Number.isSafeInteger(download.sizeBytes) || download.sizeBytes < 0)
+    ) {
+      throw new Error(`Invalid sandbox file size for ${download.fileId}: ${download.sizeBytes}`);
+    }
+    const sha256 = download.sha256?.trim().toLowerCase();
+    if (sha256 !== undefined && !/^[a-f0-9]{64}$/.test(sha256)) {
+      throw new Error(`Invalid sandbox file SHA-256 for ${download.fileId}`);
+    }
     return {
       ...download,
       mountPath,
+      ...(sha256 ? { sha256 } : {}),
     };
   });
 }
@@ -6369,8 +6647,12 @@ function assertSafeSandboxFilename(filename: string, fileId: string): void {
   }
 }
 
-function sandboxDownloadTargetPath(download: SandboxFileDownload): string {
-  return posixPath.join("/workspace", download.mountPath, download.filename);
+function sandboxDownloadRelativePath(download: SandboxFileDownload): string {
+  return posixPath.join(download.mountPath, download.filename);
+}
+
+function sandboxDownloadLogicalPath(download: SandboxFileDownload): string {
+  return posixPath.join("/workspace", sandboxDownloadRelativePath(download));
 }
 
 function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: string): string {
@@ -6378,17 +6660,58 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
     throw new Error(`File download materialization URL is empty for ${download.fileId}`);
   }
   const targetDir = posixPath.dirname(targetPath);
-  const tmpPath = `${targetPath}.opengeni-download-$$`;
+  const canVerifyExisting = download.sizeBytes !== undefined || download.sha256 !== undefined;
+  const directoryCommands: string[] = [];
+  let directory = "";
+  for (const segment of targetDir.split("/")) {
+    directory = directory ? `${directory}/${segment}` : segment;
+    directoryCommands.push(
+      `if [ -L ${shellQuote(directory)} ]; then echo ${shellQuote(`Refusing symlinked attachment directory: ${directory}`)} >&2; exit 73; fi`,
+      `mkdir -p -- ${shellQuote(directory)}`,
+    );
+  }
+  const verificationCommands = [
+    "verify_attachment() {",
+    '  candidate="$1"',
+    '  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1',
+    ...(download.sizeBytes !== undefined
+      ? [
+          "  actual_size=$(wc -c < \"$candidate\" | tr -d '[:space:]')",
+          `  [ "$actual_size" = ${shellQuote(String(download.sizeBytes))} ] || return 1`,
+        ]
+      : []),
+    ...(download.sha256
+      ? [
+          "  if command -v sha256sum >/dev/null 2>&1; then",
+          "    actual_sha=$(sha256sum \"$candidate\" | awk '{print $1}')",
+          "  elif command -v shasum >/dev/null 2>&1; then",
+          "    actual_sha=$(shasum -a 256 \"$candidate\" | awk '{print $1}')",
+          "  else",
+          '    echo "No SHA-256 verifier is available for attachment delivery" >&2',
+          "    return 2",
+          "  fi",
+          `  [ "$actual_sha" = ${shellQuote(download.sha256)} ] || return 1`,
+        ]
+      : []),
+    "  return 0",
+    "}",
+  ];
   return [
     "set +x",
     "set -eu",
-    `mkdir -p -- ${shellQuote(targetDir)}`,
-    `if [ ! -f ${shellQuote(targetPath)} ]; then`,
-    `  tmp=${shellQuote(tmpPath)}`,
+    ...directoryCommands,
+    ...verificationCommands,
+    `if [ -L ${shellQuote(targetPath)} ]; then echo ${shellQuote("Refusing symlinked attachment target")} >&2; exit 73; fi`,
+    `if [ -e ${shellQuote(targetPath)} ] && [ ! -f ${shellQuote(targetPath)} ]; then echo ${shellQuote("Refusing non-file attachment target")} >&2; exit 73; fi`,
+    `if ${canVerifyExisting ? `verify_attachment ${shellQuote(targetPath)}` : "false"}; then`,
+    "  :",
+    "else",
+    `  tmp=$(mktemp ${shellQuote(`${targetPath}.opengeni-download.XXXXXX`)})`,
     '  cleanup() { rm -f -- "$tmp"; }',
     "  trap cleanup EXIT",
     `  curl --fail --location --silent --show-error --retry 3 --retry-delay 1 --output "$tmp" ${shellQuote(download.url)}`,
-    `  mv -- "$tmp" ${shellQuote(targetPath)}`,
+    '  if ! verify_attachment "$tmp"; then echo "Downloaded attachment failed size or SHA-256 verification" >&2; exit 74; fi',
+    `  mv -f -- "$tmp" ${shellQuote(targetPath)}`,
     "  trap - EXIT",
     "fi",
     `chmod a-w -- ${shellQuote(targetPath)} 2>/dev/null || true`,

@@ -32,6 +32,7 @@ import {
   boundModelToolOutputItems,
   DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 } from "@opengeni/codex";
+import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 
 /** A history item is any JSON object; we only inspect a few discriminator fields. */
 export type HistoryItem = Record<string, unknown>;
@@ -146,10 +147,7 @@ function callIdOf(item: unknown): string | undefined {
  * types exist with that id, the call appearing before the result. Calls and
  * results that satisfy that survive untouched.
  */
-export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
-  items: readonly T[],
-  toolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
-): T[] {
+export function repairHistoryProtocolItems<T extends HistoryItem>(items: readonly T[]): T[] {
   if (items.length === 0) {
     return [];
   }
@@ -241,10 +239,20 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
 
   const paired =
     dropped.size === 0 ? items.slice() : items.filter((_item, index) => !dropped.has(index));
-  return boundModelToolOutputItems(
-    paired.map(stripInternalResumeMarker),
-    toolOutputTruncationTokens,
-  );
+  return paired.map(stripInternalModelMetadata);
+}
+
+/**
+ * Canonical model-wire boundary: protocol repair plus the configured tool
+ * output bound. Keeping these operations separately callable prevents a later
+ * modality projection from accidentally applying the default output limit a
+ * second time.
+ */
+export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
+  items: readonly T[],
+  toolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): T[] {
+  return boundModelToolOutputItems(repairHistoryProtocolItems(items), toolOutputTruncationTokens);
 }
 
 /**
@@ -255,6 +263,15 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
  * an import cycle; context-compaction re-exports it.
  */
 export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
+
+/** Remove OpenGeni-only durable fields before an SDK/provider sees the item. */
+export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
+  const withoutResume = stripInternalResumeMarker(item);
+  if (!(MODEL_ATTACHMENT_REFS_FIELD in withoutResume)) return withoutResume;
+  const clone = { ...withoutResume } as Record<string, unknown>;
+  delete clone[MODEL_ATTACHMENT_REFS_FIELD];
+  return clone as T;
+}
 
 /**
  * Remove the {@link INTERNAL_RESUME_MESSAGE_MARKER} providerData key from a

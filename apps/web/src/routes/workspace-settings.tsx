@@ -2,9 +2,8 @@
 // name/rename, members, API keys, memory/transcription/Codex policy, Codex
 // subscriptions, and a danger zone with workspace deletion. The org/billing
 // console lives at Organization settings.
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import {
-  BoxIcon,
   BrainCircuitIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -26,6 +25,7 @@ import { toast } from "sonner";
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
 import { LoadErrorState } from "@/components/common";
+import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import {
   WORKSPACE_BROWSE_ITEMS,
   type WorkspaceConfigItem,
@@ -65,24 +65,18 @@ function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boo
   const items = WORKSPACE_BROWSE_ITEMS.filter(
     (item: WorkspaceConfigItem) => !item.requiresAdmin || props.canReadInsights,
   );
-  // Leaf catalog only. Importing the rail icon map into this lazy route creates
-  // an eager shared-chunk edge between the app shell and workspace settings.
   return (
     <nav aria-label="Browse workspace" className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
       <span className="mr-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
         Browse
       </span>
       {items.map((item) => (
-        <Link
+        <WorkspaceConfigLink
           key={item.to}
-          to={item.to}
-          params={{ workspaceId: props.workspaceId }}
-          title={item.description}
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-        >
-          {item.icon === "box" ? <BoxIcon className="size-3.5 shrink-0 text-brand" /> : null}
-          {item.label}
-        </Link>
+          item={item}
+          workspaceId={props.workspaceId}
+          variant="browse"
+        />
       ))}
     </nav>
   );

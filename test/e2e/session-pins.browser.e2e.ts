@@ -1112,6 +1112,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       `Mobile pin ${"long title ".repeat(20)}`.slice(0, 200),
     );
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+    // Wait for the session shell before sampling React commits — a cold goto can
+    // read the probe at 0 before the first paint registers.
+    await page.getByRole("button", { name: "Pin session" }).waitFor();
     const initialCommits = await reactCommitCount(page);
     expect(initialCommits).toBeGreaterThan(0);
     await page.getByRole("button", { name: "Pin session" }).click();

@@ -2167,7 +2167,7 @@ describe("useComposer durable draft and control binding", () => {
     const fileId = "33333333-3333-4333-8333-333333333333";
     const canonicalFile = {
       kind: "file" as const,
-      mountPath: `files/${fileId}`,
+      mountPath: `.opengeni/files/${fileId}`,
       fileId,
     };
     let serverDraft: ComposerDraft = {
@@ -2187,7 +2187,7 @@ describe("useComposer durable draft and control binding", () => {
         resource.kind === "file"
           ? {
               kind: "file" as const,
-              mountPath: resource.mountPath ?? `files/${resource.fileId}`,
+              mountPath: resource.mountPath ?? `.opengeni/files/${resource.fileId}`,
               fileId: resource.fileId,
             }
           : resource,

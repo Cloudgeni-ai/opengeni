@@ -56,7 +56,8 @@ import {
   isTransientProviderError,
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
-  modelAcceptsTypedAttachmentContentForTurn,
+  modelAttachmentInputPolicyForTurn,
+  modelSupportsImageInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseUsageContextSignal,
@@ -67,6 +68,7 @@ import {
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
+  requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
   safeErrorDiagnostic,
   sandboxDeadlineRotationRecoveryDelayMs,
@@ -2648,6 +2650,17 @@ describe("Codex credential lease deadline fence", () => {
 });
 
 describe("sandbox file materialization note", () => {
+  test("uses the active backend when deciding whether attachments need signed delivery", () => {
+    const modalHome = testSettings({
+      sandboxBackend: "modal",
+      objectStorageBackend: "s3-compatible",
+    });
+    expect(requiresSignedFileResourceDownloads(modalHome, "modal")).toBe(false);
+    expect(requiresSignedFileResourceDownloads(modalHome, "selfhosted")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "docker")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "none")).toBe(false);
+  });
+
   test("filters downloads already materialized on the current box", () => {
     const downloads = [
       {
@@ -3265,8 +3278,11 @@ describe("transient provider error classifier", () => {
 // EXPLICIT computer-use tool transport there instead of letting the runtime string-sniff
 // the model instance's constructor name. This seam pins the provider→mode mapping.
 describe("computerToolModeForTurn (explicit computer-use transport derivation)", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi) =>
-    ({ provider: { kind, api } }) as Parameters<typeof computerToolModeForTurn>[0];
+  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, image = true) =>
+    ({
+      provider: { kind, api },
+      configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
+    }) as Parameters<typeof computerToolModeForTurn>[0];
 
   test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
     // api is irrelevant once kind is codex-subscription — codex wins.
@@ -3282,6 +3298,13 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 
   test("a registry responses provider → hosted", () => {
     expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
+  });
+
+  test("any text-only model → disabled before provider transport selection", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "responses", false))).toBe("disabled");
+    expect(computerToolModeForTurn(resolved("codex-subscription", "responses", false))).toBe(
+      "disabled",
+    );
   });
 
   test("Gateway Responses models do not inherit OpenAI hosted computer tools", () => {
@@ -3332,17 +3355,45 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   });
 });
 
-describe("modelAcceptsTypedAttachmentContentForTurn", () => {
-  const resolved = (api: ModelProviderApi) =>
-    ({ provider: { api } }) as Parameters<typeof modelAcceptsTypedAttachmentContentForTurn>[0];
+describe("modelAttachmentInputPolicyForTurn", () => {
+  const resolved = (api: ModelProviderApi, image: boolean, files: string[] = []) =>
+    ({
+      provider: { api },
+      configured: {
+        capabilities: {
+          inputModalities: image ? ["text", "image"] : ["text"],
+          inputFileMediaTypes: files,
+        },
+      },
+    }) as Parameters<typeof modelAttachmentInputPolicyForTurn>[0];
 
-  test("accepts built-in and registry Responses transports", () => {
-    expect(modelAcceptsTypedAttachmentContentForTurn(null)).toBe(true);
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("responses"))).toBe(true);
+  test("keeps image and file capabilities independent on Responses", () => {
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", true, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: ["application/pdf"] });
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", false, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: ["application/pdf"] });
   });
 
-  test("keeps chat-completions providers on the sandbox-path fallback", () => {
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("chat"))).toBe(false);
+  test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
+    expect(modelAttachmentInputPolicyForTurn(resolved("chat", true, ["application/pdf"]))).toEqual({
+      supportsImageInput: false,
+      inputFileMediaTypes: [],
+    });
+  });
+});
+
+describe("modelSupportsImageInputForTurn", () => {
+  const resolved = (inputModalities: string[]) =>
+    ({ configured: { capabilities: { inputModalities } } }) as Parameters<
+      typeof modelSupportsImageInputForTurn
+    >[0];
+
+  test("derives image support only from the model capability contract", () => {
+    expect(modelSupportsImageInputForTurn(null)).toBe(true);
+    expect(modelSupportsImageInputForTurn(resolved(["text", "image"]))).toBe(true);
+    expect(modelSupportsImageInputForTurn(resolved(["text"]))).toBe(false);
   });
 });
 

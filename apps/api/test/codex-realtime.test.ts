@@ -195,8 +195,18 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).toContain(
       "accepted_for_steering means it was given priority as a change of direction, while any prior work may still be yielding",
     );
+    expect(captured?.instructions).toContain(
+      "Live context wrapped in <session_human_input_request> means current work is paused for the user's answer.",
+    );
+    expect(captured?.instructions).toContain(
+      "If the user answers conversationally, create exactly one delegation containing the relevant question and the user's answer",
+    );
+    expect(captured?.instructions).toContain(
+      "An answered or skipped response came through the structured session UI and is already routed",
+    );
     expect(captured?.instructions).not.toContain("OpenGeni");
     expect(captured?.instructions).not.toContain("client delegation");
+    expect(captured?.instructions).not.toContain("Steer with");
   });
 
   test("bounds additional realtime guidance and keeps server rules authoritative", () => {

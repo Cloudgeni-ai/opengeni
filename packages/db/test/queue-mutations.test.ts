@@ -922,7 +922,7 @@ describe("canonical queue commands", () => {
       const bareResource = { kind: "file" as const, fileId };
       const canonicalResource = {
         ...bareResource,
-        mountPath: `files/${fileId}`,
+        mountPath: `.opengeni/files/${fileId}`,
       };
       const draft = await withWorkspaceSubjectRls(
         client.db,
@@ -996,7 +996,7 @@ describe("canonical queue commands", () => {
       const bareResource = { kind: "file" as const, fileId };
       const canonicalResource = {
         ...bareResource,
-        mountPath: `files/${fileId}`,
+        mountPath: `.opengeni/files/${fileId}`,
       };
       const draft = await withWorkspaceSubjectRls(
         client.db,

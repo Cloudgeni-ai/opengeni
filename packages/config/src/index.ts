@@ -108,7 +108,7 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "Follow the user's task and any enabled pack or skill instructions for the current role.",
   "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
-  "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
+  "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
   "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
   "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
@@ -1176,6 +1176,8 @@ export const ModelCapabilitiesV1Schema = z
       codeExecution: CapabilityStateV1Schema,
     }),
     inputModalities: z.array(ModelModalityV1).min(1),
+    /** Exact MIME types accepted as typed `input_file`; `text/*` is allowed. */
+    inputFileMediaTypes: z.array(z.string()).default([]),
     outputModalities: z.array(ModelModalityV1).min(1),
     transports: z.object({
       sse: CapabilityStateV1Schema,
@@ -2271,6 +2273,7 @@ function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabili
     inputModalities: [...parsed.inputModalities].sort(
       (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
     ),
+    inputFileMediaTypes: [...new Set(parsed.inputFileMediaTypes)].sort(),
     outputModalities: [...parsed.outputModalities].sort(
       (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
     ),
@@ -2283,7 +2286,7 @@ function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabili
 
 function legacyModelCapabilities(
   settings: Settings,
-  input: { reasoningEffort: boolean; hostedWebSearch: boolean },
+  input: { reasoningEffort: boolean; hostedWebSearch: boolean; vision?: boolean },
 ): ModelCapabilitiesV1 {
   const reasoningEfforts = input.reasoningEffort ? configuredAllowedReasoningEfforts(settings) : [];
   return normalizeCapabilities({
@@ -2304,7 +2307,14 @@ function legacyModelCapabilities(
       xSearch: { upstream: "unknown", runnable: false },
       codeExecution: { upstream: "unknown", runnable: false },
     },
-    inputModalities: ["text"],
+    inputModalities: input.vision ? ["text", "image"] : ["text"],
+    inputFileMediaTypes: [
+      "application/json",
+      "application/pdf",
+      "application/x-yaml",
+      "application/yaml",
+      "text/*",
+    ],
     outputModalities: ["text"],
     transports: {
       sse: { upstream: "unknown", runnable: true },
@@ -2334,7 +2344,7 @@ export function gatewayRequestPolicyForUpstreamModel(
 
 function gatewayModelCapabilities(
   settings: Settings,
-  input: { implicitCaching: boolean; vision: boolean },
+  input: { implicitCaching: boolean; vision: boolean; inputFileMediaTypes?: string[] },
 ): ModelCapabilitiesV1 {
   const legacy = legacyModelCapabilities(settings, {
     reasoningEffort: true,
@@ -2344,6 +2354,7 @@ function gatewayModelCapabilities(
     ...legacy,
     functionCalling: { upstream: "supported", runnable: true },
     inputModalities: input.vision ? ["text", "image"] : ["text"],
+    inputFileMediaTypes: input.inputFileMediaTypes ?? [],
     transports: {
       ...legacy.transports,
       sse: { upstream: "supported", runnable: true },
@@ -2373,6 +2384,7 @@ function gatewayRegistryProvider(
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
         vision: kimi,
+        inputFileMediaTypes: kimi ? ["application/pdf"] : [],
       }),
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 900_000,
@@ -2755,6 +2767,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: true,
+          vision: slug.startsWith("gpt-5.6-"),
         }),
         ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
           ? {
@@ -2941,6 +2954,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
+          vision: id.startsWith("gpt-5.6-"),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }

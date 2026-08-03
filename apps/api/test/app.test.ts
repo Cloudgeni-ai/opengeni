@@ -208,7 +208,7 @@ describe("API helpers", () => {
       {
         kind: "file",
         fileId,
-        mountPath: `files/${fileId}`,
+        mountPath: `.opengeni/files/${fileId}`,
       },
     ]);
   });

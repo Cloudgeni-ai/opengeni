@@ -510,6 +510,8 @@ export type RunOnResult = {
   target: string;
   kind: string;
   ok: boolean;
+  /** Display name of the target sandbox when known (from the sandboxes row). */
+  targetName?: string;
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
@@ -628,6 +630,7 @@ export async function runOnSandbox(
   if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
     return {
       target,
+      targetName: sandbox.name,
       kind: op.kind,
       ok: false,
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
@@ -635,10 +638,16 @@ export async function runOnSandbox(
   }
   const enrollment = await getEnrollment(services.db, ctx.workspaceId, sandbox.enrollmentId);
   if (!enrollment || enrollment.status !== "active") {
-    return { target, kind: op.kind, ok: false, reason: `sandbox ${target} is not enrolled/active` };
+    return {
+      target,
+      targetName: sandbox.name,
+      kind: op.kind,
+      ok: false,
+      reason: `sandbox ${target} is not enrolled/active`,
+    };
   }
 
-  return executeRunOnSelfhostedMachine(
+  const result = await executeRunOnSelfhostedMachine(
     {
       workspaceId: ctx.workspaceId,
       agentId: sandbox.enrollmentId,
@@ -650,6 +659,7 @@ export async function runOnSandbox(
     target,
     op,
   );
+  return { ...result, targetName: sandbox.name };
 }
 
 export type ProvisionResult =

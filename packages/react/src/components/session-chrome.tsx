@@ -18,6 +18,7 @@
  * | `--og-session-chrome-chip-pad-x` / `--og-session-chrome-chip-gap` | Chip padding / rail gap |
  * | `--og-session-chrome-rail-pad` | Outer rail inset |
  * | `--og-session-chrome-panel-pad-x` / `-y` | Expanded panel padding |
+ * | `--og-session-chrome-panel-max-height` | Cap for expanded body (scrolls inside) |
  * | `--og-session-chrome-duration` / `--og-session-chrome-ease` | Expand + pill motion |
  * | `--og-session-chrome-crossfade-duration` | Segment content opacity crossfade |
  * | `--og-session-chrome-row-hover` | Inbox / queue row hover wash |
@@ -664,8 +665,9 @@ export function SessionChrome({
           >
             <div
               ref={panelBodyRef}
-              className="relative border-t border-og-border/50"
+              className="relative overflow-y-auto overscroll-contain border-t border-og-border/50"
               style={{
+                maxHeight: "var(--og-session-chrome-panel-max-height)",
                 paddingInline: "var(--og-session-chrome-panel-pad-x)",
                 paddingBlock: "var(--og-session-chrome-panel-pad-y)",
               }}

@@ -100,6 +100,8 @@ export async function maybeCompactContext(
      * append again — the event is already durable.
      */
     publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+    /** Turn-scoped attachment/modality view; canonical persisted rows stay untouched. */
+    projectModelInput?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
   } = {},
 ): Promise<MaybeCompactResult> {
   if (options.codexCompactionMode === "remote_v2" && options.isCodexSubscriptionTurn !== true) {
@@ -142,9 +144,16 @@ export async function maybeCompactContext(
     };
   }
 
-  const items = sanitizeHistoryItemsForModel(
-    applyCodexHistoryStrip(active, options.codexAccount ?? { currentCodexCredentialId: null }),
+  const canonicalItems = applyCodexHistoryStrip(
+    active,
+    options.codexAccount ?? { currentCodexCredentialId: null },
   ) as CompactionItem[];
+  const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> =>
+    sanitizeHistoryItemsForModel(
+      options.projectModelInput ? await options.projectModelInput(input) : input,
+      settings.modelToolOutputTruncationTokens,
+    ) as CompactionItem[];
+  const items = await projectForWire(canonicalItems);
   const decision = decideCompaction({
     items,
     lastInputTokens,
@@ -181,7 +190,16 @@ export async function maybeCompactContext(
   await options.publishLiveEvents?.(started.events);
 
   if (useRemoteV2) {
-    const outcome = await compactContextRemoteV2(db, settings, scope, items, decision, options);
+    const outcome = await compactContextRemoteV2(
+      db,
+      settings,
+      scope,
+      canonicalItems,
+      items,
+      decision,
+      options,
+      projectForWire,
+    );
     return prependCompactionEvents(started.events, outcome);
   }
 
@@ -189,10 +207,12 @@ export async function maybeCompactContext(
     db,
     settings,
     scope,
+    canonicalItems,
     items,
     decision,
     summarize,
     options,
+    projectForWire,
   );
   return prependCompactionEvents(started.events, outcome);
 }
@@ -285,6 +305,7 @@ async function compactContextRemoteV2(
     executionGeneration: number;
     attemptId: string;
   },
+  canonicalItems: CompactionItem[],
   items: CompactionItem[],
   decision: { signalTokens: number; thresholdTokens: number },
   options: {
@@ -293,6 +314,7 @@ async function compactContextRemoteV2(
     requestRemoteCompactionV2?: RemoteCompactionV2Requester;
     producerCodexCredentialId?: string | null;
   },
+  projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
   if (!options.requestRemoteCompactionV2) {
     throw new EmptyCompactionSummaryError({
@@ -305,8 +327,8 @@ async function compactContextRemoteV2(
   // No local "must shrink / must differ" gate — that is portable-only.
   // Fail closed on provider/extract failure — no portable fallback.
   const compactionItem = await options.requestRemoteCompactionV2(settings, items);
-  const replacementHistory = buildRemoteV2ReplacementHistory(items, compactionItem);
-  const estimatedTokensAfter = estimateTokens(replacementHistory);
+  const replacementHistory = buildRemoteV2ReplacementHistory(canonicalItems, compactionItem);
+  const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
   const tailItem = replacementHistory.at(-1);
   if (!tailItem) {
@@ -365,6 +387,7 @@ async function compactContextPortable(
     executionGeneration: number;
     attemptId: string;
   },
+  canonicalItems: CompactionItem[],
   items: CompactionItem[],
   decision: { signalTokens: number; thresholdTokens: number },
   summarize: CompactionSummarizer,
@@ -372,14 +395,15 @@ async function compactContextPortable(
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
   },
+  projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
   const estimatedTokensBefore = estimateTokens(items);
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const summaryBody = summarized.summaryBody;
-  const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
-  const estimatedTokensAfter = estimateTokens(replacementHistory);
+  const replacementHistory = buildCompactionReplacementHistory(canonicalItems, summaryBody);
+  const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
-  const previousReplacementFingerprint = latestCompactionReplacementFingerprint(items);
+  const previousReplacementFingerprint = latestCompactionReplacementFingerprint(canonicalItems);
   const summaryItem = replacementHistory.at(-1);
   if (!summaryItem) {
     // Started already fanout; settle visibly so the landmark cannot stick on

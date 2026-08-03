@@ -2957,6 +2957,14 @@ export const FileResourceRef = z.object({
 });
 export type FileResourceRef = z.infer<typeof FileResourceRef>;
 
+/**
+ * Private durable metadata carried on user history items. It contains only
+ * stable file references, never file bytes, and is removed before model wire
+ * serialization. Keeping the references beside the message lets a later turn
+ * reconstruct the same typed attachment input after a model switch or retry.
+ */
+export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
+
 export const ResourceRef = z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]);
 export type ResourceRef = z.infer<typeof ResourceRef>;
 
@@ -3043,10 +3051,12 @@ export function defaultRepositoryMountPath(uri: string): string {
 }
 
 /** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
+export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
+
 export function resourceMountPath(resource: ResourceRef): string {
   if (resource.mountPath) return normalizeResourceMountPath(resource.mountPath);
   return resource.kind === "file"
-    ? normalizeResourceMountPath(`files/${resource.fileId}`)
+    ? normalizeResourceMountPath(`${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`)
     : defaultRepositoryMountPath(resource.uri);
 }
 
@@ -8597,10 +8607,10 @@ export const HumanInputQuestion = z
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
     allowOther: z.boolean().default(false),
+    // Selection bounds only — agents invent useless text char mins/maxes.
+    // Answer strings stay platform-capped on HumanInputAnswer (~8192).
     validation: z
       .object({
-        minLength: z.number().int().nonnegative().max(8192).nullable().optional(),
-        maxLength: z.number().int().positive().max(8192).nullable().optional(),
         minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
         maxSelections: z.number().int().positive().max(20).nullable().optional(),
       })
@@ -8639,17 +8649,6 @@ export const HumanInputQuestion = z
       });
     }
     const validation = question.validation;
-    if (
-      validation?.minLength != null &&
-      validation?.maxLength != null &&
-      validation.minLength > validation.maxLength
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["validation"],
-        message: "minLength exceeds maxLength",
-      });
-    }
     if (
       validation?.minSelections != null &&
       validation?.maxSelections != null &&
@@ -9525,6 +9524,7 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
       codeExecution: ModelCapabilityStateV1,
     }),
     inputModalities: z.array(z.enum(["text", "image", "audio"])),
+    inputFileMediaTypes: z.array(z.string()).optional(),
     outputModalities: z.array(z.enum(["text", "image", "audio"])),
     transports: z.object({
       sse: ModelCapabilityStateV1,

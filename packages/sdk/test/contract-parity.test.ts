@@ -26,6 +26,7 @@ import {
   WorkspaceMemorySearchRequest as ContractWorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse as ContractWorkspaceMemorySearchResponse,
   DESKTOP_STREAM_PORT,
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT as CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   ListWorkspaceMembersResponse as ContractListWorkspaceMembersResponse,
   MachineState as ContractMachineState,
   OPENGENI_API_CONTRACT_HEADER as CONTRACT_API_CONTRACT_HEADER,
@@ -80,6 +81,7 @@ import {
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
 import {
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
@@ -169,6 +171,9 @@ describe("SDK / contracts parity", () => {
     expect(OPENGENI_API_CONTRACT_REVISION).toBe(CONTRACT_API_CONTRACT_REVISION);
     expect(OPENGENI_API_CONTRACT_HEADER).toBe(CONTRACT_API_CONTRACT_HEADER);
     expect(OPENGENI_CORRELATION_HEADER).toBe(CONTRACT_CORRELATION_HEADER);
+  });
+  test("pins the default uploaded-file mount root", () => {
+    expect(DEFAULT_FILE_RESOURCE_MOUNT_ROOT).toBe(CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT);
   });
   test("known session event types match the contracts enum exactly", () => {
     expect([...SESSION_EVENT_TYPES].sort()).toEqual([...ContractSessionEventType.options].sort());

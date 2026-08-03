@@ -90,6 +90,8 @@ describe("curated AI Gateway catalogue", () => {
       runnable: true,
       mode: "implicit",
     });
+    expect(deepseek.capabilities.inputModalities).toEqual(["text"]);
+    expect(deepseek.capabilities.inputFileMediaTypes).toEqual([]);
     expect(kimi.upstreamModelId).toBe("moonshotai/kimi-k3");
     expect(kimi.label).toBe("Kimi K3");
     expect(kimi.aliases).toEqual([]);
@@ -101,6 +103,8 @@ describe("curated AI Gateway catalogue", () => {
       runnable: true,
       mode: "implicit",
     });
+    expect(kimi.capabilities.inputModalities).toEqual(["text", "image"]);
+    expect(kimi.capabilities.inputFileMediaTypes).toEqual(["application/pdf"]);
     expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
 
     expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
@@ -623,6 +627,12 @@ describe("configuredModels", () => {
     const models = configuredModels(settings);
     expect(models.find((model) => model.id === "gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
     expect(models.find((model) => model.id === "codex/gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+    expect(
+      models.find((model) => model.id === "gpt-5.6-luna")?.capabilities.inputModalities,
+    ).toEqual(["text", "image"]);
+    expect(
+      models.find((model) => model.id === "codex/gpt-5.6-luna")?.capabilities.inputModalities,
+    ).toEqual(["text", "image"]);
   });
 
   test("with no registry returns exactly the built-in allow-list, default model first", () => {
@@ -941,7 +951,7 @@ describe("normalized model definitions", () => {
   test("pins the V1 digest and excludes labels, aliases, API keys, and secret metadata values", () => {
     const baseline = definitionFor();
     expect(baseline.definitionVersion).toBe(
-      "sha256:40e81d830e81001fb8bc29050c22ba6170b78c0a54554ca3594bc59801912015",
+      "sha256:008d081089653410afffe7b5b92ee709047e8596695dce65f6027eb3ef130882",
     );
     expect(
       definitionFor({
