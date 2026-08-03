@@ -4,6 +4,10 @@ import { OpenGeniClient } from "../src/client";
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const REVISION_A = "00000000-0000-4000-8000-000000000002";
 const REVISION_B = "00000000-0000-4000-8000-000000000003";
+const DRAFT_OPERATION = "00000000-0000-4000-8000-000000000004";
+const IMPORT_OPERATION = "00000000-0000-4000-8000-000000000005";
+const ACTIVATE_OPERATION = "00000000-0000-4000-8000-000000000006";
+const ROLLBACK_OPERATION = "00000000-0000-4000-8000-000000000007";
 
 describe("workspace instruction-policy SDK", () => {
   test("maps the complete backend control surface to stable routes", async () => {
@@ -26,24 +30,31 @@ describe("workspace instruction-policy SDK", () => {
     });
     await client.getWorkspaceInstructionPolicyRevision(WORKSPACE_ID, REVISION_A);
     await client.createWorkspaceInstructionPolicyDraft(WORKSPACE_ID, {
+      operationId: DRAFT_OPERATION,
       kind: "policy",
       scope: "global",
       roleKey: null,
       content: "Prefer additive changes.",
       provenanceSource: "onboarding",
     });
-    await client.importLegacyWorkspaceInstructionPolicyDraft(WORKSPACE_ID);
+    await client.importLegacyWorkspaceInstructionPolicyDraft(WORKSPACE_ID, {
+      operationId: IMPORT_OPERATION,
+    });
     await client.diffWorkspaceInstructionPolicyRevisions(WORKSPACE_ID, {
       fromRevisionId: REVISION_A,
       toRevisionId: REVISION_B,
     });
     await client.activateWorkspaceInstructionPolicyRevision(WORKSPACE_ID, REVISION_A, {
+      operationId: ACTIVATE_OPERATION,
       expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
       reason: "Initial activation",
     });
     await client.rollbackWorkspaceInstructionPolicyRevision(WORKSPACE_ID, {
+      operationId: ROLLBACK_OPERATION,
       targetRevisionId: REVISION_A,
       expectedCurrentRevisionId: REVISION_B,
+      expectedActivationVersion: 2,
       reason: "Restore known-good policy",
     });
 
@@ -77,11 +88,23 @@ describe("workspace instruction-policy SDK", () => {
         `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/instruction-policies/rollback`,
       ],
     ]);
-    expect(await requests[2]!.json()).toMatchObject({ provenanceSource: "onboarding" });
-    expect(await requests[3]!.json()).toEqual({});
+    expect(await requests[2]!.json()).toMatchObject({
+      operationId: DRAFT_OPERATION,
+      provenanceSource: "onboarding",
+    });
+    expect(await requests[3]!.json()).toEqual({ operationId: IMPORT_OPERATION });
     expect(await requests[5]!.json()).toEqual({
+      operationId: ACTIVATE_OPERATION,
       expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
       reason: "Initial activation",
+    });
+    expect(await requests[6]!.json()).toEqual({
+      operationId: ROLLBACK_OPERATION,
+      targetRevisionId: REVISION_A,
+      expectedCurrentRevisionId: REVISION_B,
+      expectedActivationVersion: 2,
+      reason: "Restore known-good policy",
     });
   });
 });

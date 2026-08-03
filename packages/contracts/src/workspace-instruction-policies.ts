@@ -130,6 +130,7 @@ export type WorkspaceInstructionPolicyRevisionIdentity = z.infer<
 
 export const WorkspaceInstructionPolicyRevision = z.object({
   ...revisionIdentityShape,
+  operationId: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   ...targetShape,
@@ -212,6 +213,7 @@ export type ResolvedWorkspaceInstructionPolicySnapshot = z.infer<
 
 export const WorkspaceInstructionPolicyActivationEvent = z.object({
   id: z.string().uuid(),
+  operationId: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   ...targetShape,
@@ -229,6 +231,7 @@ export type WorkspaceInstructionPolicyActivationEvent = z.infer<
 
 export const CreateWorkspaceInstructionPolicyDraftRequest = z
   .object({
+    operationId: z.string().uuid().optional(),
     kind: WorkspaceInstructionPolicyKind,
     scope: WorkspaceInstructionPolicyScope,
     roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
@@ -253,6 +256,7 @@ export type CreateWorkspaceInstructionPolicyDraftRequest = z.infer<
 
 export const ImportLegacyWorkspaceInstructionPolicyDraftRequest = z
   .object({
+    operationId: z.string().uuid().optional(),
     supersedesRevisionId: z.string().uuid().nullable().default(null),
   })
   .strict();
@@ -305,7 +309,9 @@ export type WorkspaceInstructionPolicyDiffResponse = z.infer<
 >;
 
 export const ActivateWorkspaceInstructionPolicyRequest = z.object({
+  operationId: z.string().uuid().optional(),
   expectedCurrentRevisionId: z.string().uuid().nullable(),
+  expectedActivationVersion: z.number().int().nonnegative().optional(),
   reason: z.string().trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
 });
 export type ActivateWorkspaceInstructionPolicyRequest = z.infer<
@@ -313,8 +319,10 @@ export type ActivateWorkspaceInstructionPolicyRequest = z.infer<
 >;
 
 export const RollbackWorkspaceInstructionPolicyRequest = z.object({
+  operationId: z.string().uuid().optional(),
   targetRevisionId: z.string().uuid(),
   expectedCurrentRevisionId: z.string().uuid(),
+  expectedActivationVersion: z.number().int().positive().optional(),
   reason: z.string().trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
 });
 export type RollbackWorkspaceInstructionPolicyRequest = z.infer<
@@ -336,4 +344,12 @@ export const WorkspaceInstructionPolicyConflictResponse = z.object({
 });
 export type WorkspaceInstructionPolicyConflictResponse = z.infer<
   typeof WorkspaceInstructionPolicyConflictResponse
+>;
+
+export const WorkspaceInstructionPolicyOperationReuseResponse = z.object({
+  code: z.literal("WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED"),
+  message: z.string(),
+});
+export type WorkspaceInstructionPolicyOperationReuseResponse = z.infer<
+  typeof WorkspaceInstructionPolicyOperationReuseResponse
 >;

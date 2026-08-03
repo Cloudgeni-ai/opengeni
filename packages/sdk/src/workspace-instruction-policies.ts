@@ -29,6 +29,7 @@ export type WorkspaceInstructionPolicyRevisionIdentity = {
 
 export type WorkspaceInstructionPolicyRevision = WorkspaceInstructionPolicyRevisionIdentity &
   WorkspaceInstructionPolicyTarget & {
+    operationId: string;
     accountId: string;
     workspaceId: string;
     content: string;
@@ -52,6 +53,7 @@ export type WorkspaceInstructionPolicyHead = WorkspaceInstructionPolicyTarget & 
 
 export type WorkspaceInstructionPolicyActivationEvent = WorkspaceInstructionPolicyTarget & {
   id: string;
+  operationId: string;
   accountId: string;
   workspaceId: string;
   type: WorkspaceInstructionPolicyActivationType;
@@ -64,6 +66,7 @@ export type WorkspaceInstructionPolicyActivationEvent = WorkspaceInstructionPoli
 };
 
 export type CreateWorkspaceInstructionPolicyDraftRequest = WorkspaceInstructionPolicyTarget & {
+  operationId?: string;
   content: string;
   provenanceSource?: WorkspaceInstructionPolicyDraftProvenanceSource;
   provenanceSourceId?: string | null;
@@ -71,6 +74,7 @@ export type CreateWorkspaceInstructionPolicyDraftRequest = WorkspaceInstructionP
 };
 
 export type ImportLegacyWorkspaceInstructionPolicyDraftRequest = {
+  operationId?: string;
   supersedesRevisionId?: string | null;
 };
 
@@ -102,13 +106,17 @@ export type WorkspaceInstructionPolicyDiffResponse = {
 };
 
 export type ActivateWorkspaceInstructionPolicyRequest = {
+  operationId?: string;
   expectedCurrentRevisionId: string | null;
+  expectedActivationVersion?: number;
   reason: string;
 };
 
 export type RollbackWorkspaceInstructionPolicyRequest = {
+  operationId?: string;
   targetRevisionId: string;
   expectedCurrentRevisionId: string;
+  expectedActivationVersion?: number;
   reason: string;
 };
 
@@ -121,4 +129,9 @@ export type WorkspaceInstructionPolicyConflictResponse = {
   code: "WORKSPACE_INSTRUCTION_POLICY_CONFLICT";
   message: string;
   currentHead: WorkspaceInstructionPolicyHead | null;
+};
+
+export type WorkspaceInstructionPolicyOperationReuseResponse = {
+  code: "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED";
+  message: string;
 };

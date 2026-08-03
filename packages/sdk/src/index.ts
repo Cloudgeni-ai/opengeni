@@ -136,6 +136,7 @@ export type {
   WorkspaceInstructionPolicyKind,
   WorkspaceInstructionPolicyListOptions,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOperationReuseResponse,
   WorkspaceInstructionPolicyProvenanceSource,
   WorkspaceInstructionPolicyRevision,
   WorkspaceInstructionPolicyRevisionIdentity,
