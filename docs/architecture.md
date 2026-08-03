@@ -601,10 +601,11 @@ explicitly enables and configures it. OpenGeni's explicit route tracking sends
 pathnames only and suspends providers on public-auth or query-bearing routes.
 The Reo adapter initializes with clipboard/code-copy and supported AI-widget
 capture disabled. It does not send authenticated identity: adding an identify
-call requires a separate privacy review and explicit consent copy. Visitors can
-reopen analytics preferences and withdraw consent; provider cleanup must run
-without breaking the console even when browser storage or a third-party script
-fails. The event surface must never carry prompts, source code, repository
+call requires a separate privacy review and explicit consent copy. First visit
+shows a consent sheet; after that, visitors reopen preferences from the Account
+menu (no persistent floating chrome) and can withdraw consent. Provider cleanup
+must run without breaking the console even when browser storage or a third-party
+script fails. The event surface must never carry prompts, source code, repository
 content, tool arguments, logs, secrets, or document contents. Provider selection
 belongs to validated runtime configuration, never arbitrary script injection.
 

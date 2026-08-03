@@ -1,6 +1,5 @@
-// Leaf workspace-destination catalog. Icon *names* only — never Lucide
-// components — so lazy settings can share this module without pulling icon
-// modules that Rolldown colocated into workbench/composer share chunks.
+// Workspace destination catalog (routes, labels, icon keys). Rendering lives in
+// `workspace-config-link.tsx`.
 
 export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/insights"

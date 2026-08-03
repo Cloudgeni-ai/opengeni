@@ -278,11 +278,10 @@ export function SessionRoute({
   );
 
   // The workspace shell already needs the capability catalog for session tool
-  // policy. Reuse that authoritative read for timeline names and logos instead
-  // of downloading the same large catalog again from the session route.
-  const { providerLogos, capabilityNames } = useMemo(() => {
+  // policy. Reuse that authoritative read for timeline logos instead of
+  // downloading the same large catalog again from the session route.
+  const providerLogos = useMemo(() => {
     const logos = new Map<string, string>();
-    const names = new Map<string, string>();
     for (const capability of context.workspaceCapabilityCatalog) {
       const domain = capability.providerDomain ?? capability.connectionRef?.providerDomain ?? null;
       const url = context.client.catalogAssetUrl(capability.logoAssetPath);
@@ -290,20 +289,12 @@ export function SessionRoute({
         const key = normalizeProviderDomain(domain);
         if (!logos.has(key)) logos.set(key, url);
       }
-      const mcpServerId = capability.runtime.mcpServerId;
-      if (mcpServerId && capability.name && !names.has(mcpServerId)) {
-        names.set(mcpServerId, capability.name);
-      }
     }
-    return { providerLogos: logos, capabilityNames: names };
+    return logos;
   }, [context.client, context.workspaceCapabilityCatalog]);
   const resolveProviderLogo = useCallback(
     (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
     [providerLogos],
-  );
-  const resolveCapabilityName = useCallback(
-    (mcpServerId: string) => capabilityNames.get(mcpServerId) ?? null,
-    [capabilityNames],
   );
   // One lineage read feeds the single composer-anchored agents surface. Events
   // refresh it instantly on spawn/worker-completion, and a 30s poll ensures the pill's
@@ -413,7 +404,6 @@ export function SessionRoute({
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
-      resolveCapabilityName={resolveCapabilityName}
     />
   );
 
@@ -548,8 +538,6 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
-  /** Real capability name for a user-message tool chip, resolved from the catalog. */
-  resolveCapabilityName: (mcpServerId: string) => string | null;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
@@ -889,13 +877,7 @@ function SessionChatPane(props: {
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
-        return (
-          <UserMessageBody
-            workspaceId={props.session.workspaceId}
-            item={item}
-            resolveCapabilityName={props.resolveCapabilityName}
-          />
-        );
+        return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
       }
       return (
         <div data-testid="assistant-markdown">
@@ -903,7 +885,7 @@ function SessionChatPane(props: {
         </div>
       );
     },
-    [props.session.workspaceId, props.resolveCapabilityName],
+    [props.session.workspaceId],
   );
 
   return (

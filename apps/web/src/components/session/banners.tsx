@@ -8,7 +8,6 @@ import {
   ImageIcon,
   AudioLinesIcon,
   TerminalIcon,
-  WrenchIcon,
 } from "lucide-react";
 import { useLightboxOptional, type UserMessageItem } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
@@ -18,7 +17,6 @@ import { toast } from "sonner";
 import { MarkdownText } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
-import { capabilityChipLabel } from "@/lib/capabilities";
 import type { SessionFailureSummary } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { repositoryDisplayName } from "@/lib/session-tools";
@@ -211,16 +209,13 @@ function isImageAsset(asset: FileAsset | null | undefined): boolean {
   return Boolean(asset?.contentType.startsWith("image/"));
 }
 
-/** Attachment previews/chips + repository/tool chips + markdown body inside the user bubble. */
+/** Attachment previews/chips + repository chips + markdown body inside the user bubble. */
 export function UserMessageBody({
   workspaceId,
   item,
-  resolveCapabilityName,
 }: {
   workspaceId: string;
   item: UserMessageItem;
-  /** Real capability name for a tool chip (from the workspace catalog), or null. */
-  resolveCapabilityName?: (mcpServerId: string) => string | null;
 }) {
   const fileResources = item.resources.filter(
     (resource): resource is FileResource => resource.kind === "file",
@@ -241,8 +236,7 @@ export function UserMessageBody({
   const otherFileResources = filesPending
     ? []
     : fileResources.filter((resource) => !isImageAsset(assets.get(resource.fileId)));
-  const hasChips =
-    otherFileResources.length > 0 || repositoryResources.length > 0 || item.tools.length > 0;
+  const hasChips = otherFileResources.length > 0 || repositoryResources.length > 0;
 
   return (
     <div data-testid="timeline-user">
@@ -299,17 +293,6 @@ export function UserMessageBody({
             >
               <GitBranchIcon className="size-3.5 shrink-0" />
               <span className="truncate">{repositoryDisplayName(resource)}</span>
-            </span>
-          ))}
-          {item.tools.map((tool) => (
-            <span
-              key={`${tool.kind}:${tool.id}`}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted"
-            >
-              <WrenchIcon className="size-3.5 shrink-0" />
-              <span className="truncate">
-                {resolveCapabilityName?.(tool.id) ?? capabilityChipLabel(tool.id)}
-              </span>
             </span>
           ))}
         </div>
