@@ -50,6 +50,7 @@ import type {
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
+  SlackReactionChannelListResponse,
   CreateConnectionRequest,
   CreateDocumentBaseRequest,
   CreateFileUploadRequest,
@@ -2848,6 +2849,19 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/connections/slack-bot/install`,
       request,
+    );
+  }
+
+  async listOpenGeniSlackReactionChannels(
+    workspaceId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<SlackReactionChannelListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    if (cursor) query.set("cursor", cursor);
+    return await this.requestJson<SlackReactionChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/reaction-channels?${query}`,
     );
   }
 

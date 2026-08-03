@@ -6,6 +6,9 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  type Permission,
+  type WorkspaceSlackReactionSummonSettings,
 } from "@opengeni/contracts";
 import {
   appendSessionEvents,
@@ -14,9 +17,11 @@ import {
   createDb,
   encryptVariableSetValue,
   getLatestSessionModelForSubject,
+  getOrCreateSlackInteraction,
   getWorkspaceGrant,
   grantWorkspaceAccess,
   saveSlackBotUserLink,
+  updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -85,11 +90,35 @@ type SlackPost = {
   timestamp: string;
 };
 
+type SlackCall = {
+  method: string;
+  channel: string | null;
+  timestamp: string | null;
+};
+
+type SlackReactionContextPage = {
+  messages: Array<Record<string, unknown>>;
+  nextCursor?: string;
+  error?: string;
+  status?: number;
+  retryAfterSeconds?: number;
+};
+
+type SlackReactionContext = SlackReactionContextPage & {
+  pages?: Record<string, SlackReactionContextPage>;
+};
+
 function fakeSlack(
   deniedChannels: Set<string> = new Set(),
-  options: { failAfterAcceptTexts?: Set<string> } = {},
+  options: {
+    failAfterAcceptTexts?: Set<string>;
+    sharedChannels?: Set<string>;
+  } = {},
 ) {
   const posts: SlackPost[] = [];
+  const calls: SlackCall[] = [];
+  const reactionContexts = new Map<string, SlackReactionContext>();
+  const reactionContextHits: string[] = [];
   const failuresByText = new Map<
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
@@ -105,6 +134,11 @@ function fakeSlack(
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const method = url.pathname.replace(/^\/api\//, "");
     const form = new URLSearchParams(String(init?.body ?? ""));
+    calls.push({
+      method,
+      channel: form.get("channel"),
+      timestamp: form.get("ts"),
+    });
     if (method === "conversations.info") {
       const channel = form.get("channel") ?? "";
       const configuredFailure = channelAccessFailures.get(channel);
@@ -130,7 +164,33 @@ function fakeSlack(
           is_member: !deniedChannels.has(channel),
           is_im: channel.startsWith("D"),
           is_private: channel.startsWith("D") || channel.startsWith("G"),
+          is_shared: options.sharedChannels?.has(channel) ?? false,
+          is_ext_shared: options.sharedChannels?.has(channel) ?? false,
         },
+      });
+    }
+    if (method === "conversations.replies") {
+      const channel = form.get("channel") ?? "";
+      const timestamp = form.get("ts") ?? "";
+      const key = `${channel}:${timestamp}`;
+      const rootContext = reactionContexts.get(key);
+      const cursor = form.get("cursor");
+      const context = cursor ? rootContext?.pages?.[cursor] : rootContext;
+      if (!context) return Response.json({ ok: false, error: "message_not_found" });
+      reactionContextHits.push(cursor ? `${key}:${cursor}` : key);
+      const status = context.status ?? 200;
+      if (status !== 200 || context.error) {
+        return Response.json(status === 200 ? { ok: false, error: context.error } : { ok: false }, {
+          status,
+          headers: context.retryAfterSeconds
+            ? { "retry-after": String(context.retryAfterSeconds) }
+            : undefined,
+        });
+      }
+      return Response.json({
+        ok: true,
+        messages: context.messages,
+        response_metadata: { next_cursor: context.nextCursor ?? "" },
       });
     }
     if (method === "conversations.open") {
@@ -141,7 +201,11 @@ function fakeSlack(
       const clientMessageId = form.get("client_msg_id");
       const accepted = clientMessageId ? acceptedByClientMessageId.get(clientMessageId) : null;
       if (accepted) {
-        return Response.json({ ok: true, channel: accepted.channel, ts: accepted.timestamp });
+        return Response.json({
+          ok: true,
+          channel: accepted.channel,
+          ts: accepted.timestamp,
+        });
       }
       const timestamp = `1800000000.${String(nextTimestamp++).padStart(6, "0")}`;
       const post = {
@@ -174,13 +238,20 @@ function fakeSlack(
         failedAfterAccept.add(post.text);
         throw new TypeError("simulated Slack response loss after provider acceptance");
       }
-      return Response.json({ ok: true, channel: form.get("channel"), ts: timestamp });
+      return Response.json({
+        ok: true,
+        channel: form.get("channel"),
+        ts: timestamp,
+      });
     }
     return Response.json({ ok: false, error: `unexpected_${method}` });
   };
   return {
     fetch: fetch as typeof globalThis.fetch,
     posts,
+    calls,
+    reactionContexts,
+    reactionContextHits,
     failuresByText,
     channelAccessFailures,
   };
@@ -206,6 +277,10 @@ async function fixture(
     failAfterAcceptTexts?: string[];
     managedBilling?: boolean;
     codexSubscriptionEnabled?: boolean;
+    grantedScopes?: string[];
+    ownerPermissions?: Permission[];
+    sharedChannels?: string[];
+    slackReactionSummon?: WorkspaceSlackReactionSummonSettings;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -220,18 +295,22 @@ async function fixture(
   });
   const owner = access.workspaceGrants[0]!;
   const otherSubjectId = `user:other-${suffix}`;
-  const permissions = ["sessions:create", "sessions:read", "sessions:control"] as const;
+  const permissions = options.ownerPermissions ?? [
+    "sessions:create",
+    "sessions:read",
+    "sessions:control",
+  ];
   await grantWorkspaceAccess(client.db, {
     accountId: owner.accountId,
     workspaceId: owner.workspaceId,
     subjectId: owner.subjectId,
-    permissions: [...permissions],
+    permissions,
   });
   await grantWorkspaceAccess(client.db, {
     accountId: owner.accountId,
     workspaceId: owner.workspaceId,
     subjectId: otherSubjectId,
-    permissions: [...permissions],
+    permissions: ["sessions:create", "sessions:read", "sessions:control"],
   });
 
   const teamId = `T_${suffix}`;
@@ -255,7 +334,7 @@ async function fixture(
     subjectId: null,
     providerDomain: "slack.com",
     kind: "app_install",
-    grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+    grantedScopes: options.grantedScopes ?? [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
     verifiedInstallAt: new Date(),
     verifiedInstallVersion: 1,
     metadata: {
@@ -279,6 +358,11 @@ async function fixture(
     client.db,
     connectionInput as Parameters<typeof createConnection>[1],
   );
+  if (options.slackReactionSummon) {
+    await updateWorkspaceSettings(client.db, owner.workspaceId, {
+      slackReactionSummon: options.slackReactionSummon,
+    });
+  }
   await saveSlackBotUserLink(client.db, {
     accountId: owner.accountId,
     workspaceId: owner.workspaceId,
@@ -302,6 +386,7 @@ async function fixture(
 
   const slack = fakeSlack(new Set(options.deniedChannels ?? []), {
     failAfterAcceptTexts: new Set(options.failAfterAcceptTexts ?? []),
+    sharedChannels: new Set(options.sharedChannels ?? []),
   });
   const wakes: Array<{ sessionId: string }> = [];
   const noop = async () => undefined;
@@ -368,6 +453,30 @@ function eventBody(input: { teamId: string; eventId: string; event: Record<strin
   });
 }
 
+function reactionEvent(input: {
+  teamId: string;
+  eventId: string;
+  userId: string;
+  channelId: string;
+  timestamp: string;
+  reaction?: string;
+}) {
+  return {
+    teamId: input.teamId,
+    eventId: input.eventId,
+    event: {
+      type: "reaction_added",
+      user: input.userId,
+      reaction: input.reaction ?? "genie",
+      item: {
+        type: "message",
+        channel: input.channelId,
+        ts: input.timestamp,
+      },
+    },
+  };
+}
+
 async function postEvent(
   app: Hono,
   input: { teamId: string; eventId: string; event: Record<string, unknown> },
@@ -416,6 +525,933 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(verifySlackUserLinkToken(signingMaterial, token, now)).toMatchObject(input);
     expect(verifySlackUserLinkToken(signingMaterial, `${token}x`, now)).toBeNull();
     expect(verifySlackUserLinkToken(signingMaterial, token, now + 16 * 60_000)).toBeNull();
+  });
+
+  test("reaction ingress filters disabled, legacy-scope, wrong-emoji, and disallowed-channel events before content fetch", async () => {
+    if (!available) return;
+    const enabledScopes = [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES];
+    const value = await fixture({ grantedScopes: enabledScopes });
+    const timestamp = "1705000000.000001";
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_DISABLED_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId: "C_ALLOWED",
+            timestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await updateWorkspaceSettings(client.db, value.owner.workspaceId, {
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: ["C_ALLOWED"] },
+      },
+    });
+    for (const event of [
+      reactionEvent({
+        teamId: value.teamId,
+        eventId: `E_REACTION_WRONG_EMOJI_${crypto.randomUUID()}`,
+        userId: value.ownerSlackUserId,
+        channelId: "C_ALLOWED",
+        timestamp,
+        reaction: "robot_face",
+      }),
+      reactionEvent({
+        teamId: value.teamId,
+        eventId: `E_REACTION_DISALLOWED_CHANNEL_${crypto.randomUUID()}`,
+        userId: value.ownerSlackUserId,
+        channelId: "C_OTHER",
+        timestamp,
+      }),
+    ]) {
+      expect((await postEvent(value.app, event)).status).toBe(200);
+    }
+
+    const legacy = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "bot_member" },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          legacy.app,
+          reactionEvent({
+            teamId: legacy.teamId,
+            eventId: `E_REACTION_LEGACY_SCOPE_${crypto.randomUUID()}`,
+            userId: legacy.ownerSlackUserId,
+            channelId: "C_LEGACY",
+            timestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+
+    for (const workspaceId of [value.owner.workspaceId, legacy.owner.workspaceId]) {
+      const [inbox] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count
+        from slack_interaction_inbox
+        where workspace_id = ${workspaceId}`;
+      expect(inbox!.count).toBe(0);
+    }
+    expect(value.slack.calls).toHaveLength(0);
+    expect(legacy.slack.calls).toHaveLength(0);
+  });
+
+  test("an exact authorized reaction starts one bounded root-thread session across retry and remove-readd delivery", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION";
+    const rootTimestamp = "1706000000.000001";
+    const reactedTimestamp = "1706000000.000002";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Previously selected model",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_THREAD_ROOT",
+          text: "Investigate the failed production deployment.",
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Compare the logs and propose the safest rollback.",
+          files: [{ id: "F_REACTION", name: "deploy.log", title: "Deployment log" }],
+        },
+      ],
+      nextCursor: "bounded-more",
+    });
+    const firstEvent = reactionEvent({
+      teamId: value.teamId,
+      eventId: `E_REACTION_FIRST_${crypto.randomUUID()}`,
+      userId: value.ownerSlackUserId,
+      channelId,
+      timestamp: reactedTimestamp,
+    });
+    expect((await postEvent(value.app, firstEvent)).status).toBe(200);
+    expect((await postEvent(value.app, firstEvent)).status).toBe(200);
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            ...firstEvent,
+            eventId: `E_REACTION_READD_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const [queued] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(queued!.count).toBe(1);
+
+    await drainAll({
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps);
+
+    expect(value.slack.calls.filter((call) => call.method === "conversations.replies")).toEqual([
+      {
+        method: "conversations.replies",
+        channel: channelId,
+        timestamp: reactedTimestamp,
+      },
+    ]);
+    expect(value.slack.reactionContextHits).toEqual([`${channelId}:${reactedTimestamp}`]);
+
+    const [processed] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(processed).toEqual({ status: "processed", last_error_code: null });
+
+    const [route] = await interactions(value.owner.workspaceId);
+    expect(route).toMatchObject({
+      route_key: `${channelId}:${rootTimestamp}`,
+      slack_thread_ts: rootTimestamp,
+      visibility: "workspace",
+    });
+    expect(value.slack.calls.filter((call) => call.method === "conversations.info")).toHaveLength(
+      2,
+    );
+    expect(value.slack.posts).toHaveLength(1);
+    expect(value.slack.posts[0]).toMatchObject({
+      channel: channelId,
+      threadTimestamp: rootTimestamp,
+    });
+    expect(value.slack.posts[0]!.text).toContain("started from the :genie: reaction");
+
+    const [session] = await shared!.admin<
+      {
+        first_party_mcp_tools: string[];
+        initial_message: string;
+        model: string;
+      }[]
+    >`
+      select first_party_mcp_tools, initial_message, model
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(session!.first_party_mcp_tools).toEqual([...DEFAULT_FIRST_PARTY_MCP_TOOLS]);
+    expect(session!.model).toBe("gpt-5.6-terra");
+    expect(session!.initial_message).toContain("[reacted message]");
+    expect(session!.initial_message).toContain("Compare the logs and propose the safest rollback.");
+    expect(session!.initial_message).toContain("Deployment log");
+    expect(session!.initial_message).toContain("If the intended action is ambiguous");
+    expect(session!.initial_message).toContain("Do not infer permission to ingest or persist");
+    expect(session!.initial_message).toContain("bounded Slack context limit");
+    const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
+      select
+        (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
+        (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
+    expect(persistence).toEqual({ documents: 0, memories: 0 });
+  });
+
+  test("reaction retrieval paginates to the exact message and pins it under the prompt budget", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_PAGED";
+    const rootTimestamp = "1706100000.000001";
+    const reactedTimestamp = "1706100000.000017";
+    const exactText = `Pinned deployment decision: ${"x".repeat(3_500)}`;
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    const firstPage = Array.from({ length: 15 }, (_, index) => ({
+      ts: `1706100000.${String(index + 1).padStart(6, "0")}`,
+      ...(index === 0 ? {} : { thread_ts: rootTimestamp }),
+      user: index === 0 ? "U_THREAD_ROOT" : `U_CONTEXT_${index}`,
+      text: `Long surrounding context ${index}: ${"c".repeat(550)}`,
+    }));
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: firstPage,
+      nextCursor: "reaction-page-2",
+      pages: {
+        "reaction-page-2": {
+          messages: [
+            {
+              ts: "1706100000.000016",
+              thread_ts: rootTimestamp,
+              user: "U_CONTEXT_16",
+              text: `Adjacent context before: ${"b".repeat(550)}`,
+            },
+            {
+              ts: reactedTimestamp,
+              thread_ts: rootTimestamp,
+              user: value.ownerSlackUserId,
+              text: exactText,
+              files: [{ id: "F_PINNED", title: "Pinned deployment plan" }],
+            },
+            {
+              ts: "1706100000.000018",
+              thread_ts: rootTimestamp,
+              user: "U_CONTEXT_18",
+              text: `Adjacent context after: ${"a".repeat(550)}`,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_PAGED_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(value.slack.reactionContextHits).toEqual([
+      `${channelId}:${reactedTimestamp}`,
+      `${channelId}:${reactedTimestamp}:reaction-page-2`,
+    ]);
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(session!.initial_message.length).toBeLessThanOrEqual(8_000);
+    expect(session!.initial_message).toContain(exactText);
+    expect(session!.initial_message).toContain("[reacted message]");
+    expect(session!.initial_message).toContain("Pinned deployment plan");
+    expect(session!.initial_message.indexOf("[reacted message]")).toBeLessThan(
+      session!.initial_message.indexOf("Bounded surrounding thread context:"),
+    );
+    expect(session!.initial_message).toContain("bounded Slack context limit");
+  });
+
+  test("a concurrent linked reactor cannot take over an unbound reaction route", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_OWNER_RACE";
+    const rootTimestamp = "1706150000.000001";
+    const reactedTimestamp = "1706150000.000002";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      linkOther: true,
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_THREAD_ROOT",
+          text: "Investigate this deployment.",
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Use the exact owning subject for session creation.",
+        },
+      ],
+    });
+    const { interaction } = await getOrCreateSlackInteraction(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackChannelId: channelId,
+      slackThreadTs: rootTimestamp,
+      routeKey: `${channelId}:${rootTimestamp}`,
+      triggeringProviderEventId: `E_REACTION_OWNER_${crypto.randomUUID()}`,
+      owningSubjectId: value.owner.subjectId,
+      visibility: "workspace",
+    });
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_RACING_USER_${crypto.randomUUID()}`,
+            userId: value.otherSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const [waiting] = await shared!.admin<
+      {
+        id: string;
+        status: string;
+        last_error_code: string;
+        retry_at: Date | null;
+      }[]
+    >`
+      select id, status, last_error_code, retry_at
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(waiting).toMatchObject({
+      status: "pending",
+      last_error_code: "slack_route_creation_pending",
+    });
+    expect(waiting!.retry_at).not.toBeNull();
+    const [beforeOwner] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(beforeOwner!.count).toBe(0);
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_OWNING_USER_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+
+    const [created] = await shared!.admin<
+      {
+        id: string;
+        created_by_subject_id: string;
+        create_idempotency_key: string;
+      }[]
+    >`
+      select id, created_by_subject_id, create_idempotency_key
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(created).toEqual({
+      id: interaction.sessionReservationId,
+      created_by_subject_id: value.owner.subjectId,
+      create_idempotency_key: `slack-interaction:${interaction.id}`,
+    });
+
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now() - interval '1 second'
+      where id = ${waiting!.id}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const [sessionCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(sessionCount!.count).toBe(1);
+    const [racingInbox] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where id = ${waiting!.id}`;
+    expect(racingInbox).toEqual({ status: "processed", last_error_code: null });
+  });
+
+  test("reaction pagination resumes its durable cursor across a fresh claim after Slack throttling", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_RATE_LIMITED";
+    const rootTimestamp = "1706200000.000001";
+    const reactedTimestamp = "1706200000.000020";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: Array.from({ length: 15 }, (_, index) => ({
+        ts: `1706200000.${String(index + 1).padStart(6, "0")}`,
+        ...(index === 0 ? {} : { thread_ts: rootTimestamp }),
+        user: `U_CONTEXT_${index}`,
+        text: `Context ${index}`,
+      })),
+      nextCursor: "rate-limited-page",
+      pages: {
+        "rate-limited-page": {
+          messages: [],
+          status: 429,
+          retryAfterSeconds: 30,
+        },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_RATE_LIMITED_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainSlackInteractionsOnce(value.deps);
+
+    const [inbox] = await shared!.admin<
+      {
+        id: string;
+        status: string;
+        attempt_count: number;
+        retry_at: Date | null;
+        last_error_code: string;
+        reaction_context_checkpoint: unknown;
+        checkpoint_bytes: number;
+      }[]
+    >`
+      select id, status, attempt_count, retry_at, last_error_code,
+        reaction_context_checkpoint,
+        octet_length(reaction_context_checkpoint::text)::int as checkpoint_bytes
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toMatchObject({
+      status: "pending",
+      attempt_count: 1,
+      last_error_code: "http_429",
+    });
+    expect(inbox!.retry_at).not.toBeNull();
+    expect(inbox!.reaction_context_checkpoint).toMatchObject({
+      version: 1,
+      binding: {
+        inboxId: inbox!.id,
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        slackMessageTs: reactedTimestamp,
+      },
+      state: {
+        pageCount: 1,
+        nextCursor: "rate-limited-page",
+        seenCursors: ["rate-limited-page"],
+      },
+    });
+    expect(inbox!.checkpoint_bytes).toBeLessThanOrEqual(131_072);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(value.slack.posts).toHaveLength(0);
+
+    value.slack.reactionContexts.get(`${channelId}:${reactedTimestamp}`)!.pages![
+      "rate-limited-page"
+    ] = {
+      messages: [
+        {
+          ts: "1706200000.000016",
+          thread_ts: rootTimestamp,
+          user: "U_CONTEXT_16",
+          text: "Context immediately before the reacted message",
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Resume from the stored cursor and investigate this exact message.",
+        },
+      ],
+    };
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now() - interval '1 second'
+      where id = ${inbox!.id}`;
+    const freshDeps = {
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    expect(await drainSlackInteractionsOnce(freshDeps)).toBe(true);
+
+    expect(value.slack.reactionContextHits).toEqual([
+      `${channelId}:${reactedTimestamp}`,
+      `${channelId}:${reactedTimestamp}:rate-limited-page`,
+      `${channelId}:${reactedTimestamp}:rate-limited-page`,
+    ]);
+    const [processed] = await shared!.admin<
+      {
+        status: string;
+        attempt_count: number;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, attempt_count, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${inbox!.id}`;
+    expect(processed).toEqual({
+      status: "processed",
+      attempt_count: 2,
+      last_error_code: null,
+      reaction_context_checkpoint: null,
+    });
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
+    const [sessionCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(sessionCount!.count).toBe(1);
+    expect(value.slack.posts).toHaveLength(1);
+    expect(value.slack.posts[0]).toMatchObject({
+      channel: channelId,
+      threadTimestamp: rootTimestamp,
+    });
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_RATE_LIMITED_READD_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const [deduplicated] = await shared!.admin<{ inboxes: number; sessions: number }[]>`
+      select
+        (select count(*)::int from slack_interaction_inbox
+          where workspace_id = ${value.owner.workspaceId}) as inboxes,
+        (select count(*)::int from sessions
+          where workspace_id = ${value.owner.workspaceId}) as sessions`;
+    expect(deduplicated).toEqual({ inboxes: 1, sessions: 1 });
+  });
+
+  test("reaction checkpoints fail closed when stale, malformed, or copied across workspace events", async () => {
+    if (!available) return;
+    const sourceChannelId = "C_REACTION_CHECKPOINT_SOURCE";
+    const sourceTimestamp = "1706250000.000020";
+    const source = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [sourceChannelId] },
+      },
+    });
+    source.slack.reactionContexts.set(`${sourceChannelId}:${sourceTimestamp}`, {
+      messages: [{ ts: "1706250000.000001", user: "U_ROOT", text: "Root" }],
+      nextCursor: "checkpoint-page-2",
+      pages: {
+        "checkpoint-page-2": {
+          messages: [],
+          status: 429,
+          retryAfterSeconds: 30,
+        },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          source.app,
+          reactionEvent({
+            teamId: source.teamId,
+            eventId: `E_REACTION_CHECKPOINT_SOURCE_${crypto.randomUUID()}`,
+            userId: source.ownerSlackUserId,
+            channelId: sourceChannelId,
+            timestamp: sourceTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainSlackInteractionsOnce(source.deps);
+    const [sourceInbox] = await shared!.admin<
+      { id: string; reaction_context_checkpoint: unknown }[]
+    >`
+      select id, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where workspace_id = ${source.owner.workspaceId}`;
+    expect(sourceInbox!.reaction_context_checkpoint).not.toBeNull();
+
+    await shared!.admin`
+      update slack_interaction_inbox
+      set reaction_context_checkpoint = jsonb_set(
+            reaction_context_checkpoint,
+            '{state,createdAtMs}',
+            '0'::jsonb
+          ),
+          retry_at = now() - interval '1 second'
+      where id = ${sourceInbox!.id}`;
+    expect(await drainSlackInteractionsOnce(source.deps)).toBe(true);
+    const [malformed] = await shared!.admin<
+      {
+        status: string;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${sourceInbox!.id}`;
+    expect(malformed).toEqual({
+      status: "failed",
+      last_error_code: "reaction_checkpoint_invalid",
+      reaction_context_checkpoint: null,
+    });
+    expect(source.slack.reactionContextHits).toEqual([
+      `${sourceChannelId}:${sourceTimestamp}`,
+      `${sourceChannelId}:${sourceTimestamp}:checkpoint-page-2`,
+    ]);
+
+    const targetChannelId = "C_REACTION_CHECKPOINT_TARGET";
+    const targetTimestamp = "1706250001.000020";
+    const target = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [targetChannelId] },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          target.app,
+          reactionEvent({
+            teamId: target.teamId,
+            eventId: `E_REACTION_CHECKPOINT_TARGET_${crypto.randomUUID()}`,
+            userId: target.ownerSlackUserId,
+            channelId: targetChannelId,
+            timestamp: targetTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const [targetInbox] = await shared!.admin<{ id: string }[]>`
+      select id
+      from slack_interaction_inbox
+      where workspace_id = ${target.owner.workspaceId}`;
+    await shared!.admin`
+      update slack_interaction_inbox
+      set reaction_context_checkpoint = ${shared!.admin.json(
+        sourceInbox!.reaction_context_checkpoint,
+      )}
+      where id = ${targetInbox!.id}`;
+    expect(await drainSlackInteractionsOnce(target.deps)).toBe(true);
+    const [crossWorkspace] = await shared!.admin<
+      {
+        status: string;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where id = ${targetInbox!.id}`;
+    expect(crossWorkspace).toEqual({
+      status: "failed",
+      last_error_code: "reaction_checkpoint_invalid",
+      reaction_context_checkpoint: null,
+    });
+    expect(target.slack.calls).toHaveLength(0);
+    expect(await interactions(target.owner.workspaceId)).toHaveLength(0);
+  });
+
+  test("reaction checkpointing rejects a repeated provider cursor and clears terminal state", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_REPEATED_CURSOR";
+    const reactedTimestamp = "1706260000.000020";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: [{ ts: "1706260000.000001", user: "U_ROOT", text: "Root" }],
+      nextCursor: "repeated-cursor",
+      pages: {
+        "repeated-cursor": {
+          messages: [{ ts: "1706260000.000002", user: "U_CONTEXT", text: "Context" }],
+          nextCursor: "repeated-cursor",
+        },
+      },
+    });
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_REPEATED_CURSOR_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const [inbox] = await shared!.admin<
+      {
+        status: string;
+        attempt_count: number;
+        last_error_code: string | null;
+        reaction_context_checkpoint: unknown | null;
+      }[]
+    >`
+      select status, attempt_count, last_error_code, reaction_context_checkpoint
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toEqual({
+      status: "failed",
+      attempt_count: 1,
+      last_error_code: "reaction_pagination_invalid",
+      reaction_context_checkpoint: null,
+    });
+    expect(value.slack.reactionContextHits).toEqual([
+      `${channelId}:${reactedTimestamp}`,
+      `${channelId}:${reactedTimestamp}:repeated-cursor`,
+    ]);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(value.slack.posts).toHaveLength(0);
+  });
+
+  test("reaction session admission failures are visible in the containing Slack thread", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_NO_CREDIT";
+    const timestamp = "1706500000.000001";
+    const value = await fixture({
+      managedBilling: true,
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${timestamp}`, {
+      messages: [
+        {
+          ts: timestamp,
+          user: value.ownerSlackUserId,
+          text: "Start a task that requires a billable model.",
+        },
+      ],
+    });
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_NO_CREDIT_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(value.slack.posts.at(-1)).toMatchObject({
+      channel: channelId,
+      threadTimestamp: timestamp,
+    });
+    expect(value.slack.posts.at(-1)?.text).toContain("no available billing source");
+    const [inbox] = await shared!.admin<{ status: string; last_error_code: string }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toEqual({ status: "failed", last_error_code: "http_402" });
+  });
+
+  test("reaction processing rejects unmapped, under-authorized, inaccessible, and shared-channel summons before message content", async () => {
+    if (!available) return;
+    const settings = {
+      enabled: true,
+      emoji: "genie",
+      channelPolicy: { mode: "bot_member" as const },
+    };
+    const unmapped = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: settings,
+    });
+    await postEvent(
+      unmapped.app,
+      reactionEvent({
+        teamId: unmapped.teamId,
+        eventId: `E_REACTION_UNMAPPED_${crypto.randomUUID()}`,
+        userId: "U_UNMAPPED_REACTION",
+        channelId: "C_UNMAPPED_REACTION",
+        timestamp: "1707000000.000001",
+      }),
+    );
+    await drainAll(unmapped.deps);
+    expect(unmapped.slack.calls).toHaveLength(0);
+
+    const underAuthorized = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      ownerPermissions: ["sessions:create", "sessions:read"],
+      slackReactionSummon: settings,
+    });
+    await postEvent(
+      underAuthorized.app,
+      reactionEvent({
+        teamId: underAuthorized.teamId,
+        eventId: `E_REACTION_UNDER_AUTHORIZED_${crypto.randomUUID()}`,
+        userId: underAuthorized.ownerSlackUserId,
+        channelId: "C_UNDER_AUTHORIZED",
+        timestamp: "1707000001.000001",
+      }),
+    );
+    await drainAll(underAuthorized.deps);
+    expect(underAuthorized.slack.calls).toHaveLength(0);
+    const [underAuthorizedInbox] = await shared!.admin<
+      { status: string; last_error_code: string }[]
+    >`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where workspace_id = ${underAuthorized.owner.workspaceId}`;
+    expect(underAuthorizedInbox).toEqual({
+      status: "failed",
+      last_error_code: "reaction_session_permissions_denied",
+    });
+
+    const inaccessible = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      deniedChannels: ["C_DENIED_REACTION"],
+      sharedChannels: ["C_SHARED_REACTION"],
+      slackReactionSummon: settings,
+    });
+    for (const [channelId, timestamp] of [
+      ["C_DENIED_REACTION", "1707000002.000001"],
+      ["C_SHARED_REACTION", "1707000003.000001"],
+    ] as const) {
+      await postEvent(
+        inaccessible.app,
+        reactionEvent({
+          teamId: inaccessible.teamId,
+          eventId: `E_REACTION_INACCESSIBLE_${crypto.randomUUID()}`,
+          userId: inaccessible.ownerSlackUserId,
+          channelId,
+          timestamp,
+        }),
+      );
+    }
+    await drainAll(inaccessible.deps);
+    expect(
+      inaccessible.slack.calls.filter((call) => call.method === "conversations.info"),
+    ).toHaveLength(2);
+    expect(
+      inaccessible.slack.calls.filter((call) => call.method === "conversations.replies"),
+    ).toHaveLength(0);
+
+    for (const workspaceId of [
+      unmapped.owner.workspaceId,
+      underAuthorized.owner.workspaceId,
+      inaccessible.owner.workspaceId,
+    ]) {
+      expect(await interactions(workspaceId)).toHaveLength(0);
+    }
   });
 
   test("top-level bot DMs create separate private sessions while thread replies and retries converge", async () => {
@@ -517,6 +1553,42 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
         (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
     expect(persistence).toEqual({ documents: 0, memories: 0 });
+  });
+
+  test("ordinary Slack triggers retain sessions:create-only authorization", async () => {
+    if (!available) return;
+    const value = await fixture({
+      ownerPermissions: ["sessions:create", "sessions:read"],
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_CREATE_ONLY_DM_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_CREATE_ONLY",
+            ts: "1715000000.000001",
+            text: "Create an ordinary Slack task without session control authority",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const routes = await interactions(value.owner.workspaceId);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      route_key: "D_CREATE_ONLY:1715000000.000001",
+      visibility: "private",
+    });
+    const [inbox] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toEqual({ status: "processed", last_error_code: null });
   });
 
   test("new Slack tasks preserve a later browser-selected turn model", async () => {
@@ -923,7 +1995,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await commandResponse.text()).toContain("accepted this task");
     await drainAll(value.deps);
     const commandAck = value.slack.posts.at(-1)!;
-    expect(commandAck).toMatchObject({ channel: "C_COMMAND", threadTimestamp: null });
+    expect(commandAck).toMatchObject({
+      channel: "C_COMMAND",
+      threadTimestamp: null,
+    });
 
     const shortcutPayload = JSON.stringify({
       type: "message_action",
@@ -936,7 +2011,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         text: "Explicitly send this human DM message to OpenGeni",
       },
     });
-    const shortcut = new URLSearchParams({ payload: shortcutPayload }).toString();
+    const shortcut = new URLSearchParams({
+      payload: shortcutPayload,
+    }).toString();
     const shortcutResponse = await value.app.request(
       signedRequest(
         "/v1/integrations/slack/interactions",
@@ -996,7 +2073,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       from slack_interaction_inbox
       where workspace_id = ${value.owner.workspaceId}
         and provider_event_id = ${`command:${transientTriggerId}`}`;
-    expect(pendingTransient).toMatchObject({ status: "pending", attempt_count: 0, retry_at: null });
+    expect(pendingTransient).toMatchObject({
+      status: "pending",
+      attempt_count: 0,
+      retry_at: null,
+    });
     value.slack.channelAccessFailures.delete(transientChannel);
     await drainAll(value.deps);
     expect(await interactions(value.owner.workspaceId)).toHaveLength(3);
@@ -1250,7 +2331,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       error: "cannot_reply_to_message",
     });
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
-      { type: "turn.completed", payload: { output: "Permanent delivery result" } },
+      {
+        type: "turn.completed",
+        payload: { output: "Permanent delivery result" },
+      },
     ]);
 
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
