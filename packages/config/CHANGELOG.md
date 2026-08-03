@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 0.10.4
+
+### Patch Changes
+
+- 74bd3a5: Project image content and image-only tools from the model capability catalogue without mutating durable session history.
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+
 ## 0.10.3
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @opengeni/sdk
 
+## 0.38.0
+
+### Minor Changes
+
+- 3e4842d: Add subject-authorized accepted-attempt governance inspection to Workspace State,
+  including immutable policy/preference snapshot metadata and deterministic current
+  drift classification without exposing prompt or personal preference content.
+
 ## 0.37.0
 
 ### Minor Changes
