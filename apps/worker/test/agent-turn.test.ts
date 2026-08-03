@@ -58,6 +58,7 @@ import {
   legacyTurnExecutionPolicyInput,
   modelAcceptsTypedAttachmentContentForTurn,
   modelSupportsImageInputForTurn,
+  projectCompactionInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseUsageContextSignal,
@@ -3371,6 +3372,36 @@ describe("modelSupportsImageInputForTurn", () => {
     expect(modelSupportsImageInputForTurn(null)).toBe(true);
     expect(modelSupportsImageInputForTurn(resolved(["text", "image"]))).toBe(true);
     expect(modelSupportsImageInputForTurn(resolved(["text"]))).toBe(false);
+  });
+});
+
+describe("projectCompactionInputForTurn", () => {
+  const resolved = (inputModalities: string[]) =>
+    ({ configured: { capabilities: { inputModalities } } }) as Parameters<
+      typeof projectCompactionInputForTurn
+    >[1];
+  const input = [
+    {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "Describe this." },
+        { type: "input_image", image: "data:image/png;base64,TEST" },
+      ],
+    },
+  ] as Array<Record<string, unknown>>;
+
+  test("removes images before portable compaction for a text-only model", () => {
+    const projected = projectCompactionInputForTurn(input, resolved(["text"]), 1_000_000);
+
+    expect(JSON.stringify(projected)).not.toContain("data:image");
+    expect(JSON.stringify(input)).toContain("data:image");
+  });
+
+  test("preserves the exact compaction prefix for an image-capable model", () => {
+    expect(projectCompactionInputForTurn(input, resolved(["text", "image"]), 1_000_000)).toBe(
+      input,
+    );
   });
 });
 

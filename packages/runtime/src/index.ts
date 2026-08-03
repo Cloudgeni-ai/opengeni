@@ -4698,13 +4698,14 @@ function stripImagesFromModelInputItem<T extends Record<string, unknown>>(item: 
 /**
  * Build the per-request view for a model's input modalities. Image-capable
  * models receive the exact original array. Text-only models lose image payloads
- * and image-only tool pairs from this clone only; durable history is untouched,
- * so switching back to the same image-capable model restores its original cache
- * prefix and pixel context.
+ * and image-only tool pairs from this clone only. Images already present in the
+ * run-state history remain there for a later image-capable request; this helper
+ * does not make transient turn attachments durable.
  */
 export function projectModelInputForImageSupport<T extends Record<string, unknown>>(
   items: readonly T[],
   supportsImageInput: boolean,
+  toolOutputTruncationTokens?: number,
 ): T[] {
   if (supportsImageInput) return items as T[];
 
@@ -4728,16 +4729,20 @@ export function projectModelInputForImageSupport<T extends Record<string, unknow
     const stripped = stripImagesFromModelInputItem(item);
     if (stripped) projected.push(stripped);
   });
-  return sanitizeHistoryItemsForModel(projected) as T[];
+  return sanitizeHistoryItemsForModel(projected, toolOutputTruncationTokens) as T[];
 }
 
-function modelModalityProjectionFilterForAgent(agent: object): CallModelInputFilter | undefined {
+function modelModalityProjectionFilterForAgent(
+  agent: object,
+  settings: Settings,
+): CallModelInputFilter | undefined {
   if (agentSupportsImageInput.get(agent) !== false) return undefined;
   return async ({ modelData }) => ({
     ...modelData,
     input: projectModelInputForImageSupport(
       modelData.input as unknown as Array<Record<string, unknown>>,
       false,
+      settings.modelToolOutputTruncationTokens,
     ) as typeof modelData.input,
   });
 }
@@ -4748,7 +4753,8 @@ function modelModalityProjectionFilterForAgent(agent: object): CallModelInputFil
  * the provider-item-id strip is layered on top when the configured policy
  * selects it; the context-robustness guard then raises the proactive durable
  * compaction signal on the client-compaction path. Model-specific modality
- * projection is composed at runAgentStream's literal final seam.
+ * projection is composed by runAgentStream immediately before that final
+ * accounting guard.
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
@@ -4910,6 +4916,7 @@ export async function runAgentStream(
         // canonical bound at the literal final seam before accounting/provider
         // serialization so no extension can bypass the policy.
         boundModelToolOutputsFilterForSettings(settings),
+        modelModalityProjectionFilterForAgent(agent, settings),
         contextRobustnessFilterForSettings(settings, {
           throwOnCompactionNeeded: Boolean(
             overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -4923,7 +4930,6 @@ export async function runAgentStream(
               }
             : {}),
         }),
-        modelModalityProjectionFilterForAgent(agent),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -5010,16 +5016,18 @@ export async function runAgentStream(
     : undefined;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
-  // provider-id stripping, output bounds), then any per-turn filter and finally
-  // the model's modality projection. The SDK invokes filters on a deep request
-  // clone; OpenGeni does not pass an SDK session here and reconciles durable
-  // conversation truth from the untouched run-state history.
+  // provider-id stripping, output bounds), then any per-turn filter, the model's
+  // modality projection, and finally context accounting over the exact payload
+  // that can reach the provider. The SDK invokes filters on a deep request clone;
+  // OpenGeni does not pass an SDK session here and reconciles durable conversation
+  // truth from the untouched run-state history.
   const callModelInputFilter = composeCallModelInputFilters(
     [
       callModelInputFilterForSettings(settings),
       genesisTitleInputFilter,
       overrides.callModelInputFilter,
       boundModelToolOutputsFilterForSettings(settings),
+      modelModalityProjectionFilterForAgent(agent, settings),
       contextRobustnessFilterForSettings(settings, {
         throwOnCompactionNeeded: Boolean(
           overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -5031,7 +5039,6 @@ export async function runAgentStream(
           ? { contextCompactionRequested: overrides.contextCompactionRequested }
           : {}),
       }),
-      modelModalityProjectionFilterForAgent(agent),
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {

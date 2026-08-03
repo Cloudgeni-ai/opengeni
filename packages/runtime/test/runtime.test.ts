@@ -71,6 +71,7 @@ import {
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
   prepareRunInput,
+  runAgentStream,
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
@@ -99,7 +100,7 @@ import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
-import { startTestMcpServer, testSettings } from "@opengeni/testing";
+import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
@@ -5898,6 +5899,67 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(input)).toBe(durableJson);
     expect(projectModelInputForImageSupport(input, true)).toBe(input);
     expect(JSON.stringify(projectModelInputForImageSupport(input, true))).toBe(durableJson);
+  });
+
+  test("text-only projection preserves the configured tool-output limit", () => {
+    const output = "x".repeat(100_000);
+    const input = [
+      {
+        type: "function_call",
+        callId: "large-result",
+        name: "read_file",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "large-result",
+        output,
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const projected = projectModelInputForImageSupport(input, false, 1_000_000);
+
+    expect(projected[1]?.output).toBe(output);
+  });
+
+  test("text-only projection runs before context accounting in the real agent loop", async () => {
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+      contextWindowTokens: 20_000,
+      contextAutoCompactThresholdTokens: 10_000,
+      contextReservedOutputTokens: 0,
+    });
+    const model = new ScriptedModel("done");
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      supportsImageInput: false,
+      hostedWebSearch: false,
+    });
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Describe these if supported." },
+          ...["A", "B", "C"].map((value) => ({
+            type: "input_image",
+            image: `data:image/png;base64,${value.repeat(80_000)}`,
+          })),
+        ],
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const result = await runAgentStream(agent, { input: input as any }, settings, {
+      contextCompactionRequested: () => false,
+    });
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(model.calls).toBe(1);
+    expect(JSON.stringify(model.requests[0]?.input)).not.toContain("data:image");
+    expect(JSON.stringify(result.state.history)).toContain("data:image");
+    expect(JSON.stringify(input)).toContain("data:image");
   });
 
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {

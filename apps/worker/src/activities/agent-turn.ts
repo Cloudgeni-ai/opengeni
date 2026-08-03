@@ -94,6 +94,7 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
+  projectModelInputForImageSupport,
   appendPersistentSessionSettings,
   appendSessionInstructions,
   appendWorkspaceGovernance,
@@ -1927,6 +1928,19 @@ export function modelSupportsImageInputForTurn(
   return (
     resolvedModel === null ||
     resolvedModel.configured.capabilities.inputModalities.includes("image")
+  );
+}
+
+/** Project portable-compaction input through the same per-model modality view as the agent loop. */
+export function projectCompactionInputForTurn<T extends Record<string, unknown>>(
+  items: readonly T[],
+  resolvedModel: Parameters<typeof modelSupportsImageInputForTurn>[0],
+  toolOutputTruncationTokens: number,
+): T[] {
+  return projectModelInputForImageSupport(
+    items,
+    modelSupportsImageInputForTurn(resolvedModel),
+    toolOutputTruncationTokens,
   );
 }
 
@@ -4166,6 +4180,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         capabilitySettings,
         turnExecutionPolicy.productModelId,
       );
+      const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
       const selectedProvider = resolvedModel?.provider;
       const publicProviderHeaders = new Set(
         selectedProvider?.publicDefaultHeaderNames?.map((name) => name.toLowerCase()) ?? [],
@@ -4366,24 +4381,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         resolvedModel
           ? (s: Settings, m: Array<Record<string, unknown>>) =>
               withCodex(() =>
-                summarizeForCompaction(s, m, {
-                  client: resolvedModel.client,
-                  api: resolvedModel.provider.api,
+                summarizeForCompaction(
+                  s,
+                  projectCompactionInputForTurn(
+                    m,
+                    resolvedModel,
+                    s.modelToolOutputTruncationTokens,
+                  ),
+                  {
+                    client: resolvedModel.client,
+                    api: resolvedModel.provider.api,
+                    model: turnExecutionPolicy.upstreamModelId,
+                    maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+                    onUsage: recordCompactionUsage,
+                    ...(systemInstructions ? { systemInstructions } : {}),
+                    ...(promptCacheKey ? { promptCacheKey } : {}),
+                  },
+                ),
+              )
+          : (s: Settings, m: Array<Record<string, unknown>>) =>
+              summarizeForCompaction(
+                s,
+                projectCompactionInputForTurn(m, resolvedModel, s.modelToolOutputTruncationTokens),
+                {
                   model: turnExecutionPolicy.upstreamModelId,
                   maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                   onUsage: recordCompactionUsage,
                   ...(systemInstructions ? { systemInstructions } : {}),
                   ...(promptCacheKey ? { promptCacheKey } : {}),
-                }),
-              )
-          : (s: Settings, m: Array<Record<string, unknown>>) =>
-              summarizeForCompaction(s, m, {
-                model: turnExecutionPolicy.upstreamModelId,
-                maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                onUsage: recordCompactionUsage,
-                ...(systemInstructions ? { systemInstructions } : {}),
-                ...(promptCacheKey ? { promptCacheKey } : {}),
-              });
+                },
+              );
       // Prompt-cache prefix for remote_v2 MUST match ordinary turns:
       // tools → instructions → history. Filled after buildAgent for every
       // compact path (including operator /compact, which now builds the agent
@@ -5612,7 +5639,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {};
       const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
-      const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
       const serviceTier = serviceTierForLatencyMode(
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
