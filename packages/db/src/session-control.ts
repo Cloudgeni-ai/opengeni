@@ -1576,6 +1576,55 @@ async function registerInterruptionWakes(
   return Number(rows[0]?.wakeCount ?? 0);
 }
 
+/**
+ * Terminal cancellation must wake every affected workflow, including sessions
+ * parked at an approval, capacity, or other no-active-attempt boundary. Those
+ * sessions have no new interruption row, so the ordinary Pause wake selector
+ * cannot discover them. Signal-with-start is intentional here: a closed
+ * workflow cheaply re-reads the terminal row and exits, while an open workflow
+ * is released from an otherwise unbounded durable wait.
+ */
+async function registerCancellationWakes(
+  db: Database,
+  input: { workspaceId: string; sessionIds: string[] },
+): Promise<number> {
+  if (input.sessionIds.length === 0) return 0;
+  const sessionIds = sql.join(
+    input.sessionIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+  const rows = await db.execute<{ wakeCount: number | string }>(sql`
+    with eligible as (
+      select
+        session.id as session_id,
+        session.account_id,
+        session.workspace_id,
+        coalesce(session.temporal_workflow_id, 'session-' || session.id::text)
+          as temporal_workflow_id
+      from ${schema.sessions} session
+      where session.workspace_id = ${input.workspaceId}
+        and session.id in (${sessionIds})
+    ), upserted as (
+      insert into ${schema.sessionWorkflowWakeOutbox} (
+        session_id, account_id, workspace_id, temporal_workflow_id, reason
+      )
+      select session_id, account_id, workspace_id, temporal_workflow_id, 'session_cancelled'
+      from eligible
+      on conflict (session_id) do update set
+        wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+        temporal_workflow_id = excluded.temporal_workflow_id,
+        reason = excluded.reason,
+        attempts = 0,
+        next_attempt_at = now(),
+        last_error = null,
+        updated_at = now()
+      returning session_id
+    )
+    select count(*)::bigint as "wakeCount" from upserted
+  `);
+  return Number(rows[0]?.wakeCount ?? 0);
+}
+
 /** Register one exact post-commit Temporal nudge without encoding eligibility in
  * the transport. The workflow re-reads canonical Postgres state; coalescing is
  * revisioned so a lost or stale delivery cannot hide a later mutation. */
@@ -2271,16 +2320,21 @@ export async function mutateSessionControlInTransaction(
         })
       : 0;
   const wakeCount =
-    input.action === "pause" || input.action === "cancel"
-      ? await registerInterruptionWakes(db, {
-          operationId: reserved.receipt.id,
-          reason: "session_pause_interruption",
-        })
-      : await registerDescendantWakes(db, {
+    input.action === "cancel"
+      ? await registerCancellationWakes(db, {
           workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          reason: "session_resume",
-        });
+          sessionIds: cancellationSessionIds,
+        })
+      : input.action === "pause"
+        ? await registerInterruptionWakes(db, {
+            operationId: reserved.receipt.id,
+            reason: "session_pause_interruption",
+          })
+        : await registerDescendantWakes(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            reason: "session_resume",
+          });
   const [controlEvent] = await db
     .insert(schema.sessionEvents)
     .values({

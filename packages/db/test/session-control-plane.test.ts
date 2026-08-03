@@ -5099,6 +5099,7 @@ describe("clean session control plane", () => {
       replay: false,
       control: { state: "paused" },
       interruptionCount: 1,
+      wakeCount: 2,
       cancelledSessionCount: 2,
       cancelledTurnCount: 2,
     });
@@ -5129,6 +5130,55 @@ describe("clean session control plane", () => {
     );
     expect(settled).toMatchObject({ action: "paused", outcome: "cancelled" });
     expect((await getSessionTurn(client.db, grant.workspaceId!, rootPrompt.turn.id))?.status).toBe(
+      "cancelled",
+    );
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("cancelled");
+  });
+
+  test("terminal cancellation wakes a workflow parked without a live attempt", async () => {
+    const { grant, session } = await fixture();
+    const prompt = await send(grant, session.id, "wait for approval forever");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn?.id).toBe(prompt.turn.id);
+    const settlement = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn!.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [{ id: "approval-without-deadline" }],
+      },
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "approval-without-deadline" },
+        },
+      ],
+    });
+    expect(settlement.action).toBe("settled");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "approval-wait",
+    });
+
+    const cancelled = await controlSession(grant, session.id, "cancel");
+    expect(cancelled).toMatchObject({
+      interruptionCount: 0,
+      wakeCount: 1,
+      cancelledSessionCount: 1,
+      cancelledTurnCount: 1,
+    });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, turn!.id))?.status).toBe(
       "cancelled",
     );
     expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("cancelled");
