@@ -1313,6 +1313,11 @@ export const sessions = pgTable(
     // Composed system-level AFTER the workspace agentInstructions; never emitted
     // as a timeline event.
     instructions: text("instructions"),
+    // Immutable normalized prompt-policy role. This is deliberately separate
+    // from workspace membership roles and memory selectors. Existing rows keep
+    // NULL and use the bounded metadata.role compatibility fallback at the
+    // attempt-snapshot boundary.
+    policyRole: text("policy_role"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -2085,6 +2090,11 @@ export const sessionTurns = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({ backfill: true }),
+    // Immutable human authority for exact-attempt governance. Human turns bind
+    // their own subject; trusted continuations/compactions may inherit the
+    // causal turn's value while retaining a service initiator. Null means the
+    // turn has no human preference authority.
+    initiatingHumanSubjectId: text("initiating_human_subject_id"),
     // Immutable exact personal MCP authority for this logical turn. Recovery,
     // approval, retries, and Toolspace reuse this row; no runtime may infer
     // broader authority from the session creator or mutable session state.

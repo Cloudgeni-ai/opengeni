@@ -42,6 +42,7 @@ import {
   SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES,
   SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES,
   SESSION_MCP_SERVERS_MAX,
+  Session,
   SessionGoal,
   SessionMcpServerMetadata,
   SteerSessionMessageRequest,
@@ -475,6 +476,23 @@ describe("contracts", () => {
     expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+  });
+
+  test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "review the release",
+        policyRole: "  Release   Reviewer  ",
+      }).policyRole,
+    ).toBe("release-reviewer");
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "review the release",
+        policyRole: "../../workspace-owner",
+      }).success,
+    ).toBe(false);
+
+    expect(Session.shape.policyRole.parse(undefined)).toBeNull();
   });
 
   test("accepts an explicit rig-less session", () => {

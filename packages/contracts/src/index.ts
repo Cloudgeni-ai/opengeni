@@ -5,6 +5,7 @@ import {
   sessionEventJsonBytes,
   type SessionEventBoundarySurface,
 } from "./event-preview";
+import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 
 export * from "./slack-bot-scopes";
 
@@ -5875,6 +5876,10 @@ export const Session = z.object({
   // metadata (exposed like title/goal), never a secret and never a timeline event.
   // null when the session carried none.
   instructions: z.string().nullable(),
+  // Immutable prompt-policy role binding. This is separate from human
+  // workspace membership roles and from memory selectors. Null keeps the
+  // compatibility fallback to a normalized metadata.role value.
+  policyRole: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
   resources: z.array(ResourceRef),
   skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
@@ -8160,6 +8165,11 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // matches the codebase's largest free-form string convention (workspace
   // variable set variable values). Absent ⇒ byte-identical to today.
   instructions: z.string().trim().min(1).max(32768).optional(),
+  // Immutable prompt-policy role binding for matching one activated role
+  // policy. This never derives from or grants a human workspace membership
+  // role. Existing callers may continue to use normalized metadata.role as a
+  // compatibility fallback by omitting this field.
+  policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
   // For an agent-created child, omission inherits the trusted immediate
   // parent's repository/file context. An explicit array, including [], is
   // authoritative. Top-level omission remains []. Presence is resolved from
