@@ -17,6 +17,7 @@ import {
   createDb,
   encryptVariableSetValue,
   getLatestSessionModelForSubject,
+  getOrCreateSlackInteraction,
   getWorkspaceGrant,
   grantWorkspaceAccess,
   saveSlackBotUserLink,
@@ -200,7 +201,11 @@ function fakeSlack(
       const clientMessageId = form.get("client_msg_id");
       const accepted = clientMessageId ? acceptedByClientMessageId.get(clientMessageId) : null;
       if (accepted) {
-        return Response.json({ ok: true, channel: accepted.channel, ts: accepted.timestamp });
+        return Response.json({
+          ok: true,
+          channel: accepted.channel,
+          ts: accepted.timestamp,
+        });
       }
       const timestamp = `1800000000.${String(nextTimestamp++).padStart(6, "0")}`;
       const post = {
@@ -233,7 +238,11 @@ function fakeSlack(
         failedAfterAccept.add(post.text);
         throw new TypeError("simulated Slack response loss after provider acceptance");
       }
-      return Response.json({ ok: true, channel: form.get("channel"), ts: timestamp });
+      return Response.json({
+        ok: true,
+        channel: form.get("channel"),
+        ts: timestamp,
+      });
     }
     return Response.json({ ok: false, error: `unexpected_${method}` });
   };
@@ -663,7 +672,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id = ${value.owner.workspaceId}`;
     expect(queued!.count).toBe(1);
 
-    await drainAll({ ...value.deps, bus: new MemoryEventBus() } as ApiRouteDeps);
+    await drainAll({
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps);
 
     expect(value.slack.calls.filter((call) => call.method === "conversations.replies")).toEqual([
       {
@@ -697,7 +709,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(value.slack.posts[0]!.text).toContain("started from the :genie: reaction");
 
     const [session] = await shared!.admin<
-      { first_party_mcp_tools: string[]; initial_message: string; model: string }[]
+      {
+        first_party_mcp_tools: string[];
+        initial_message: string;
+        model: string;
+      }[]
     >`
       select first_party_mcp_tools, initial_message, model
       from sessions
@@ -802,6 +818,134 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       session!.initial_message.indexOf("Bounded surrounding thread context:"),
     );
     expect(session!.initial_message).toContain("bounded Slack context limit");
+  });
+
+  test("a concurrent linked reactor cannot take over an unbound reaction route", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_OWNER_RACE";
+    const rootTimestamp = "1706150000.000001";
+    const reactedTimestamp = "1706150000.000002";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      linkOther: true,
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_THREAD_ROOT",
+          text: "Investigate this deployment.",
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Use the exact owning subject for session creation.",
+        },
+      ],
+    });
+    const { interaction } = await getOrCreateSlackInteraction(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackChannelId: channelId,
+      slackThreadTs: rootTimestamp,
+      routeKey: `${channelId}:${rootTimestamp}`,
+      triggeringProviderEventId: `E_REACTION_OWNER_${crypto.randomUUID()}`,
+      owningSubjectId: value.owner.subjectId,
+      visibility: "workspace",
+    });
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_RACING_USER_${crypto.randomUUID()}`,
+            userId: value.otherSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const [waiting] = await shared!.admin<
+      {
+        id: string;
+        status: string;
+        last_error_code: string;
+        retry_at: Date | null;
+      }[]
+    >`
+      select id, status, last_error_code, retry_at
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(waiting).toMatchObject({
+      status: "pending",
+      last_error_code: "slack_route_creation_pending",
+    });
+    expect(waiting!.retry_at).not.toBeNull();
+    const [beforeOwner] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(beforeOwner!.count).toBe(0);
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_OWNING_USER_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+
+    const [created] = await shared!.admin<
+      {
+        id: string;
+        created_by_subject_id: string;
+        create_idempotency_key: string;
+      }[]
+    >`
+      select id, created_by_subject_id, create_idempotency_key
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(created).toEqual({
+      id: interaction.sessionReservationId,
+      created_by_subject_id: value.owner.subjectId,
+      create_idempotency_key: `slack-interaction:${interaction.id}`,
+    });
+
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now() - interval '1 second'
+      where id = ${waiting!.id}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const [sessionCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(sessionCount!.count).toBe(1);
+    const [racingInbox] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where id = ${waiting!.id}`;
+    expect(racingInbox).toEqual({ status: "processed", last_error_code: null });
   });
 
   test("reaction pagination resumes its durable cursor across a fresh claim after Slack throttling", async () => {
@@ -914,7 +1058,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       update slack_interaction_inbox
       set retry_at = now() - interval '1 second'
       where id = ${inbox!.id}`;
-    const freshDeps = { ...value.deps, bus: new MemoryEventBus() } as ApiRouteDeps;
+    const freshDeps = {
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
     expect(await drainSlackInteractionsOnce(freshDeps)).toBe(true);
 
     expect(value.slack.reactionContextHits).toEqual([
@@ -1848,7 +1995,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await commandResponse.text()).toContain("accepted this task");
     await drainAll(value.deps);
     const commandAck = value.slack.posts.at(-1)!;
-    expect(commandAck).toMatchObject({ channel: "C_COMMAND", threadTimestamp: null });
+    expect(commandAck).toMatchObject({
+      channel: "C_COMMAND",
+      threadTimestamp: null,
+    });
 
     const shortcutPayload = JSON.stringify({
       type: "message_action",
@@ -1861,7 +2011,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         text: "Explicitly send this human DM message to OpenGeni",
       },
     });
-    const shortcut = new URLSearchParams({ payload: shortcutPayload }).toString();
+    const shortcut = new URLSearchParams({
+      payload: shortcutPayload,
+    }).toString();
     const shortcutResponse = await value.app.request(
       signedRequest(
         "/v1/integrations/slack/interactions",
@@ -1921,7 +2073,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       from slack_interaction_inbox
       where workspace_id = ${value.owner.workspaceId}
         and provider_event_id = ${`command:${transientTriggerId}`}`;
-    expect(pendingTransient).toMatchObject({ status: "pending", attempt_count: 0, retry_at: null });
+    expect(pendingTransient).toMatchObject({
+      status: "pending",
+      attempt_count: 0,
+      retry_at: null,
+    });
     value.slack.channelAccessFailures.delete(transientChannel);
     await drainAll(value.deps);
     expect(await interactions(value.owner.workspaceId)).toHaveLength(3);
@@ -2175,7 +2331,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       error: "cannot_reply_to_message",
     });
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
-      { type: "turn.completed", payload: { output: "Permanent delivery result" } },
+      {
+        type: "turn.completed",
+        payload: { output: "Permanent delivery result" },
+      },
     ]);
 
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);

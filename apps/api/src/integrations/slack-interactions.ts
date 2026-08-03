@@ -777,6 +777,14 @@ async function processSlackReactionInboxEntry(
     await continueSlackReactionSession(deps, grant, interaction, preparedEntry);
     return;
   }
+  if (interaction.owningSubjectId !== grant.subjectId) {
+    // The route insert freezes the causal owner. Another linked user may race
+    // the same previously-unmapped Slack thread on a different API replica,
+    // but must not create the reserved session under their own authority.
+    // Retry until the owner binds the session; the later user can then
+    // continue the workspace-visible interaction through the normal path.
+    throw new SlackInteractionRetryableError("slack_route_creation_pending");
+  }
   const preferredModel = await getLatestSessionModelForSubject(
     deps.db,
     entry.workspaceId,
@@ -792,7 +800,10 @@ async function processSlackReactionInboxEntry(
       // the prompt; do not expose general Slack history tools for this trigger.
       firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
       ...(preferredModel ? { model: preferredModel } : {}),
-      idempotencyKey: `slack:${entry.connectionId}:${entry.providerMessageId}`,
+      // Every reaction entry converging on this route must use the same create
+      // key. This closes the same-owner multi-event race while the owner check
+      // above prevents a different subject from winning creation authority.
+      idempotencyKey: `slack-interaction:${interaction.id}`,
       clientEventId: `slack:${entry.providerEventId}`,
     });
   } catch (error) {
@@ -1360,6 +1371,7 @@ function safePayloadText(payload: unknown, field: string) {
 function safeErrorCode(error: unknown) {
   if (error instanceof SlackBotProviderError) return error.code.slice(0, 128);
   if (error instanceof SlackInteractionPermanentError) return error.code.slice(0, 128);
+  if (error instanceof SlackInteractionRetryableError) return error.code.slice(0, 128);
   if (error instanceof HTTPException) return `http_${error.status}`;
   const raw = error instanceof Error ? error.name : "slack_interaction_error";
   return (
@@ -1384,6 +1396,13 @@ class SlackInteractionPermanentError extends Error {
   constructor(readonly code: string) {
     super(code);
     this.name = "SlackInteractionPermanentError";
+  }
+}
+
+class SlackInteractionRetryableError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "SlackInteractionRetryableError";
   }
 }
 
