@@ -90,7 +90,9 @@ export type CodexRealtimeControllerSnapshot = {
   mode: SessionRealtimeMode | null;
   bridge: CodexRealtimeV3BridgeSnapshot | null;
   microphone: CodexRealtimeMicrophoneState;
+  inputMuted: boolean;
   audibleOutput: CodexRealtimeAudibleOutputState;
+  outputMuted: boolean;
   connectionGeneration: number;
   reconnectAttempt: number;
   diagnostic: CodexRealtimeDiagnostic | null;
@@ -196,6 +198,8 @@ export type CodexRealtimeController = {
   ingestProviderEvent(payload: string): Promise<void>;
   retry(): Promise<void>;
   retryAudibleOutput(): Promise<boolean>;
+  setInputMuted(muted: boolean): void;
+  setOutputMuted(muted: boolean): void;
   stop(): Promise<void>;
   /** Close browser resources but retain owner proof for truthful reload recovery. */
   close(): void;
@@ -264,7 +268,9 @@ export function createCodexRealtimeController(
     mode: null,
     bridge: null,
     microphone: "inactive",
+    inputMuted: false,
     audibleOutput: "inactive",
+    outputMuted: false,
     connectionGeneration: 0,
     reconnectAttempt: 0,
     diagnostic: null,
@@ -384,6 +390,8 @@ export function createCodexRealtimeController(
       realtimeId: null,
       mode: null,
       bridge: null,
+      inputMuted: false,
+      outputMuted: false,
       reconnectAttempt: 0,
       diagnostic: diagnostic("terminal_stop", message, false),
       error: null,
@@ -404,6 +412,7 @@ export function createCodexRealtimeController(
         throw signal.reason ?? new DOMException("Aborted", "AbortError");
       }
       microphone = acquired;
+      for (const track of acquired.getAudioTracks()) track.enabled = !state.inputMuted;
       publish({ microphone: "active" });
       return acquired;
     } catch (error) {
@@ -852,6 +861,7 @@ export function createCodexRealtimeController(
         onFatal: (fatal) => onBridgeFatal(targetGeneration, bridge, fatal),
       });
       active = { generation: targetGeneration, transport: connected, bridge };
+      connected.setOutputMuted(state.outputMuted);
       recoveryTerminal = false;
       pendingAbort = null;
       pendingGeneration = null;
@@ -982,6 +992,18 @@ export function createCodexRealtimeController(
     const resumed = await target.transport.retryAudibleOutput();
     if (active?.generation !== target.generation) return false;
     return resumed;
+  };
+
+  const setInputMuted = (muted: boolean): void => {
+    if (state.inputMuted === muted) return;
+    for (const track of microphone?.getAudioTracks() ?? []) track.enabled = !muted;
+    publish({ inputMuted: muted });
+  };
+
+  const setOutputMuted = (muted: boolean): void => {
+    if (state.outputMuted === muted) return;
+    active?.transport.setOutputMuted(muted);
+    publish({ outputMuted: muted });
   };
 
   const controller: CodexRealtimeController = {
@@ -1115,6 +1137,8 @@ export function createCodexRealtimeController(
     },
     retry,
     retryAudibleOutput,
+    setInputMuted,
+    setOutputMuted,
     stop: async () => {
       const currentOwner = owner;
       if (!currentOwner || !state.mode) {

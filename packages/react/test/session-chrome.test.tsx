@@ -199,6 +199,46 @@ describe("SessionChrome", () => {
     ).not.toBeNull();
   });
 
+  test("presents queued realtime work as voice instead of leaking agent context", async () => {
+    const transcript = "Find the LangFuse repository";
+    const prompt = [
+      "<realtime_delegation>",
+      `  <input>${transcript}</input>`,
+      "  <transcript_delta>user: please do that too</transcript_delta>",
+      "</realtime_delegation>",
+    ].join("\n");
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({
+          queue: [
+            fakeTurn({
+              prompt,
+              metadata: {
+                realtimeDelegation: { inputTranscript: transcript },
+              },
+            }),
+          ],
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    expect(queueChip?.textContent).toContain("Voice request queued");
+    expect(queueChip?.textContent).toContain(transcript);
+    expect(queueChip?.textContent).not.toContain("realtime_delegation");
+    expect(queueChip?.querySelector(".lucide-audio-lines")).not.toBeNull();
+
+    await act(async () => {
+      queueChip?.click();
+    });
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
+    expect(panel?.textContent).toContain(transcript);
+    expect(panel?.textContent).not.toContain("realtime_delegation");
+  });
+
   test("expands queue and reveals hover actions wired to queue APIs", async () => {
     const calls: string[] = [];
     const q = queue({

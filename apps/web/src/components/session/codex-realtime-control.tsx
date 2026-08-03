@@ -16,9 +16,12 @@ import {
   ChevronDownIcon,
   CircleAlertIcon,
   LoaderCircleIcon,
+  MicIcon,
+  MicOffIcon,
   RotateCcwIcon,
   SquareIcon,
   Volume2Icon,
+  VolumeXIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -125,7 +128,9 @@ export function useSessionCodexRealtime(options: {
     mode: null,
     bridge: null,
     microphone: "inactive",
+    inputMuted: false,
     audibleOutput: "inactive",
+    outputMuted: false,
     connectionGeneration: 0,
     reconnectAttempt: 0,
     diagnostic: null,
@@ -181,7 +186,9 @@ export function useSessionCodexRealtime(options: {
           mode: null,
           bridge: null,
           microphone: "inactive",
+          inputMuted: false,
           audibleOutput: "inactive",
+          outputMuted: false,
           connectionGeneration: 0,
           reconnectAttempt: 0,
           diagnostic: {
@@ -228,6 +235,12 @@ export function useSessionCodexRealtime(options: {
   const retryAudibleOutput = useCallback(async () => {
     await controllerRef.current?.retryAudibleOutput();
   }, []);
+  const setInputMuted = useCallback((muted: boolean) => {
+    controllerRef.current?.setInputMuted(muted);
+  }, []);
+  const setOutputMuted = useCallback((muted: boolean) => {
+    controllerRef.current?.setOutputMuted(muted);
+  }, []);
   const admissionInput = {
     sessionStatus: options.sessionStatus,
     controlState: options.effectiveControl.state,
@@ -256,6 +269,8 @@ export function useSessionCodexRealtime(options: {
     stop,
     retry,
     retryAudibleOutput,
+    setInputMuted,
+    setOutputMuted,
   };
 }
 
@@ -346,6 +361,7 @@ export function SessionCodexRealtimeControl(props: {
       canStart={realtime.canStart}
       admissionBlocker={realtime.admissionBlocker}
       modelAvailable={selectedModel.available}
+      menuSide="top"
       audioRef={realtime.audioRef}
       selectedModel={selectedModel}
       models={selection.models}
@@ -354,6 +370,8 @@ export function SessionCodexRealtimeControl(props: {
       onStop={realtime.stop}
       onRetry={realtime.retry}
       onRetryAudibleOutput={realtime.retryAudibleOutput}
+      onSetInputMuted={realtime.setInputMuted}
+      onSetOutputMuted={realtime.setOutputMuted}
     />
   );
 }
@@ -427,7 +445,9 @@ const IDLE_REALTIME_SNAPSHOT: CodexRealtimeControllerSnapshot = {
   mode: null,
   bridge: null,
   microphone: "inactive",
+  inputMuted: false,
   audibleOutput: "inactive",
+  outputMuted: false,
   connectionGeneration: 0,
   reconnectAttempt: 0,
   diagnostic: null,
@@ -483,6 +503,7 @@ export function NewSessionRealtimeControl(props: {
       admissionBlocker={selection.selectedModel.unavailableReason ?? props.disabledReason ?? null}
       modelAvailable={selection.selectedModel.available}
       selectionDisabled={starting}
+      menuSide="bottom"
       showDiagnostics={false}
       audioRef={audioRef}
       selectedModel={selection.selectedModel}
@@ -492,6 +513,8 @@ export function NewSessionRealtimeControl(props: {
       onStop={async () => undefined}
       onRetry={start}
       onRetryAudibleOutput={async () => undefined}
+      onSetInputMuted={() => undefined}
+      onSetOutputMuted={() => undefined}
     />
   );
 }
@@ -502,6 +525,8 @@ export function CodexRealtimeControl(props: {
   admissionBlocker?: string | null | undefined;
   modelAvailable: boolean;
   selectionDisabled?: boolean | undefined;
+  /** Prefer `bottom` on home/new-session; `top` for the docked session composer. */
+  menuSide?: "top" | "bottom" | undefined;
   showDiagnostics?: boolean;
   audioRef: RefObject<HTMLAudioElement | null>;
   selectedModel?: RealtimeModelOption | undefined;
@@ -511,6 +536,8 @@ export function CodexRealtimeControl(props: {
   onStop: () => Promise<void>;
   onRetry: () => Promise<void>;
   onRetryAudibleOutput: () => Promise<void>;
+  onSetInputMuted: (muted: boolean) => void;
+  onSetOutputMuted: (muted: boolean) => void;
 }) {
   const reduceMotion = useReducedMotion();
   const selectedModel = props.selectedModel ?? {
@@ -532,7 +559,7 @@ export function CodexRealtimeControl(props: {
     props.snapshot.status !== "stopping" &&
     props.snapshot.status !== "active" &&
     props.snapshot.diagnostic?.recoverable === true;
-  const audioBlocked = props.snapshot.audibleOutput === "blocked";
+  const audioBlocked = props.snapshot.audibleOutput === "blocked" && !props.snapshot.outputMuted;
   const mainDisabled =
     props.snapshot.status === "stopping" ||
     props.snapshot.status === "lost_owner" ||
@@ -564,9 +591,39 @@ export function CodexRealtimeControl(props: {
   }, [pickerOpen, selectedModel.provider]);
 
   return (
-    <div aria-label="Realtime voice" className="inline-flex shrink-0 items-center">
+    <div
+      aria-label="Realtime voice"
+      data-picker-side={props.menuSide ?? "top"}
+      className="inline-flex shrink-0 items-center"
+    >
       <audio ref={props.audioRef} autoPlay className="hidden" aria-hidden="true" />
       <RealtimeComposerGlow phase={status.phase} reduceMotion={reduceMotion === true} />
+      <AnimatePresence initial={false}>
+        {modeOwned ? (
+          <motion.div
+            key="realtime-mute-controls"
+            data-testid="realtime-mute-controls"
+            initial={reduceMotion ? false : { opacity: 0, width: 0, marginRight: 0 }}
+            animate={{ opacity: 1, width: "auto", marginRight: 4 }}
+            exit={reduceMotion ? undefined : { opacity: 0, width: 0, marginRight: 0 }}
+            transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.2, 0.8, 0.2, 1] }}
+            className="inline-flex shrink-0 items-center gap-0.5 overflow-hidden"
+          >
+            <RealtimeMuteButton
+              muted={props.snapshot.inputMuted}
+              kind="microphone"
+              reduceMotion={reduceMotion === true}
+              onToggle={() => props.onSetInputMuted(!props.snapshot.inputMuted)}
+            />
+            <RealtimeMuteButton
+              muted={props.snapshot.outputMuted}
+              kind="output"
+              reduceMotion={reduceMotion === true}
+              onToggle={() => props.onSetOutputMuted(!props.snapshot.outputMuted)}
+            />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
       <motion.button
         type="button"
         data-testid="realtime-primary-action"
@@ -612,7 +669,7 @@ export function CodexRealtimeControl(props: {
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
-          side="top"
+          side={props.menuSide ?? "top"}
           align="end"
           sideOffset={8}
           collisionPadding={12}
@@ -693,6 +750,50 @@ export function CodexRealtimeControl(props: {
         </span>
       ) : null}
     </div>
+  );
+}
+
+function RealtimeMuteButton(props: {
+  muted: boolean;
+  kind: "microphone" | "output";
+  reduceMotion: boolean;
+  onToggle(): void;
+}) {
+  const microphone = props.kind === "microphone";
+  const label = microphone
+    ? props.muted
+      ? "Unmute microphone"
+      : "Mute microphone"
+    : props.muted
+      ? "Unmute voice audio"
+      : "Mute voice audio";
+  const Icon = microphone
+    ? props.muted
+      ? MicOffIcon
+      : MicIcon
+    : props.muted
+      ? VolumeXIcon
+      : Volume2Icon;
+
+  return (
+    <motion.button
+      type="button"
+      aria-label={label}
+      aria-pressed={props.muted}
+      title={label}
+      whileTap={props.reduceMotion ? undefined : { scale: 0.92 }}
+      onClick={props.onToggle}
+      className={cn(
+        "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md border outline-none",
+        "transition-[background-color,border-color,color] duration-150 ease-og-out",
+        "focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:size-11",
+        props.muted
+          ? "border-og-accent/35 bg-og-accent-soft text-og-accent"
+          : "border-og-border bg-og-surface-2 text-og-fg-muted hover:border-og-accent/35 hover:text-og-fg",
+      )}
+    >
+      <Icon className="size-3.5" aria-hidden />
+    </motion.button>
   );
 }
 
@@ -779,7 +880,9 @@ function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: CodexRealtimeControll
   const rows = [
     ["controller", snapshot.status],
     ["microphone", snapshot.microphone],
+    ["microphone muted", String(snapshot.inputMuted)],
     ["audio", snapshot.audibleOutput],
+    ["audio muted", String(snapshot.outputMuted)],
     ["generation", String(snapshot.connectionGeneration)],
     ["reconnect attempt", String(snapshot.reconnectAttempt)],
     ["mode", snapshot.mode?.state ?? "none"],
@@ -840,7 +943,7 @@ function statusContent(
   admissionBlocker: string | null,
   modelLabel: string,
 ): { phase: RealtimeVisualPhase; label: string; detail: string } {
-  if (snapshot.audibleOutput === "blocked") {
+  if (snapshot.audibleOutput === "blocked" && !snapshot.outputMuted) {
     return {
       phase: "blocked",
       label: "Audio output blocked",

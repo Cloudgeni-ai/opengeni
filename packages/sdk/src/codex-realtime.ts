@@ -74,6 +74,7 @@ export type CodexRealtimeWebrtcSession = {
   readonly modeVersion: number;
   microphoneHealthy(): boolean;
   audibleOutputState(): CodexRealtimeAudibleOutputState;
+  setOutputMuted(muted: boolean): void;
   activateRemoteAudio(): void;
   retryAudibleOutput(): Promise<boolean>;
   /** Idempotently close media, data channel, and peer transport. */
@@ -107,6 +108,7 @@ export async function startCodexRealtimeWebrtc(
   let stopped = false;
   let remoteStream: MediaStream | null = null;
   let remoteAudioActive = options.activateRemoteAudio ?? true;
+  let outputMuted = false;
   let audibleOutput: CodexRealtimeAudibleOutputState = "inactive";
   let audioAttempt = 0;
 
@@ -121,6 +123,7 @@ export async function startCodexRealtimeWebrtc(
     const stream = remoteStream;
     if (stopped || !remoteAudioActive || !remoteAudio || !stream) return false;
     remoteAudio.autoplay = true;
+    remoteAudio.muted = outputMuted;
     remoteAudio.srcObject = stream;
     const attempt = ++audioAttempt;
     publishAudibleOutput("pending");
@@ -276,6 +279,10 @@ export async function startCodexRealtimeWebrtc(
       modeVersion: answer.modeVersion,
       microphoneHealthy: () => microphoneTracksHealthy(audioTracks),
       audibleOutputState: () => audibleOutput,
+      setOutputMuted: (muted) => {
+        outputMuted = muted;
+        if (options.remoteAudio) options.remoteAudio.muted = muted;
+      },
       activateRemoteAudio: () => {
         if (stopped || remoteAudioActive) return;
         remoteAudioActive = true;

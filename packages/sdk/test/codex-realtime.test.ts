@@ -356,6 +356,10 @@ describe("Codex realtime browser negotiation", () => {
     expect(audibleStates).toEqual(["pending", "blocked"]);
     expect(fixture.track.enabled).toBe(true);
     expect(session.microphoneHealthy()).toBe(true);
+    session.setOutputMuted(true);
+    expect(fixture.remoteAudio.muted).toBe(true);
+    session.setOutputMuted(false);
+    expect(fixture.remoteAudio.muted).toBe(false);
     fixture.allowPlay();
     expect(await session.retryAudibleOutput()).toBe(true);
     expect(audibleStates).toEqual(["pending", "blocked", "pending", "audible"]);

@@ -60,7 +60,7 @@ function browserFixture(
 ) {
   const calls: string[] = [];
   const sent: string[] = [];
-  const track = { kind: "audio", stop: () => calls.push("track.stop") };
+  const track = { kind: "audio", enabled: true, stop: () => calls.push("track.stop") };
   const remoteTrack = { kind: "audio" };
   const media = {
     getAudioTracks: () => [track],
@@ -126,6 +126,7 @@ function browserFixture(
   return {
     calls,
     sent,
+    track,
     media,
     events,
     peer,
@@ -462,6 +463,16 @@ describe("Codex realtime browser controller", () => {
       }),
     ]);
     expect(storage.values.size).toBe(1);
+
+    controller.setInputMuted(true);
+    controller.setOutputMuted(true);
+    expect(controller.snapshot()).toMatchObject({ inputMuted: true, outputMuted: true });
+    expect(browser.track.enabled).toBe(false);
+    expect(browser.remoteAudio.muted).toBe(true);
+    controller.setInputMuted(false);
+    controller.setOutputMuted(false);
+    expect(browser.track.enabled).toBe(true);
+    expect(browser.remoteAudio.muted).toBe(false);
 
     browser.dispatchRemoteTrack();
     await Promise.resolve();

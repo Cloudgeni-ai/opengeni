@@ -166,6 +166,7 @@ export function createGatewayRealtimeTransportStarter(): RealtimeControllerTrans
         microphoneTracks.length > 0 &&
         microphoneTracks.every((track) => track.readyState !== "ended"),
       audibleOutputState: () => audio.audibleOutputState(),
+      setOutputMuted: (muted) => audio.setMuted(muted),
       activateRemoteAudio: () => void audio.resume(),
       retryAudibleOutput: () => audio.resume(),
       stop,
@@ -395,10 +396,12 @@ class GatewayRealtimeAudio {
   private captureSource: MediaStreamAudioSourceNode | null = null;
   private captureProcessor: ScriptProcessorNode | null = null;
   private playbackContext: AudioContext | null = null;
+  private playbackGain: GainNode | null = null;
   private playbackTime = 0;
   private playbackStartedAt = 0;
   private activeSources = new Set<AudioBufferSourceNode>();
   private outputState: CodexRealtimeAudibleOutputState = "inactive";
+  private muted = false;
 
   constructor(
     private readonly options: {
@@ -446,7 +449,7 @@ class GatewayRealtimeAudio {
     buffer.getChannelData(0).set(samples);
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(context.destination);
+    source.connect(this.outputNode(context));
     const startAt = Math.max(context.currentTime, this.playbackTime);
     if (this.activeSources.size === 0) this.playbackStartedAt = startAt;
     source.start(startAt);
@@ -482,6 +485,13 @@ class GatewayRealtimeAudio {
     return this.outputState;
   }
 
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    const context = this.playbackContext;
+    const gain = this.playbackGain;
+    if (context && gain) gain.gain.setValueAtTime(muted ? 0 : 1, context.currentTime);
+  }
+
   isPlaying(): boolean {
     return this.activeSources.size > 0;
   }
@@ -507,8 +517,19 @@ class GatewayRealtimeAudio {
     this.captureSource = null;
     this.captureContext = null;
     this.stopPlayback();
+    this.playbackGain?.disconnect();
     void this.playbackContext?.close();
+    this.playbackGain = null;
     this.playbackContext = null;
+  }
+
+  private outputNode(context: AudioContext): GainNode {
+    if (!this.playbackGain) {
+      this.playbackGain = context.createGain();
+      this.playbackGain.gain.value = this.muted ? 0 : 1;
+      this.playbackGain.connect(context.destination);
+    }
+    return this.playbackGain;
   }
 
   private publish(state: CodexRealtimeAudibleOutputState): void {

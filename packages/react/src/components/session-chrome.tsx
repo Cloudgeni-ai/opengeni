@@ -32,6 +32,7 @@
  */
 import type { SessionGoal, SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
 import {
+  AudioLinesIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   BotIcon,
@@ -105,6 +106,11 @@ type GoalPillState =
   | "invariant_broken"
   | "completed";
 
+type QueuedTurnPresentation = {
+  kind: "prompt" | "realtime_voice" | "realtime_voice_handoff";
+  text: string;
+};
+
 const GOAL_LABEL: Record<GoalPillState, string> = {
   pursuing: "Pursuing",
   scheduled: "Scheduled",
@@ -114,6 +120,24 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
   invariant_broken: "Needs attention",
   completed: "Done",
 };
+
+function queuedTurnPresentation(turn: SessionTurn): QueuedTurnPresentation {
+  const realtimeDelegation = objectValue(turn.metadata.realtimeDelegation);
+  const inputTranscript = realtimeDelegation?.inputTranscript;
+  if (typeof inputTranscript === "string" && inputTranscript.trim()) {
+    return { kind: "realtime_voice", text: inputTranscript.trim() };
+  }
+  if (objectValue(turn.metadata.realtimeTailFlush)) {
+    return { kind: "realtime_voice_handoff", text: "Remaining voice context" };
+  }
+  return { kind: "prompt", text: turn.prompt };
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 /** Select pill state from the goal's authoritative continuation projection. */
 export function sessionChromeGoalPillState(
@@ -251,13 +275,29 @@ export function SessionChrome({
       });
     }
     if (turns.length > 0) {
-      const detail = turns[0]?.prompt;
+      const presentations = turns.map(queuedTurnPresentation);
+      const first = presentations[0];
+      const allVoiceRequests = presentations.every(({ kind }) => kind === "realtime_voice");
+      const onlyVoiceHandoff =
+        presentations.length === 1 && first?.kind === "realtime_voice_handoff";
+      const voiceOnly = allVoiceRequests || onlyVoiceHandoff;
+      const detail = first?.text;
       rows.push({
         id: "queue",
-        label: `${turns.length} queued prompt${turns.length === 1 ? "" : "s"}`,
+        label: allVoiceRequests
+          ? turns.length === 1
+            ? "Voice request queued"
+            : `${turns.length} voice requests queued`
+          : onlyVoiceHandoff
+            ? "Voice handoff queued"
+            : `${turns.length} queued prompt${turns.length === 1 ? "" : "s"}`,
         ...(detail ? { detail } : {}),
         tone: "neutral",
-        icon: <ListOrderedIcon className="size-3" />,
+        icon: voiceOnly ? (
+          <AudioLinesIcon className="size-3" />
+        ) : (
+          <ListOrderedIcon className="size-3" />
+        ),
       });
     }
     if (record && goalState) {
@@ -691,6 +731,8 @@ function QueuePanel({
       data-og-session-chrome-panel="queue"
     >
       {turns.map((turn, index) => {
+        const presentation = queuedTurnPresentation(turn);
+        const voice = presentation.kind !== "prompt";
         const pending = mutationFor(turn.id);
         const beforeUp = index > 0 ? (turns[index - 1]?.id ?? null) : null;
         const beforeDown = index < turns.length - 1 ? (turns[index + 2]?.id ?? null) : null;
@@ -703,11 +745,18 @@ function QueuePanel({
             className="group flex flex-col gap-1 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--og-session-chrome-row-hover)]"
           >
             <div className="flex items-start gap-1.5">
-              <span className="mt-px shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
-                {index + 1}
-              </span>
+              {voice ? (
+                <AudioLinesIcon
+                  aria-hidden="true"
+                  className="mt-0.5 size-3 shrink-0 text-og-accent"
+                />
+              ) : (
+                <span className="mt-px shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
+                  {index + 1}
+                </span>
+              )}
               <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
-                {turn.prompt}
+                {presentation.text}
               </p>
               {showActions ? (
                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">

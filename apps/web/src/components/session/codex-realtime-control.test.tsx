@@ -27,7 +27,9 @@ const idle: CodexRealtimeControllerSnapshot = {
   mode: null,
   bridge: null,
   microphone: "inactive",
+  inputMuted: false,
   audibleOutput: "inactive",
+  outputMuted: false,
   connectionGeneration: 0,
   reconnectAttempt: 0,
   diagnostic: null,
@@ -191,6 +193,8 @@ describe("ordinary session Codex realtime control", () => {
           onRetryAudibleOutput={async () => {
             calls.push("audio");
           }}
+          onSetInputMuted={(muted) => calls.push(`input:${String(muted)}`)}
+          onSetOutputMuted={(muted) => calls.push(`output:${String(muted)}`)}
         />,
       );
     });
@@ -234,6 +238,8 @@ describe("ordinary session Codex realtime control", () => {
           onRetryAudibleOutput={async () => {
             calls.push("audio");
           }}
+          onSetInputMuted={(muted) => calls.push(`input:${String(muted)}`)}
+          onSetOutputMuted={(muted) => calls.push(`output:${String(muted)}`)}
         />,
       );
     });
@@ -241,9 +247,22 @@ describe("ordinary session Codex realtime control", () => {
       'button[aria-label="End voice conversation"]',
     );
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Listening");
+    const muteMicrophone = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Mute microphone"]',
+    );
+    const muteAudio = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Mute voice audio"]',
+    );
+    expect(container.querySelector('[data-testid="realtime-mute-controls"]')).not.toBeNull();
+    expect(muteMicrophone?.getAttribute("aria-pressed")).toBe("false");
+    expect(muteAudio?.getAttribute("aria-pressed")).toBe("false");
+    await act(async () => {
+      muteMicrophone?.click();
+      muteAudio?.click();
+    });
     expect(stop?.disabled).toBe(false);
     await act(async () => stop?.click());
-    expect(calls).toEqual(["start", "stop"]);
+    expect(calls).toEqual(["start", "input:true", "output:true", "stop"]);
   });
 
   test("uses the shared provider-to-model drill-down with recognizable provider marks", async () => {
@@ -319,6 +338,30 @@ describe("ordinary session Codex realtime control", () => {
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
   });
 
+  test("configures the voice model picker below the new-session composer", async () => {
+    await act(async () => {
+      root.render(
+        <CodexRealtimeControl
+          snapshot={idle}
+          canStart={true}
+          modelAvailable={true}
+          menuSide="bottom"
+          audioRef={createRef<HTMLAudioElement>()}
+          onStart={async () => undefined}
+          onStop={async () => undefined}
+          onRetry={async () => undefined}
+          onRetryAudibleOutput={async () => undefined}
+          onSetInputMuted={() => undefined}
+          onSetOutputMuted={() => undefined}
+        />,
+      );
+    });
+
+    expect(
+      container.querySelector('[aria-label="Realtime voice"]')?.getAttribute("data-picker-side"),
+    ).toBe("bottom");
+  });
+
   test("exposes an autoplay-blocked retry without starting another realtime call", async () => {
     const calls: string[] = [];
     await act(async () => {
@@ -354,6 +397,8 @@ describe("ordinary session Codex realtime control", () => {
           onRetryAudibleOutput={async () => {
             calls.push("audio");
           }}
+          onSetInputMuted={() => undefined}
+          onSetOutputMuted={() => undefined}
         />,
       );
     });
@@ -384,6 +429,8 @@ describe("ordinary session Codex realtime control", () => {
           onStop={async () => undefined}
           onRetry={async () => undefined}
           onRetryAudibleOutput={async () => undefined}
+          onSetInputMuted={() => undefined}
+          onSetOutputMuted={() => undefined}
         />,
       );
     });
