@@ -41,13 +41,13 @@ Shared Drive boundary. That product mode requires
   contract is explicitly limited to the individually selected files. It must
   not be represented as a recursively synchronized folder.
 
-OAuth start continues to use Google's incremental-authorization flag. Future
-Drive publishing under OPE-138 may request `drive.file` as a separate write
-capability without replacing the read-only source grant. The callback and every
-active source-browser admission evaluate the exact returned/stored scope set
-through one deterministic capability decision. Unknown, partial, write-only,
-or malformed grants fail before Google identity lookup, credential persistence,
-or source-provider reads.
+OAuth start continues to use Google's incremental-authorization flag. A future
+Drive publishing feature may request `drive.file` as a separate write capability
+without replacing the read-only source grant. The callback and every active
+source-browser admission evaluate the exact returned/stored scope set through
+one deterministic capability decision. Unknown, partial, write-only, or malformed
+grants fail before Google identity lookup, credential persistence, or
+source-provider reads.
 
 ## Local setup
 
