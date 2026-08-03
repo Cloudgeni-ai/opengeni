@@ -1,5 +1,22 @@
 # @opengeni/db
 
+## 0.24.0
+
+### Minor Changes
+
+- 3e4842d: Add subject-authorized accepted-attempt governance inspection to Workspace State,
+  including immutable policy/preference snapshot metadata and deterministic current
+  drift classification without exposing prompt or personal preference content.
+
+### Patch Changes
+
+- d1f0c3d: Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [74bd3a5]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/config@0.10.4
+
 ## 0.23.0
 
 ### Minor Changes

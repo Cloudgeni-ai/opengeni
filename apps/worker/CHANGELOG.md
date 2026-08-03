@@ -1,5 +1,25 @@
 # @opengeni/worker-bundle
 
+## 0.16.1
+
+### Patch Changes
+
+- d1f0c3d: Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.
+- 74bd3a5: Project image content and image-only tools from the model capability catalogue without mutating durable session history.
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [74bd3a5]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/documents@0.3.0
+  - @opengeni/core@0.20.0
+  - @opengeni/db@0.24.0
+  - @opengeni/config@0.10.4
+  - @opengeni/runtime@0.18.1
+  - @opengeni/events@0.3.63
+  - @opengeni/github@0.4.20
+  - @opengeni/observability@0.4.7
+  - @opengeni/storage@0.2.57
+
 ## 0.16.0
 
 ### Minor Changes
