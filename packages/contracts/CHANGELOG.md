@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.33.0
+
+### Minor Changes
+
+- d1f0c3d: Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.
+
 ## 0.32.0
 
 ### Minor Changes
