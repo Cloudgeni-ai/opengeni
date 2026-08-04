@@ -98,7 +98,7 @@ describe("capabilities browser e2e", () => {
       expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-hidden"))).toBe(
         null,
       );
-      expect(await browseOpener.count()).toBe(0);
+      expect(await browseOpener.count()).toBe(1);
 
       await page.keyboard.press("Tab");
       await expectFocused(page.getByRole("button", { name: "Disable" }));
@@ -264,7 +264,9 @@ describe("capabilities browser e2e", () => {
       expect(await setupLink.getAttribute("href")).toBe(
         "https://docs.mobbin.com/mcp/clients/overview",
       );
-      await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }));
+      await expectVisible(
+        page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }),
+      );
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
         path: `${mobbinEvidenceDir}disconnected-desktop-light.png`,
@@ -278,7 +280,7 @@ describe("capabilities browser e2e", () => {
       });
       await Promise.all([
         page.waitForURL(`${authorizationOrigin}/**`),
-        page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }).click(),
+        page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }).click(),
       ]);
       await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for OpenGeni" }));
       expect(state.oauthStarts).toBe(1);
@@ -298,7 +300,7 @@ describe("capabilities browser e2e", () => {
       });
       await setTheme(page, "dark");
       await openMobbinSheet(page, true);
-      await expectText(page.getByRole("dialog"), "Connected to mobbin.com");
+      await expectText(page.getByRole("dialog"), "Workspace connection to mobbin.com");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
         path: `${mobbinEvidenceDir}connected-desktop-dark.png`,
@@ -324,7 +326,10 @@ describe("capabilities browser e2e", () => {
       await setTheme(mobilePage, "dark");
       await expectText(mobilePage.getByRole("region", { name: "Capabilities" }), "Needs attention");
       await openMobbinSheet(mobilePage, true);
-      await expectText(mobilePage.getByRole("dialog"), "Reconnect to restore access");
+      await expectText(
+        mobilePage.getByRole("dialog"),
+        "Workspace connection needs to be reconnected",
+      );
       await expectVisible(
         mobilePage.getByRole("dialog").getByRole("button", { name: "Reconnect Mobbin" }),
       );
@@ -340,8 +345,9 @@ describe("capabilities browser e2e", () => {
 });
 
 async function openBrowseSheet(page: Page) {
+  await page.getByRole("tab", { name: /Discover/ }).click();
   const opener = page
-    .locator("button:not([data-capability-focus-target])")
+    .locator("[data-capability-focus-target]")
     .filter({ hasText: "Example capability" })
     .first();
   await expectVisible(opener);
@@ -354,6 +360,7 @@ async function openBrowseSheet(page: Page) {
 }
 
 async function openMobbinSheet(page: Page, enabled: boolean): Promise<void> {
+  if (!enabled) await page.getByRole("tab", { name: /Discover/ }).click();
   const opener = enabled
     ? page.locator(`[data-capability-focus-target][data-capability-id="${mobbinCapabilityId}"]`)
     : page.getByRole("button").filter({ hasText: "Mobbin" }).first();
@@ -658,7 +665,7 @@ function mobbinConnections(mode: MobbinUiState["mode"]) {
       id: mobbinConnectionId,
       accountId,
       workspaceId,
-      subjectId: "browser-focus-subject",
+      subjectId: null,
       providerDomain: "mobbin.com",
       kind: "oauth2",
       status: mode === "connected" ? "active" : "revoked",

@@ -156,7 +156,7 @@ export function LoadErrorState({
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>
         {error?.message ? (
-          <div className="mt-0.5 break-words text-xs leading-4 text-status-failed/80">
+          <div className="mt-0.5 break-words text-xs leading-4 text-status-failed">
             {error.message}
           </div>
         ) : null}

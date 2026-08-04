@@ -1,27 +1,43 @@
-// Capabilities: the workspace integrations marketplace. A single scrollable
-// page — a large search, kind filters, an "Enabled" strip the user manages
-// daily, and a logo tile grid over the full catalog (1,000+ items, rendered
-// incrementally). Credentialed MCP servers connect through the connections
-// spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
-// by hand-editing enable headers. Packs keep their first-class register/enable/
-// disable/unregister surface, restyled flat.
+// Capabilities: the workspace capability-management surface. Lifecycle views
+// separate what agents can use now, work-oriented discovery, connection health,
+// and advanced/custom configuration. Credentialed MCP servers still connect
+// through the connections spine in a right-hand detail sheet, and the existing
+// capability/pack mutation behavior remains authoritative underneath the new IA.
 import {
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
 } from "@opengeni/contracts/slack-bot-scopes";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
+  BlocksIcon,
   Building2Icon,
   CheckCircle2Icon,
   ChevronDownIcon,
+  ChevronRightIcon,
+  CircleAlertIcon,
   GlobeIcon,
+  Layers3Icon,
+  LibraryIcon,
   Loader2Icon,
   PlugIcon,
   PlusIcon,
   RefreshCwIcon,
   SearchIcon,
+  Settings2Icon,
+  ShieldCheckIcon,
+  SparklesIcon,
+  WrenchIcon,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
@@ -39,7 +55,10 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { MetaChip } from "@/components/ui/meta-chip";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppContext } from "@/context";
 import {
   apiKeyConnectionRef,
@@ -98,6 +117,19 @@ import type {
 
 const PAGE_SIZE = 48;
 const FILTERS: CapabilityFilter[] = ["all", "pack", "mcp", "api", "skill", "plugin"];
+const CAPABILITY_VIEWS = ["current", "discover", "connections", "custom"] as const;
+const DISCOVERY_CATEGORIES = [
+  "all",
+  "work",
+  "development",
+  "knowledge",
+  "marketing",
+  "infrastructure",
+] as const;
+
+type CapabilityView = (typeof CAPABILITY_VIEWS)[number];
+type DiscoveryCategory = (typeof DISCOVERY_CATEGORIES)[number];
+type DiscoverySource = "all" | "opengeni" | "verified" | "community" | "custom";
 
 export function canWriteWorkspaceConnections(
   accessContext: AccessContext | null,
@@ -224,9 +256,14 @@ export function CapabilitiesRoute({
   const [personalSlackDisconnectOpen, setPersonalSlackDisconnectOpen] = useState(false);
   const [slackBotBusy, setSlackBotBusy] = useState(false);
 
+  const [view, setView] = useState<CapabilityView>(
+    initialSection === "packs" ? "discover" : "current",
+  );
   const [filter, setFilter] = useState<CapabilityFilter>(
     initialSection === "packs" ? "pack" : "all",
   );
+  const [category, setCategory] = useState<DiscoveryCategory>("all");
+  const [sourceFilter, setSourceFilter] = useState<DiscoverySource>("all");
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
@@ -256,11 +293,19 @@ export function CapabilitiesRoute({
     () => filterCapabilityCatalogItems(items, filter, query).filter((item) => item.kind !== "pack"),
     [items, filter, query],
   );
-  // The Enabled strip is the daily-management surface; Browse shows the rest of
-  // the catalog so an enabled item never appears in both places.
-  const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
-  const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
-  const visibleBrowse = browseItems.slice(0, visibleCount);
+  const enabledItems = useMemo(
+    () => items.filter((item) => item.kind !== "pack" && item.enabled),
+    [items],
+  );
+  const discoveryItems = useMemo(
+    () =>
+      filtered.filter(
+        (item) =>
+          matchesDiscoveryCategory(item, category) && matchesDiscoverySource(item, sourceFilter),
+      ),
+    [category, filtered, sourceFilter],
+  );
+  const visibleDiscover = discoveryItems.slice(0, visibleCount);
   const slackBotConnections = openGeniSlackBotConnections(connections ?? []);
   const slackBotConnection = preferredOpenGeniSlackBotConnection(slackBotConnections);
   const slackBotMetadata = slackBotConnection
@@ -269,8 +314,8 @@ export function CapabilitiesRoute({
   const canInstallSlackBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
   const canManageSlackReaction = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
-  const showPacks = filter === "all" || filter === "pack";
-  const showCatalog = filter !== "pack";
+  const showPacks =
+    filter === "pack" || packs.loading || Boolean(packs.error) || packs.packs.length > 0;
 
   const logoUrl = useCallback(
     (item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath),
@@ -301,6 +346,27 @@ export function CapabilitiesRoute({
       })()
     : null;
   const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
+  const currentRows = useMemo(
+    () =>
+      enabledItems
+        .map((item) => ({
+          item,
+          health: connectionHealth(item, connections ?? [], connectionsLoaded),
+        }))
+        .sort(compareCurrentCapabilityRows),
+    [connections, connectionsLoaded, enabledItems],
+  );
+  const attentionRows = currentRows.filter((row) => row.health.state === "attention");
+  const readyRows = currentRows.filter((row) => row.health.state !== "attention");
+  const activeConnectionCount = (connections ?? []).filter(
+    (connection) => connection.status === "active",
+  ).length;
+  const builtInCount = enabledItems.filter(
+    (item) => item.source === "built_in" || item.source === "configured",
+  ).length;
+  const customItems = items.filter(
+    (item) => item.source === "manual" || item.source === "configured",
+  );
 
   useEffect(() => {
     void refresh();
@@ -351,7 +417,7 @@ export function CapabilitiesRoute({
   }, [slackLinkToken, workspaceId]);
 
   // Reset the incremental window whenever the result set changes.
-  useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
+  useEffect(() => setVisibleCount(PAGE_SIZE), [category, filter, query, sourceFilter]);
 
   // Close the sheet if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) — never leave a ghost open. A
@@ -1056,169 +1122,564 @@ export function CapabilitiesRoute({
           title="Capabilities"
           description="Connect integrations and enable the tools, packs, and skills your agents can use."
           actions={
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={refreshAll}
-                disabled={loading || packs.loading}
-              >
-                <RefreshCwIcon className={cn((loading || packs.loading) && "animate-spin")} />
-                Refresh
-              </Button>
-              <Button type="button" onClick={() => setAddOpen(true)}>
-                <PlusIcon />
-                Add custom
-              </Button>
-            </>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={refreshAll}
+              disabled={loading || packs.loading}
+            >
+              <RefreshCwIcon className={cn((loading || packs.loading) && "animate-spin")} />
+              Refresh
+            </Button>
           }
         />
 
-        <Suspense fallback={<Skeleton className="mt-6 h-40 w-full rounded-xl" />}>
-          <GoogleDriveConnectorCard workspaceId={workspaceId} />
-        </Suspense>
-
-        <section className="mt-6" aria-labelledby="slack-connections-heading">
-          <div>
-            <h2 id="slack-connections-heading" className="text-sm font-semibold text-fg">
-              Slack connections
-            </h2>
-            <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
-              Personal account linking and workspace bot installation are separate principals.
-              Connecting one never exposes, replaces, or reuses the other's credentials.
-            </p>
+        <Tabs
+          value={view}
+          onValueChange={(value) => setView(value as CapabilityView)}
+          className="mt-5 gap-0"
+        >
+          <div className="sticky top-0 z-20 -mx-1 overflow-x-auto border-b border-border bg-bg/95 px-1 pt-1 backdrop-blur supports-[backdrop-filter]:bg-bg/85">
+            <TabsList variant="line" aria-label="Capability views" className="h-10 gap-1">
+              <TabsTrigger value="current" className="px-3 text-xs">
+                <Layers3Icon />
+                Current
+                {attentionRows.length > 0 ? (
+                  <span
+                    className="size-1.5 rounded-full bg-status-waiting"
+                    aria-label="Needs attention"
+                  />
+                ) : null}
+              </TabsTrigger>
+              <TabsTrigger value="discover" className="px-3 text-xs">
+                <SparklesIcon />
+                Discover
+              </TabsTrigger>
+              <TabsTrigger value="connections" className="px-3 text-xs">
+                <PlugIcon />
+                Connections
+              </TabsTrigger>
+              <TabsTrigger value="custom" className="px-3 text-xs">
+                <WrenchIcon />
+                Custom
+              </TabsTrigger>
+            </TabsList>
           </div>
 
-          <div className="mt-3 grid gap-4 xl:grid-cols-2">
-            <PersonalSlackAccountCard
-              available={personalSlackItem !== null}
-              canManage={canManagePersonalSlack}
-              busy={personalSlackBusy}
-              accountState={personalSlackStatus}
-              onConnect={() => void startPersonalSlackOAuth()}
-              onReconnect={() => void startPersonalSlackOAuth()}
-              onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
-            />
-
-            <section
-              className="rounded-xl border border-border bg-surface p-4"
-              aria-labelledby="workspace-slack-bot-heading"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex min-w-0 items-start gap-3">
-                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
-                    <Building2Icon className="size-4" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3
-                        id="workspace-slack-bot-heading"
-                        className="text-sm font-semibold text-fg"
-                      >
-                        OpenGeni workspace bot
-                      </h3>
-                      <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-2xs font-medium text-fg-muted">
-                        Workspace shared · bot identity
-                      </span>
-                    </div>
-                    <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
-                      Install a separate bot principal for first-party Slack tools and explicitly
-                      bound scheduled tasks. It never uses a person's Slack OAuth grant.
-                    </p>
-                  </div>
+          <TabsContent value="current" className="mt-6 space-y-7">
+            <section aria-labelledby="capability-summary-heading">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h2 id="capability-summary-heading" className="text-base font-semibold text-fg">
+                    What agents can use now
+                  </h2>
+                  <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
+                    Workspace capabilities define what can be selected. Each session can narrow its
+                    tools, while workspace policy and built-ins cannot be widened here.
+                  </p>
                 </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setView("discover")}
+                >
+                  Explore capabilities
+                  <ChevronRightIcon />
+                </Button>
               </div>
 
-              {slackBotConnection && slackBotMetadata ? (
-                <>
-                  <div className="mt-4 flex items-start gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
-                    <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-brand" />
-                    <div>
-                      <p className="text-sm font-semibold text-fg">
-                        {slackBotConnection.status === "active"
-                          ? `Installed in ${slackBotMetadata.slackTeamName}`
-                          : `Reinstall needed for ${slackBotMetadata.slackTeamName}`}
-                      </p>
-                      <p className="mt-0.5 text-xs text-fg-muted">
-                        {slackBotConnection.status === "active"
-                          ? "The workspace bot is ready to use in this Slack workspace."
-                          : "Reinstall the workspace bot to restore its Slack access."}
+              <div className="mt-4 grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-surface/40 lg:grid-cols-4">
+                <SummaryMetric
+                  label="Ready now"
+                  value={readyRows.length}
+                  icon={<CheckCircle2Icon />}
+                />
+                <SummaryMetric
+                  label="Needs attention"
+                  value={attentionRows.length}
+                  icon={<CircleAlertIcon />}
+                  attention={attentionRows.length > 0}
+                />
+                <SummaryMetric
+                  label="Active connections"
+                  value={connectionsLoaded ? activeConnectionCount : "—"}
+                  icon={<PlugIcon />}
+                />
+                <SummaryMetric label="Built in" value={builtInCount} icon={<ShieldCheckIcon />} />
+              </div>
+            </section>
+
+            {catalogView === "loading" ? (
+              <CapabilityRowSkeletons />
+            ) : catalogView === "error" ? (
+              <LoadErrorState
+                title="Couldn't load capabilities"
+                error={loadError}
+                onRetry={() => void refresh()}
+              />
+            ) : currentRows.length === 0 ? (
+              <EmptyState
+                icon={<SparklesIcon className="size-4" />}
+                title="Choose capabilities for the work ahead"
+                description="OpenGeni's platform capabilities stay available. Discover a pack, connection, or specialist skill when you need it."
+                action={
+                  <Button type="button" size="sm" onClick={() => setView("discover")}>
+                    Discover capabilities
+                  </Button>
+                }
+              />
+            ) : (
+              <div className="space-y-7">
+                {attentionRows.length > 0 ? (
+                  <CapabilityListSection
+                    title="Needs attention"
+                    description="Repair these before relying on them in a new session."
+                    rows={attentionRows}
+                    logoUrl={logoUrl}
+                    busyId={busyId}
+                    onOpen={openItem}
+                    onDisable={disableFromStrip}
+                  />
+                ) : null}
+                {readyRows.length > 0 ? (
+                  <CapabilityListSection
+                    title="Available now"
+                    description="Built-ins, configured tools, and workspace selections in one compact inventory."
+                    rows={readyRows}
+                    logoUrl={logoUrl}
+                    busyId={busyId}
+                    onOpen={openItem}
+                    onDisable={disableFromStrip}
+                  />
+                ) : null}
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="discover" className="mt-6 space-y-8">
+            <section aria-labelledby="recommended-heading">
+              <div>
+                <h2 id="recommended-heading" className="text-base font-semibold text-fg">
+                  Start with the work, not the technology
+                </h2>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
+                  Recommendations keep common paths visible. The full catalog and technical formats
+                  stay searchable below.
+                </p>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-3">
+                <RecommendationCard
+                  icon={<LibraryIcon />}
+                  title="Work with company knowledge"
+                  description="Documents, search, files, and connected sources."
+                  action="Browse knowledge"
+                  onClick={() => {
+                    setCategory("knowledge");
+                    setFilter("all");
+                  }}
+                />
+                <RecommendationCard
+                  icon={<BlocksIcon />}
+                  title="Run a repeatable workflow"
+                  description="Packs compose tools, skills, connections, and schedules."
+                  action="Browse packs"
+                  onClick={() => setFilter("pack")}
+                />
+                <RecommendationCard
+                  icon={<Settings2Icon />}
+                  title="Infrastructure and Terraform"
+                  description="Specialist guidance, available intentionally rather than globally."
+                  action="Browse infrastructure"
+                  onClick={() => {
+                    setCategory("infrastructure");
+                    setFilter("skill");
+                  }}
+                />
+              </div>
+            </section>
+
+            {showPacks ? (
+              <PacksSection
+                packs={packs}
+                variableSets={variableSets.variableSets.map((variableSet) => ({
+                  id: variableSet.id,
+                  name: variableSet.name,
+                }))}
+                busyPackId={packBusyId}
+                onRegister={registerPackManifest}
+                onEnable={(pack, variableSetId) => void enablePack(pack, variableSetId)}
+                onDisable={(pack) => void disablePack(pack)}
+                onUnregister={unregisterPack}
+              />
+            ) : null}
+
+            {filter !== "pack" ? (
+              <section aria-labelledby="catalog-heading" className="space-y-4">
+                <div className="flex flex-wrap items-end justify-between gap-3">
+                  <div>
+                    <h2 id="catalog-heading" className="text-base font-semibold text-fg">
+                      Capability library
+                    </h2>
+                    <p className="mt-1 text-xs text-fg-muted">
+                      {discoveryItems.length.toLocaleString()} matching capabilities
+                      {filter === "all" && counts.pack > 0
+                        ? ` · ${counts.pack.toLocaleString()} ${counts.pack === 1 ? "pack" : "packs"} managed separately`
+                        : ""}
+                    </p>
+                  </div>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setView("custom")}>
+                    <PlusIcon />
+                    Add custom
+                  </Button>
+                </div>
+
+                <div className="sticky top-11 z-10 rounded-xl border border-border bg-bg/95 p-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-bg/85">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+                    <div className="relative min-w-0 flex-1">
+                      <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
+                      <Input
+                        value={query}
+                        onChange={(event) => setQuery(event.target.value)}
+                        placeholder="Search by task, product, or capability"
+                        className="h-10 pl-9"
+                        aria-label="Search capabilities"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 sm:flex">
+                      <Select
+                        aria-label="Capability format"
+                        value={filter}
+                        onChange={(event) => setFilter(event.target.value as CapabilityFilter)}
+                        className="h-10 min-w-0 text-xs sm:w-36"
+                      >
+                        {FILTERS.map((kind) => (
+                          <option key={kind} value={kind}>
+                            {capabilityFilterLabel(kind)} · {counts[kind]}
+                          </option>
+                        ))}
+                      </Select>
+                      <Select
+                        aria-label="Capability source"
+                        value={sourceFilter}
+                        onChange={(event) => setSourceFilter(event.target.value as DiscoverySource)}
+                        className="h-10 min-w-0 text-xs sm:w-40"
+                      >
+                        <option value="all">All sources</option>
+                        <option value="opengeni">OpenGeni</option>
+                        <option value="verified">Verified library</option>
+                        <option value="community">Community registry</option>
+                        <option value="custom">Custom</option>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex gap-2 overflow-x-auto pb-0.5" aria-label="Categories">
+                    {DISCOVERY_CATEGORIES.map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={category === value}
+                        onClick={() => setCategory(value)}
+                        className={cn(
+                          "inline-flex h-8 shrink-0 items-center rounded-md border px-2.5 text-xs font-medium transition-colors",
+                          category === value
+                            ? "border-brand/30 bg-brand/10 text-brand"
+                            : "border-border bg-surface/40 text-fg-muted hover:border-border-strong hover:text-fg",
+                        )}
+                      >
+                        {discoveryCategoryLabel(value)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {catalogView === "loading" ? (
+                  <CapabilityRowSkeletons />
+                ) : catalogView === "error" ? (
+                  <LoadErrorState
+                    title="Couldn't load capabilities"
+                    error={loadError}
+                    onRetry={() => void refresh()}
+                  />
+                ) : discoveryItems.length === 0 ? (
+                  <RegistryFallback
+                    query={query}
+                    busy={registryBusy}
+                    searched={registrySearched}
+                    results={visibleRegistry}
+                    onSearch={() => void searchRegistry()}
+                    logoUrl={logoUrl}
+                    onOpen={(item) => openItem(item, true)}
+                    emptyDefault={items.length === 0}
+                  />
+                ) : (
+                  <>
+                    <div className="overflow-hidden rounded-xl border border-border bg-surface/30">
+                      {visibleDiscover.map((item) => (
+                        <CapabilityInventoryRow
+                          key={item.id}
+                          item={item}
+                          health={connectionHealth(item, connections ?? [], connectionsLoaded)}
+                          logoSrc={logoUrl(item)}
+                          busy={busyId === item.id}
+                          onOpen={() => openItem(item)}
+                          onDisable={() => void disableFromStrip(item)}
+                          focusTarget
+                        />
+                      ))}
+                    </div>
+                    {visibleCount < discoveryItems.length ? (
+                      <LoadMoreSentinel
+                        onReach={() =>
+                          setVisibleCount((count) =>
+                            Math.min(count + PAGE_SIZE, discoveryItems.length),
+                          )
+                        }
+                      />
+                    ) : null}
+                  </>
+                )}
+              </section>
+            ) : null}
+          </TabsContent>
+
+          <TabsContent value="connections" className="mt-6 space-y-8">
+            <section>
+              <h2 className="text-base font-semibold text-fg">Connections and identities</h2>
+              <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
+                Connections provide credentials and provider identity. Workspace and personal
+                principals are separate; connecting one never substitutes for the other.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <MetaChip dot="idle">
+                  {connectionsLoaded ? `${activeConnectionCount} active` : "Health unavailable"}
+                </MetaChip>
+                <MetaChip>Workspace shared by default</MetaChip>
+                <MetaChip>Personal access stays subject scoped</MetaChip>
+              </div>
+            </section>
+
+            <Suspense fallback={<Skeleton className="h-40 w-full rounded-xl" />}>
+              <GoogleDriveConnectorCard workspaceId={workspaceId} />
+            </Suspense>
+
+            <section aria-labelledby="slack-connections-heading">
+              <div>
+                <h2 id="slack-connections-heading" className="text-sm font-semibold text-fg">
+                  Slack
+                </h2>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
+                  Two explicit principals: your Slack identity and the workspace bot.
+                </p>
+              </div>
+
+              <div className="mt-3 grid gap-4 xl:grid-cols-2">
+                <PersonalSlackAccountCard
+                  available={personalSlackItem !== null}
+                  canManage={canManagePersonalSlack}
+                  busy={personalSlackBusy}
+                  accountState={personalSlackStatus}
+                  onConnect={() => void startPersonalSlackOAuth()}
+                  onReconnect={() => void startPersonalSlackOAuth()}
+                  onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
+                />
+
+                <section
+                  className="rounded-xl border border-border bg-surface p-4"
+                  aria-labelledby="workspace-slack-bot-heading"
+                >
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
+                      <Building2Icon className="size-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3
+                          id="workspace-slack-bot-heading"
+                          className="text-sm font-semibold text-fg"
+                        >
+                          OpenGeni workspace bot
+                        </h3>
+                        <MetaChip>Workspace · bot identity</MetaChip>
+                      </div>
+                      <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
+                        First-party Slack tools and explicitly bound scheduled tasks. It never uses
+                        a person's Slack grant.
                       </p>
                     </div>
                   </div>
 
-                  <SlackReactionSummonCard
-                    workspaceId={workspaceId}
-                    connection={slackBotConnection}
-                    canManage={canManageSlackReaction}
-                    installBusy={slackBotBusy}
-                    onReinstall={() => void installSlackBot(false)}
-                  />
-
-                  <details className="group mt-3 border-t border-border/70 pt-3">
-                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                      <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                      <span>Workspace bot permissions and installation details</span>
-                    </summary>
-                    <div className="mt-3 rounded-md bg-bg/50 p-3">
-                      <p className="text-2xs font-medium text-fg-muted">Required bot scopes</p>
-                      <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-                        {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
-                      </p>
-                      <p className="mt-2 text-2xs text-fg-subtle">
-                        Bot connection ID:{" "}
-                        <span className="font-mono">{slackBotConnection.id}</span>
-                        {slackBotConnections.length > 1
-                          ? ` · ${slackBotConnections.length} Slack installations`
-                          : ""}
+                  {slackBotConnection && slackBotMetadata ? (
+                    <>
+                      <div className="mt-4 flex items-start gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
+                        <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-brand" />
+                        <div>
+                          <p className="text-sm font-semibold text-fg">
+                            {slackBotConnection.status === "active"
+                              ? `Installed in ${slackBotMetadata.slackTeamName}`
+                              : `Reinstall needed for ${slackBotMetadata.slackTeamName}`}
+                          </p>
+                          <p className="mt-0.5 text-xs text-fg-muted">
+                            {slackBotConnection.status === "active"
+                              ? "Ready for the workspace."
+                              : "Reinstall to restore Slack access."}
+                          </p>
+                        </div>
+                      </div>
+                      <SlackReactionSummonCard
+                        workspaceId={workspaceId}
+                        connection={slackBotConnection}
+                        canManage={canManageSlackReaction}
+                        installBusy={slackBotBusy}
+                        onReinstall={() => void installSlackBot(false)}
+                      />
+                      <details className="group mt-3 border-t border-border/70 pt-3">
+                        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                          <span>Permissions and installation details</span>
+                        </summary>
+                        <div className="mt-3 rounded-md bg-bg/50 p-3">
+                          <p className="text-2xs font-medium text-fg-muted">Required bot scopes</p>
+                          <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+                            {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
+                          </p>
+                          <SlackBotInstallControls
+                            canInstall={canInstallSlackBot}
+                            hasConnection
+                            busy={slackBotBusy}
+                            onInstall={(createNewConnection) =>
+                              void installSlackBot(createNewConnection)
+                            }
+                          />
+                          {slackBotConnection.status === "active" ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="mt-1"
+                              disabled={slackBotBusy}
+                              onClick={() => void disconnectSlackBot()}
+                            >
+                              Disconnect workspace bot
+                            </Button>
+                          ) : null}
+                        </div>
+                      </details>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mt-4 max-w-2xl text-xs text-fg-muted">
+                        Install the OpenGeni bot in a Slack workspace to get started.
                       </p>
                       <SlackBotInstallControls
                         canInstall={canInstallSlackBot}
-                        hasConnection
+                        hasConnection={false}
                         busy={slackBotBusy}
                         onInstall={(createNewConnection) =>
                           void installSlackBot(createNewConnection)
                         }
                       />
-                      {slackBotConnection.status === "active" ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="mt-1"
-                          disabled={slackBotBusy}
-                          onClick={() => void disconnectSlackBot()}
-                        >
-                          Disconnect workspace bot
-                        </Button>
-                      ) : null}
-                    </div>
-                  </details>
-                </>
-              ) : (
-                <>
-                  <p className="mt-4 max-w-2xl text-xs text-fg-muted">
-                    Install the OpenGeni bot in a Slack workspace to get started.
+                      <details className="group mt-3">
+                        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                          <span>Permissions requested</span>
+                        </summary>
+                        <WorkspaceSlackBotRequestedScopes />
+                      </details>
+                    </>
+                  )}
+                </section>
+              </div>
+            </section>
+
+            {currentRows.some((row) => row.item.connectionRef) ? (
+              <CapabilityListSection
+                title="Other connected capabilities"
+                description="Connection-backed catalog items that are currently available."
+                rows={currentRows.filter((row) => row.item.connectionRef)}
+                logoUrl={logoUrl}
+                busyId={busyId}
+                onOpen={openItem}
+                onDisable={disableFromStrip}
+              />
+            ) : null}
+          </TabsContent>
+
+          <TabsContent value="custom" className="mt-6 space-y-8">
+            <section className="rounded-xl border border-border bg-surface/40 p-5 sm:flex sm:items-center sm:justify-between sm:gap-6">
+              <div className="flex items-start gap-3">
+                <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-border bg-bg text-fg-muted">
+                  <WrenchIcon className="size-4" />
+                </span>
+                <div>
+                  <h2 className="text-base font-semibold text-fg">
+                    Build or add a custom capability
+                  </h2>
+                  <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
+                    Add a remote MCP server, API, skill, or plugin. Catalog metadata does not make a
+                    capability executable unless a compatible runtime adapter exists.
                   </p>
-                  <SlackBotInstallControls
-                    canInstall={canInstallSlackBot}
-                    hasConnection={false}
-                    busy={slackBotBusy}
-                    onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+                </div>
+              </div>
+              <Button type="button" className="mt-4 sm:mt-0" onClick={() => setAddOpen(true)}>
+                <PlusIcon />
+                Add custom
+              </Button>
+            </section>
+
+            <section aria-labelledby="custom-inventory-heading">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h2 id="custom-inventory-heading" className="text-sm font-semibold text-fg">
+                    Custom inventory
+                  </h2>
+                  <p className="mt-1 text-xs text-fg-muted">
+                    Configured deployment tools and items added by this workspace.
+                  </p>
+                </div>
+                <MetaChip>{customItems.length} items</MetaChip>
+              </div>
+              {customItems.length > 0 ? (
+                <div className="mt-3 overflow-hidden rounded-xl border border-border bg-surface/30">
+                  {customItems.map((item) => (
+                    <CapabilityInventoryRow
+                      key={item.id}
+                      item={item}
+                      health={connectionHealth(item, connections ?? [], connectionsLoaded)}
+                      logoSrc={logoUrl(item)}
+                      busy={busyId === item.id}
+                      onOpen={() => openItem(item)}
+                      onDisable={() => void disableFromStrip(item)}
+                      focusTarget
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-3">
+                  <EmptyState
+                    icon={<WrenchIcon className="size-4" />}
+                    title="No custom capabilities"
+                    description="Use Add custom when a reviewed capability is not already in Discover."
                   />
-                  <details className="group mt-3">
-                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                      <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                      <span>Workspace bot permissions requested</span>
-                    </summary>
-                    <WorkspaceSlackBotRequestedScopes />
-                  </details>
-                </>
+                </div>
               )}
             </section>
-          </div>
-        </section>
+
+            <section className="grid gap-3 md:grid-cols-2">
+              <AdvancedBoundaryCard
+                icon={<ShieldCheckIcon />}
+                title="Workspace policy"
+                description="Sessions and child agents may narrow access, but cannot override workspace-level denies or borrow another user's connection."
+              />
+              <AdvancedBoundaryCard
+                icon={<Layers3Icon />}
+                title="Skill and pack precedence"
+                description="Session skills override packs, packs override curated selections, and curated selections override same-named bundled skills."
+              />
+            </section>
+          </TabsContent>
+        </Tabs>
 
         <ConfirmDialog
           open={personalSlackDisconnectOpen}
@@ -1229,148 +1690,6 @@ export function CapabilitiesRoute({
           cancelAutoFocus
           onConfirm={disconnectPersonalSlack}
         />
-
-        {/* Primary search — front and center. */}
-        <div className="relative mt-6">
-          <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search integrations, tools, and skills"
-            className="h-12 rounded-xl pl-11 text-base"
-            aria-label="Search capabilities"
-          />
-        </div>
-
-        {/* Kind filters with counts. */}
-        <div className="mt-4 flex flex-wrap gap-2">
-          {FILTERS.map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              onClick={() => setFilter(kind)}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-                filter === kind
-                  ? "border-brand/40 bg-brand/10 text-brand"
-                  : "border-border bg-surface/50 text-fg-muted hover:border-border-strong hover:text-fg",
-              )}
-            >
-              {capabilityFilterLabel(kind)}
-              <span
-                className={cn("text-2xs", filter === kind ? "text-brand/70" : "text-fg-subtle")}
-              >
-                {counts[kind]}
-              </span>
-            </button>
-          ))}
-        </div>
-
-        <div className="mt-8 space-y-10">
-          {/* Enabled strip. */}
-          {showCatalog && enabledItems.length > 0 ? (
-            <section className="space-y-3">
-              <h2 className="text-sm font-semibold text-fg">Enabled</h2>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {enabledItems.map((item) => (
-                  <EnabledCard
-                    key={item.id}
-                    item={item}
-                    health={connectionHealth(item, connections ?? [], connectionsLoaded)}
-                    logoSrc={logoUrl(item)}
-                    busy={busyId === item.id}
-                    onOpen={() => openItem(item)}
-                    onDisable={() => void disableFromStrip(item)}
-                  />
-                ))}
-              </div>
-            </section>
-          ) : null}
-
-          {/* Packs. */}
-          {showPacks ? (
-            <PacksSection
-              packs={packs}
-              variableSets={variableSets.variableSets.map((variableSet) => ({
-                id: variableSet.id,
-                name: variableSet.name,
-              }))}
-              busyPackId={packBusyId}
-              onRegister={registerPackManifest}
-              onEnable={(pack, variableSetId) => void enablePack(pack, variableSetId)}
-              onDisable={(pack) => void disablePack(pack)}
-              onUnregister={unregisterPack}
-            />
-          ) : null}
-
-          {/* Browse grid. */}
-          {showCatalog ? (
-            <section className="space-y-4">
-              {filter === "all" || enabledItems.length > 0 ? (
-                <h2 className="text-sm font-semibold text-fg">Browse</h2>
-              ) : null}
-
-              {catalogView === "loading" ? (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {[
-                    "catalog-skeleton-1",
-                    "catalog-skeleton-2",
-                    "catalog-skeleton-3",
-                    "catalog-skeleton-4",
-                    "catalog-skeleton-5",
-                    "catalog-skeleton-6",
-                    "catalog-skeleton-7",
-                    "catalog-skeleton-8",
-                  ].map((rowKey) => (
-                    <div key={rowKey} className="rounded-xl border border-border bg-surface/50 p-4">
-                      <Skeleton className="size-10 rounded-lg" />
-                      <Skeleton className="mt-3 h-4 w-24" />
-                      <Skeleton className="mt-2 h-3 w-full" />
-                      <Skeleton className="mt-1.5 h-3 w-2/3" />
-                    </div>
-                  ))}
-                </div>
-              ) : catalogView === "error" ? (
-                <LoadErrorState
-                  title="Couldn't load capabilities"
-                  error={loadError}
-                  onRetry={() => void refresh()}
-                />
-              ) : browseItems.length === 0 ? (
-                <RegistryFallback
-                  query={query}
-                  busy={registryBusy}
-                  searched={registrySearched}
-                  results={visibleRegistry}
-                  onSearch={() => void searchRegistry()}
-                  logoUrl={logoUrl}
-                  onOpen={(item) => openItem(item, true)}
-                  emptyDefault={enabledItems.length === 0}
-                />
-              ) : (
-                <>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                    {visibleBrowse.map((item) => (
-                      <CapabilityTile
-                        key={item.id}
-                        item={item}
-                        logoSrc={logoUrl(item)}
-                        onOpen={() => openItem(item)}
-                      />
-                    ))}
-                  </div>
-                  {visibleCount < browseItems.length ? (
-                    <LoadMoreSentinel
-                      onReach={() =>
-                        setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
-                      }
-                    />
-                  ) : null}
-                </>
-              )}
-            </section>
-          ) : null}
-        </div>
       </div>
 
       <CapabilityDetailSheet
@@ -1403,63 +1722,207 @@ export function CapabilitiesRoute({
   );
 }
 
-// A compact managed card in the Enabled strip.
-function EnabledCard({
+type CurrentCapabilityRow = {
+  item: CapabilityCatalogItem;
+  health: ConnectionHealth;
+};
+
+function SummaryMetric({
+  label,
+  value,
+  icon,
+  attention = false,
+}: {
+  label: string;
+  value: number | string;
+  icon: ReactNode;
+  attention?: boolean;
+}) {
+  return (
+    <div className="min-w-0 border-b border-r border-border p-3 last:border-r-0 lg:border-b-0 lg:p-4">
+      <div
+        className={cn(
+          "flex items-center gap-2 text-2xs font-medium",
+          attention ? "text-status-waiting" : "text-fg-subtle",
+        )}
+      >
+        <span className="[&_svg]:size-3.5">{icon}</span>
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-1 text-xl font-semibold tracking-tight text-fg">{value}</div>
+    </div>
+  );
+}
+
+function CapabilityRowSkeletons() {
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-surface/30">
+      {["row-1", "row-2", "row-3", "row-4", "row-5", "row-6"].map((key) => (
+        <div
+          key={key}
+          className="flex min-h-14 items-center gap-3 border-b border-border px-3 last:border-0"
+        >
+          <Skeleton className="size-8 shrink-0 rounded-lg" />
+          <div className="min-w-0 flex-1">
+            <Skeleton className="h-3.5 w-32" />
+            <Skeleton className="mt-1.5 h-3 w-56 max-w-full" />
+          </div>
+          <Skeleton className="h-6 w-20 rounded-md" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RecommendationCard({
+  icon,
+  title,
+  description,
+  action,
+  onClick,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  action: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex min-h-32 flex-col rounded-xl border border-border bg-surface/40 p-4 text-left transition-colors hover:border-border-strong hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+    >
+      <span className="grid size-8 place-items-center rounded-lg border border-border bg-bg text-fg-muted [&_svg]:size-4">
+        {icon}
+      </span>
+      <span className="mt-3 text-sm font-semibold text-fg">{title}</span>
+      <span className="mt-1 flex-1 text-xs leading-5 text-fg-muted">{description}</span>
+      <span className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-fg-muted group-hover:text-fg">
+        {action}
+        <ChevronRightIcon className="size-3.5" />
+      </span>
+    </button>
+  );
+}
+
+function CapabilityListSection({
+  title,
+  description,
+  rows,
+  logoUrl,
+  busyId,
+  onOpen,
+  onDisable,
+}: {
+  title: string;
+  description: string;
+  rows: CurrentCapabilityRow[];
+  logoUrl: (item: CapabilityCatalogItem) => string | null;
+  busyId: string | null;
+  onOpen: (item: CapabilityCatalogItem) => void;
+  onDisable: (item: CapabilityCatalogItem) => void | Promise<void>;
+}) {
+  return (
+    <section aria-labelledby={`capability-section-${slugId(title)}`}>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 id={`capability-section-${slugId(title)}`} className="text-sm font-semibold text-fg">
+            {title}
+          </h2>
+          <p className="mt-1 text-xs text-fg-muted">{description}</p>
+        </div>
+        <MetaChip>{rows.length}</MetaChip>
+      </div>
+      <div className="mt-3 overflow-hidden rounded-xl border border-border bg-surface/30">
+        {rows.map(({ item, health }) => (
+          <CapabilityInventoryRow
+            key={item.id}
+            item={item}
+            health={health}
+            logoSrc={logoUrl(item)}
+            busy={busyId === item.id}
+            onOpen={() => onOpen(item)}
+            onDisable={() => void onDisable(item)}
+            focusTarget
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CapabilityInventoryRow({
   item,
   health,
   logoSrc,
   busy,
   onOpen,
   onDisable,
+  focusTarget = false,
 }: {
   item: CapabilityCatalogItem;
   health: ConnectionHealth;
   logoSrc: string | null;
   busy: boolean;
   onOpen: () => void;
-  onDisable: () => void;
+  onDisable?: () => void;
+  focusTarget?: boolean;
 }) {
-  // Health is resolved by the installation's connection id: "attention" means the
-  // row is missing or inactive; "none" means no connection is involved;
-  // "unverified" means connections didn't load, so stay neutral (never amber).
   const needsAttention = health.state === "attention";
   const canDisable = item.source !== "built_in" && item.source !== "configured";
-  // A broken connection ("Needs attention") is the actionable state, so it wins
-  // the single status slot over staleness — which only gates discovery, still
-  // runs fine, and so reads as quiet neutral text, never an amber alert.
-  const status = needsAttention
-    ? { label: "Needs attention", dot: "bg-status-waiting", text: "text-status-waiting" }
-    : item.stale
-      ? { label: "No longer in registry", dot: "bg-fg-subtle/60", text: "text-fg-subtle" }
-      : {
-          label: health.state === "connected" ? "Connected" : "Enabled",
-          dot: "bg-status-idle",
-          text: "text-fg-subtle",
-        };
+  const status = !item.enabled
+    ? { label: capabilityUnavailableLabel(item), dot: "bg-fg-subtle/45", text: "text-fg-subtle" }
+    : needsAttention
+      ? { label: "Needs attention", dot: "bg-status-waiting", text: "text-status-waiting" }
+      : item.stale
+        ? { label: "No longer in registry", dot: "bg-fg-subtle/60", text: "text-fg-subtle" }
+        : {
+            label: capabilityAvailabilityLabel(item, health),
+            dot: "bg-status-idle",
+            text: "text-fg-subtle",
+          };
+  const scope = capabilityScopeLabel(item, health);
+  const source = capabilitySourceShortLabel(item);
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/50 p-3">
+    <div className="group flex min-h-14 items-center gap-2 border-b border-border px-2 last:border-0 hover:bg-surface/60 sm:gap-3 sm:px-3">
       <button
         type="button"
         onClick={onOpen}
-        data-capability-focus-target
+        data-capability-focus-target={focusTarget ? "" : undefined}
         data-capability-id={item.id}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+        className="flex min-h-12 min-w-0 flex-1 items-center gap-3 rounded-md px-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset"
       >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-fg">{item.name}</div>
-          <div className={cn("flex items-center gap-1.5 text-2xs", status.text)}>
-            <span className={cn("size-1.5 rounded-full", status.dot)} />
-            {status.label}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-sm font-medium text-fg">{item.name}</span>
+            {item.tier === "verified" || item.source === "library" ? (
+              <ShieldCheckIcon className="size-3.5 shrink-0 text-fg-subtle" aria-label="Verified" />
+            ) : null}
+          </div>
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
+            <span className={cn("inline-flex min-w-0 items-center gap-1.5", status.text)}>
+              <span className={cn("size-1.5 rounded-full", status.dot)} />
+              <span className="truncate">{status.label}</span>
+            </span>
             <span aria-hidden className="text-fg-subtle/50">
               ·
             </span>
             <span className="truncate">{capabilityKindLabel(item.kind)}</span>
+            <span aria-hidden className="hidden text-fg-subtle/50 sm:inline">
+              ·
+            </span>
+            <span className="hidden truncate sm:inline">{scope}</span>
           </div>
         </div>
       </button>
-      {canDisable ? (
+      <div className="hidden shrink-0 items-center gap-1.5 lg:flex">
+        <MetaChip>{source}</MetaChip>
+        {scope !== source ? <MetaChip>{scope}</MetaChip> : null}
+      </div>
+      {item.enabled && canDisable && onDisable ? (
         <Button
           type="button"
           variant="ghost"
@@ -1471,10 +1934,142 @@ function EnabledCard({
           {busy ? <Loader2Icon className="animate-spin" /> : "Disable"}
         </Button>
       ) : (
-        <span className="shrink-0 px-2 text-2xs text-fg-subtle">Built in</span>
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={`Open ${item.name} details`}
+          className="grid size-10 shrink-0 place-items-center rounded-md text-fg-subtle opacity-70 transition-colors hover:bg-bg hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+        >
+          <ChevronRightIcon className="size-4" />
+        </button>
       )}
     </div>
   );
+}
+
+function AdvancedBoundaryCard({
+  icon,
+  title,
+  description,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+}) {
+  return (
+    <article className="flex items-start gap-3 rounded-xl border border-border bg-surface/30 p-4">
+      <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-bg text-fg-muted [&_svg]:size-4">
+        {icon}
+      </span>
+      <div>
+        <h3 className="text-sm font-semibold text-fg">{title}</h3>
+        <p className="mt-1 text-xs leading-5 text-fg-muted">{description}</p>
+      </div>
+    </article>
+  );
+}
+
+function compareCurrentCapabilityRows(left: CurrentCapabilityRow, right: CurrentCapabilityRow) {
+  const leftAttention = left.health.state === "attention" ? 0 : 1;
+  const rightAttention = right.health.state === "attention" ? 0 : 1;
+  return (
+    leftAttention - rightAttention ||
+    capabilitySourceRank(left.item) - capabilitySourceRank(right.item) ||
+    left.item.name.localeCompare(right.item.name)
+  );
+}
+
+function capabilitySourceRank(item: CapabilityCatalogItem): number {
+  if (item.source === "manual" || item.source === "library") return 0;
+  if (item.source === "configured") return 1;
+  return 2;
+}
+
+function capabilityAvailabilityLabel(
+  item: CapabilityCatalogItem,
+  health: ConnectionHealth,
+): string {
+  if (health.state === "connected") return "Connected";
+  if (item.source === "built_in") return "Built in";
+  if (item.source === "configured") return "Configured";
+  if (item.source === "library") return "Selected for workspace";
+  return "Added to workspace";
+}
+
+function capabilityUnavailableLabel(item: CapabilityCatalogItem): string {
+  if (item.source === "library") return "Available to add";
+  if (item.authKind === "oauth2" || item.authKind === "api_key") return "Connection required";
+  if (!item.runtime.available) return "Metadata only";
+  return "Available to add";
+}
+
+function capabilityScopeLabel(item: CapabilityCatalogItem, health: ConnectionHealth): string {
+  if (item.connectionRef?.subjectScope === "subject") return "Only me";
+  if (item.connectionRef?.subjectScope === "workspace" || health.state === "connected") {
+    return health.state === "connected" && health.connection.subjectId !== null
+      ? "Only me"
+      : "Workspace";
+  }
+  if (item.source === "built_in" || item.source === "configured") return "Deployment";
+  return "Workspace";
+}
+
+function capabilitySourceShortLabel(item: CapabilityCatalogItem): string {
+  if (item.source === "built_in") return "OpenGeni";
+  if (item.source === "library") return "Verified library";
+  if (item.source === "configured") return "Deployment";
+  if (item.source === "registry" || item.source === "public_registry") return "Community";
+  return "Custom";
+}
+
+function matchesDiscoveryCategory(
+  item: CapabilityCatalogItem,
+  category: DiscoveryCategory,
+): boolean {
+  if (category === "all") return true;
+  const haystack = [item.category, item.name, item.description, ...item.tags]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const terms: Record<Exclude<DiscoveryCategory, "all">, string[]> = {
+    work: ["productivity", "communication", "project", "crm", "calendar", "slack", "linear"],
+    development: ["development", "developer", "code", "github", "git", "database", "testing"],
+    knowledge: ["knowledge", "document", "search", "files", "drive", "research"],
+    marketing: ["marketing", "social", "sales", "content", "campaign"],
+    infrastructure: ["infrastructure", "terraform", "checkov", "cloud", "devops", "security"],
+  };
+  return terms[category].some((term) => haystack.includes(term));
+}
+
+function matchesDiscoverySource(item: CapabilityCatalogItem, source: DiscoverySource): boolean {
+  if (source === "all") return true;
+  if (source === "opengeni") return item.source === "built_in" || item.source === "configured";
+  if (source === "verified") return item.source === "library" || item.tier === "verified";
+  if (source === "community") {
+    return item.source === "registry" || item.source === "public_registry";
+  }
+  return item.source === "manual";
+}
+
+function discoveryCategoryLabel(category: DiscoveryCategory): string {
+  switch (category) {
+    case "all":
+      return "All work";
+    case "work":
+      return "Work & productivity";
+    case "development":
+      return "Development";
+    case "knowledge":
+      return "Knowledge";
+    case "marketing":
+      return "Marketing";
+    case "infrastructure":
+      return "Infrastructure";
+  }
+}
+
+function slugId(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
 // Empty catalog results: offer the public MCP registry, then render registry
