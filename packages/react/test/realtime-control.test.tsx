@@ -8,10 +8,13 @@ import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
 import {
   RealtimeVoiceControl,
   RealtimeModelPickerMenu,
+  SessionRealtimeControl,
   codexRealtimeAdmissionAllowed,
   type RealtimeModelOption,
+  type SessionRealtimeControllerFactory,
   useSessionRealtime,
 } from "../src/realtime/realtime-control";
+import type { SessionRealtimeController } from "@opengeni/sdk/realtime";
 
 GlobalRegistrator.register({ url: "https://app.example.test" });
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -204,11 +207,18 @@ describe("ordinary session Codex realtime control", () => {
     );
     expect(region).not.toBeNull();
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Start voice");
+    // Idle primary control is a ghost icon (no border/surface box).
+    expect(start?.className).not.toMatch(/(?:^|\s)border(?:\s|$)/);
+    expect(start?.className).not.toContain("bg-og-accent");
+    expect(start?.className).toContain("text-og-fg-muted");
     const voiceOptions = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Choose voice model and options"]',
     );
     expect(voiceOptions).not.toBeNull();
-    expect(voiceOptions?.classList.contains("w-6")).toBe(true);
+    // Desktop-only chevron (hidden below sm); still present for wider viewports.
+    expect(voiceOptions?.classList.contains("w-5")).toBe(true);
+    expect(voiceOptions?.classList.contains("hidden")).toBe(true);
+    expect(voiceOptions?.classList.contains("sm:inline-flex")).toBe(true);
     expect(container.textContent).not.toContain("Realtime diagnostics");
     expect(start?.disabled).toBe(false);
     await act(async () => start?.click());
@@ -249,13 +259,16 @@ describe("ordinary session Codex realtime control", () => {
       'button[aria-label="End voice conversation"]',
     );
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Listening");
+    expect(stop?.className).toContain("bg-og-accent");
+    const muteCluster = container.querySelector('[data-testid="realtime-mute-controls"]');
+    expect(muteCluster).not.toBeNull();
+    expect(muteCluster?.className).not.toContain("max-sm:hidden");
     const muteMicrophone = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Mute microphone"]',
     );
     const muteAudio = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Mute voice audio"]',
     );
-    expect(container.querySelector('[data-testid="realtime-mute-controls"]')).not.toBeNull();
     expect(muteMicrophone?.getAttribute("aria-pressed")).toBe("false");
     expect(muteAudio?.getAttribute("aria-pressed")).toBe("false");
     await act(async () => {
@@ -265,6 +278,79 @@ describe("ordinary session Codex realtime control", () => {
     expect(stop?.disabled).toBe(false);
     await act(async () => stop?.click());
     expect(calls).toEqual(["start", "input:true", "output:true", "stop"]);
+  });
+
+  test("notifies the host when voice becomes active so dictate can soft-hide", async () => {
+    const activeUpdates: boolean[] = [];
+    let current = {
+      ...idle,
+      status: "active" as const,
+      realtimeId: activeMode.id,
+      mode: activeMode,
+    };
+    const listeners = new Set<(snapshot: typeof current) => void>();
+    const factory: SessionRealtimeControllerFactory = () => {
+      const controller: SessionRealtimeController = {
+        snapshot: () => current,
+        subscribe(listener) {
+          listeners.add(listener);
+          listener(current);
+          return () => listeners.delete(listener);
+        },
+        start: async () => undefined,
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => undefined,
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted(muted) {
+          current = { ...current, inputMuted: muted };
+          for (const listener of listeners) listener(current);
+        },
+        setOutputMuted(muted) {
+          current = { ...current, outputMuted: muted };
+          for (const listener of listeners) listener(current);
+        },
+        stop: async () => undefined,
+        close() {
+          listeners.clear();
+        },
+      };
+      return controller;
+    };
+
+    await act(async () => {
+      root.render(
+        <SessionRealtimeControl
+          client={
+            {
+              getWorkspaceRealtimeModelCatalog: undefined,
+            } as unknown as OpenGeniClient
+          }
+          workspaceId="11111111-1111-4111-8111-111111111111"
+          sessionId="22222222-2222-4222-8222-222222222222"
+          sessionStatus="idle"
+          effectiveControl={effectiveControl}
+          events={[]}
+          eventsReady={true}
+          codexConnected={true}
+          controllerFactory={factory}
+          onVoiceActiveChange={(active) => {
+            activeUpdates.push(active);
+          }}
+        />,
+      );
+    });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      if (activeUpdates.includes(true)) break;
+    }
+    expect(activeUpdates.includes(true)).toBe(true);
+    expect(container.querySelector('[data-testid="realtime-mute-controls"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="realtime-mute-controls"]')?.className,
+    ).not.toContain("max-sm:hidden");
   });
 
   test("uses the shared provider-to-model drill-down with recognizable provider marks", async () => {

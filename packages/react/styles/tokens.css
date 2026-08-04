@@ -97,7 +97,8 @@
   --og-session-chrome-surface-open: color-mix(in oklch, var(--og-color-surface-2) 92%, transparent);
   --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 85%, transparent);
   --og-session-chrome-border-open: var(--og-color-border);
-  --og-session-chrome-highlight: color-mix(in oklch, var(--og-color-bg) 72%, transparent);
+  /* Soft wash only — no ring/border; the active chip carries the X. */
+  --og-session-chrome-highlight: color-mix(in oklch, var(--og-color-surface-3) 55%, transparent);
   --og-session-chrome-shadow: 0 6px 22px -14px oklch(0 0 0 / 0.42);
   --og-session-chrome-shadow-open: 0 10px 28px -16px oklch(0 0 0 / 0.5);
   --og-session-chrome-radius: var(--og-radius-lg);
@@ -158,7 +159,7 @@
   --og-session-chrome-surface-open: var(--og-color-surface-2);
   --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
   --og-session-chrome-border-open: var(--og-color-border);
-  --og-session-chrome-highlight: color-mix(in oklch, var(--og-color-surface-1) 88%, transparent);
+  --og-session-chrome-highlight: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
   --og-session-chrome-shadow: 0 4px 16px -10px oklch(0.2 0.02 260 / 0.14);
   --og-session-chrome-shadow-open: 0 8px 22px -12px oklch(0.2 0.02 260 / 0.18);
   --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);

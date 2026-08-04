@@ -364,12 +364,13 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
           </RunningPreview>
         }
       >
-        {ops.map((op) => {
+        {ops.map((op, index) => {
           const file = safeParseOp(op);
+          const key = `${op.type}:${op.path}:${index}`;
           return file ? (
-            <ToolDiff key={op.path} files={[file]} />
+            <ToolDiff key={key} files={[file]} />
           ) : (
-            <div key={op.path}>
+            <div key={key}>
               <p className="mb-1 font-og-mono text-og-xs text-og-fg-muted">{op.path}</p>
               <RawPatch diff={op.diff ?? ""} />
             </div>
@@ -421,10 +422,11 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
       >
         {ops.map((op, index) => {
           const file = parsed[index];
+          const key = `${op.type}:${op.path}:${index}`;
           return file ? (
-            <ToolDiff key={op.path} files={[file]} />
+            <ToolDiff key={key} files={[file]} />
           ) : (
-            <div key={op.path}>
+            <div key={key}>
               <p className="mb-1 font-og-mono text-og-xs text-og-fg-muted">{op.path}</p>
               <RawPatch diff={op.diff ?? ""} />
             </div>

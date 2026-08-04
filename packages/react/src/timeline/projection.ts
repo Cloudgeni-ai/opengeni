@@ -54,6 +54,11 @@ const WORKER_MESSAGE_TOOL = "session_send_message";
  * `"agent"`. That keeps mid-turn goal tools from splitting the step rail with
  * a breakaway GoalRow pill. Non-agent goal events (API, create-session,
  * system auto-pause, continuations) still render as landmarks.
+ *
+ * Solo `goal_continuation` machine-input batches are also suppressed: the
+ * paired `goal.continuation` GoalRow already marks the tick; rendering both
+ * restates the goal text. Mixed batches (continuation + other kinds) still
+ * render as machine-input rows.
  */
 const LANDMARK_ONLY_TOOL_LEAVES = new Set(["memory_save", "memory_correct"]);
 
@@ -140,6 +145,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "system.update.delivered": {
         const inputs = machineInputMembers(payload.members);
         if (inputs.length === 0) break;
+        // Goal continuations already land as `goal.continuation` GoalRows.
+        // A solo continuation batch would duplicate that landmark + dump the
+        // model-facing prompt — skip chrome for that case only.
+        if (inputs.every((member) => member.kind === "goal_continuation")) {
+          break;
+        }
         closeStreamingTail();
         items.push({
           kind: "machine-input-batch",

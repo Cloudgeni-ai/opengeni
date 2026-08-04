@@ -1,4 +1,5 @@
 import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
+import { LayoutGroup, motion } from "motion/react";
 import type { ClipboardEvent, ReactNode } from "react";
 import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
@@ -61,6 +62,10 @@ export type ChatComposerProps = {
   attachButtonClassName?: string | undefined;
   /** Provider-neutral speech capability. Provider configuration stays in workspace settings. */
   transcription?: ComposerTranscriptionControlProps | undefined;
+  /** Extra classes on the transcription control. */
+  transcriptionClassName?: string | undefined;
+  /** Soft-hide dictate while realtime voice is active (animated collapse). */
+  transcriptionSuppressed?: boolean | undefined;
   /** Content rendered above the textarea, inside the field chrome. */
   header?: ReactNode | undefined;
   /** Paste hook composed with the attachment paste path. */
@@ -99,6 +104,8 @@ export function ChatComposer({
   actionsStart,
   attachButtonClassName,
   transcription,
+  transcriptionClassName,
+  transcriptionSuppressed = false,
   header,
   onPaste,
   attachments,
@@ -145,25 +152,57 @@ export function ChatComposer({
           {controller.confirmState ? (
             <Confirmation />
           ) : (
-            <Footer className={stackActions ? "flex-wrap" : undefined}>
-              {hasControls ? (
-                <Controls className={stackActions ? "w-full sm:w-auto" : undefined}>
-                  {controlsLeading}
-                  <AttachButton className={attachButtonClassName} />
-                  {transcription ? <ComposerTranscriptionControl {...transcription} /> : null}
-                  {models ? (
-                    <ModelPicker models={models} value={selectedModel} onChange={onSelectModel} />
-                  ) : null}
-                  {controlsStart}
-                </Controls>
-              ) : (
-                <Hint>{hint}</Hint>
-              )}
-              <Actions className={stackActions ? "w-full justify-end sm:w-auto" : undefined}>
-                {actionsStart}
-                <PauseButton />
-                <SendButton />
-              </Actions>
+            <Footer className={stackActions ? "max-sm:flex-nowrap sm:flex-wrap" : undefined}>
+              <LayoutGroup id="og-composer-footer">
+                {hasControls ? (
+                  <Controls
+                    className={stackActions ? "min-w-0 max-sm:flex-1 sm:w-auto" : undefined}
+                  >
+                    {controlsLeading}
+                    <AttachButton className={attachButtonClassName} />
+                    {transcription ? (
+                      <ComposerTranscriptionControl
+                        {...transcription}
+                        suppressed={transcriptionSuppressed}
+                        className={[transcription.className, transcriptionClassName]
+                          .filter(Boolean)
+                          .join(" ")}
+                      />
+                    ) : null}
+                    {models ? (
+                      <motion.span
+                        layout
+                        transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
+                        className="inline-flex min-w-0"
+                      >
+                        <ModelPicker
+                          models={models}
+                          value={selectedModel}
+                          onChange={onSelectModel}
+                        />
+                      </motion.span>
+                    ) : null}
+                    {controlsStart ? (
+                      <motion.span
+                        layout
+                        transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
+                        className="inline-flex min-w-0 items-center gap-1.5"
+                      >
+                        {controlsStart}
+                      </motion.span>
+                    ) : null}
+                  </Controls>
+                ) : (
+                  <Hint>{hint}</Hint>
+                )}
+                <Actions
+                  className={stackActions ? "max-sm:shrink-0 sm:w-auto sm:justify-end" : undefined}
+                >
+                  {actionsStart}
+                  <PauseButton />
+                  <SendButton />
+                </Actions>
+              </LayoutGroup>
             </Footer>
           )}
         </Surface>

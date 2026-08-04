@@ -575,6 +575,11 @@ function SessionChatPane(props: {
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
+  // Soft-hide dictate while realtime voice owns the mic (model + mutes stay on the bar).
+  const [voiceActive, setVoiceActive] = useState(false);
+  const onVoiceActiveChange = useCallback((active: boolean) => {
+    setVoiceActive(active);
+  }, []);
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -1046,6 +1051,7 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+            transcriptionSuppressed={voiceActive}
             controlsLeading={
               <ComposerMobilePlus
                 disabled={terminal || composer.sending}
@@ -1075,6 +1081,7 @@ function SessionChatPane(props: {
                     codexConnected={codexConnected}
                     realtimeAutostartModel={props.realtimeAutostartModel}
                     onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
+                    onVoiceActiveChange={onVoiceActiveChange}
                   />
                 </Suspense>
               ) : null

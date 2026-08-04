@@ -37,6 +37,8 @@ export function ConsoleComposer(props: {
   actions?: ReactNode;
   commandContext?: SlashCommandContext;
   onClearView?: () => void;
+  /** Soft-hide dictate while realtime voice is active. */
+  transcriptionSuppressed?: boolean;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
@@ -59,6 +61,7 @@ export function ConsoleComposer(props: {
       attachButtonClassName="max-sm:hidden"
       controlsStart={props.controls}
       actionsStart={props.actions}
+      transcriptionSuppressed={props.transcriptionSuppressed === true}
       {...(context.clientConfig.voiceInput?.available
         ? {
             transcription: {
