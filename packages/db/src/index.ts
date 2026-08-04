@@ -32981,9 +32981,14 @@ export class MachineRemovalRevisionConflictError extends Error {
   }
 }
 
-function machineRemovalFingerprint(expectedUpdatedAt?: string): string {
+function machineRemovalFingerprint(enrollmentId: string, expectedUpdatedAt?: string): string {
   return createHash("sha256")
-    .update(JSON.stringify({ expectedUpdatedAt: expectedUpdatedAt ?? null }))
+    .update(
+      JSON.stringify({
+        enrollmentId,
+        expectedUpdatedAt: expectedUpdatedAt ?? null,
+      }),
+    )
     .digest("hex");
 }
 
@@ -33042,7 +33047,7 @@ export async function removeEnrollment(
   if (operationKey.length === 0 || operationKey.length > 200) {
     throw new Error("machine removal operation key must be 1-200 characters");
   }
-  const requestFingerprint = machineRemovalFingerprint(input.expectedUpdatedAt);
+  const requestFingerprint = machineRemovalFingerprint(input.enrollmentId, input.expectedUpdatedAt);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },

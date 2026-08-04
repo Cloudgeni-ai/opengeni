@@ -208,6 +208,82 @@ describe("connected machine removal lifecycle", () => {
     );
   }, 60_000);
 
+  test("fences idempotency keys by enrollment with omitted and equal revisions", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const omittedFirst = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:idempotency-omitted-a-${crypto.randomUUID()}`,
+    });
+    const omittedSecond = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:idempotency-omitted-b-${crypto.randomUUID()}`,
+    });
+
+    const omittedRemoval = await removeEnrollment(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: omittedFirst.id,
+      operationKey: "cross-enrollment-omitted",
+    });
+    expect(omittedRemoval?.outcome).toBe("removed");
+    await expect(
+      removeEnrollment(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: omittedSecond.id,
+        operationKey: "cross-enrollment-omitted",
+      }),
+    ).rejects.toBeInstanceOf(MachineRemovalIdempotencyError);
+    expect((await getEnrollment(db, workspaceId, omittedSecond.id))?.status).toBe("active");
+
+    const equalFirst = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:idempotency-equal-a-${crypto.randomUUID()}`,
+    });
+    const equalSecond = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:idempotency-equal-b-${crypto.randomUUID()}`,
+    });
+    const equalRevision = new Date("2026-08-04T10:00:00.000Z");
+    await admin`
+      update enrollments
+      set updated_at = ${equalRevision}
+      where id in (${equalFirst.id}, ${equalSecond.id})`;
+
+    const equalRemoval = await removeEnrollment(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: equalFirst.id,
+      operationKey: "cross-enrollment-equal",
+      expectedUpdatedAt: equalRevision.toISOString(),
+    });
+    expect(equalRemoval?.outcome).toBe("removed");
+    await expect(
+      removeEnrollment(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: equalSecond.id,
+        operationKey: "cross-enrollment-equal",
+        expectedUpdatedAt: equalRevision.toISOString(),
+      }),
+    ).rejects.toBeInstanceOf(MachineRemovalIdempotencyError);
+    expect((await getEnrollment(db, workspaceId, equalSecond.id))?.status).toBe("active");
+
+    const replay = await removeEnrollment(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: equalFirst.id,
+      operationKey: "cross-enrollment-equal",
+      expectedUpdatedAt: equalRevision.toISOString(),
+    });
+    expect(replay).toEqual(equalRemoval);
+  }, 60_000);
+
   test("blocks active routing and live leases, rejects stale revisions, and serializes concurrent removal", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
