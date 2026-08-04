@@ -8,8 +8,12 @@ describe("Northstar host typography", () => {
     expect(resetSelectors).toBeDefined();
 
     for (const control of ["button", "select", "input", "textarea"]) {
-      expect(resetSelectors).toContain(`.northstar .og-root ${control}`);
+      expect(resetSelectors).toContain(`.northstar :where(.og-root) ${control}`);
       expect(resetSelectors).not.toMatch(new RegExp(`\\.northstar ${control}(?:,|$)`));
     }
+  });
+
+  test("keeps the host reset below the SDK typography guard's specificity", () => {
+    expect(styles).not.toMatch(/\.northstar \.og-root (?:button|select|input|textarea)/);
   });
 });
