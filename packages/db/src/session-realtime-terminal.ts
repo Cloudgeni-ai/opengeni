@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 import * as schema from "./schema";
 

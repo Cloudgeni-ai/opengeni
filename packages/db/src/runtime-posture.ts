@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import type { Database, RlsStrategy } from "./index";
+import type { Database, RlsStrategy } from "./database";
 import {
   classifyRoleRelationships,
   roleRelationshipsCatalogQuery,

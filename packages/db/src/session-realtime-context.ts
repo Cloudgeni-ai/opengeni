@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { ReasoningEffort } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
 
