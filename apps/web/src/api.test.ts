@@ -3,6 +3,7 @@ import {
   authHeadersForAccessKey,
   configureClientAuth,
   createOpenGeniClient,
+  redeemCodexResetCredit,
   resolveApiBaseUrl,
   sendVerificationEmail,
   setStoredAccessKey,
@@ -111,6 +112,45 @@ describe("web API auth helpers", () => {
     expect(request!.init?.method).toBe("POST");
     expect(request!.init?.credentials).toBe("include");
     expect(JSON.parse(String(request!.init?.body))).toEqual({ email: "user@example.com" });
+  });
+
+  test("sends the API contract header on managed-session mutations", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requests.push({ input, init });
+      return Response.json({
+        status: "completed",
+        attemptId: "attempt-id",
+        outcome: "reset",
+        overview: null,
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      await expect(
+        redeemCodexResetCredit("workspace-id", "account-id", {
+          attemptId: "attempt-id",
+          creditId: "credit-id",
+          confirmationToken: "confirmation-token",
+          confirmation: "REDEEM_USAGE_LIMIT_RESET",
+        }),
+      ).resolves.toMatchObject({ status: "completed", outcome: "reset" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const request = requests[0];
+    expect(request).toBeDefined();
+    expect(String(request!.input)).toBe(
+      "/v1/workspaces/workspace-id/codex/accounts/account-id/reset-credits/redeem",
+    );
+    expect(request!.init?.credentials).toBe("include");
+    expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
+      "2026-07-workspace-artifacts-v1",
+    );
+    expect(new Headers(request!.init?.headers).get("authorization")).toBeNull();
+    expect(new Headers(request!.init?.headers).get("x-opengeni-access-key")).toBeNull();
   });
 });
 
