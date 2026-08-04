@@ -1180,8 +1180,33 @@ async function transcribePersistedRecording(input: {
           { signal: input.signal },
         );
         break;
-      case "failed":
-        throw { code: remote.recording.errorCode ?? "unknown" };
+      case "failed": {
+        if (!remote.recording.retryable) {
+          throw { code: remote.recording.errorCode ?? "unknown" };
+        }
+        const retried =
+          remote.recording.segmentCount === 0
+            ? await client.finalizeTranscriptionRecording(
+                input.workspaceId,
+                input.manifest.recordingId,
+                {
+                  chunkCount: input.manifest.chunkCount,
+                  totalBytes: input.manifest.totalBytes,
+                  totalDurationMilliseconds: input.manifest.totalDurationMilliseconds,
+                  signal: input.signal,
+                },
+              )
+            : await client.processNextTranscriptionRecordingSegment(
+                input.workspaceId,
+                input.manifest.recordingId,
+                { signal: input.signal },
+              );
+        if (retried.recording.state === "failed") {
+          throw { code: retried.recording.errorCode ?? "unknown" };
+        }
+        remote = retried;
+        break;
+      }
       case "discarded":
         throw { code: "invalid_audio" };
       case "uploading":

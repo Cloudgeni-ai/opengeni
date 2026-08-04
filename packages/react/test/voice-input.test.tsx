@@ -43,6 +43,16 @@ const capability = {
   acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
 };
 
+const resumableCapability = {
+  ...capability,
+  resumable: {
+    maxDurationSeconds: 2 * 60 * 60,
+    maxSizeBytes: 512 * 1024 * 1024,
+    maxChunkSizeBytes: 8 * 1024 * 1024,
+    providerSegmentSeconds: 50,
+  },
+};
+
 class FakeMediaRecorder {
   static instances: FakeMediaRecorder[] = [];
   static isTypeSupported(type: string) {
@@ -342,6 +352,72 @@ async function seedStoppedRecording(
     { captureState: "stopped" },
     new Date(new Date(createdAt).getTime() + 1_000).toISOString(),
   );
+}
+
+function resumableRecordingResponse(
+  manifest: VoiceRecordingManifest,
+  input: {
+    state: "ready" | "failed" | "complete" | "discarded";
+    segmentCount?: number;
+    completedSegmentCount?: number;
+    retryable?: boolean;
+    errorCode?: "provider" | null;
+    transcriptText?: string | null;
+  },
+) {
+  const complete = input.state === "complete";
+  return {
+    recording: {
+      id: manifest.recordingId,
+      workspaceId: manifest.workspaceId,
+      mimeType: manifest.mimeType,
+      state: input.state,
+      nextChunkNumber: manifest.chunkCount,
+      chunkCount: manifest.chunkCount,
+      totalBytes: manifest.totalBytes,
+      totalDurationMilliseconds: manifest.totalDurationMilliseconds,
+      segmentCount: input.segmentCount ?? 1,
+      completedSegmentCount: input.completedSegmentCount ?? (complete ? 1 : 0),
+      transcriptText: complete ? (input.transcriptText ?? "reclaimed transcript") : null,
+      languages: complete ? ["en"] : [],
+      errorCode: input.errorCode ?? null,
+      retryable: input.retryable ?? false,
+      objectsCleaned: input.state === "discarded",
+      createdAt: manifest.createdAt,
+      updatedAt: manifest.updatedAt,
+      expiresAt: "2026-08-05T07:00:00.000Z",
+    },
+    segments: [],
+  };
+}
+
+async function renderRecoveredResumableRecording(input: {
+  client: NonNullable<Parameters<typeof useVoiceInput>[0]["client"]>;
+  store: MemoryVoiceRecordingStore;
+  value: string;
+  setValue: (value: string) => void;
+  ownerId: string;
+}) {
+  const hook = await renderHook(
+    () =>
+      useVoiceInput({
+        client: input.client,
+        workspaceId: "ws-1",
+        capability: resumableCapability,
+        enabled: true,
+        value: input.value,
+        setValue: input.setValue,
+        focusInput: () => undefined,
+        createRecordingStore: () => input.store,
+        createOwnerId: () => input.ownerId,
+      }),
+    undefined,
+  );
+  await act(async () => {
+    await settle(20);
+  });
+  expect(hook.result.current.status).toBe("recovered");
+  return hook;
 }
 
 function composerState(
@@ -1114,6 +1190,199 @@ describe("useVoiceInput", () => {
     expect(hook.result.current.status).toBe("idle");
     await hook.unmount();
   });
+
+  test("reclaims a retryable retained segment once without re-uploading or duplicate handoff", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    const recordingId = "recording-retryable-segment";
+    await seedStoppedRecording(store, recordingId, "2026-08-04T07:00:00.000Z");
+    const manifest = store.manifests.get(recordingId);
+    if (!manifest) throw new Error("missing retryable recording manifest");
+    const failed = resumableRecordingResponse(manifest, {
+      state: "failed",
+      retryable: true,
+      errorCode: "provider",
+    });
+    const complete = resumableRecordingResponse(manifest, {
+      state: "complete",
+      transcriptText: "reclaimed transcript",
+    });
+    let draft = "existing";
+    let uploadCalls = 0;
+    let finalizeCalls = 0;
+    let processNextCalls = 0;
+    let discardCalls = 0;
+    const hook = await renderRecoveredResumableRecording({
+      client: {
+        transcribeAudio: async () => ({ text: "wrong path", languages: [] }),
+        createTranscriptionRecording: async () => failed,
+        getTranscriptionRecording: async () => failed,
+        uploadTranscriptionRecordingChunk: async () => {
+          uploadCalls += 1;
+          throw new Error("retained chunks must not be uploaded again");
+        },
+        finalizeTranscriptionRecording: async () => {
+          finalizeCalls += 1;
+          return failed;
+        },
+        processNextTranscriptionRecordingSegment: async () => {
+          processNextCalls += 1;
+          return complete;
+        },
+        discardTranscriptionRecording: async () => {
+          discardCalls += 1;
+          return resumableRecordingResponse(manifest, { state: "discarded" });
+        },
+      },
+      store,
+      value: draft,
+      setValue: (value) => {
+        draft = value;
+      },
+      ownerId: "retryable-segment-owner",
+    });
+
+    await act(async () => {
+      hook.result.current.retry();
+      await settle(30);
+    });
+
+    expect(uploadCalls).toBe(0);
+    expect(finalizeCalls).toBe(1);
+    expect(processNextCalls).toBe(1);
+    expect(discardCalls).toBe(1);
+    expect(draft).toBe("existing reclaimed transcript");
+    expect(hook.result.current.status).toBe("idle");
+    expect(store.manifests.has(recordingId)).toBe(false);
+
+    await act(async () => {
+      hook.result.current.retry();
+      await settle();
+    });
+    expect(processNextCalls).toBe(1);
+    expect(discardCalls).toBe(1);
+    expect(draft).toBe("existing reclaimed transcript");
+    await hook.unmount();
+  });
+
+  test("retries failed segment assembly through finalize before processing any segment", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    const recordingId = "recording-retryable-assembly";
+    await seedStoppedRecording(store, recordingId, "2026-08-04T07:00:00.000Z");
+    const manifest = store.manifests.get(recordingId);
+    if (!manifest) throw new Error("missing retryable assembly manifest");
+    const failedAssembly = resumableRecordingResponse(manifest, {
+      state: "failed",
+      segmentCount: 0,
+      retryable: true,
+      errorCode: "provider",
+    });
+    const ready = resumableRecordingResponse(manifest, { state: "ready" });
+    const complete = resumableRecordingResponse(manifest, {
+      state: "complete",
+      transcriptText: "assembled transcript",
+    });
+    const calls: string[] = [];
+    let finalizeCalls = 0;
+    let draft = "";
+    const hook = await renderRecoveredResumableRecording({
+      client: {
+        transcribeAudio: async () => ({ text: "wrong path", languages: [] }),
+        createTranscriptionRecording: async () => failedAssembly,
+        getTranscriptionRecording: async () => failedAssembly,
+        uploadTranscriptionRecordingChunk: async () => {
+          throw new Error("retained chunks must not be uploaded again");
+        },
+        finalizeTranscriptionRecording: async () => {
+          calls.push("finalize");
+          finalizeCalls += 1;
+          return finalizeCalls === 1 ? failedAssembly : ready;
+        },
+        processNextTranscriptionRecordingSegment: async () => {
+          calls.push("process-next");
+          return complete;
+        },
+        discardTranscriptionRecording: async () =>
+          resumableRecordingResponse(manifest, { state: "discarded" }),
+      },
+      store,
+      value: draft,
+      setValue: (value) => {
+        draft = value;
+      },
+      ownerId: "retryable-assembly-owner",
+    });
+    await act(async () => {
+      hook.result.current.retry();
+      await settle(30);
+    });
+
+    expect(calls).toEqual(["finalize", "finalize", "process-next"]);
+    expect(draft).toBe("assembled transcript");
+    expect(hook.result.current.status).toBe("idle");
+    expect(store.manifests.has(recordingId)).toBe(false);
+    await hook.unmount();
+  });
+
+  test.each([
+    ["repeated retryable", true, 1],
+    ["terminal", false, 0],
+  ] as const)(
+    "surfaces a %s retained-segment failure without duplicate processing",
+    async (_label, retryable, expectedProcessNextCalls) => {
+      installMediaMocks();
+      const store = new MemoryVoiceRecordingStore();
+      const recordingId = `recording-${retryable ? "retryable-again" : "terminal"}`;
+      await seedStoppedRecording(store, recordingId, "2026-08-04T07:00:00.000Z");
+      const manifest = store.manifests.get(recordingId);
+      if (!manifest) throw new Error("missing failed recording manifest");
+      const failed = resumableRecordingResponse(manifest, {
+        state: "failed",
+        retryable,
+        errorCode: "provider",
+      });
+      let draft = "unchanged";
+      let uploadCalls = 0;
+      let processNextCalls = 0;
+      const hook = await renderRecoveredResumableRecording({
+        client: {
+          transcribeAudio: async () => ({ text: "wrong path", languages: [] }),
+          createTranscriptionRecording: async () => failed,
+          getTranscriptionRecording: async () => failed,
+          uploadTranscriptionRecordingChunk: async () => {
+            uploadCalls += 1;
+            throw new Error("retained chunks must not be uploaded again");
+          },
+          finalizeTranscriptionRecording: async () => failed,
+          processNextTranscriptionRecordingSegment: async () => {
+            processNextCalls += 1;
+            return failed;
+          },
+          discardTranscriptionRecording: async () =>
+            resumableRecordingResponse(manifest, { state: "discarded" }),
+        },
+        store,
+        value: draft,
+        setValue: (value) => {
+          draft = value;
+        },
+        ownerId: `${recordingId}-owner`,
+      });
+      await act(async () => {
+        hook.result.current.retry();
+        await settle(30);
+      });
+
+      expect(uploadCalls).toBe(0);
+      expect(processNextCalls).toBe(expectedProcessNextCalls);
+      expect(draft).toBe("unchanged");
+      expect(hook.result.current.status).toBe("error");
+      expect(hook.result.current.error).toBe("provider");
+      expect(store.manifests.has(recordingId)).toBe(true);
+      await hook.unmount();
+    },
+  );
 
   test("fails closed when a recorder chunk cannot be durably persisted", async () => {
     installMediaMocks();
