@@ -2627,8 +2627,9 @@ describe("workflow contracts", () => {
     );
     expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
     expect(ci.jobs["service-images"].if).toBe(ci.jobs.deployment.if);
+    expect(ci.jobs["relay-image"].if).toBe(ci.jobs.deployment.if);
     expect(ci.jobs["sandbox-image"].if).toBe(ci.jobs.deployment.if);
-    const imageSteps = ["service-images", "sandbox-image"].flatMap((jobName) =>
+    const imageSteps = ["service-images", "relay-image", "sandbox-image"].flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
     );
     expect(imageSteps).toHaveLength(5);
@@ -2657,6 +2658,7 @@ describe("workflow contracts", () => {
       "package-contracts",
       "deployment",
       "service-images",
+      "relay-image",
       "sandbox-image",
       "images",
     ])
