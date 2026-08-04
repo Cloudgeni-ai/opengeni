@@ -629,6 +629,7 @@ export function RealtimeVoiceControl(props: {
 
   return (
     <div
+      role="group"
       aria-label="Realtime voice"
       data-picker-side={props.menuSide ?? "top"}
       className="inline-flex shrink-0 items-center"
