@@ -1,5 +1,16 @@
 # @opengeni/api-router
 
+## 0.21.7
+
+### Patch Changes
+
+- c29fd4c: Bound MCP OAuth callbacks through token exchange and persistence, return safe stage-specific failures to the capabilities UI, and replace incompatible dynamic client registrations with a compare-and-swap update.
+- Updated dependencies [c29fd4c]
+  - @opengeni/core@0.20.10
+  - @opengeni/db@0.27.7
+  - @opengeni/documents@0.5.3
+  - @opengeni/events@0.3.73
+
 ## 0.21.6
 
 ### Patch Changes
