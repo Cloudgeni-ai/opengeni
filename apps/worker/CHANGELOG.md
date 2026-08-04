@@ -1,5 +1,14 @@
 # @opengeni/worker-bundle
 
+## 0.16.16
+
+### Patch Changes
+
+- c6c9acb: Recover required MCP setup when a transient socket failure is wrapped by the MCP SDK, while preserving only secret-safe transport classification.
+- Updated dependencies [c6c9acb]
+  - @opengeni/runtime@0.18.14
+  - @opengeni/core@0.20.15
+
 ## 0.16.15
 
 ### Patch Changes
