@@ -642,6 +642,16 @@ export type OpenGeniSlackBotInstallStart = {
 };
 
 export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
+export type ConnectorDocumentDestinationAuthority = "organization" | "workspace" | "personal";
+export type ConnectorDocumentDestinationSelection = {
+  authorityKind: ConnectorDocumentDestinationAuthority;
+  collectionId: string | null;
+};
+export type ConnectorDocumentDestination = ConnectorDocumentDestinationSelection & {
+  authorityAccountId: string;
+  authorityWorkspaceId: string | null;
+  authoritySubjectId: string | null;
+};
 export type GoogleDriveSyncCadence = "manual" | "hourly" | "daily";
 export type GoogleDriveReadPolicy = "allow" | "ask" | "block";
 export type GoogleDriveConnectionLifecycleState =
@@ -666,7 +676,9 @@ export type GoogleDriveSelectedSource = {
   name: string;
   mimeType: string;
   driveId: string | null;
-  targetScope: GoogleDriveTargetScope;
+  destination?: ConnectorDocumentDestination | undefined;
+  /** @deprecated Missing destinations resolve to the current workspace boundary. */
+  targetScope?: GoogleDriveTargetScope | undefined;
   syncCadence: GoogleDriveSyncCadence;
   readPolicy: GoogleDriveReadPolicy;
   selectedAt: string;
@@ -681,6 +693,7 @@ export type GoogleDriveConnectionMetadata = {
   verifiedAt: string;
   accessMode: "metadata_readonly" | "readonly";
   lifecycle?: GoogleDriveConnectionLifecycle | undefined;
+  documentDestination?: ConnectorDocumentDestination | undefined;
   selectedSources?: GoogleDriveSelectedSource[] | undefined;
   /** @deprecated Read selectedSources; retained while existing connections migrate. */
   selectedSource?: GoogleDriveSelectedSource | null | undefined;
@@ -728,7 +741,9 @@ export type GoogleDriveBrowseResponse = {
 
 export type SaveGoogleDriveSourceRequest = {
   sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
-  targetScope: GoogleDriveTargetScope;
+  destination?: ConnectorDocumentDestinationSelection | undefined;
+  /** @deprecated Legacy requests resolve to workspace authority. */
+  targetScope?: GoogleDriveTargetScope | undefined;
   syncCadence: GoogleDriveSyncCadence;
   readPolicy: GoogleDriveReadPolicy;
 };
