@@ -7131,6 +7131,7 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
 
 type RuntimeGitBindingDescriptor = {
   provider: GitCredentialProvider;
+  remotePathProvider: GitCredentialProvider | null;
   credentialBindingId: string;
   bindingHash: string;
   protocol: string;
@@ -7166,7 +7167,7 @@ function runtimeGitBindingDescriptors(
     const credentialBindingId =
       gitCredentialBindingIdForRepository(resource, credentialProvider) ?? provider;
     const path = url.pathname.replace(/^\/+|\/+$/g, "");
-    const remote = gitRemoteIdentity(resource.uri, provider);
+    const remote = gitRemoteIdentity(resource.uri, credentialProvider);
     const bindingKey = `${provider}\u0000${credentialBindingId}`;
     const boundProvider = bindingProviders.get(credentialBindingId);
     if (boundProvider && boundProvider !== provider) {
@@ -7184,6 +7185,7 @@ function runtimeGitBindingDescriptors(
     remoteBindings.set(remote, bindingKey);
     return {
       provider,
+      remotePathProvider: credentialProvider,
       credentialBindingId,
       bindingHash: gitCredentialBindingHash(credentialBindingId),
       protocol: url.protocol.replace(/:$/, "").toLowerCase(),
@@ -7376,7 +7378,7 @@ function gitCredentialHelperBindingCaseLines(
         ),
     )
     .flatMap((descriptor) => {
-      const paths = gitRemotePathAliases(descriptor.uri, descriptor.provider);
+      const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
           `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
@@ -7541,7 +7543,7 @@ function gitCredentialHelperCommandLines(
     ...new Set(wrapperDescriptors.map((item) => `${item.provider}|${item.bindingHash}`)),
   ].map((key) => `    ${shellQuote(key)}) return 0 ;;`);
   const originWrapperHashes = wrapperDescriptors.flatMap((item) => {
-    return gitRemoteUriAliases(item.uri, item.provider).map(
+    return gitRemoteUriAliases(item.uri, item.remotePathProvider).map(
       (uri) =>
         `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
     );

@@ -142,6 +142,35 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     expect(command).toContain("https://dev.azure.com/acme/project/_git/repo.git");
   });
 
+  test("keeps provider-neutral credential-helper paths exact", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://git.example/acme/repo",
+        ref: "main",
+        mountPath: "repos/plain",
+      },
+      {
+        kind: "repository",
+        uri: "https://git.example/acme/repo.git",
+        ref: "main",
+        mountPath: "repos/dot-git",
+      },
+    ]);
+    const lines = command.split("\n");
+
+    expect(
+      lines.filter((line) =>
+        line.includes("'https|git.example|acme/repo') username='x-access-token'"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      lines.filter((line) =>
+        line.includes("'https|git.example|acme/repo.git') username='x-access-token'"),
+      ),
+    ).toHaveLength(1);
+  });
+
   test("fails closed on an unsupported credential transport", () => {
     expect(() =>
       repositoryCloneCommand(
