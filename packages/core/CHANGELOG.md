@@ -1,5 +1,11 @@
 # @opengeni/core
 
+## 0.20.12
+
+### Patch Changes
+
+- ee79969: Repair release-head recovery when GitHub emits duplicate legacy check projections.
+
 ## 0.20.11
 
 ### Patch Changes
