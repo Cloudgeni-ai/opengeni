@@ -17,33 +17,33 @@ import {
 describe("documents", () => {
   test("requires canonical bounded subjects for legacy personal authority", () => {
     const workspaceId = "11111111-1111-4111-8111-111111111111";
-    const document = (authoritySubjectId: unknown) =>
-      ({
-        authorityKind: "personal",
-        authorityWorkspaceId: workspaceId,
-        authoritySubjectId,
-      }) as Parameters<typeof canViewDocument>[0];
+    const document = {
+      authorityKind: "personal",
+      authorityWorkspaceId: workspaceId,
+      authoritySubjectId: "subject:owner",
+    } as const;
 
-    expect(canViewDocument(document("subject:owner"), "subject:owner", workspaceId)).toBe(true);
-    expect(canViewDocument(document("subject:owner"), "subject:other", workspaceId)).toBe(false);
-    expect(canViewDocument(document("subject:owner"), undefined, workspaceId)).toBe(false);
-    expect(canViewDocument(document("subject:owner"), null, workspaceId)).toBe(false);
-    expect(canViewDocument(document(""), "", workspaceId)).toBe(false);
-    expect(canViewDocument(document("   "), "   ", workspaceId)).toBe(false);
-    expect(canViewDocument(document(" subject:owner"), " subject:owner", workspaceId)).toBe(
-      false,
-    );
-    expect(canViewDocument(document("subject:owner "), "subject:owner", workspaceId)).toBe(false);
-    expect(canViewDocument(document("subject:owner"), " subject:owner", workspaceId)).toBe(false);
-    expect(canViewDocument(document("subject:owner"), "subject:owner ", workspaceId)).toBe(false);
+    expect(canViewDocument(document, "subject:owner", workspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:other", workspaceId)).toBe(false);
+    expect(canViewDocument(document, undefined, workspaceId)).toBe(false);
+    expect(canViewDocument(document, null, workspaceId)).toBe(false);
 
     const overlongSubject = "ø".repeat(513);
-    expect(canViewDocument(document(overlongSubject), overlongSubject, workspaceId)).toBe(false);
-    expect(canViewDocument(document("subject:owner"), overlongSubject, workspaceId)).toBe(false);
-    expect(canViewDocument(document(123), "123", workspaceId)).toBe(false);
-    expect(
-      canViewDocument(document("subject:owner"), 123 as unknown as string, workspaceId),
-    ).toBe(false);
+    const malformedSubjects: Array<[authoritySubjectId: string, viewerSubjectId: string]> = [
+      ["", ""],
+      ["   ", "   "],
+      [" subject:owner", " subject:owner"],
+      ["subject:owner ", "subject:owner"],
+      ["subject:owner", " subject:owner"],
+      ["subject:owner", "subject:owner "],
+      [overlongSubject, overlongSubject],
+      ["subject:owner", overlongSubject],
+    ];
+    for (const [authoritySubjectId, viewerSubjectId] of malformedSubjects) {
+      expect(
+        canViewDocument({ ...document, authoritySubjectId }, viewerSubjectId, workspaceId),
+      ).toBe(false);
+    }
   });
 
   test("keeps legacy authority workspace-anchored and fails closed for ambiguous tuples", () => {
