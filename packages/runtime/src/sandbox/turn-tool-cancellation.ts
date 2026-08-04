@@ -59,6 +59,7 @@ type ActiveShellSession = {
   sessionId: number;
   markerPath: string | null;
   token: string | null;
+  interactive: boolean;
   runContext: Parameters<FunctionToolInvoke>[0];
   execInvoke: FunctionToolInvoke;
   writeInvoke: FunctionToolInvoke | null;
@@ -611,6 +612,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
       const useRemoteOpCancellation =
         Boolean(session.cancelExecCommand) && session.supportsPty?.() === false;
+      const interactive = args.tty ?? true;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
           ? this.registerRemoteExec(
@@ -625,7 +627,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         ...(args.shell ? { shell: args.shell } : {}),
         ...(args.login !== undefined ? { login: args.login } : {}),
         ...(args.runAs ? { run_as: args.runAs } : {}),
-        tty: useRemoteOpCancellation ? args.tty : true,
+        tty: useRemoteOpCancellation ? args.tty : interactive,
         yield_time_ms: useRemoteOpCancellation
           ? args.yieldTimeMs
           : cappedYield(args.yieldTimeMs, TURN_EXEC_YIELD_MS),
@@ -683,6 +685,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         sessionId,
         markerPath,
         token,
+        interactive,
         runContext: lifecycleRunContext,
         execInvoke: invokeExec,
         writeInvoke: invokeWrite,
@@ -776,6 +779,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             // cloud/local sessions use the portable SDK session + POSIX marker.
             const useRemoteOpCancellation =
               Boolean(cancelExecCommand) && cancellationSession?.supportsPty?.() === false;
+            const interactive = parsed.tty !== false;
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
                 ? this.registerRemoteExec(
@@ -788,10 +792,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               : JSON.stringify({
                   ...parsed,
                   cmd: cancellableShellCommand(parsed.cmd, markerPath),
-                  // The SDK's only provider-neutral live-process interrupt is a PTY.
-                  // The process marker provides TERM/KILL escalation when Ctrl-C is
-                  // ignored; the short yield exposes the provider session promptly.
-                  tty: true,
+                  // Preserve an explicit pipe-mode request. When tty is omitted,
+                  // retain the historical PTY default and Ctrl-C fast path. Every
+                  // mode keeps the process marker plus TERM/KILL escalation, and
+                  // the short yield exposes the provider session promptly.
+                  tty: interactive,
                   yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_EXEC_YIELD_MS),
                 });
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
@@ -818,6 +823,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   sessionId: retainedProcess.providerSessionId,
                   markerPath,
                   token,
+                  interactive,
                   runContext,
                   execInvoke: tool.invoke,
                   writeInvoke: this.rawWriteInvoke,
@@ -838,6 +844,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 sessionId,
                 markerPath,
                 token,
+                interactive,
                 runContext,
                 execInvoke: tool.invoke,
                 writeInvoke: this.rawWriteInvoke,
@@ -896,6 +903,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     sessionId,
                     markerPath: null,
                     token: null,
+                    interactive: true,
                     runContext,
                     execInvoke: this.rawExecInvoke ?? tool.invoke,
                     writeInvoke: tool.invoke,
@@ -1110,8 +1118,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // A retained provider session must remain pinned until its process group is
     // absent. Polling it first could settle/delete the durable route while an
     // ignored-signal descendant still lives, making the exact helper backend
-    // unavailable. Generic legacy sessions retain their Ctrl-C fast path.
-    if (!state.processSession && state.writeInvoke) {
+    // unavailable. Generic interactive sessions retain their Ctrl-C fast path;
+    // pipe-mode commands never receive terminal control bytes.
+    if (!state.processSession && state.writeInvoke && state.interactive) {
       await this.rawWrite(state, "\u0003", SHELL_POLL_MS);
       if (!(await this.identityAlive(state))) {
         await this.forgetShellSessionAfterExactSettlement(state);
