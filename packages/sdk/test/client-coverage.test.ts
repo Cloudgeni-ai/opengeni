@@ -1097,6 +1097,32 @@ describe("OpenGeniClient connections", () => {
 });
 
 describe("OpenGeniClient error handling for new endpoints", () => {
+  test("preserves safe structured OAuth failure details", () => {
+    const error = new OpenGeniApiError(
+      408,
+      JSON.stringify({
+        error: {
+          status: 408,
+          code: "upstream_unavailable",
+          message: "Connection setup timed out during authorization-server discovery. Try again.",
+          retryable: true,
+          requestId: "oauth-timeout-test",
+          details: {
+            oauthStage: "authorization_server_metadata",
+            oauthReason: "timeout",
+            ignoredNestedValue: { secret: "not projected" },
+          },
+        },
+      }),
+      { mutation: true },
+    );
+
+    expect(error.details).toEqual({
+      oauthStage: "authorization_server_metadata",
+      oauthReason: "timeout",
+    });
+  });
+
   test("non-2xx responses raise OpenGeniApiError with status and body", async () => {
     const { client } = makeClient(() => new Response("goal not found", { status: 404 }));
     const error = await client.getGoal(WORKSPACE_ID, SESSION_ID).then(

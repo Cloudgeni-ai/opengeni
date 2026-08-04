@@ -29,6 +29,7 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   DestinationPolicyError,
   OAUTH_MAX_RESPONSE_BYTES,
+  RequestDeadlineError,
   isLocalTestEnvironment,
   pinnedFetch,
   readResponseJsonBounded,
@@ -37,6 +38,7 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
@@ -49,6 +51,7 @@ type OAuthClientDeps = {
   db: Database;
   settings: Settings;
   observability?: Observability | undefined;
+  oauthStartDeadlineMs?: number | undefined;
 };
 
 export type OAuthStartContext = {
@@ -133,6 +136,66 @@ type TokenResponse = {
 
 type OAuthCallbackStage = "state_verify" | "token_exchange" | "tools_list" | "persist";
 
+export const OAUTH_START_DEADLINE_MS = 15_000;
+
+export type OAuthStartStage =
+  | "connection_lookup"
+  | "mcp_challenge"
+  | "protected_resource_metadata"
+  | "authorization_server_metadata"
+  | "client_registration";
+
+class OAuthStartStageError extends Error {
+  constructor(
+    readonly stage: OAuthStartStage,
+    readonly reason: string,
+    readonly cause: unknown,
+  ) {
+    super(errorMessage(cause));
+    this.name = "OAuthStartStageError";
+  }
+}
+
+class OAuthStartDeadline {
+  readonly signal: AbortSignal;
+  private readonly controller = new AbortController();
+  private readonly timer: ReturnType<typeof setTimeout>;
+
+  constructor(timeoutMs: number) {
+    this.signal = this.controller.signal;
+    this.timer = setTimeout(() => this.controller.abort(), timeoutMs);
+    this.timer.unref?.();
+  }
+
+  async run<T>(stage: OAuthStartStage, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.signal.aborted) {
+      throw new OAuthStartStageError(stage, "timeout", new RequestDeadlineError(stage));
+    }
+    let removeAbortListener = () => {};
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const onAbort = () =>
+        reject(new OAuthStartStageError(stage, "timeout", new RequestDeadlineError(stage)));
+      this.signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => this.signal.removeEventListener("abort", onAbort);
+    });
+    try {
+      return await Promise.race([operation(this.signal), aborted]);
+    } catch (error) {
+      if (error instanceof OAuthStartStageError) throw error;
+      if (this.signal.aborted || error instanceof RequestDeadlineError) {
+        throw new OAuthStartStageError(stage, "timeout", error);
+      }
+      throw new OAuthStartStageError(stage, oauthStartFailureReason(error), error);
+    } finally {
+      removeAbortListener();
+    }
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+  }
+}
+
 class OAuthCallbackStageError extends Error {
   constructor(
     readonly stage: OAuthCallbackStage,
@@ -147,6 +210,27 @@ class OAuthCallbackStageError extends Error {
 export async function startMcpOAuth(
   deps: OAuthClientDeps,
   context: OAuthStartContext,
+): Promise<OAuthStartResponse> {
+  const deadline = new OAuthStartDeadline(deps.oauthStartDeadlineMs ?? OAUTH_START_DEADLINE_MS);
+  try {
+    return await startMcpOAuthWithinDeadline(deps, context, deadline);
+  } catch (error) {
+    const staged =
+      error instanceof OAuthStartStageError
+        ? error
+        : new OAuthStartStageError("connection_lookup", oauthStartFailureReason(error), error);
+    const providerDomain = safeRequestedProviderDomain(context.payload);
+    logOAuthStartFailure(deps.observability, staged, providerDomain);
+    throw oauthStartApiError(staged);
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function startMcpOAuthWithinDeadline(
+  deps: OAuthClientDeps,
+  context: OAuthStartContext,
+  deadline: OAuthStartDeadline,
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
@@ -169,16 +253,18 @@ export async function startMcpOAuth(
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
   const metadataUrl = `${baseUrl}/v1/integrations/oauth/client-metadata.json`;
-  const existing = await existingOAuthConnectionForStart(db, {
-    workspaceId: context.workspaceId,
-    subjectId: context.subjectId,
-    providerDomain,
-    mcpUrl,
-    personalSlack,
-    connectionId: context.payload.connectionId,
-    requestedOwnership: context.payload.ownership,
-    newConnectionOwnership: requestedOwnership,
-  });
+  const existing = await deadline.run("connection_lookup", async () =>
+    existingOAuthConnectionForStart(db, {
+      workspaceId: context.workspaceId,
+      subjectId: context.subjectId,
+      providerDomain,
+      mcpUrl,
+      personalSlack,
+      connectionId: context.payload.connectionId,
+      requestedOwnership: context.payload.ownership,
+      newConnectionOwnership: requestedOwnership,
+    }),
+  );
   if (context.payload.connectionId && !existing) {
     throw new HTTPException(404, { message: "connection not found" });
   }
@@ -186,7 +272,7 @@ export async function startMcpOAuth(
     ? ownershipForConnection(existing.subjectId, context.subjectId)
     : requestedOwnership;
 
-  const discovery = await discoverMcpOAuth(mcpUrl, settings);
+  const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
   if (personalSlack && !isLocalTestEnvironment(settings.environment)) {
     assertSlackAuthorizationServer(discovery.as);
   }
@@ -197,14 +283,17 @@ export async function startMcpOAuth(
     discovery.challenge.scope,
     discovery.prm.scopesSupported,
   );
-  const client = await registerOAuthClient(
-    db,
-    settings,
-    discovery.as,
-    metadataUrl,
-    redirectUri,
-    authorizeScopes,
-    context.payload.oauthClient,
+  const client = await deadline.run("client_registration", (signal) =>
+    registerOAuthClient(
+      db,
+      settings,
+      discovery.as,
+      metadataUrl,
+      redirectUri,
+      authorizeScopes,
+      context.payload.oauthClient,
+      signal,
+    ),
   );
   const key = requireEnvironmentEncryption(settings);
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
@@ -225,7 +314,9 @@ export async function startMcpOAuth(
     clientRegistrationMethod: client.method,
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
     ...(client.method === "manual" && client.clientSecret
-      ? { encryptedClientSecret: encryptEnvironmentValue(key, client.clientSecret) }
+      ? {
+          encryptedClientSecret: encryptEnvironmentValue(key, client.clientSecret),
+        }
       : {}),
     returnPath,
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
@@ -249,7 +340,11 @@ export async function startMcpOAuth(
 
 export async function completeMcpOAuthCallback(
   deps: OAuthClientDeps,
-  input: { code?: string | undefined; state?: string | undefined; requestUrl: string },
+  input: {
+    code?: string | undefined;
+    state?: string | undefined;
+    requestUrl: string;
+  },
 ): Promise<OAuthCallbackResult> {
   const { db, settings, observability } = deps;
   let state: OAuthStatePayload | null = null;
@@ -260,14 +355,20 @@ export async function completeMcpOAuthCallback(
       new Error("missing OAuth state"),
     );
     logOAuthCallbackFailure(observability, error, state);
-    return { redirectTo: callbackReturnPath("/integrations", "error", { reason: error.reason }) };
+    return {
+      redirectTo: callbackReturnPath("/integrations", "error", {
+        reason: error.reason,
+      }),
+    };
   }
   try {
     state = readOAuthState(input.state, settings);
     await requireOAuthCallbackGrant(db, state);
     if (!input.code) {
       return {
-        redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }),
+        redirectTo: callbackReturnPath(state.returnPath, "error", {
+          reason: "missing_code",
+        }),
       };
     }
     const consumed = await consumeIntegrationOAuthStateNonce(db, {
@@ -279,7 +380,9 @@ export async function completeMcpOAuthCallback(
       now: new Date(),
     });
     if (!consumed) {
-      throw new HTTPException(400, { message: "OAuth state has already been used" });
+      throw new HTTPException(400, {
+        message: "OAuth state has already been used",
+      });
     }
   } catch (error) {
     const staged = new OAuthCallbackStageError("state_verify", "state_invalid", error);
@@ -377,7 +480,11 @@ export async function completeMcpOAuthCallback(
         ? error
         : new OAuthCallbackStageError("persist", "persist_failed", error);
     logOAuthCallbackFailure(observability, staged, state);
-    return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: staged.reason }) };
+    return {
+      redirectTo: callbackReturnPath(state.returnPath, "error", {
+        reason: staged.reason,
+      }),
+    };
   }
 }
 
@@ -421,7 +528,9 @@ function assertPersonalSlackOAuthStart(
     });
   }
   if (payload.providerDomain && canonicalProviderDomain(payload.providerDomain) !== "slack.com") {
-    throw new HTTPException(422, { message: "Slack provider identity does not match slack.com" });
+    throw new HTTPException(422, {
+      message: "Slack provider identity does not match slack.com",
+    });
   }
   if (!isLocalTestEnvironment(settings.environment) && mcpUrl !== OFFICIAL_SLACK_MCP_URL) {
     throw new HTTPException(422, {
@@ -454,16 +563,17 @@ export function assertSlackAuthorizationServer(as: AuthorizationServerMetadata):
 async function discoverMcpOAuth(
   resource: string,
   settings: Settings,
+  deadline: OAuthStartDeadline,
 ): Promise<{
   challenge: WwwAuthenticateChallenge;
   prm: ProtectedResourceMetadata;
   as: AuthorizationServerMetadata;
 }> {
-  const challenge = await probeMcpChallenge(resource, settings);
-  const prm = await discoverProtectedResourceMetadata(
-    resource,
-    settings,
-    challenge.resourceMetadata,
+  const challenge = await deadline.run("mcp_challenge", (signal) =>
+    probeMcpChallenge(resource, settings, signal),
+  );
+  const prm = await deadline.run("protected_resource_metadata", (signal) =>
+    discoverProtectedResourceMetadata(resource, settings, challenge.resourceMetadata, signal),
   );
   const authorizationServer = prm.authorizationServers[0];
   if (!authorizationServer) {
@@ -471,7 +581,9 @@ async function discoverMcpOAuth(
       message: "MCP protected resource metadata did not advertise an authorization server",
     });
   }
-  const as = await discoverAuthorizationServerMetadata(authorizationServer, settings);
+  const as = await deadline.run("authorization_server_metadata", (signal) =>
+    discoverAuthorizationServerMetadata(authorizationServer, settings, signal),
+  );
   if (!as.codeChallengeMethodsSupported.includes("S256")) {
     throw new HTTPException(422, {
       message: "authorization server does not support required PKCE S256",
@@ -483,10 +595,12 @@ async function discoverMcpOAuth(
 async function probeMcpChallenge(
   resource: string,
   settings: Settings,
+  signal: AbortSignal,
 ): Promise<WwwAuthenticateChallenge> {
   const response = await fetchOAuth(resource, settings, {
     method: "GET",
     headers: { accept: "application/json" },
+    signal,
   });
   try {
     if (response.status !== 401) {
@@ -502,13 +616,14 @@ async function discoverProtectedResourceMetadata(
   resource: string,
   settings: Settings,
   advertisedUrl?: string,
+  signal?: AbortSignal,
 ): Promise<ProtectedResourceMetadata> {
   const candidates = uniqueStrings([
     ...(advertisedUrl ? [advertisedUrl] : []),
     ...wellKnownCandidates(resource, "oauth-protected-resource"),
   ]);
   for (const candidate of candidates) {
-    const payload = await fetchJsonObject(candidate, settings).catch((error) => {
+    const payload = await fetchJsonObject(candidate, settings, signal).catch((error) => {
       if (error instanceof HTTPException) {
         throw error;
       }
@@ -528,12 +643,15 @@ async function discoverProtectedResourceMetadata(
       ...(stringValue(payload.resource) ? { resource: stringValue(payload.resource)! } : {}),
     };
   }
-  throw new HTTPException(422, { message: "could not discover MCP protected resource metadata" });
+  throw new HTTPException(422, {
+    message: "could not discover MCP protected resource metadata",
+  });
 }
 
 async function discoverAuthorizationServerMetadata(
   authorizationServer: string,
   settings: Settings,
+  signal: AbortSignal,
 ): Promise<AuthorizationServerMetadata> {
   const safeAuthorizationServer = oauthEndpointUrl(
     authorizationServer,
@@ -551,7 +669,7 @@ async function discoverAuthorizationServerMetadata(
     safeAuthorizationServer,
   ]);
   for (const candidate of candidates) {
-    const payload = await fetchJsonObject(candidate, settings).catch((error) => {
+    const payload = await fetchJsonObject(candidate, settings, signal).catch((error) => {
       if (error instanceof HTTPException) {
         throw error;
       }
@@ -605,6 +723,7 @@ async function registerOAuthClient(
   redirectUri: string,
   scopes: string[],
   manual: OAuthStartRequest["oauthClient"],
+  signal: AbortSignal,
 ): Promise<OAuthClientRegistration> {
   const operator = operatorClientForAs(settings, as);
   if (operator) {
@@ -614,7 +733,14 @@ async function registerOAuthClient(
   // the authorization endpoint. Its documented interactive setup uses DCR,
   // so prefer the simultaneously advertised registration endpoint.
   if (prefersDynamicClientRegistration(as)) {
-    return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+    return await getOrCreateDynamicClientRegistration(
+      db,
+      settings,
+      as,
+      redirectUri,
+      scopes,
+      signal,
+    );
   }
   if (as.clientIdMetadataDocumentSupported) {
     return {
@@ -638,7 +764,7 @@ async function registerOAuthClient(
       ),
     };
   }
-  return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+  return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes, signal);
 }
 
 function prefersDynamicClientRegistration(as: AuthorizationServerMetadata): boolean {
@@ -653,6 +779,7 @@ async function getOrCreateDynamicClientRegistration(
   as: AuthorizationServerMetadata,
   redirectUri: string,
   scopes: string[],
+  signal: AbortSignal,
 ): Promise<OAuthClientRegistration> {
   const storedClient = await loadIntegrationOAuthClient(db, settings, as.issuer);
   if (storedClient && storedDcrClientSatisfiesPolicy(storedClient, scopes)) {
@@ -673,7 +800,7 @@ async function getOrCreateDynamicClientRegistration(
       message: "manual OAuth client credentials are required for this authorization server",
     });
   }
-  const dcr = await dynamicClientRegistration(settings, as, redirectUri, scopes);
+  const dcr = await dynamicClientRegistration(settings, as, redirectUri, scopes, signal);
   const key = dcr.clientSecret ? requireEnvironmentEncryption(settings) : null;
   const storeInput = {
     issuer: as.issuer,
@@ -814,6 +941,7 @@ async function dynamicClientRegistration(
   as: AuthorizationServerMetadata,
   redirectUri: string,
   scopes: string[],
+  signal: AbortSignal,
 ): Promise<OAuthClientRegistration> {
   if (!as.registrationEndpoint) {
     throw new HTTPException(422, {
@@ -831,6 +959,7 @@ async function dynamicClientRegistration(
       response_types: ["code"],
       ...(scopes.length ? { scope: scopes.join(" ") } : {}),
     }),
+    signal,
   });
   if (!response.ok) {
     await cancelResponseBody(response);
@@ -842,6 +971,7 @@ async function dynamicClientRegistration(
     response,
     OAUTH_MAX_RESPONSE_BYTES,
     "OAuth dynamic registration response",
+    { signal },
   );
   const clientId = stringValue(payload.client_id);
   if (!clientId) {
@@ -1039,7 +1169,9 @@ async function clientForState(
       authorizationServer: state.authorizationServer,
       clientId: state.clientId,
       ...(state.encryptedClientSecret
-        ? { clientSecret: decryptEnvironmentValue(key, state.encryptedClientSecret) }
+        ? {
+            clientSecret: decryptEnvironmentValue(key, state.encryptedClientSecret),
+          }
         : {}),
       tokenEndpointAuthMethod: state.tokenEndpointAuthMethod,
     };
@@ -1052,7 +1184,9 @@ async function clientForState(
       stored.issuer !== state.issuer ||
       stored.authorizationServer !== state.authorizationServer
     ) {
-      throw new HTTPException(400, { message: "OAuth client registration is no longer available" });
+      throw new HTTPException(400, {
+        message: "OAuth client registration is no longer available",
+      });
     }
     return {
       method: "dcr",
@@ -1183,6 +1317,64 @@ function logOAuthCallbackFailure(
   });
 }
 
+function logOAuthStartFailure(
+  observability: Observability | undefined,
+  error: OAuthStartStageError,
+  providerDomain: string | undefined,
+): void {
+  observability?.warn("MCP OAuth setup failed", {
+    "opengeni.oauth.stage": error.stage,
+    "opengeni.oauth.reason": error.reason,
+    "opengeni.oauth.provider_domain": providerDomain,
+    error: sanitizedError(error.cause),
+  });
+}
+
+function oauthStartFailureReason(error: unknown): string {
+  if (error instanceof RequestDeadlineError) return "timeout";
+  if (error instanceof DestinationPolicyError) return error.reason;
+  if (error instanceof HTTPException) return `http_${error.status}`;
+  if (error instanceof SyntaxError) return "invalid_response";
+  return "request_failed";
+}
+
+function oauthStartApiError(error: OAuthStartStageError): ApiHttpError {
+  const timeout = error.reason === "timeout";
+  const status = timeout ? 408 : error.cause instanceof HTTPException ? error.cause.status : 422;
+  return new ApiHttpError(status, {
+    code: timeout || status >= 500 ? "upstream_unavailable" : "validation_failed",
+    retryable: timeout || status === 429 || status >= 500,
+    message: timeout
+      ? oauthStartTimeoutMessage(error.stage)
+      : error.cause instanceof HTTPException
+        ? error.cause.message
+        : `Connection setup failed during ${oauthStartStageLabel(error.stage)}.`,
+    details: {
+      oauthStage: error.stage,
+      oauthReason: error.reason,
+    },
+  });
+}
+
+function oauthStartTimeoutMessage(stage: OAuthStartStage): string {
+  return `Connection setup timed out during ${oauthStartStageLabel(stage)}. Try again.`;
+}
+
+function oauthStartStageLabel(stage: OAuthStartStage): string {
+  switch (stage) {
+    case "connection_lookup":
+      return "connection lookup";
+    case "mcp_challenge":
+      return "MCP authorization discovery";
+    case "protected_resource_metadata":
+      return "protected-resource discovery";
+    case "authorization_server_metadata":
+      return "authorization-server discovery";
+    case "client_registration":
+      return "OAuth client registration";
+  }
+}
+
 function logOAuthVerificationWarning(
   observability: Observability | undefined,
   error: OAuthCallbackStageError,
@@ -1218,6 +1410,16 @@ function errorMessage(error: unknown): string {
 function safeHost(rawUrl: string): string | undefined {
   try {
     return new URL(rawUrl).host;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeRequestedProviderDomain(payload: OAuthStartRequest): string | undefined {
+  try {
+    const resource = payload.mcpUrl ?? payload.resource;
+    if (!resource) return undefined;
+    return canonicalProviderDomain(payload.providerDomain ?? new URL(resource).hostname);
   } catch {
     return undefined;
   }
@@ -1266,7 +1468,10 @@ async function verifyMcpToolsList(
       timeout: 10_000,
       maxTotalTimeout: 10_000,
     });
-    const listed = await client.listTools(undefined, { timeout: 10_000, maxTotalTimeout: 10_000 });
+    const listed = await client.listTools(undefined, {
+      timeout: 10_000,
+      maxTotalTimeout: 10_000,
+    });
     return listed.tools.map((tool) => ({
       name: tool.name,
       ...(tool.description ? { description: tool.description } : {}),
@@ -1414,19 +1619,30 @@ function oauthEndpointUrl(rawUrl: string, settings: Settings, label: string): st
 
 function safeReturnPath(value: string): string {
   if (!value.startsWith("/") || value.startsWith("//")) {
-    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+    throw new HTTPException(400, {
+      message: "OAuth returnPath must be a relative path",
+    });
   }
   const parsed = new URL(value, "https://opengeni.local");
   // `..` segments can normalize back into a `//host` prefix, which browsers
   // resolve as a protocol-relative absolute URL. Reject the NORMALIZED path.
   if (parsed.origin !== "https://opengeni.local" || parsed.pathname.startsWith("//")) {
-    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+    throw new HTTPException(400, {
+      message: "OAuth returnPath must be a relative path",
+    });
   }
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
-async function fetchJsonObject(url: string, settings: Settings): Promise<Record<string, unknown>> {
-  const response = await fetchOAuth(url, settings, { headers: { accept: "application/json" } });
+async function fetchJsonObject(
+  url: string,
+  settings: Settings,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const response = await fetchOAuth(url, settings, {
+    headers: { accept: "application/json" },
+    ...(signal ? { signal } : {}),
+  });
   if (!response.ok) {
     await cancelResponseBody(response);
     throw new Error(`HTTP ${response.status}`);
@@ -1435,6 +1651,7 @@ async function fetchJsonObject(url: string, settings: Settings): Promise<Record<
     response,
     OAUTH_MAX_RESPONSE_BYTES,
     "OAuth metadata response",
+    { ...(signal ? { signal } : {}) },
   );
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("metadata response was not a JSON object");
@@ -1477,19 +1694,25 @@ async function fetchOAuth(
   }
   if (hop >= 3) {
     await cancelResponseBody(response);
-    throw new HTTPException(422, { message: "OAuth fetch exceeded maximum redirect hops" });
+    throw new HTTPException(422, {
+      message: "OAuth fetch exceeded maximum redirect hops",
+    });
   }
   const location = response.headers.get("location");
   if (!location) {
     await cancelResponseBody(response);
-    throw new HTTPException(422, { message: "OAuth fetch redirect was missing Location" });
+    throw new HTTPException(422, {
+      message: "OAuth fetch redirect was missing Location",
+    });
   }
   let nextUrl: string;
   try {
     nextUrl = new URL(location, rawUrl).toString();
   } catch {
     await cancelResponseBody(response);
-    throw new HTTPException(422, { message: "OAuth fetch redirect Location was invalid" });
+    throw new HTTPException(422, {
+      message: "OAuth fetch redirect Location was invalid",
+    });
   }
   await cancelResponseBody(response);
   return await fetchOAuth(nextUrl, settings, init, hop + 1);
@@ -1624,7 +1847,9 @@ function numberValue(value: unknown): number | undefined {
 function requiredString(value: unknown, field: string): string {
   const result = stringValue(value);
   if (!result) {
-    throw new HTTPException(400, { message: `invalid OAuth state: missing ${field}` });
+    throw new HTTPException(400, {
+      message: `invalid OAuth state: missing ${field}`,
+    });
   }
   return result;
 }

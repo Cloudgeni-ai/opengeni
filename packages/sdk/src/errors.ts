@@ -7,6 +7,7 @@ export class OpenGeniApiError extends Error {
   /** True only when an uncontrolled transport failed after a mutation may have been accepted. */
   readonly outcomeUnknown: boolean;
   readonly body: string;
+  readonly details: Record<string, unknown> | undefined;
 
   constructor(
     status: number,
@@ -42,6 +43,7 @@ export class OpenGeniApiError extends Error {
     this.outcomeUnknown =
       options.outcomeUnknown ?? (gatewayFailure && !!options.mutation && !decoded);
     this.body = !fromResponse || decoded ? body : "";
+    this.details = decoded?.details;
   }
 }
 
@@ -50,6 +52,7 @@ function decodeApiErrorBody(body: string): {
   message: string | undefined;
   requestId: string | undefined;
   retryable: boolean | undefined;
+  details: Record<string, unknown> | undefined;
 } | null {
   if (!body) return null;
   try {
@@ -64,16 +67,34 @@ function decodeApiErrorBody(body: string): {
     const message = boundedApiField(nested.message);
     const requestId = boundedCorrelationId(nested.requestId);
     const retryable = typeof nested.retryable === "boolean" ? nested.retryable : undefined;
-    if (!code && !message && !requestId && retryable === undefined) return null;
+    const details = boundedApiDetails(nested.details);
+    if (!code && !message && !requestId && retryable === undefined && !details) return null;
     return {
       code,
       message,
       requestId,
       retryable,
+      details,
     };
   } catch {
     return null;
   }
+}
+
+function boundedApiDetails(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const entries = Object.entries(value as Record<string, unknown>).slice(0, 16);
+  const details: Record<string, unknown> = {};
+  for (const [key, entry] of entries) {
+    if (!/^[a-zA-Z][\w.-]{0,63}$/.test(key)) continue;
+    if (typeof entry === "string") {
+      const bounded = boundedApiField(entry);
+      if (bounded !== undefined) details[key] = bounded;
+    } else if (typeof entry === "number" || typeof entry === "boolean" || entry === null) {
+      details[key] = entry;
+    }
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
 }
 
 function boundedApiField(value: unknown): string | undefined {

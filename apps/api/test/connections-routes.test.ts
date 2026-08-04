@@ -75,6 +75,17 @@ function app(overrides: Partial<Settings> = {}) {
   } as never);
 }
 
+function appWithDeps(overrides: Partial<Settings>, extraDeps: Record<string, unknown>) {
+  return createApp({
+    settings: { ...settings, ...overrides },
+    db: client.db,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+    ...extraDeps,
+  } as never);
+}
+
 function publicApp(dbOverride: unknown = client?.db ?? {}, overrides: Partial<Settings> = {}) {
   const publicSettings = testSettings({
     authRequired: true,
@@ -865,6 +876,78 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth start fails promptly with a structured stage when metadata streaming stalls", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    let origin = "";
+    const source = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/mcp") {
+          return new Response(null, {
+            status: 401,
+            headers: {
+              "www-authenticate": `Bearer resource_metadata="${origin}/prm"`,
+            },
+          });
+        }
+        if (path === "/prm") {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode('{"authorization_servers":["https://issuer.test"]'),
+                );
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${source.port}`;
+    try {
+      const startedAt = performance.now();
+      const response = await appWithDeps(
+        { environment: "test" },
+        { oauthStartDeadlineMs: 25 },
+      ).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerDomain: "stalled.example.test",
+          mcpUrl: `${origin}/mcp`,
+        }),
+      });
+      const body = (await response.json()) as {
+        error: {
+          code: string;
+          message: string;
+          retryable: boolean;
+          details?: Record<string, string>;
+        };
+      };
+      expect(response.status).toBe(408);
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(body.error).toMatchObject({
+        code: "upstream_unavailable",
+        retryable: true,
+        details: {
+          oauthStage: "protected_resource_metadata",
+          oauthReason: "timeout",
+        },
+      });
+      expect(body.error.message).toContain("protected-resource discovery");
+    } finally {
+      source.stop(true);
+    }
+  });
+
   test("oauth uses protected-resource metadata resource as token audience while connecting to the MCP endpoint", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1469,7 +1552,9 @@ describe("connections routes", () => {
 
     const missingDeploymentClient = await request({}, "https://mcp.slack.com/mcp");
     expect(missingDeploymentClient.status).toBe(503);
-    expect(await missingDeploymentClient.text()).toContain("temporarily unavailable");
+    expect(await missingDeploymentClient.text()).toContain(
+      "personal Slack OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
+    );
 
     const nonOfficialResource = await request(
       {

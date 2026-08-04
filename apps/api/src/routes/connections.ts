@@ -517,7 +517,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const payload = parsed.data;
     const result = await startMcpOAuth(
-      { db, settings, observability },
+      { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
         accountId: grant.accountId,
         workspaceId,
