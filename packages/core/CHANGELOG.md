@@ -1,5 +1,12 @@
 # @opengeni/core
 
+## 0.20.6
+
+### Patch Changes
+
+- Updated dependencies [d5df927]
+  - @opengeni/documents@0.4.1
+
 ## 0.20.5
 
 ### Patch Changes
