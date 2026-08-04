@@ -1,5 +1,12 @@
 # @opengeni/example-northstar-support
 
+## 0.0.69
+
+### Patch Changes
+
+- Updated dependencies [9159e64]
+  - @opengeni/react@0.44.4
+
 ## 0.0.68
 
 ### Patch Changes

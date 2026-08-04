@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.44.4
+
+### Patch Changes
+
+- 9159e64: Add render-compatible runtime typography and model-picker density tokens, a compact embedded preset, host-reset-safe component typography, and token propagation for portalled model and realtime menus.
+
 ## 0.44.3
 
 ### Patch Changes
