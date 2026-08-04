@@ -1,4 +1,4 @@
--- OPE-14 enrollment credential-generation fence.
+-- Enrollment credential-generation fence.
 --
 -- Schema-first/backward-compatible rollout: every pre-existing enrollment is
 -- generation 1, matching legacy signed bearers that did not carry an explicit
