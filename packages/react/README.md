@@ -412,6 +412,9 @@ intentional changes should regenerate those snapshots and review the diff.
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
   `renderMessageText` to plug a markdown renderer.
+- `UserMessageBody` — the shared lossless rendered-height disclosure for
+  already-sent user text. Use it inside a custom `renderMessageText` user branch
+  so attachments and voice identity remain outside the clipped Markdown region.
 - `SessionStatus` / `StatusDot` — status badges; live states breathe.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the

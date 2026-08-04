@@ -1,0 +1,236 @@
+import AxeBuilder from "@axe-core/playwright";
+import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { chromium, type Browser, type Locator, type Page } from "playwright";
+
+const repoRoot = new URL("../..", import.meta.url).pathname;
+const demoRoot = `${repoRoot}/packages/react/demo`;
+const evidenceDir = process.env.USER_MESSAGE_ARTIFACT_DIR;
+
+describe("long sent user-message browser acceptance", () => {
+  let web: StartedProcess;
+  let browser: Browser;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const port = await freePort();
+    baseUrl = `http://127.0.0.1:${port}`;
+    web = await startProcess(
+      ["bun", "run", "vite", ".", "--port", String(port), "--strictPort", "--host", "127.0.0.1"],
+      {
+        cwd: demoRoot,
+        ready: async () =>
+          (await fetch(baseUrl, { signal: AbortSignal.timeout(2_000) }).catch(() => null))?.ok ===
+          true,
+        timeoutMs: 45_000,
+      },
+    );
+    const executablePath = [
+      process.env.CHROMIUM_EXECUTABLE_PATH,
+      "/opt/google/chrome/chrome",
+      "/usr/local/bin/chromium",
+    ].find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
+    browser = await chromium.launch({
+      ...(executablePath ? { executablePath } : {}),
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    });
+    if (evidenceDir) {
+      await mkdir(evidenceDir, { recursive: true });
+    }
+  }, 60_000);
+
+  afterAll(async () => {
+    await Promise.allSettled([browser?.close(), web?.stop()]);
+  });
+
+  for (const viewport of [
+    { name: "mobile", width: 390, height: 844 },
+    { name: "desktop", width: 1440, height: 960 },
+  ] as const) {
+    test(`is lossless, bounded, keyboard accessible, and viewport-safe on ${viewport.name}`, async () => {
+      const page = await openHarness(browser, baseUrl, viewport);
+      try {
+        const body = page.locator('[data-og-message-id="long-user-message"]');
+        const clip = body.locator("[data-og-user-message-clip]");
+        const disclosure = body.getByRole("button", { name: "Show more" });
+        await disclosure.scrollIntoViewIfNeeded();
+        const collapsed = await body.evaluate((node) => {
+          const clipNode = node.querySelector<HTMLElement>("[data-og-user-message-clip]")!;
+          const root = document.documentElement;
+          return {
+            ariaExpanded: node
+              .querySelector("[data-og-user-message-disclosure]")
+              ?.getAttribute("aria-expanded"),
+            clipHeight: clipNode.getBoundingClientRect().height,
+            clipScrollHeight: clipNode.scrollHeight,
+            hasFade: Boolean(node.querySelector("[data-og-user-message-fade]")),
+            hasFinalParagraph: (node.textContent ?? "").includes("Final paragraph after the URL"),
+            hasUnicode: (node.textContent ?? "").includes("こんにちは · مرحبا · 👩🏽‍💻"),
+            attachmentOutsideClip: !clipNode.contains(
+              node.querySelector("[data-message-attachments]"),
+            ),
+            voiceOutsideClip: !clipNode.contains(node.querySelector("[data-voice-identity]")),
+            contextOutsideClip: !clipNode.contains(node.querySelector("[data-voice-context]")),
+            pageOverflow: root.scrollWidth - window.innerWidth,
+          };
+        });
+        expect(collapsed.ariaExpanded).toBe("false");
+        expect(collapsed.clipHeight).toBeLessThanOrEqual(viewport.width < 640 ? 225 : 289);
+        expect(collapsed.clipScrollHeight).toBeGreaterThan(collapsed.clipHeight + 100);
+        expect(collapsed.hasFade).toBe(true);
+        expect(collapsed.hasFinalParagraph).toBe(true);
+        expect(collapsed.hasUnicode).toBe(true);
+        expect(collapsed.attachmentOutsideClip).toBe(true);
+        expect(collapsed.voiceOutsideClip).toBe(true);
+        expect(collapsed.contextOutsideClip).toBe(true);
+        expect(collapsed.pageOverflow).toBeLessThanOrEqual(1);
+
+        if (evidenceDir) {
+          await page.screenshot({
+            path: `${evidenceDir}/user-message-${viewport.name}-collapsed.png`,
+            fullPage: true,
+          });
+        }
+
+        await disclosure.focus();
+        await page.keyboard.press("Enter");
+        const showLess = body.getByRole("button", { name: "Show less" });
+        await showLess.waitFor();
+        expect(await showLess.getAttribute("aria-expanded")).toBe("true");
+        const expandedHeight = await clip.evaluate((node) => node.getBoundingClientRect().height);
+        expect(expandedHeight).toBeGreaterThan(collapsed.clipHeight + 100);
+        expect(await body.locator("[data-og-user-message-fade]").count()).toBe(0);
+
+        const accessibility = await new AxeBuilder({ page })
+          .include('[data-og-message-id="long-user-message"]')
+          .analyze();
+        expect(accessibility.violations).toEqual([]);
+
+        if (evidenceDir) {
+          await page.screenshot({
+            path: `${evidenceDir}/user-message-${viewport.name}-expanded.png`,
+            fullPage: true,
+          });
+          await writeFile(
+            `${evidenceDir}/user-message-${viewport.name}-accessibility.json`,
+            `${JSON.stringify(
+              {
+                viewport,
+                collapsed,
+                expandedHeight,
+                ariaExpanded: await showLess.getAttribute("aria-expanded"),
+                focusedLabel: await page.evaluate(() => document.activeElement?.textContent),
+                axeViolations: accessibility.violations.length,
+              },
+              null,
+              2,
+            )}\n`,
+          );
+        }
+      } finally {
+        await page.context().close();
+      }
+    }, 30_000);
+  }
+
+  test("preserves scrolled-back anchors, expansion state, streaming, and prepend", async () => {
+    const page = await openHarness(browser, baseUrl, { width: 1280, height: 900 });
+    try {
+      const body = page.locator('[data-og-message-id="long-user-message"]');
+      const group = body.locator("xpath=ancestor::*[@data-og-timeline-group-anchor]");
+      const scroller = page.locator("[data-og-timeline-scroller]");
+      await scroller.evaluate((node) => {
+        node.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
+      });
+      await group.evaluate((node) => node.scrollIntoView({ block: "start" }));
+      await page.waitForTimeout(100);
+      expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("false");
+      const beforeExpand = await relativeTop(group, scroller);
+      await body
+        .getByRole("button", { name: "Show more" })
+        .evaluate((node: HTMLButtonElement) => node.click());
+      const afterExpand = await relativeTop(group, scroller);
+      expect(afterExpand).toBeCloseTo(beforeExpand, 0);
+
+      await page.evaluate(() => window.userMessageHarness!.stream());
+      await page.evaluate(() => window.userMessageHarness!.prepend());
+      expect(
+        await body.locator("[data-og-user-message-disclosure]").getAttribute("aria-expanded"),
+      ).toBe("true");
+      const afterUpdates = await relativeTop(group, scroller);
+      expect(afterUpdates).toBeCloseTo(afterExpand, 0);
+
+      const showLess = body.getByRole("button", { name: "Show less" });
+      await showLess.evaluate((node) => node.scrollIntoView({ block: "center" }));
+      await page.waitForTimeout(50);
+      const beforeCollapse = await relativeTop(showLess, scroller);
+      await showLess.evaluate((node: HTMLButtonElement) => node.click());
+      const afterCollapse = await relativeTop(
+        body.getByRole("button", { name: "Show more" }),
+        scroller,
+      );
+      expect(afterCollapse).toBeCloseTo(beforeCollapse, 0);
+      expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("false");
+    } finally {
+      await page.context().close();
+    }
+  }, 30_000);
+
+  test("keeps bottom-follow pinned when a near-tip message expands", async () => {
+    const page = await openHarness(browser, baseUrl, { width: 1280, height: 900 });
+    try {
+      const scroller = page.locator("[data-og-timeline-scroller]");
+      await scroller.evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+      });
+      await page.waitForTimeout(100);
+      expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("true");
+      const disclosure = page
+        .locator('[data-og-message-id="long-user-message"]')
+        .getByRole("button", { name: "Show more" });
+      await disclosure.evaluate((node: HTMLButtonElement) => node.click());
+      await page.waitForFunction(() => {
+        const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
+        return Boolean(node && node.scrollHeight - node.scrollTop - node.clientHeight < 2);
+      });
+      const result = await scroller.evaluate((node) => ({
+        gap: node.scrollHeight - node.scrollTop - node.clientHeight,
+        bottomFollow: node.getAttribute("data-og-bottom-follow"),
+      }));
+      expect(result.gap).toBeLessThan(2);
+      expect(result.bottomFollow).toBe("true");
+    } finally {
+      await page.context().close();
+    }
+  }, 30_000);
+});
+
+async function openHarness(
+  browser: Browser,
+  baseUrl: string,
+  viewport: { width: number; height: number },
+): Promise<Page> {
+  const context = await browser.newContext({
+    viewport,
+    hasTouch: viewport.width <= 768,
+    isMobile: viewport.width <= 390,
+  });
+  const page = await context.newPage();
+  await page.goto(`${baseUrl}/user-message-test.html`);
+  await page.waitForFunction(() => window.userMessageHarness !== undefined);
+  await page.locator('[data-og-message-id="long-user-message"]').waitFor({ timeout: 15_000 });
+  return page;
+}
+
+async function relativeTop(target: Locator, scroller: Locator) {
+  const [targetBox, scrollerBox] = await Promise.all([
+    target.boundingBox(),
+    scroller.boundingBox(),
+  ]);
+  if (!targetBox || !scrollerBox) {
+    throw new Error("expected visible target and timeline scroller");
+  }
+  return targetBox.y - scrollerBox.y;
+}

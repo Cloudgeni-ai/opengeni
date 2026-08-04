@@ -97,7 +97,7 @@ const components: Components = {
   ),
   a: ({ children, ...props }) => (
     <a
-      className="break-words font-medium text-og-accent underline-offset-2 hover:underline"
+      className="break-words font-medium text-og-accent-strong underline-offset-2 hover:underline"
       target="_blank"
       rel="noreferrer noopener"
       {...props}
