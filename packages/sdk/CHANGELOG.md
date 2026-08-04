@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.42.1
+
+### Patch Changes
+
+- 4976e1c: Fix DNS-pinned OAuth response streaming under Bun and expose X as a built-in workspace social capability.
+
 ## 0.42.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # @opengeni/network
 
+## 0.1.2
+
+### Patch Changes
+
+- 4976e1c: Fix DNS-pinned OAuth response streaming under Bun and expose X as a built-in workspace social capability.
+
 ## 0.1.1
 
 ### Patch Changes

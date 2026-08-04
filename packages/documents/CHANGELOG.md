@@ -1,5 +1,12 @@
 # @opengeni/documents
 
+## 0.4.1
+
+### Patch Changes
+
+- d5df927: Keep legacy personal document checks anchored to their originating workspace and fail closed for incomplete, non-canonical, overlong, or unknown authority tuples.
+  - @opengeni/db@0.27.3
+
 ## 0.4.0
 
 ### Minor Changes
