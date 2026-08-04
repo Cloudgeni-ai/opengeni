@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.44.6
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- Updated dependencies [69bc207]
+- Updated dependencies [c0f8e40]
+  - @opengeni/sdk@0.44.6
+
 ## 0.44.5
 
 ### Patch Changes
