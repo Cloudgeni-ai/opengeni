@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.10.8
+
+### Patch Changes
+
+- abe0de6: Persist timesliced composer voice recordings in browser storage with reload-safe document ownership, opener/duplicate-tab fencing, oldest-first recovery, byte-ceiling enforcement, and durable transcript-before-draft handoff. Interrupted audio retries reuse the same recording, uncertain saved transcripts require explicit insertion instead of automatic retranscription or duplicate append, and transient handed-off cleanup failures are retried and garbage-collected owner-safely.
+- Updated dependencies [abe0de6]
+  - @opengeni/contracts@0.36.1
+
 ## 0.10.7
 
 ### Patch Changes
