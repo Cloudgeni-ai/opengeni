@@ -48,6 +48,8 @@ import { observabilityEventLogger } from "../observability";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
 export const AUTH_CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
+/** Keep live NATS credentials short-lived while never outliving the bearer. */
+export const NATS_USER_JWT_TTL_SECONDS = 5 * 60;
 
 export interface AuthCalloutDeps {
   db: Database;
@@ -139,6 +141,7 @@ export async function handleAuthorizationRequest(
   // GRANT: a user JWT scoped to ONLY this workspace's agent subtree + the reply
   // inbox. This allow-list IS the per-workspace isolation boundary.
   const permissions = workspaceAgentPermissions(claims.workspaceId);
+  const nowSeconds = Math.floor(Date.now() / 1000);
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,
     accountSeed: deps.callout.accountSeed,
@@ -151,7 +154,7 @@ export async function handleAuthorizationRequest(
     audienceAccount: deps.callout.accountName,
     // Tie the credential's life to the bearer's remaining life: a revoked/expired
     // enrollment cannot outlive its bearer at the NATS layer either.
-    expiresAtSeconds: claims.exp,
+    expiresAtSeconds: Math.min(claims.exp, nowSeconds + NATS_USER_JWT_TTL_SECONDS),
   });
   const response = mintAuthResponse({
     userPublicKey: decoded.userNkey,
