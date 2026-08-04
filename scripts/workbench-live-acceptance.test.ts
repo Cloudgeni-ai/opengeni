@@ -98,6 +98,7 @@ describe("workbench live acceptance preflight", () => {
     const directoryButton = { click: async () => clicks.push("directory") };
     const fileButton = { click: async () => clicks.push("file") };
     const directoryItem = {
+      isVisible: async () => true,
       getAttribute: async (name: string) => {
         expect(name).toBe("aria-expanded");
         return "true";
@@ -129,6 +130,7 @@ describe("workbench live acceptance preflight", () => {
     let active = 0;
     const rows = ["api", "base.txt", "notes.txt", "server.ts"];
     const directoryItem = {
+      isVisible: async () => true,
       getAttribute: async () => "true",
       getByRole: () => ({ first: () => ({ click: async () => {} }) }),
     };
@@ -161,6 +163,11 @@ describe("workbench live acceptance preflight", () => {
         const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
         return {
           waitFor: async () => {},
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows[index] === "api" ? "true" : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
           getByText(text: string, options: { exact: boolean }) {
             expect(options).toEqual({ exact: true });
             return { count: async () => (rows[index] === text ? 1 : 0) };
@@ -172,6 +179,60 @@ describe("workbench live acceptance preflight", () => {
     await selectTreeFile(page, "api", "server.ts");
 
     expect(presses).toEqual(["Home", "ArrowDown", "ArrowDown", "ArrowDown", "Enter"]);
+  });
+
+  test("selects a file when its virtualized root directory is initially off-screen", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let expanded = false;
+    const rows = ["README.md", "api", "base.txt"];
+    const tree = {
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowRight" && rows[active] === "api") expanded = true;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "base.txt" ? "2" : "1";
+            if (name === "aria-expanded") {
+              return rows[index] === "api" && expanded ? "true" : "false";
+            }
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "base.txt");
+
+    expect(presses).toEqual(["Home", "ArrowDown", "ArrowRight", "ArrowDown", "Enter"]);
   });
 
   test("accepts repository evidence from the compact changed-file picker", async () => {
