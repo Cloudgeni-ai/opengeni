@@ -357,11 +357,10 @@ import {
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
-// How long the session workflow holds the loop after a retryable provider
-// failure before the goal continuation re-enters the model. Azure/OpenAI TPM
-// throttling is minute-granular; anything shorter mostly burns continuation
-// budget against the same window.
+// Retryable provider connectivity/5xx failures start quickly and back off to
+// this ceiling. Explicit rate limits retain the minute-granular fallback.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 
 /** Broad personal lookup is allowed only for a direct human/API command. */
 export function credentialSubjectIdForTurnInitiator(
@@ -445,14 +444,91 @@ export function legacyTurnExecutionPolicyInput(
 /** A retryable provider fault recovers the accepted turn itself. Goal state is
  * irrelevant: autonomous continuation and infrastructure recovery are separate
  * concerns. */
-export function providerRecoveryResult(): {
+export function providerRecoveryResult(input: {
+  failureCode: string | undefined;
+  attemptNumber: number;
+  retryAfterMs?: number | null;
+}): {
   status: "recovering";
   continueDelayMs: number;
 } {
+  const providerDelay =
+    input.retryAfterMs !== null &&
+    input.retryAfterMs !== undefined &&
+    Number.isFinite(input.retryAfterMs) &&
+    input.retryAfterMs > 0
+      ? Math.ceil(input.retryAfterMs)
+      : null;
+  const continueDelayMs =
+    input.failureCode === "provider_rate_limited"
+      ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
+      : input.failureCode === "provider_unavailable" ||
+          input.failureCode === "upstream_connectivity_unavailable"
+        ? Math.max(
+            providerDelay ?? 0,
+            PROVIDER_CONNECTIVITY_BACKOFF_MS[
+              Math.min(
+                Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+              )
+            ]!,
+          )
+        : PROVIDER_BACKPRESSURE_DELAY_MS;
   return {
     status: "recovering",
-    continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    continueDelayMs,
   };
+}
+
+export function providerRecoveryCountFromMetadata(metadata: Record<string, unknown>): number {
+  const value = metadata.providerRecoveryCount;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function headerValue(headers: unknown, name: string): string | null {
+  if (!headers || typeof headers !== "object") return null;
+  const getter = (headers as { get?: unknown }).get;
+  if (typeof getter === "function") {
+    const value = getter.call(headers, name);
+    return typeof value === "string" ? value : null;
+  }
+  const target = name.toLowerCase();
+  const entry = Object.entries(headers as Record<string, unknown>).find(
+    ([key, value]) => key.toLowerCase() === target && typeof value === "string",
+  );
+  return typeof entry?.[1] === "string" ? entry[1] : null;
+}
+
+/** Read a provider Retry-After hint without retaining response headers/body. */
+export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    const body =
+      value.error && typeof value.error === "object"
+        ? (value.error as Record<string, unknown>)
+        : null;
+    const directSeconds = Number(
+      value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
+    );
+    const header =
+      headerValue(value.headers, "retry-after") ??
+      headerValue(value.responseHeaders, "retry-after") ??
+      headerValue(body?.headers, "retry-after");
+    const headerSeconds = header === null ? Number.NaN : Number(header);
+    const headerDate =
+      header !== null && !Number.isFinite(headerSeconds) ? Date.parse(header) : Number.NaN;
+    const seconds = Number.isFinite(directSeconds)
+      ? directSeconds
+      : Number.isFinite(headerSeconds)
+        ? headerSeconds
+        : Number.isFinite(headerDate)
+          ? Math.max(0, (headerDate - nowMs) / 1_000)
+          : Number.NaN;
+    if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1_000);
+    current = value.cause;
+  }
+  return null;
 }
 
 /**
@@ -2378,6 +2454,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let isCodexTurn = false;
     let isExternallyBilledTurn = false;
     let executionGeneration = 0;
+    let providerRecoveryCount = 0;
     let modelRequestStarted = false;
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
@@ -3179,6 +3256,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const turn = claim.turn;
       turnId = turn.id;
       executionGeneration = turn.executionGeneration;
+      providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
       const policyForAbsent =
         claimedPolicy.kind === "valid"
@@ -8176,7 +8254,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         try {
-          const recoveryResult = providerRecoveryResult();
+          const nextProviderRecoveryCount = providerRecoveryCount + 1;
+          const recoveryResult = providerRecoveryResult({
+            failureCode: failure.code,
+            attemptNumber: nextProviderRecoveryCount,
+            retryAfterMs: providerRetryAfterMs(error),
+          });
           await flushRuntimeBatcher();
           await reconcileConversationTruth({ requireDurable: true });
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
@@ -8185,9 +8268,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             triggerEventId: triggerEventId!,
             attemptId: input.attemptId,
             reason: failure.code ?? "provider_unavailable",
+            providerRecoveryCount: nextProviderRecoveryCount,
             detail: {
               ...failure,
               continueDelayMs: recoveryResult.continueDelayMs,
+              providerRecoveryCount: nextProviderRecoveryCount,
             },
           });
           if (recovery.action === "stale") {
@@ -8810,8 +8895,11 @@ function isExactStatuslessUpstreamConnectivityMessage(message: string): boolean 
 
 export function isTransientProviderError(error: unknown): boolean {
   const status =
-    typeof error === "object" && error !== null && "status" in error
-      ? Number((error as { status?: unknown }).status)
+    typeof error === "object" && error !== null
+      ? Number(
+          (error as { status?: unknown; statusCode?: unknown }).status ??
+            (error as { statusCode?: unknown }).statusCode,
+        )
       : undefined;
   // A real HTTP status is AUTHORITATIVE: a 5xx is transient, and ANY other status
   // (4xx validation/auth/404, plus the 429 the earlier branches already handled) is
@@ -8857,8 +8945,11 @@ export function agentRunFailurePayload(
 } {
   const message = error instanceof Error ? error.message : String(error);
   const status =
-    typeof error === "object" && error !== null && "status" in error
-      ? Number((error as { status?: unknown }).status)
+    typeof error === "object" && error !== null
+      ? Number(
+          (error as { status?: unknown; statusCode?: unknown }).status ??
+            (error as { statusCode?: unknown }).statusCode,
+        )
       : undefined;
   const code =
     typeof error === "object" && error !== null && "code" in error
@@ -9062,13 +9153,15 @@ export function classifyCodexCredentialFailure(error: unknown): CodexCredentialF
       value.error && typeof value.error === "object"
         ? (value.error as Record<string, unknown>)
         : null;
-    const status = Number(value.status ?? body?.status);
+    const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
     const code = String(value.code ?? body?.code ?? "").toLowerCase();
     const directRetryAfter = Number(
       value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
     );
-    const headers = value.headers as { get?: (name: string) => string | null } | undefined;
-    const retryAfterHeader = headers?.get?.("retry-after") ?? null;
+    const retryAfterHeader =
+      headerValue(value.headers, "retry-after") ??
+      headerValue(value.responseHeaders, "retry-after") ??
+      headerValue(body?.headers, "retry-after");
     const retryAfterNumber = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
     const retryAfterDate =
       retryAfterHeader !== null && !Number.isFinite(retryAfterNumber)
