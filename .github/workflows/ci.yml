@@ -390,7 +390,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Install pinned Playwright Chromium runtime
-        run: bunx playwright install --with-deps chromium
+        run: bunx playwright install --with-deps --only-shell chromium
 
       - name: Codex quota Codex quota and entitlement browser acceptance
         env:
