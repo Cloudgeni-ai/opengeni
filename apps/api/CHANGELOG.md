@@ -1,5 +1,11 @@
 # @opengeni/api-router
 
+## 0.21.8
+
+### Patch Changes
+
+- 8c9b9a7: Return actionable operator configuration guidance when social OAuth credentials are missing.
+
 ## 0.21.7
 
 ### Patch Changes
