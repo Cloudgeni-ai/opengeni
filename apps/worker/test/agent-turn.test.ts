@@ -2799,6 +2799,56 @@ describe("escaped MCP transport timeout classifier", () => {
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
   });
 
+  test("recovers a sanitized nested MCP connection refusal without exposing transport detail", () => {
+    const raw = new Error("MCP connect failed for https://private.example/token-value");
+    raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+      code: "ECONNREFUSED",
+    });
+    const sanitized = safeMcpTransportError(raw);
+
+    expect(classifyMcpTransportTimeoutError(sanitized)).toBeNull();
+    expect(agentRunFailurePayload(sanitized)).toEqual({
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
+    });
+    expect(
+      providerRecoveryResult({
+        failureCode: "mcp_transport_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+    expect(JSON.stringify({ sanitized, payload: agentRunFailurePayload(sanitized) })).not.toContain(
+      "private.example",
+    );
+    expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+  });
+
+  test("keeps sanitized MCP client and ambiguous failures terminal", () => {
+    const rejected = safeMcpTransportError(
+      Object.assign(new Error("request rejected with secret body"), {
+        status: 401,
+        cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+      }),
+    );
+    const ambiguous = safeMcpTransportError(
+      Object.assign(new Error("policy refused the connection"), {
+        code: "CONNECTION_REFUSED_BY_POLICY",
+      }),
+    );
+
+    expect(agentRunFailurePayload(rejected)).toEqual({
+      error: "MCP transport operation failed (Error 401)",
+    });
+    expect(agentRunFailurePayload(ambiguous)).toEqual({
+      error: "MCP transport operation failed (Error)",
+    });
+  });
+
   test("emits a typed workflow recovery obligation only before a generation-2 model request", () => {
     const detail = {
       turnId: "turn-2",
