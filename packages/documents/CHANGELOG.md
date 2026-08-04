@@ -1,5 +1,19 @@
 # @opengeni/documents
 
+## 0.4.0
+
+### Minor Changes
+
+- fd13ba9: Add one immutable organization, workspace, or personal document destination contract for connector configuration, and make Google Drive persist and consume that authority independently from optional collections.
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/config@0.10.9
+  - @opengeni/db@0.27.2
+  - @opengeni/storage@0.2.62
+
 ## 0.3.4
 
 ### Patch Changes
