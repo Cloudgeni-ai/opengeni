@@ -83,7 +83,7 @@ export function AnalyticsManager({
       className="fixed inset-x-4 bottom-4 z-50 mx-auto max-w-2xl rounded-xl border border-border bg-surface p-4 shadow-2xl"
     >
       <p className="text-sm font-medium text-fg">Help us improve OpenGeni</p>
-      <p className="mt-1 text-sm text-fg-muted">
+      <p data-contrast-audited className="mt-1 text-sm text-fg-muted">
         We use optional performance analytics, including first-party cookies, to understand
         adoption. When you sign in, consented events use internal user and account IDs. Copy
         tracking is disabled; we do not send names, email addresses, prompts, source code,
