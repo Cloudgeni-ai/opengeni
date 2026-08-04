@@ -286,10 +286,9 @@ describe("Documents Default collection UX", () => {
 
       const droppedFile = new File(["personal file"], "personal.txt", { type: "text/plain" });
       await act(async () => {
-        fireFileDrop(
-          container.querySelector<HTMLElement>('[aria-label="Knowledge drop zone"]')!,
-          [droppedFile],
-        );
+        fireFileDrop(container.querySelector<HTMLElement>('[aria-label="Knowledge drop zone"]')!, [
+          droppedFile,
+        ]);
         await Promise.resolve();
       });
       await settleRoute();
