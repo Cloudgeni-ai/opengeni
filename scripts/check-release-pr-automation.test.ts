@@ -2818,6 +2818,23 @@ describe("workflow contracts", () => {
     expect(safetyStep.run).toBe("bun run test:unit");
 
     const browser = ci.jobs["browser-acceptance"];
+    const browserInstall = browser.steps.find(
+      (step: any) => step.name === "Install pinned Playwright Chromium runtime",
+    );
+    expect(browserInstall).toEqual({
+      name: "Install pinned Playwright Chromium runtime",
+      run: "bunx playwright install --with-deps --only-shell chromium",
+    });
+    expect(
+      browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),
+    ).toEqual([browserInstall]);
+    expect(
+      browser.steps.some(
+        (step: any) =>
+          String(step.uses ?? "").startsWith("actions/cache@") &&
+          JSON.stringify(step.with ?? {}).includes("ms-playwright"),
+      ),
+    ).toBe(false);
     expect(
       browser.steps.find(
         (step: any) => step.name === "Codex quota Codex quota and entitlement browser acceptance",
