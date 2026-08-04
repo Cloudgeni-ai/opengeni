@@ -95,6 +95,18 @@ export class ResponseBodyLimitError extends Error {
   }
 }
 
+/** Raised when a caller-supplied absolute request deadline expires. */
+export class RequestDeadlineError extends Error {
+  constructor(readonly label: string) {
+    super(`${label} timed out`);
+    this.name = "RequestDeadlineError";
+  }
+}
+
+export type BoundedResponseReadOptions = {
+  signal?: AbortSignal;
+};
+
 /**
  * Read a response through its stream with a hard byte ceiling.
  *
@@ -107,6 +119,7 @@ export async function readResponseBodyBounded(
   response: Response,
   maxBytes: number,
   label: string,
+  options: BoundedResponseReadOptions = {},
 ): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new RangeError("response body limit must be a non-negative safe integer");
@@ -133,7 +146,7 @@ export async function readResponseBodyBounded(
   let receivedBytes = 0;
   try {
     for (;;) {
-      const result = await reader.read();
+      const result = await readStreamChunk(reader, options.signal, label);
       if (result.done) {
         break;
       }
@@ -145,10 +158,15 @@ export async function readResponseBodyBounded(
       chunks.push(result.value);
     }
   } catch (error) {
-    await reader.cancel().catch(() => undefined);
+    void reader.cancel(error).catch(() => undefined);
     throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // An aborted read may still own the lock until the underlying transport
+      // observes cancellation. The response is already being cancelled above.
+    }
   }
 
   const body = new Uint8Array(receivedBytes);
@@ -164,16 +182,52 @@ export async function readResponseTextBounded(
   response: Response,
   maxBytes: number,
   label: string,
+  options: BoundedResponseReadOptions = {},
 ): Promise<string> {
-  return new TextDecoder().decode(await readResponseBodyBounded(response, maxBytes, label));
+  return new TextDecoder().decode(
+    await readResponseBodyBounded(response, maxBytes, label, options),
+  );
 }
 
 export async function readResponseJsonBounded<T = unknown>(
   response: Response,
   maxBytes: number,
   label: string,
+  options: BoundedResponseReadOptions = {},
 ): Promise<T> {
-  return JSON.parse(await readResponseTextBounded(response, maxBytes, label)) as T;
+  return JSON.parse(await readResponseTextBounded(response, maxBytes, label, options)) as T;
+}
+
+type ResponseStreamReadResult = Awaited<
+  ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
+>;
+
+async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined,
+  label: string,
+): Promise<ResponseStreamReadResult> {
+  if (!signal) return await reader.read();
+  if (signal.aborted) throw new RequestDeadlineError(label);
+  return await new Promise<ResponseStreamReadResult>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      const error = new RequestDeadlineError(label);
+      void reader.cancel(error).catch(() => undefined);
+      finish(() => reject(error));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void reader.read().then(
+      (result) => finish(() => resolve(result)),
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 export type ResolvePinnedDestinationOptions = {
@@ -477,7 +531,10 @@ function createPinnedAgent(addresses: readonly DnsAddress[]): DispatcherLifecycl
         if (options.all) {
           callback(
             null,
-            candidates.map((entry) => ({ address: entry.address, family: entry.family })),
+            candidates.map((entry) => ({
+              address: entry.address,
+              family: entry.family,
+            })),
           );
           return;
         }
