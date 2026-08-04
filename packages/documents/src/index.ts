@@ -927,7 +927,7 @@ export async function addDocumentToBase(
         )
         .limit(1);
       if (existing) {
-        if (!documentMatchesAccess(existing, input.access)) {
+        if (!documentMatchesAccess(existing, input.workspaceId, input.access)) {
           throw new Error(`Document not found: ${existing.id}`);
         }
         assertOrganizationDocumentAuthority(
@@ -1878,28 +1878,64 @@ function documentAccessConditions(
 }
 
 function documentMatchesAccess(
-  document: Pick<DocumentAccessRecord, "authorityKind" | "authoritySubjectId" | "agentAccess">,
+  document: Pick<
+    DocumentAccessRecord,
+    "authorityKind" | "authorityWorkspaceId" | "authoritySubjectId" | "agentAccess"
+  >,
+  workspaceId: string,
   access: DocumentAccessFilter | undefined,
 ): boolean {
   if (access?.agentOnly) {
-    return document.agentAccess && canViewDocument(document, access.viewerSubjectId);
+    return document.agentAccess && canViewDocument(document, access.viewerSubjectId, workspaceId);
   }
-  return canViewDocument(document, access?.viewerSubjectId);
+  return canViewDocument(document, access?.viewerSubjectId, workspaceId);
 }
 
-/** Whether a single already-fetched document is readable by this human viewer. */
+function canonicalDocumentAuthoritySubject(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const subjectId = cleanString(value);
+  if (!subjectId || subjectId !== value) return undefined;
+  if (new TextEncoder().encode(subjectId).byteLength > DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES) {
+    return undefined;
+  }
+  return subjectId;
+}
+
+/**
+ * Whether a single already-fetched document is readable in this workspace.
+ *
+ * Keep this compatibility predicate as strict as SQL/RLS: personal authority
+ * remains anchored to its originating workspace, and unknown or incomplete
+ * authority tuples deny instead of falling through as workspace-visible.
+ */
 export function canViewDocument(
-  document: Pick<DocumentAccessRecord, "authorityKind" | "authoritySubjectId">,
+  document: Pick<DocumentAccessRecord, "authorityKind" | "authoritySubjectId"> & {
+    authorityWorkspaceId?: string | null | undefined;
+  },
   viewerSubjectId: string | null | undefined,
+  workspaceId?: string | null | undefined,
 ): boolean {
-  return (
-    document.authorityKind !== "personal" ||
-    (!!viewerSubjectId && document.authoritySubjectId === viewerSubjectId)
-  );
+  if (document.authorityKind === "organization") {
+    return document.authorityWorkspaceId === null && document.authoritySubjectId === null;
+  }
+  const normalizedWorkspaceId = cleanString(workspaceId ?? null);
+  if (!normalizedWorkspaceId || document.authorityWorkspaceId !== normalizedWorkspaceId) {
+    return false;
+  }
+  if (document.authorityKind === "workspace") {
+    return document.authoritySubjectId === null;
+  }
+  if (document.authorityKind === "personal") {
+    const authoritySubjectId = canonicalDocumentAuthoritySubject(document.authoritySubjectId);
+    const viewer = canonicalDocumentAuthoritySubject(viewerSubjectId);
+    return !!authoritySubjectId && authoritySubjectId === viewer;
+  }
+  return false;
 }
 
 type DocumentAccessRecord = {
   authorityKind: string;
+  authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;
   agentAccess: boolean;
 };
