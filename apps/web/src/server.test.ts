@@ -114,6 +114,7 @@ describe("production web handler", () => {
     expect(headers.get("x-forwarded-host")).toBe("example.test");
     expect(headers.get("x-forwarded-port")).toBeNull();
     expect(headers.get("x-real-ip")).toBeNull();
+    expect(headers.get("accept-encoding")).toBe("identity");
     expect(seen.init?.redirect).toBe("manual");
     expect(seen.body).toContain("realtime");
 
@@ -144,6 +145,46 @@ describe("production web handler", () => {
         )
       ).status,
     ).toBe(400);
+  });
+
+  test("normalizes representation and hop-by-hop headers after upstream decoding", async () => {
+    const root = await fixture();
+    const seen: { acceptEncoding?: string | null } = {};
+    const handler = createWebHandler(root, {
+      demoApiProxy: {
+        targetBaseUrl: "http://api.internal:8000",
+        fetch: async (_input, init) => {
+          seen.acceptEncoding = new Headers(init?.headers).get("accept-encoding");
+          // This is the shape exposed by Bun when it has already decoded a
+          // gzip response body but retained the upstream response headers.
+          return new Response('{"error":"Unauthorized"}', {
+            status: 401,
+            headers: {
+              connection: "keep-alive",
+              "content-encoding": "gzip",
+              "content-length": "999",
+              "content-type": "application/json",
+              "transfer-encoding": "chunked",
+            },
+          });
+        },
+      },
+    });
+
+    const response = await handler(
+      new Request("https://example.test/demo-api/v1/workspaces/ws/sessions", {
+        headers: { "accept-encoding": "br, gzip" },
+      }),
+    );
+
+    expect(seen.acceptEncoding).toBe("identity");
+    expect(response.status).toBe(401);
+    expect(response.headers.get("content-encoding")).toBeNull();
+    expect(response.headers.get("content-length")).toBeNull();
+    expect(response.headers.get("connection")).toBeNull();
+    expect(response.headers.get("transfer-encoding")).toBeNull();
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ error: "Unauthorized" });
   });
 
   test("derives optional authority headers from environment names", () => {
