@@ -37554,6 +37554,7 @@ export async function claimSessionWorkForAttempt(
                 "delivered",
                 "acknowledged",
                 "settled",
+                "rejected_stale",
               ]),
               isNull(schema.sessionTurnAttempts.quiescedAt),
             ),
@@ -38481,28 +38482,6 @@ export async function claimSessionWorkForAttempt(
             turn: mapSessionTurnForExecution(internalTurn),
           };
         }
-        const predecessorAttemptId = queuedSteerReplacementAttemptId(queuedTurn.metadata);
-        if (predecessorAttemptId) {
-          const [predecessor] = await tx
-            .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
-            .from(schema.sessionTurnAttempts)
-            .where(
-              and(
-                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
-                eq(schema.sessionTurnAttempts.sessionId, sessionId),
-                eq(schema.sessionTurnAttempts.id, predecessorAttemptId),
-              ),
-            )
-            .limit(1);
-          if (!predecessor) {
-            throw new SessionControlInvariantError(
-              `Queued Steer ${id} points to missing predecessor attempt ${predecessorAttemptId}`,
-            );
-          }
-          if (!predecessor.quiescedAt) {
-            return { action: "unclaimed", reason: "control-pending" };
-          }
-        }
         // The database guard makes this function the only supported
         // queued-to-running transition. Raw or stale claimers cannot bypass the
         // generation/active-pointer transaction.
@@ -39136,6 +39115,14 @@ export async function settleSessionAttemptInterruptions(
               interruptions.map((interruption) => interruption.id),
             ),
           );
+        await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          temporalWorkflowId: session.temporalWorkflowId ?? `session-${sessionId}`,
+          reason: "attempt_interruption_rejected_stale",
+          controlRequested: true,
+        });
         return {
           action: effectiveControl.state === "paused" ? "paused" : "continue",
           events: [],
@@ -39327,6 +39314,14 @@ export async function settleSessionAttemptInterruptions(
             interruptions.map((interruption) => interruption.id),
           ),
         );
+      await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: session.temporalWorkflowId ?? `session-${sessionId}`,
+        reason: "attempt_interruption_settled",
+        controlRequested: true,
+      });
       return {
         action: effectiveControl.state === "paused" ? "paused" : "continue",
         events: [...closedTools.events, ...eventRows.map(mapEvent)],
@@ -39354,6 +39349,50 @@ export type SessionWorkPeek =
   | { kind: "interruption-pending"; attemptId: string }
   | { kind: "cancellation-wait"; attemptId: string }
   | { kind: "idle" };
+
+/**
+ * Return the oldest exact attempt whose logical interruption settled but whose
+ * physical quiescence receipt is still missing. This deliberately searches all
+ * attempts: a provider-recovery race can create a newer generation before the
+ * predecessor receipt is reconciled, and looking only at the newest attempt
+ * would strand the replacement forever.
+ */
+async function nextSessionAttemptAwaitingQuiescence(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  attemptId: string;
+} | null> {
+  const [row] = await db
+    .select({
+      attemptId: schema.sessionTurnAttempts.id,
+    })
+    .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionAttemptInterruptions,
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
+        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, sessionId),
+        eq(schema.sessionTurnAttempts.state, "closed"),
+        isNull(schema.sessionTurnAttempts.quiescedAt),
+        inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+      ),
+    )
+    .orderBy(
+      asc(schema.sessionAttemptInterruptions.requestedAt),
+      asc(schema.sessionAttemptInterruptions.id),
+    )
+    .limit(1);
+  return row ?? null;
+}
 
 async function latestSessionAttemptInterruption(
   db: Database,
@@ -39402,6 +39441,43 @@ async function latestSessionAttemptInterruption(
     : null;
 }
 
+async function queuedSteerHasUnquiescedPredecessor(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  predecessorAttemptIds: string[],
+): Promise<boolean> {
+  if (predecessorAttemptIds.length === 0) return false;
+  const [row] = await db
+    .select({ attemptId: schema.sessionTurnAttempts.id })
+    .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionAttemptInterruptions,
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
+        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, sessionId),
+        inArray(schema.sessionTurnAttempts.id, predecessorAttemptIds),
+        isNull(schema.sessionTurnAttempts.quiescedAt),
+        inArray(schema.sessionAttemptInterruptions.state, [
+          "pending",
+          "delivered",
+          "acknowledged",
+          "settled",
+          "rejected_stale",
+        ]),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 export async function peekSessionWork(
   db: Database,
@@ -39445,19 +39521,15 @@ export async function peekSessionWork(
     }
     if (effectiveControl.state !== "active") return { kind: "idle" };
 
-    const latestInterruption = await latestSessionAttemptInterruption(
+    const awaitingQuiescence = await nextSessionAttemptAwaitingQuiescence(
       scopedDb,
       workspaceId,
       sessionId,
     );
-    if (
-      latestInterruption &&
-      latestInterruption.quiescedAt === null &&
-      latestInterruption.interruptionState === "settled"
-    ) {
+    if (awaitingQuiescence) {
       return {
         kind: "cancellation-wait",
-        attemptId: latestInterruption.attemptId,
+        attemptId: awaitingQuiescence.attemptId,
       };
     }
 
@@ -41315,6 +41387,7 @@ export type RequestSessionTurnRecoveryInput = {
   attemptId: string;
   reason: string;
   detail?: Record<string, unknown>;
+  providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
     codexCredentialId: string;
@@ -41368,6 +41441,25 @@ export async function requestSessionTurnRecovery(
         { workspaceControl: locks.control ?? undefined },
       );
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
+      const [pendingInterruption] = attempt
+        ? await tx
+            .select({ id: schema.sessionAttemptInterruptions.id })
+            .from(schema.sessionAttemptInterruptions)
+            .where(
+              and(
+                eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+                eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+                eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+                inArray(schema.sessionAttemptInterruptions.state, [
+                  "pending",
+                  "delivered",
+                  "acknowledged",
+                ]),
+              ),
+            )
+            .limit(1)
+            .for("update")
+        : [];
       if (
         !locks.workspace ||
         !turn ||
@@ -41381,7 +41473,8 @@ export async function requestSessionTurnRecovery(
         effectiveControl.state !== "active" ||
         session.activeTurnId !== input.turnId ||
         !fromStatuses.includes(turnStatus as SessionTurnStatus) ||
-        turn.activeAttemptId !== input.attemptId
+        turn.activeAttemptId !== input.attemptId ||
+        pendingInterruption !== undefined
       ) {
         return {
           action: "stale" as const,
@@ -41392,6 +41485,12 @@ export async function requestSessionTurnRecovery(
       }
 
       const now = new Date();
+      if (
+        input.providerRecoveryCount !== undefined &&
+        (!Number.isSafeInteger(input.providerRecoveryCount) || input.providerRecoveryCount <= 0)
+      ) {
+        throw new Error("providerRecoveryCount must be a positive safe integer");
+      }
       let providerArtifactsInvalidated = 0;
       if (input.providerArtifactInvalidation) {
         const invalidatedHistory = await tx
@@ -41533,7 +41632,12 @@ export async function requestSessionTurnRecovery(
           cancelledBy: null,
           cancelReason: null,
           version: turn.version + 1,
-          metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+          metadata: {
+            ...metadataWithoutTurnDispatchAttempt(turn.metadata),
+            ...(input.providerRecoveryCount !== undefined
+              ? { providerRecoveryCount: input.providerRecoveryCount }
+              : {}),
+          },
           updatedAt: now,
         })
         .where(
@@ -42142,12 +42246,25 @@ export async function getSessionQueueSnapshot(
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
+    const items = rows.map(mapSessionTurn);
     const latestInterruption = await latestSessionAttemptInterruption(
       scopedDb,
       workspaceId,
       sessionId,
     );
-    const items = rows.map(mapSessionTurn);
+    const queuedSteerPredecessorIds = items
+      .map((turn) => queuedSteerReplacementAttemptId(turn.metadata))
+      .filter((attemptId): attemptId is string => attemptId !== null);
+    const stoppingPreviousAttempt =
+      (latestInterruption !== null &&
+        latestInterruption.interruptionState !== "rejected_stale" &&
+        latestInterruption.quiescedAt === null) ||
+      (await queuedSteerHasUnquiescedPredecessor(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        queuedSteerPredecessorIds,
+      ));
     const nextInputBatch = selectBoundedSystemUpdateBatch(pendingInputs);
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
@@ -42159,10 +42276,7 @@ export async function getSessionQueueSnapshot(
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
       activePersonalConnections,
-      stoppingPreviousAttempt:
-        latestInterruption !== null &&
-        latestInterruption.interruptionState !== "rejected_stale" &&
-        latestInterruption.quiescedAt === null,
+      stoppingPreviousAttempt,
       items,
       pendingInputs: pendingInputs.map((update) => {
         const canonical = mapSessionSystemUpdate(update);
@@ -42201,7 +42315,9 @@ function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): str
   ) {
     return attemptId;
   }
-  throw new SessionControlInvariantError("Queued Steer has malformed predecessor metadata");
+  // The interruption ledger is authoritative. Historical or malformed display
+  // metadata must not make the read-only queue projection fail.
+  return null;
 }
 
 async function enqueueFailedChildOutboxForTurnTx(
@@ -42418,6 +42534,7 @@ export async function enqueueSessionWorkflowWakeInTransaction(
     temporalWorkflowId: string;
     reason: string;
     notBefore?: Date;
+    controlRequested?: boolean;
   },
 ): Promise<number> {
   const now = new Date();
@@ -42429,6 +42546,7 @@ export async function enqueueSessionWorkflowWakeInTransaction(
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       temporalWorkflowId: input.temporalWorkflowId,
+      controlRevision: input.controlRequested ? 1 : 0,
       reason: input.reason,
       nextAttemptAt,
     })
@@ -42437,6 +42555,9 @@ export async function enqueueSessionWorkflowWakeInTransaction(
       set: {
         temporalWorkflowId: input.temporalWorkflowId,
         wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
+        controlRevision: input.controlRequested
+          ? sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`
+          : sql`${schema.sessionWorkflowWakeOutbox.controlRevision}`,
         reason: input.reason,
         attempts: 0,
         // Coalescing a delayed retry must never postpone an already-due wake
@@ -42462,6 +42583,7 @@ export async function enqueueSessionWorkflowWake(
     temporalWorkflowId: string;
     reason: string;
     notBefore?: Date;
+    controlRequested?: boolean;
   },
 ): Promise<number> {
   return await withRlsContext(
@@ -42485,6 +42607,7 @@ export async function enqueueSessionWorkflowWakeIfRunnable(
     temporalWorkflowId: string;
     reason: string;
     notBefore?: Date;
+    controlRequested?: boolean;
   },
 ): Promise<number | null> {
   return await withRlsContext(

@@ -183,14 +183,17 @@ describe("release schema contract", () => {
         (migrations.has("0166_connection_disconnect_idempotency.sql") ? 1 : 0) +
         (migrations.has("0167_document_index_replay_authority.sql") ? 1 : 0) +
         (migrations.has("0168_workspace_instruction_policy_operation_receipts.sql") ? 1 : 0) +
-        (migrations.has("0169_workspace_instruction_policy_onboarding_proposals.sql") ? 1 : 0),
+        (migrations.has("0169_workspace_instruction_policy_onboarding_proposals.sql") ? 1 : 0) +
+        (migrations.has("0170_session_control_wake_revision.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "0d2d3632d05556a71569181bc6e38955de6396dbeeb3bd6d0ebb111803ac5337",
+      "e3eb6bb582e2ce9b1bd22fc1b81ae4a8e408c07f4e1e9b06f3400616d743b57f",
     );
-    expect(contract.latestMigration).toBe(
-      "0169_workspace_instruction_policy_onboarding_proposals.sql",
-    );
+    expect(contract.latestMigration).toBe("0170_session_control_wake_revision.sql");
+    expect(migrations.get("0170_session_control_wake_revision.sql")).toMatchObject({
+      sha256: "cec3593e377f1cdc6aac3441b89d57e7c19d7377ff31991f340e14af1e64453d",
+      deploymentMode: "rolling",
+    });
     expect(
       migrations.get("0169_workspace_instruction_policy_onboarding_proposals.sql"),
     ).toMatchObject({
