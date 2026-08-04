@@ -154,6 +154,11 @@ Exec requests carry a finite agent-side process deadline inside a slightly
 larger request/reply deadline. If that deadline or the connection generation
 ends, the agent cancels the accepted operation and terminates its POSIX process
 group or Windows Job Object, including ordinary descendants spawned by a shell.
+The session shell capability also preserves an explicit `exec_command.shell`
+selection: OpenGeni sends that shell as direct argv, with the requested login or
+non-login semantics, instead of silently substituting the machine service's
+ambient default shell. Calls that omit `shell` intentionally retain the
+machine-owned `$SHELL`/`ComSpec` default.
 On Unix a private unreaped group anchor fences the PGID until cleanup has been
 issued, so cancellation cannot signal a recycled group and the requested command
 cannot exit and leave invisible same-group work behind.
