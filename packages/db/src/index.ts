@@ -43994,6 +43994,7 @@ function mapSession(
     // the fence exact even if the column type ever drifts (the lease-epoch lesson).
     activeSandboxId: row.activeSandboxId ?? null,
     activeEpoch: Number(row.activeEpoch),
+    workingDir: row.workingDir ?? null,
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
     // The rig + frozen rig version the session rides (M3). Both null for a

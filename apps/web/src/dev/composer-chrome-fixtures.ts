@@ -70,6 +70,7 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     sandboxGroupId: GALLERY_SESSION_ID,
     activeSandboxId: null,
     activeEpoch: 0,
+    workingDir: null,
     variableSetId: null,
     environmentId: null,
     rigId: null,

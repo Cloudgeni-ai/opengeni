@@ -881,6 +881,8 @@ export type Session = {
   sandboxGroupId: string;
   activeSandboxId: string | null;
   activeEpoch: number;
+  /** Explicit connected-machine project root; null uses the agent launch root. */
+  workingDir: string | null;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
   environmentId: string | null;

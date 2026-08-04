@@ -40,6 +40,7 @@ function session(patch: Partial<Session> = {}): Session {
     createdByContext: {},
     model: "scripted-model",
     sandboxBackend: "none",
+    workingDir: null,
     sandboxOs: "linux",
     sandboxGroupId: "session-1",
     activeSandboxId: null,
