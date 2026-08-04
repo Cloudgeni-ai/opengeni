@@ -3312,9 +3312,7 @@ export const ReclassifyDocumentAuthorityRequest = z
     targetAuthorityKind: DocumentAuthorityKind,
   })
   .strict();
-export type ReclassifyDocumentAuthorityRequest = z.infer<
-  typeof ReclassifyDocumentAuthorityRequest
->;
+export type ReclassifyDocumentAuthorityRequest = z.infer<typeof ReclassifyDocumentAuthorityRequest>;
 
 export const DocumentAuthorityReclassification = z.object({
   id: z.string().uuid(),
@@ -3326,9 +3324,7 @@ export const DocumentAuthorityReclassification = z.object({
   targetAuthority: DocumentAuthorityTuple,
   createdAt: z.string(),
 });
-export type DocumentAuthorityReclassification = z.infer<
-  typeof DocumentAuthorityReclassification
->;
+export type DocumentAuthorityReclassification = z.infer<typeof DocumentAuthorityReclassification>;
 
 // A knowledge drop: raw text or an already-uploaded file, with no required
 // metadata. The server files it into the workspace Default base. When a

@@ -259,7 +259,7 @@ describe("migration 0165 (document authority)", () => {
         from documents
         where id in (${document!.id}, ${workspaceDocument!.id}, ${explicitOrganization!.id})
         order by title`;
-      expect(mixed).toEqual([
+      expect([...mixed]).toEqual([
         {
           id: explicitOrganization!.id,
           kind: "organization",

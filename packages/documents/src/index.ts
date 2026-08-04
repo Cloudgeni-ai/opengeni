@@ -1212,7 +1212,11 @@ export async function reclassifyDocumentAuthority(
   if (!actorSubjectId) {
     throw new Error("document authority reclassification requires a canonical actor subject");
   }
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.operationId)) {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      input.operationId,
+    )
+  ) {
     throw new Error("document authority reclassification requires a UUID operationId");
   }
   const expectedAuthority = canonicalDocumentAuthorityTuple(
@@ -2133,10 +2137,7 @@ function canonicalDocumentAuthorityTuple(
   return { kind: value.kind, workspaceId, subjectId };
 }
 
-function documentAuthorityTuplesEqual(
-  left: DocumentAuthority,
-  right: DocumentAuthority,
-): boolean {
+function documentAuthorityTuplesEqual(left: DocumentAuthority, right: DocumentAuthority): boolean {
   return (
     left.kind === right.kind &&
     left.workspaceId === right.workspaceId &&

@@ -176,3 +176,17 @@ input, authorization predicates run before vector/keyword ranking and limits,
 and results retain source plus immutable authority provenance. Agent calls also
 require `agent_access=true`. Legacy workspace and legacy private rows keep the
 workspace bindings established by migration 0165.
+
+Authority changes are never inferred from a collection move, collection owner,
+or collection name. Rolling migration 0170 exposes one explicit server-side
+reclassification operation keyed by a stable UUID and complete request
+fingerprint. It locks the document, requires the exact expected old tuple,
+freezes the authenticated actor, persists one immutable before/after receipt,
+and updates the document plus every chunk in the same transaction. Personal
+targets remain bound to the original creating subject; organization source or
+target requires exact account-admin authority. Same-operation retries return
+the original receipt, changed-payload reuse and stale/ambiguous tuples deny, and
+the receipt's base id is provenance only. Because 0170 is additive, an older
+application image may continue ordinary document work after a database-first
+rollout or application rollback, but the immutable trigger still rejects any
+authority mutation outside this receipt-fenced path.

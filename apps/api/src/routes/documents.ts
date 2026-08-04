@@ -165,7 +165,12 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/documents/:documentId/authority-reclassifications",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "documents:manage",
+      );
       const payload = ReclassifyDocumentAuthorityRequest.parse(await c.req.json());
       try {
         return c.json(
