@@ -122,9 +122,6 @@ export function useVoiceInput({
   const captureLimitErrorRef = useRef<string | null>(null);
   const captureSettledRef = useRef<Promise<void>>(Promise.resolve());
   const resolveCaptureSettledRef = useRef<(() => void) | null>(null);
-  const nextChunkNumberRef = useRef(0);
-  const lastChunkEndMillisecondsRef = useRef(0);
-  const recordingStartedAtRef = useRef(0);
   const statusRef = useRef(status);
   valueRef.current = value;
   statusRef.current = status;
@@ -151,10 +148,12 @@ export function useVoiceInput({
     ownerHeartbeatTimerRef.current = null;
   }, []);
 
-  const clearCaptureRuntime = useCallback(() => {
+  const clearCaptureRuntime = useCallback((expectedStream?: MediaStream) => {
+    const captureStream = expectedStream ?? streamRef.current;
+    captureStream?.getTracks().forEach((track) => track.stop());
+    if (expectedStream && streamRef.current !== expectedStream) return;
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     recorderRef.current = null;
     setStream(null);
@@ -520,14 +519,34 @@ export function useVoiceInput({
       generation === generationRef.current &&
       workspaceIdRef.current === workspaceId &&
       ownerIdRef.current === ownerId;
+    let attemptStream: MediaStream | null = null;
+    let attemptRecorder: MediaRecorder | null = null;
+    let attemptPersistenceQueue = Promise.resolve();
+    let attemptPersistenceError: unknown = null;
+    let attemptCaptureLimitError: string | null = null;
+    const attemptCaptureSettlement: { resolve: (() => void) | null } = { resolve: null };
+    const attemptManifest: { current: VoiceRecordingManifest | null } = { current: null };
+    let attemptNextChunkNumber = 0;
+    let attemptLastChunkEndMilliseconds = 0;
+    let attemptRecordingStartedAt = 0;
+    const attemptOwnsSharedCapture = () =>
+      startAttemptIsCurrent() &&
+      attemptStream !== null &&
+      streamRef.current === attemptStream &&
+      attemptRecorder !== null &&
+      recorderRef.current === attemptRecorder &&
+      attemptManifest.current !== null &&
+      manifestRef.current?.recordingId === attemptManifest.current.recordingId &&
+      manifestRef.current.workspaceId === workspaceId &&
+      manifestRef.current.ownerId === ownerId;
     setStatus("requesting-permission");
     setError(null);
     let acquiredStream: MediaStream | null = null;
-    let createdManifest: VoiceRecordingManifest | null = null;
     let recorderStarted = false;
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       acquiredStream = mediaStream;
+      attemptStream = mediaStream;
       if (!startAttemptIsCurrent()) {
         mediaStream.getTracks().forEach((track) => track.stop());
         return false;
@@ -536,6 +555,7 @@ export function useVoiceInput({
       setStream(mediaStream);
       const mimeType = chooseMimeType(capability.acceptedMimeTypes);
       const recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+      attemptRecorder = recorder;
       const createdAt = readNow();
       const manifest = createVoiceRecordingManifest({
         recordingId: createRecordingId(),
@@ -544,37 +564,31 @@ export function useVoiceInput({
         createdAt: createdAt.toISOString(),
         ownerId,
       });
-      createdManifest = manifest;
+      attemptManifest.current = manifest;
       await store.createManifest(manifest);
       if (!startAttemptIsCurrent()) {
         await store.discard(manifest.recordingId, ownerId);
-        clearCaptureRuntime();
+        clearCaptureRuntime(mediaStream);
         return false;
       }
       rememberManifest(manifest);
       beginOwnerHeartbeat(manifest);
-      persistenceQueueRef.current = Promise.resolve();
+      persistenceQueueRef.current = attemptPersistenceQueue;
       persistenceErrorRef.current = null;
       captureLimitErrorRef.current = null;
-      nextChunkNumberRef.current = 0;
-      lastChunkEndMillisecondsRef.current = 0;
       recorderRef.current = recorder;
       recorder.ondataavailable = (event) => {
-        if (event.data.size === 0 || persistenceErrorRef.current || captureLimitErrorRef.current) {
+        if (event.data.size === 0 || attemptPersistenceError || attemptCaptureLimitError) {
           return;
         }
-        const chunkNumber = nextChunkNumberRef.current++;
-        const elapsed = Math.max(0, readNow().getTime() - recordingStartedAtRef.current);
+        const chunkNumber = attemptNextChunkNumber++;
+        const elapsed = Math.max(0, readNow().getTime() - attemptRecordingStartedAt);
         const eventTimecode = Number.isFinite(event.timecode) ? Math.max(0, event.timecode) : 0;
-        const endMilliseconds = Math.max(
-          lastChunkEndMillisecondsRef.current,
-          eventTimecode,
-          elapsed,
-        );
-        const startMilliseconds = lastChunkEndMillisecondsRef.current;
+        const endMilliseconds = Math.max(attemptLastChunkEndMilliseconds, eventTimecode, elapsed);
+        const startMilliseconds = attemptLastChunkEndMilliseconds;
         const durationMilliseconds = Math.max(0, endMilliseconds - startMilliseconds);
-        lastChunkEndMillisecondsRef.current = endMilliseconds;
-        persistenceQueueRef.current = persistenceQueueRef.current
+        attemptLastChunkEndMilliseconds = endMilliseconds;
+        attemptPersistenceQueue = attemptPersistenceQueue
           .then(async () => {
             const result = await store.persistChunk({
               recordingId: manifest.recordingId,
@@ -589,25 +603,37 @@ export function useVoiceInput({
             if (!startAttemptIsCurrent()) return;
             rememberManifest(result.manifest);
             if (result.manifest.totalBytes > capability.maxSizeBytes) {
-              captureLimitErrorRef.current = "too_large";
+              attemptCaptureLimitError = "too_large";
+              if (attemptOwnsSharedCapture()) captureLimitErrorRef.current = "too_large";
               if (recorder.state !== "inactive") recorder.stop();
             }
           })
           .catch((reason: unknown) => {
-            persistenceErrorRef.current = reason;
+            attemptPersistenceError = reason;
+            if (attemptOwnsSharedCapture()) persistenceErrorRef.current = reason;
             if (recorder.state !== "inactive") recorder.stop();
           });
+        if (attemptOwnsSharedCapture()) {
+          persistenceQueueRef.current = attemptPersistenceQueue;
+        }
       };
       recorder.onstop = () => {
-        clearCaptureRuntime();
-        void persistenceQueueRef.current
+        if (attemptOwnsSharedCapture()) {
+          clearCaptureRuntime(mediaStream);
+        } else {
+          mediaStream.getTracks().forEach((track) => track.stop());
+        }
+        void attemptPersistenceQueue
           .catch((reason: unknown) => {
-            persistenceErrorRef.current = reason;
+            attemptPersistenceError = reason;
           })
           .then(async () => {
-            const resolveSettled = resolveCaptureSettledRef.current;
-            resolveCaptureSettledRef.current = null;
+            const resolveSettled = attemptCaptureSettlement.resolve;
+            attemptCaptureSettlement.resolve = null;
             resolveSettled?.();
+            if (resolveCaptureSettledRef.current === resolveSettled) {
+              resolveCaptureSettledRef.current = null;
+            }
             const stoppedCaptureIsCurrent = () =>
               generation === generationRef.current &&
               workspaceIdRef.current === workspaceId &&
@@ -628,21 +654,22 @@ export function useVoiceInput({
               return;
             }
             rememberManifest(stopped);
-            if (persistenceErrorRef.current) {
+            if (attemptPersistenceError) {
               await preserveForRetry(stopped, "storage_unavailable", generation);
               return;
             }
-            if (captureLimitErrorRef.current) {
-              await preserveForRetry(stopped, captureLimitErrorRef.current, generation);
+            if (attemptCaptureLimitError) {
+              await preserveForRetry(stopped, attemptCaptureLimitError, generation);
               return;
             }
             await finalizePersistedRecording(generation);
           });
       };
       captureSettledRef.current = new Promise<void>((resolve) => {
+        attemptCaptureSettlement.resolve = resolve;
         resolveCaptureSettledRef.current = resolve;
       });
-      recordingStartedAtRef.current = readNow().getTime();
+      attemptRecordingStartedAt = readNow().getTime();
       recorder.start(VOICE_RECORDING_TIMESLICE_MILLISECONDS);
       recorderStarted = true;
       setStatus("recording");
@@ -653,14 +680,20 @@ export function useVoiceInput({
       );
       return true;
     } catch (reason) {
-      const resolveSettled = resolveCaptureSettledRef.current;
-      resolveCaptureSettledRef.current = null;
+      const resolveSettled = attemptCaptureSettlement.resolve;
+      attemptCaptureSettlement.resolve = null;
       resolveSettled?.();
-      if (acquiredStream && streamRef.current !== acquiredStream) {
-        acquiredStream.getTracks().forEach((track) => track.stop());
+      if (resolveCaptureSettledRef.current === resolveSettled) {
+        resolveCaptureSettledRef.current = null;
       }
-      clearCaptureRuntime();
-      const failedManifest = createdManifest as VoiceRecordingManifest | null;
+      if (acquiredStream) {
+        if (startAttemptIsCurrent() && streamRef.current === acquiredStream) {
+          clearCaptureRuntime(acquiredStream);
+        } else {
+          acquiredStream.getTracks().forEach((track) => track.stop());
+        }
+      }
+      const failedManifest = attemptManifest.current;
       if (failedManifest && !recorderStarted) {
         const discarded = await store
           .discard(failedManifest.recordingId, ownerId)
@@ -676,9 +709,12 @@ export function useVoiceInput({
             )
             .catch(() => undefined);
         }
-        clearVisibleRecording();
       }
       if (generation !== generationRef.current) return false;
+      const visibleManifest = manifestRef.current as VoiceRecordingManifest | null;
+      if (failedManifest && visibleManifest?.recordingId === failedManifest.recordingId) {
+        clearVisibleRecording();
+      }
       setStatus("error");
       setError(
         reason instanceof VoiceRecordingStorageUnavailableError

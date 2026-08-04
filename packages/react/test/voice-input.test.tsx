@@ -619,6 +619,171 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
+  test("a delayed stale stop cannot clear or corrupt a successor workspace capture", async () => {
+    FakeMediaRecorder.instances = [];
+    const oldTrack = { stop: mock(() => undefined) };
+    const successorTrack = { stop: mock(() => undefined) };
+    const streams = [
+      { getTracks: () => [oldTrack] } as unknown as MediaStream,
+      { getTracks: () => [successorTrack] } as unknown as MediaStream,
+    ];
+    const getUserMedia = mock(async () => {
+      const stream = streams.shift();
+      if (!stream) throw new Error("unexpected media request");
+      return stream;
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    Object.defineProperty(globalThis, "MediaRecorder", {
+      configurable: true,
+      value: FakeMediaRecorder,
+    });
+    const store = new MemoryVoiceRecordingStore();
+    let recordingNumber = 0;
+    const hook = await renderHook(
+      (props: { workspaceId: string }) =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              throw new Error("offline");
+            },
+          },
+          workspaceId: props.workspaceId,
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => `recording-${++recordingNumber}`,
+          createOwnerId: () => "workspace-stop-owner",
+        }),
+      { workspaceId: "ws-old" },
+    );
+
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    const oldRecorder = FakeMediaRecorder.instances[0];
+    if (!oldRecorder) throw new Error("missing old recorder");
+    oldRecorder.deferStopEvents = true;
+    await hook.rerender({ workspaceId: "ws-new" });
+    await act(async () => {
+      await settle(8);
+      await hook.result.current.start();
+    });
+    const successorRecorder = FakeMediaRecorder.instances[1];
+    if (!successorRecorder) throw new Error("missing successor recorder");
+    const successorStream = hook.result.current.stream;
+    expect(successorStream).not.toBeNull();
+    expect(hook.result.current.status).toBe("recording");
+
+    await act(async () => {
+      oldRecorder.finishStop();
+      await settle(12);
+    });
+    expect(successorTrack.stop).toHaveBeenCalledTimes(0);
+    expect(hook.result.current.stream).toBe(successorStream);
+    expect(hook.result.current.status).toBe("recording");
+    expect(successorRecorder.state).toBe("recording");
+
+    await act(async () => {
+      successorRecorder.emit(
+        new Blob([new Uint8Array([9, 8])], { type: successorRecorder.mimeType }),
+        5_000,
+      );
+      await settle();
+      hook.result.current.stop();
+      await settle(24);
+    });
+    expect(successorTrack.stop).toHaveBeenCalledTimes(1);
+    expect(successorRecorder.state).toBe("inactive");
+    expect((await store.listChunks("recording-2")).map((chunk) => chunk.chunkNumber)).toEqual([
+      0, 1,
+    ]);
+    await hook.unmount();
+  });
+
+  test("a stale permission rejection cannot clear a successor workspace capture", async () => {
+    FakeMediaRecorder.instances = [];
+    const successorTrack = { stop: mock(() => undefined) };
+    const successorStream = {
+      getTracks: () => [successorTrack],
+    } as unknown as MediaStream;
+    let rejectOldPermission: ((reason: unknown) => void) | null = null;
+    let requestNumber = 0;
+    const getUserMedia = mock(() => {
+      requestNumber += 1;
+      if (requestNumber === 1) {
+        return new Promise<MediaStream>((_resolve, reject) => {
+          rejectOldPermission = reject;
+        });
+      }
+      return Promise.resolve(successorStream);
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    Object.defineProperty(globalThis, "MediaRecorder", {
+      configurable: true,
+      value: FakeMediaRecorder,
+    });
+    const store = new MemoryVoiceRecordingStore();
+    const hook = await renderHook(
+      (props: { workspaceId: string }) =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "complete", languages: [] }) },
+          workspaceId: props.workspaceId,
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-successor-permission",
+          createOwnerId: () => "workspace-rejection-owner",
+        }),
+      { workspaceId: "ws-old" },
+    );
+
+    let oldStart!: Promise<boolean>;
+    await act(async () => {
+      oldStart = hook.result.current.start();
+      await settle(4);
+    });
+    await hook.rerender({ workspaceId: "ws-new" });
+    await act(async () => {
+      await settle(8);
+      await hook.result.current.start();
+    });
+    const successorRecorder = FakeMediaRecorder.instances[0];
+    if (!successorRecorder) throw new Error("missing successor recorder");
+    expect(hook.result.current.status).toBe("recording");
+
+    let oldStarted = true;
+    await act(async () => {
+      rejectOldPermission?.(new DOMException("Permission denied", "NotAllowedError"));
+      oldStarted = await oldStart;
+      await settle(8);
+    });
+    expect(oldStarted).toBe(false);
+    expect(successorTrack.stop).toHaveBeenCalledTimes(0);
+    expect(hook.result.current.stream).toBe(successorStream);
+    expect(hook.result.current.status).toBe("recording");
+    expect(successorRecorder.state).toBe("recording");
+
+    await act(async () => {
+      hook.result.current.stop();
+      await settle(24);
+    });
+    expect(successorTrack.stop).toHaveBeenCalledTimes(1);
+    expect(successorRecorder.state).toBe("inactive");
+    await hook.unmount();
+  });
+
   test("cancel during delayed chunk enumeration never starts a stale upload", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
