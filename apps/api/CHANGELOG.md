@@ -1,5 +1,24 @@
 # @opengeni/api-router
 
+## 0.21.10
+
+### Patch Changes
+
+- 4502474: Add workspace-default and explicitly personal ownership for first-party social connections, preserve causal personal authority for agent work, and retain actionable structured gateway errors.
+- Updated dependencies [4502474]
+- Updated dependencies [1ea5e62]
+- Updated dependencies [ee79969]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/core@0.20.12
+  - @opengeni/db@0.27.9
+  - @opengeni/runtime@0.18.11
+  - @opengeni/config@0.10.12
+  - @opengeni/documents@0.5.5
+  - @opengeni/events@0.3.75
+  - @opengeni/github@0.4.28
+  - @opengeni/observability@0.4.15
+  - @opengeni/storage@0.2.65
+
 ## 0.21.9
 
 ### Patch Changes
