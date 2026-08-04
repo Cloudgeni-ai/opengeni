@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.27.8
+
+### Patch Changes
+
+- dfa3aef: Preserve Steer priority through provider recovery and repair interrupted attempts durably.
+
 ## 0.27.7
 
 ### Patch Changes

@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.44.2
+
+### Patch Changes
+
+- 2542ae0: Recover stale composer-draft OCC after tab sleep by recognizing DRAFT_CHANGED, soft-reloading on wake, and retrying autosave with the server revision while keeping local text.
+- 2542ae0: Give progressive `tool_search` its own timeline card: capability query, disclosed tool leaves with source prefixes, and quiet no-match / failure states instead of the generic Done dump.
+
 ## 0.44.1
 
 ### Patch Changes
