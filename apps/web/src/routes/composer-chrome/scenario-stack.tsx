@@ -263,11 +263,34 @@ export function ScenarioStack({
     />
   );
 
+  // Match `session.tsx`: SessionChrome card, then composer — same spacing in phone + gallery.
+  const stack = (
+    <>
+      <div
+        className={
+          variant === "phone"
+            ? "mb-2 w-full shrink-0 px-3"
+            : "mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
+        }
+      >
+        {chrome}
+      </div>
+      <div
+        className={
+          variant === "phone" ? "shrink-0 px-3 pb-3 pt-1" : "shrink-0 px-4 pb-4 pt-1 sm:px-6"
+        }
+      >
+        <div className={variant === "phone" ? "w-full" : "mx-auto w-full max-w-3xl"}>
+          {composerBlock}
+        </div>
+      </div>
+    </>
+  );
+
   if (variant === "phone") {
     return (
-      <div className="shrink-0 border-t border-border/80 bg-bg" data-scenario={scenario.id}>
-        <div className="px-3 pt-2">{chrome}</div>
-        <div className="px-3 pb-2 pt-1">{composerBlock}</div>
+      <div className="shrink-0 bg-bg" data-scenario={scenario.id} data-session-chrome-stack="phone">
+        {stack}
       </div>
     );
   }
@@ -278,10 +301,7 @@ export function ScenarioStack({
       data-scenario={scenario.id}
       data-session-chrome-stack=""
     >
-      <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">{chrome}</div>
-      <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
-        <div className="mx-auto w-full max-w-3xl">{composerBlock}</div>
-      </div>
+      {stack}
     </div>
   );
 }

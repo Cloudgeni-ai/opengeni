@@ -11,7 +11,7 @@
  * | --- | --- |
  * | `--og-session-chrome-surface` / `-open` | Dock fill (collapsed / expanded) |
  * | `--og-session-chrome-border` / `-open` | Dock edge |
- * | `--og-session-chrome-highlight` | Sliding chip selection pill |
+ * | `--og-session-chrome-highlight` / `-ring` | Sliding chip selection fill + edge |
  * | `--og-session-chrome-shadow` / `-open` | Elevation |
  * | `--og-session-chrome-radius` | Dock corner radius |
  * | `--og-session-chrome-chip-min-height` | Signal chip height |
@@ -595,6 +595,7 @@ export function SessionChrome({
                 className="pointer-events-none absolute left-0 top-0 rounded-og-md"
                 style={{
                   background: "var(--og-session-chrome-highlight)",
+                  boxShadow: "inset 0 0 0 1px var(--og-session-chrome-highlight-ring)",
                 }}
                 initial={false}
                 animate={{
@@ -622,11 +623,11 @@ export function SessionChrome({
                     data-og-session-chrome-signal={signal.id}
                     onClick={() => setActive(selected ? null : signal.id)}
                     className={cn(
-                      "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md text-left text-og-xs outline-none",
+                      // Keep chrome chips compact — do not inflate to 44px touch targets
+                      // (that made the open dock look oddly tall vs the composer).
+                      "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-none",
                       "transition-colors duration-150 motion-reduce:transition-none",
-                      // Quiet focus — no accent ring (it fought the soft selection wash).
                       "hover:text-og-fg focus-visible:bg-og-surface-3/50",
-                      "pointer-coarse:min-h-11",
                       selected ? "text-og-fg" : "text-og-fg-muted",
                     )}
                     style={{
