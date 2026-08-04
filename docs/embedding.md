@@ -254,6 +254,10 @@ but are workspace-relative, separator-normalized, traversal-free, portable to
 case-insensitive filesystems, and collision-checked before sandbox execution.
 The normalized path is returned on the session resource and is the same value
 used by the manifest, clone hook, agent filesystem, and workbench.
+Repository URI normalization is provider-aware: GitHub, GitLab, and neutral
+HTTPS remotes use the canonical trailing `.git` suffix, while Azure DevOps
+preserves the exact `_git/<repository>` path because Azure treats a trailing
+`.git` as part of the repository name.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain

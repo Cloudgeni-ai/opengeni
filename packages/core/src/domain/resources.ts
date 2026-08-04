@@ -127,17 +127,25 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
       if (url.protocol !== "https:" || !url.hostname) {
         throw new HTTPException(422, { message: "repository resources must use HTTPS Git URLs" });
       }
-      const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-      const parts = path.split("/").filter(Boolean);
+      const credentialProvider = gitCredentialProviderForRepository(resource);
+      const path = url.pathname.replace(/^\/+|\/+$/g, "");
+      // Azure DevOps' `_git/<repository>` route treats a trailing `.git` as
+      // part of the repository name. Preserve that provider's exact path;
+      // GitHub, GitLab, and provider-neutral HTTPS remotes retain the existing
+      // canonical `.git` suffix.
+      const canonicalPath =
+        credentialProvider === "azure_devops" ? path : path.replace(/\.git$/, "");
+      const parts = canonicalPath.split("/").filter(Boolean);
       if (parts.length < 2) {
         throw new HTTPException(422, { message: "repository URL must include owner and repo" });
       }
       const repo = parts.join("/");
-      const normalizedUri = `https://${url.host.toLowerCase()}/${repo}.git`;
+      const normalizedUri = `https://${url.host.toLowerCase()}/${repo}${
+        credentialProvider === "azure_devops" ? "" : ".git"
+      }`;
       const mountPath = normalizeMountPath(
         resource.mountPath ?? defaultRepositoryMountPath(normalizedUri),
       );
-      const credentialProvider = gitCredentialProviderForRepository(resource);
       const credentialBindingId = gitCredentialBindingIdForRepository(resource, credentialProvider);
       if (
         (resource.credentialBindingId || resource.connectionId || resource.access) &&
