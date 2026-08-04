@@ -34,6 +34,11 @@ type PreferenceGovernanceIdentity = {
   scope: "organization" | "workspace" | "user";
 };
 
+type CurrentPreferenceProjectionInput = {
+  descriptors: PreferenceGovernanceIdentity[];
+  truncated: boolean;
+};
+
 type AttemptGovernanceProjectionInput =
   | { status: "unavailable" }
   | {
@@ -60,6 +65,7 @@ export type WorkspaceStateProjectionInput = {
   generatedAt: string;
   workspaceAgentInstructions: string | null;
   policies: WorkspaceInstructionPolicyListResponse;
+  preferences: CurrentPreferenceProjectionInput;
   knowledge: KnowledgeProjectionInput | null;
   attemptGovernance?: AttemptGovernanceProjectionInput | null;
 };
@@ -308,6 +314,21 @@ function policyProjection(input: WorkspaceStateProjectionInput) {
   };
 }
 
+function preferenceProjection(input: CurrentPreferenceProjectionInput) {
+  const descriptors = [...input.descriptors].sort((left, right) =>
+    preferenceIdentity(left).localeCompare(preferenceIdentity(right)),
+  );
+  const scopeCounts = { organization: 0, workspace: 0, user: 0 };
+  for (const descriptor of descriptors) scopeCounts[descriptor.scope] += 1;
+  return {
+    authority: "preference_registry_preferences" as const,
+    activeDescriptorCount: descriptors.length,
+    activeDescriptorHash: hashIdentities(descriptors.map(preferenceIdentity)),
+    scopeCounts,
+    truncated: input.truncated,
+  };
+}
+
 function availableKnowledgeProjection(knowledge: KnowledgeProjectionInput) {
   const inventory = knowledge.documents;
   const selectedBases = inventory.bases.slice(0, WORKSPACE_STATE_MAX_BASES);
@@ -402,6 +423,7 @@ function availableKnowledgeProjection(knowledge: KnowledgeProjectionInput) {
     inspectedVisibleDocumentCount,
     documentStatusCounts: aggregateStatuses,
     sourceKindCounts: aggregateSources,
+    authorityKindCounts: { ...inventory.authorityKindCounts },
     topics,
     topicsTruncated: inventory.topicsTruncated || sortedTopics.length > topics.length,
     latestDocumentUpdatedAt: inventory.latestUpdatedAt,
@@ -432,6 +454,7 @@ export function projectWorkspaceState(
       attemptGovernance: attemptGovernanceProjection(input),
     },
     policy: policyProjection(input),
+    preferences: preferenceProjection(input.preferences),
     knowledge: input.knowledge
       ? availableKnowledgeProjection(input.knowledge)
       : {

@@ -179,6 +179,33 @@ function PolicyInventory({ state }: { state: WorkspaceStateResponse }) {
   );
 }
 
+function PreferenceInventory({ state }: { state: WorkspaceStateResponse }) {
+  const { preferences } = state;
+  return (
+    <StateCard
+      title="Preference authority inventory"
+      description="Identity-only metadata from the structured preference registry. Titles, descriptions, values, and retrieval handles are excluded."
+    >
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Metric label="Active descriptors" value={preferences.activeDescriptorCount} />
+        <Metric label="Organization" value={preferences.scopeCounts.organization} />
+        <Metric label="Workspace" value={preferences.scopeCounts.workspace} />
+        <Metric label="Personal" value={preferences.scopeCounts.user} />
+      </div>
+      <div className="mt-4 text-xs text-fg-muted">
+        Current identity:{" "}
+        <code className="break-all">sha256:{preferences.activeDescriptorHash}</code>
+      </div>
+      {preferences.truncated ? (
+        <p className="mt-2 text-xs text-status-waiting">
+          The descriptor inventory reached its safety bound; the hash must not be treated as
+          complete.
+        </p>
+      ) : null}
+    </StateCard>
+  );
+}
+
 function onboardingProposalTargetLabel(
   target: Pick<WorkspaceInstructionPolicyOnboardingProposal, "kind" | "scope" | "roleKey">,
 ): string {
@@ -744,6 +771,18 @@ function KnowledgeInventory({
         ) : null}
       </div>
 
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <Metric
+          label="Company documents"
+          value={knowledge.authorityKindCounts.organization}
+        />
+        <Metric
+          label="Workspace documents"
+          value={knowledge.authorityKindCounts.workspace}
+        />
+        <Metric label="Personal documents" value={knowledge.authorityKindCounts.personal} />
+      </div>
+
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <div>
           <div className="mb-2 flex items-center justify-between gap-3">
@@ -926,6 +965,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
             proposals use an explicit admin action and never activate policy automatically.
           </div>
           <PolicyInventory state={state} />
+          <PreferenceInventory state={state} />
           <OnboardingProposalInventory
             state={state}
             workspaceId={workspaceId}
