@@ -29,8 +29,7 @@ function state() {
     preferences: {
       authority: "preference_registry_preferences",
       activeDescriptorCount: 0,
-      activeDescriptorHash:
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      activeDescriptorHash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       scopeCounts: { organization: 0, workspace: 0, user: 0 },
       truncated: false,
     },
