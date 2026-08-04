@@ -2779,7 +2779,12 @@ describe("useComposer durable draft and control binding", () => {
     const client = fakeClient({
       getComposerDraft: async () => initial,
       saveComposerDraft: async () => {
-        throw new OpenGeniApiError(409, "draft changed");
+        // Persistently conflict even after the stale-revision retry adopts
+        // the server revision — surfaces the keep_mine / use_remote banner.
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+        );
       },
     });
     const hook = await renderHook(
@@ -2790,7 +2795,57 @@ describe("useComposer durable draft and control binding", () => {
     await flushing(async () => hook.result.current.setValue("mine remains"));
     await flush(600);
     expect(hook.result.current.value).toBe("mine remains");
-    expect(hook.result.current.draftConflict?.message).toContain("409");
+    expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
+    await hook.unmount();
+  });
+
+  test("autosave recovers a stale revision after tab-sleep OCC without surfacing a conflict", async () => {
+    const initial = {
+      revision: 1,
+      text: "remote one",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let saves = 0;
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        saves === 0
+          ? initial
+          : {
+              ...initial,
+              revision: 2,
+              text: "remote one",
+            },
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        saves += 1;
+        if (request.expectedRevision === 1) {
+          throw new OpenGeniApiError(
+            409,
+            JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+          );
+        }
+        return {
+          ...initial,
+          revision: request.expectedRevision + 1,
+          text: request.text,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => hook.result.current.setValue("mine remains"));
+    await flush(600);
+    expect(hook.result.current.value).toBe("mine remains");
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.draft?.revision).toBe(3);
+    expect(saves).toBe(2);
     await hook.unmount();
   });
 

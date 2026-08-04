@@ -52,4 +52,16 @@ describe("defaultToolRegistry leaf resolution", () => {
     const renderer = registry.resolve(tool({ name: "docs__knowledge_search" }));
     expect(renderer.name).toBe("DocsSearchRenderer");
   });
+
+  test("resolves ToolSearch by name and tool_search_call raw type", () => {
+    const byName = registry.resolve(tool({ name: "tool_search" }));
+    const byRaw = registry.resolve(
+      tool({
+        name: "tool",
+        raw: { type: "tool_search_call", call_id: "c1", arguments: { query: "email" } },
+      }),
+    );
+    expect(byName.name).toBe("ToolSearchRenderer");
+    expect(byRaw.name).toBe("ToolSearchRenderer");
+  });
 });
