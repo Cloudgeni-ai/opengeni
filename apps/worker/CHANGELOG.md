@@ -1,5 +1,16 @@
 # @opengeni/worker-bundle
 
+## 0.16.12
+
+### Patch Changes
+
+- dfa3aef: Preserve Steer priority through provider recovery and repair interrupted attempts durably.
+- Updated dependencies [dfa3aef]
+  - @opengeni/core@0.20.11
+  - @opengeni/db@0.27.8
+  - @opengeni/documents@0.5.4
+  - @opengeni/events@0.3.74
+
 ## 0.16.11
 
 ### Patch Changes
