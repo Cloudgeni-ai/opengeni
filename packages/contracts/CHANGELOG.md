@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.38.3
+
+### Patch Changes
+
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+
 ## 0.38.2
 
 ### Patch Changes
