@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- Enrollment credential-generation fence.
 --
 -- Schema-first/backward-compatible rollout: every pre-existing enrollment is

@@ -130,6 +130,7 @@ describe("release schema contract", () => {
     );
     expect(contract.fileCount).toBe(
       108 +
+        (migrations.has("0065_enrollment_credential_generation.sql") ? 1 : 0) +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
@@ -188,12 +189,17 @@ describe("release schema contract", () => {
         (migrations.has("0171_social_connection_subject_ownership.sql") ? 1 : 0) +
         (migrations.has("0172_retire_model_visible_github_token.sql") ? 1 : 0) +
         (migrations.has("0173_codex_auth_boundaries.sql") ? 1 : 0) +
-        (migrations.has("0174_session_wake_live_interruption.sql") ? 1 : 0),
+        (migrations.has("0174_session_wake_live_interruption.sql") ? 1 : 0) +
+        (migrations.has("0175_connected_machine_removal.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "7fbf35b80e1490ce9604604cec928736d6a6e483148e38d0ecc62658c4ac603d",
+      "4e36226e80f90b3c1b4292204536a8722f6fd9c63909103dd9f8aaf6809bfebe",
     );
-    expect(contract.latestMigration).toBe("0174_session_wake_live_interruption.sql");
+    expect(contract.latestMigration).toBe("0175_connected_machine_removal.sql");
+    expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
+      sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0174_session_wake_live_interruption.sql")).toMatchObject({
       sha256: "492f93a4ba0f715f3d37cdc539d5e09dd277b8a882d24b1730d01e245e2f85cf",
       deploymentMode: "rolling",
@@ -208,6 +214,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0170_session_control_wake_revision.sql")).toMatchObject({
       sha256: "cec3593e377f1cdc6aac3441b89d57e7c19d7377ff31991f340e14af1e64453d",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0175_connected_machine_removal.sql")).toMatchObject({
+      sha256: "c933a0781ac3c78272c5049637e3718299382e93272ea04095077f8ce7148f0a",
       deploymentMode: "rolling",
     });
     expect(
