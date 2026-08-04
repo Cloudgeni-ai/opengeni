@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.44.1
+
+### Patch Changes
+
+- e051404: Measure composer textarea height off-DOM so multi-line typing no longer collapses the live box and yanks tip-follow.
+- 99e9b48: Give the realtime voice controls an accessible named group role.
+
 ## 0.44.0
 
 ### Patch Changes
