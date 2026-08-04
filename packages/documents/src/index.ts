@@ -136,6 +136,7 @@ export type DocumentAuthority = {
 
 export type DocumentInventoryStatusCounts = Record<DocumentStatus, number>;
 export type DocumentInventorySourceKindCounts = Record<KnowledgeSourceKind, number>;
+export type DocumentInventoryAuthorityKindCounts = Record<DocumentAuthorityKind, number>;
 
 export type DocumentInventory = {
   baseCount: number;
@@ -149,6 +150,7 @@ export type DocumentInventory = {
   visibleDocumentCount: number;
   statusCounts: DocumentInventoryStatusCounts;
   sourceKindCounts: DocumentInventorySourceKindCounts;
+  authorityKindCounts: DocumentInventoryAuthorityKindCounts;
   latestUpdatedAt: string | null;
   topics: Array<{ name: string; documentCount: number }>;
   topicsTruncated: boolean;
@@ -709,6 +711,9 @@ export async function getDocumentInventory(
         documentCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'document')::int`,
         webCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'web')::int`,
         otherCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'other')::int`,
+        organizationAuthorityCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.authorityKind} = 'organization')::int`,
+        workspaceAuthorityCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.authorityKind} = 'workspace')::int`,
+        personalAuthorityCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.authorityKind} = 'personal')::int`,
         latestUpdatedAt: sql<Date | null>`max(${schema.documents.updatedAt})`,
       })
       .from(schema.documents)
@@ -761,6 +766,11 @@ export async function getDocumentInventory(
         document: Number(summary?.documentCount ?? 0),
         web: Number(summary?.webCount ?? 0),
         other: Number(summary?.otherCount ?? 0),
+      },
+      authorityKindCounts: {
+        organization: Number(summary?.organizationAuthorityCount ?? 0),
+        workspace: Number(summary?.workspaceAuthorityCount ?? 0),
+        personal: Number(summary?.personalAuthorityCount ?? 0),
       },
       latestUpdatedAt: documentInventoryTimestamp(summary?.latestUpdatedAt ?? null),
       topics,

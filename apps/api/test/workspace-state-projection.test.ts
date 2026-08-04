@@ -89,6 +89,19 @@ function policies(
   };
 }
 
+function preferences(
+  descriptors: Array<{
+    id: string;
+    revisionId: string;
+    contentHash: string;
+    activeVersion: number;
+    scope: "organization" | "workspace" | "user";
+  }> = [],
+  truncated = false,
+) {
+  return { descriptors, truncated };
+}
+
 describe("workspace state projection", () => {
   test("does not leak knowledge counts or raw policy/runtime content without knowledge access", () => {
     const projected = projectWorkspaceState({
@@ -96,6 +109,7 @@ describe("workspace state projection", () => {
       generatedAt: NOW,
       workspaceAgentInstructions: "SECRET LEGACY RUNTIME INSTRUCTIONS",
       policies: policies(),
+      preferences: preferences(),
       knowledge: null,
     });
 
@@ -137,6 +151,15 @@ describe("workspace state projection", () => {
       generatedAt: NOW,
       workspaceAgentInstructions: null,
       policies: policies([policyHead]),
+      preferences: preferences([
+        {
+          id: id(5_105),
+          revisionId: id(5_106),
+          contentHash: "e".repeat(64),
+          activeVersion: 1,
+          scope: "user",
+        },
+      ]),
       knowledge: null,
       attemptGovernance: {
         status: "available",
@@ -267,6 +290,7 @@ describe("workspace state projection", () => {
       workspaceId: WORKSPACE_ID,
       generatedAt: NOW,
       workspaceAgentInstructions: null,
+      preferences: preferences([preference]),
       knowledge: null,
     };
 
@@ -381,6 +405,7 @@ describe("workspace state projection", () => {
         web: 0,
         other: 0,
       },
+      authorityKindCounts: { organization: 1, workspace: 2, personal: 1 },
       latestUpdatedAt: NOW,
       topics: Array.from({ length: WORKSPACE_STATE_MAX_TOPICS }, (_, index) => ({
         name: index === 0 ? "  Operations   Runbooks  " : `Topic ${String(index).padStart(2, "0")}`,
@@ -401,11 +426,44 @@ describe("workspace state projection", () => {
       generatedAt: NOW,
       workspaceAgentInstructions: null,
       policies: policies(activeHeads),
+      preferences: preferences(
+        [
+          {
+            id: id(6_003),
+            revisionId: id(6_103),
+            contentHash: "3".repeat(64),
+            activeVersion: 1,
+            scope: "user",
+          },
+          {
+            id: id(6_001),
+            revisionId: id(6_101),
+            contentHash: "1".repeat(64),
+            activeVersion: 2,
+            scope: "organization",
+          },
+          {
+            id: id(6_002),
+            revisionId: id(6_102),
+            contentHash: "2".repeat(64),
+            activeVersion: 1,
+            scope: "workspace",
+          },
+        ],
+        true,
+      ),
       knowledge: { documents, memories },
     });
 
     expect(projected.policy.activeHeads).toHaveLength(WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS);
     expect(projected.policy.activeHeadsTruncated).toBe(true);
+    expect(projected.preferences).toMatchObject({
+      authority: "preference_registry_preferences",
+      activeDescriptorCount: 3,
+      scopeCounts: { organization: 1, workspace: 1, user: 1 },
+      truncated: true,
+    });
+    expect(projected.preferences.activeDescriptorHash).toMatch(/^[0-9a-f]{64}$/);
     expect(projected.knowledge.availability).toBe("available");
     if (projected.knowledge.availability !== "available") throw new Error("expected inventory");
     expect(projected.knowledge).toMatchObject({
@@ -414,6 +472,7 @@ describe("workspace state projection", () => {
       basesTruncated: true,
       inspectedVisibleDocumentCount: 4,
       documentStatusCounts: { queued: 1, indexing: 0, ready: 2, failed: 1 },
+      authorityKindCounts: { organization: 1, workspace: 2, personal: 1 },
       memorySample: {
         recordCount: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
         limitReached: true,
