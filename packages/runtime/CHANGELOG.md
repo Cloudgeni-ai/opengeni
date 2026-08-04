@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.14
+
+### Patch Changes
+
+- c6c9acb: Recover required MCP setup when a transient socket failure is wrapped by the MCP SDK, while preserving only secret-safe transport classification.
+
 ## 0.18.13
 
 ### Patch Changes
