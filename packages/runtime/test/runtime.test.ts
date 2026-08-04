@@ -80,6 +80,7 @@ import {
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
+  isMcpTransportConnectivityError,
   projectModelInputForCapabilities,
   projectModelInputForImageSupport,
   prefixedMcpToolName,
@@ -87,6 +88,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  safeMcpTransportError,
   serializeApprovals,
   serializeHumanInputRequests,
   refreshToolspaceTokenFile,
@@ -171,6 +173,41 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
       connectTimeoutMs: 5,
     }),
   ).rejects.toThrow("MCP server connect timed out after 5ms");
+});
+
+test("sanitizes nested MCP connectivity failures into an allowlisted marker", () => {
+  const raw = new Error("MCP connect failed for https://private.example/token-value");
+  raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+    code: "ECONNREFUSED",
+  });
+
+  const sanitized = safeMcpTransportError(raw);
+
+  expect(isMcpTransportConnectivityError(raw)).toBe(false);
+  expect(isMcpTransportConnectivityError(sanitized)).toBe(true);
+  expect(sanitized).toMatchObject({
+    name: "McpTransportError",
+    message: "MCP transport operation failed (Error)",
+    mcpTransportFailureKind: "connectivity_unavailable",
+  });
+  expect(JSON.stringify(sanitized)).not.toContain("private.example");
+  expect(JSON.stringify(sanitized)).not.toContain("token-value");
+  expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+});
+
+test("does not turn MCP client failures or arbitrary codes into connectivity recovery", () => {
+  const clientFailure = Object.assign(new Error("request rejected"), {
+    status: 401,
+    cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+  });
+  const arbitrary = Object.assign(new Error("provider-specific failure"), {
+    code: "CONNECTION_REFUSED_BY_POLICY",
+  });
+
+  expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
+  expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
+  expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
 });
 
 describe("structured human-input runtime boundary", () => {

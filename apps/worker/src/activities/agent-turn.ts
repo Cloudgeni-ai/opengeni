@@ -122,6 +122,7 @@ import {
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   isMcpRequestTimeoutError,
+  isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
   WorkspaceArchiveIntegrityError,
@@ -463,7 +464,8 @@ export function providerRecoveryResult(input: {
     input.failureCode === "provider_rate_limited"
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
-          input.failureCode === "upstream_connectivity_unavailable"
+          input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "mcp_transport_unavailable"
         ? Math.max(
             providerDelay ?? 0,
             PROVIDER_CONNECTIVITY_BACKOFF_MS[
@@ -9002,6 +9004,14 @@ export function agentRunFailurePayload(
       ...(mcpTimeout.detail || mcpTimeout.message
         ? { detail: mcpTimeout.detail ?? mcpTimeout.message }
         : {}),
+    };
+  }
+  if (isMcpTransportConnectivityError(error)) {
+    return {
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
     };
   }
   if (

@@ -248,16 +248,19 @@ the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
 Recoverable conditions preserve context instead of failing the session, so a
-long run survives them. Retryable provider connectivity and 5xx failures resume
-the same accepted turn after a pacing delay. Hitting an explicitly configured
-model-call cap, escaped MCP request timeouts, and budget/credit exhaustion end
-the current turn gracefully; an active goal may create a later continuation,
-while an otherwise idle session waits for the next user message. For an MCP
-timeout that escapes after a successful tool output, conversation truth is
-checkpointed before the turn settles and the continuation is a new follow-up —
-the completed tool call/full turn is never blindly replayed. Budget/credit
-exhaustion likewise idles the turn rather than failing the session, so a top-up
-lets the same session continue.
+long run survives them. Retryable provider connectivity, 5xx failures, and
+secret-safely classified required-MCP connectivity failures resume the same
+accepted turn after a pacing delay. The MCP classifier retains only an
+allowlisted timeout/connectivity marker; raw transport messages, URLs, response
+bodies, and unknown provider codes never cross the runtime boundary. HTTP client
+failures remain authoritative and terminal. Hitting an explicitly configured
+model-call cap and budget/credit exhaustion ends the current turn gracefully;
+an active goal may create a later continuation, while an otherwise idle session
+waits for the next user message. For an MCP timeout that escapes after a
+successful tool output, conversation truth is checkpointed before the turn
+settles and the continuation is a new follow-up — the completed tool call/full
+turn is never blindly replayed. Budget/credit exhaustion likewise idles the turn
+rather than failing the session, so a top-up lets the same session continue.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that

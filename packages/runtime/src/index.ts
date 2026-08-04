@@ -3744,8 +3744,87 @@ function safeMcpErrorFields(error: unknown): {
 type SafeMcpTransportError = Error & {
   status?: number;
   code?: number;
-  mcpTransportFailureKind?: "request_timeout";
+  mcpTransportFailureKind?: "request_timeout" | "connectivity_unavailable";
 };
+
+const MCP_CONNECTIVITY_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "EPIPE",
+]);
+
+function mcpTransportHttpStatuses(error: unknown, seen = new WeakSet<object>()): number[] {
+  if (!error || typeof error !== "object" || seen.has(error)) {
+    return [];
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  const statuses: number[] = [];
+  for (const value of [record.status, record.statusCode, record.code]) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
+      statuses.push(value);
+    }
+  }
+  for (const key of ["error", "cause", "response", "data"]) {
+    statuses.push(...mcpTransportHttpStatuses(record[key], seen));
+  }
+  return statuses;
+}
+
+function hasMcpConnectivityErrorCode(error: unknown, seen = new WeakSet<object>()): boolean {
+  if (!error || typeof error !== "object" || seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (
+    typeof record.code === "string" &&
+    MCP_CONNECTIVITY_ERROR_CODES.has(record.code.toUpperCase())
+  ) {
+    return true;
+  }
+  return ["error", "cause", "response", "data"].some((key) =>
+    hasMcpConnectivityErrorCode(record[key], seen),
+  );
+}
+
+/**
+ * Preserve only an allowlisted transport-connectivity meaning across MCP SDK
+ * wrappers. HTTP client failures remain authoritative and fail closed even if
+ * a nested object also carries a socket-looking code. Raw messages, URLs,
+ * response bodies, and arbitrary provider codes are never copied forward.
+ */
+function isRawMcpTransportConnectivityError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if ((error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable") {
+    return true;
+  }
+  const statuses = mcpTransportHttpStatuses(error);
+  if (statuses.some((status) => status >= 400 && status < 500)) {
+    return false;
+  }
+  if (statuses.some((status) => status >= 500 && status < 600)) {
+    return true;
+  }
+  return hasMcpConnectivityErrorCode(error);
+}
+
+/**
+ * Test only the secret-safe marker emitted by `safeMcpTransportError`. Callers
+ * outside the MCP boundary must not infer MCP ownership from a generic 5xx or
+ * socket-shaped provider error.
+ */
+export function isMcpTransportConnectivityError(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    (error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable"
+  );
+}
 
 /**
  * Preserve the MCP SDK's exact request-timeout meaning without retaining or
@@ -3793,6 +3872,8 @@ export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
   }
   if (isMcpRequestTimeoutError(error)) {
     safeError.mcpTransportFailureKind = "request_timeout";
+  } else if (isRawMcpTransportConnectivityError(error)) {
+    safeError.mcpTransportFailureKind = "connectivity_unavailable";
   }
   return safeError;
 }
@@ -4140,7 +4221,7 @@ class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort) {
-        throw error;
+        throw safeMcpTransportError(error);
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a
