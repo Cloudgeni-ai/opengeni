@@ -56,6 +56,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -100,7 +101,7 @@ import {
   preferredOpenGeniSlackBotConnection,
 } from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
-import { request } from "@/api";
+import { isApiErrorStatus, request } from "@/api";
 
 const GoogleDriveConnectorCard = lazy(async () => {
   const module = await import("@/components/capabilities/google-drive-connector-card");
@@ -129,7 +130,7 @@ const DISCOVERY_CATEGORIES = [
 
 type CapabilityView = (typeof CAPABILITY_VIEWS)[number];
 type DiscoveryCategory = (typeof DISCOVERY_CATEGORIES)[number];
-type DiscoverySource = "all" | "opengeni" | "verified" | "community" | "custom";
+type DiscoverySource = "curated" | "all" | "opengeni" | "verified" | "community" | "custom";
 
 export function canWriteWorkspaceConnections(
   accessContext: AccessContext | null,
@@ -263,7 +264,7 @@ export function CapabilitiesRoute({
     initialSection === "packs" ? "pack" : "all",
   );
   const [category, setCategory] = useState<DiscoveryCategory>("all");
-  const [sourceFilter, setSourceFilter] = useState<DiscoverySource>("all");
+  const [sourceFilter, setSourceFilter] = useState<DiscoverySource>("curated");
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
@@ -275,6 +276,8 @@ export function CapabilitiesRoute({
   const [selected, setSelected] = useState<SheetSelection | null>(null);
   const sheetOpenerRef = useRef<HTMLElement | null>(null);
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
+  const hasLoadedCatalogRef = useRef(false);
+  const refreshGenerationRef = useRef(0);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -282,6 +285,7 @@ export function CapabilitiesRoute({
   const [registryBusy, setRegistryBusy] = useState(false);
   const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
+  const registrySearchGenerationRef = useRef(0);
 
   const packs = usePacks({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
@@ -314,8 +318,7 @@ export function CapabilitiesRoute({
   const canInstallSlackBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
   const canManageSlackReaction = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
-  const showPacks =
-    filter === "pack" || packs.loading || Boolean(packs.error) || packs.packs.length > 0;
+  const showPacks = filter === "pack";
 
   const logoUrl = useCallback(
     (item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath),
@@ -358,12 +361,29 @@ export function CapabilitiesRoute({
   );
   const attentionRows = currentRows.filter((row) => row.health.state === "attention");
   const readyRows = currentRows.filter((row) => row.health.state !== "attention");
+  const workspaceReadyCount = readyRows.filter(
+    (row) => capabilityScopeLabel(row.item, row.health) !== "Only me",
+  ).length;
   const activeConnectionCount = (connections ?? []).filter(
     (connection) => connection.status === "active",
   ).length;
-  const builtInCount = enabledItems.filter(
-    (item) => item.source === "built_in" || item.source === "configured",
-  ).length;
+  const builtInCount = enabledItems.filter((item) => item.source === "built_in").length;
+  const builtInPackIds = useMemo(
+    () =>
+      new Set(
+        items
+          .filter((item) => item.kind === "pack" && item.source === "built_in")
+          .map((item) =>
+            typeof item.metadata.packId === "string"
+              ? item.metadata.packId
+              : item.id.replace(/^pack:/, ""),
+          ),
+      ),
+    [items],
+  );
+  const otherConnectionRows = currentRows.filter(
+    (row) => row.item.connectionRef && row.item.id !== personalSlackItem?.id,
+  );
   const customItems = items.filter(
     (item) => item.source === "manual" || item.source === "configured",
   );
@@ -418,6 +438,10 @@ export function CapabilitiesRoute({
 
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [category, filter, query, sourceFilter]);
+  useEffect(() => {
+    registrySearchGenerationRef.current += 1;
+    setRegistryBusy(false);
+  }, [query]);
 
   // Close the sheet if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) — never leave a ghost open. A
@@ -441,8 +465,9 @@ export function CapabilitiesRoute({
   // one (invalidation without a clearing effect that flashes stale tiles first).
   const visibleRegistry = registryResultsForQuery(query, registrySearched, registryResults);
 
-  async function refresh() {
-    if (!workspaceId) return;
+  async function refresh({ notifyOnError = true }: { notifyOnError?: boolean } = {}) {
+    if (!workspaceId) return false;
+    const generation = ++refreshGenerationRef.current;
     setLoading(true);
     try {
       const [catalog, conns, socials] = await Promise.all([
@@ -451,21 +476,40 @@ export function CapabilitiesRoute({
         client.listConnections(workspaceId).catch(() => null),
         client.listSocialConnections(workspaceId).catch(() => null),
       ]);
+      if (generation !== refreshGenerationRef.current) return false;
       setItems(catalog.items);
+      hasLoadedCatalogRef.current = true;
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload); a
       // first-load failure leaves the prior null = "not loaded", which is correct.
       if (conns !== null) setConnections(conns);
       if (socials !== null) setSocialConnections(socials);
       setLoadError(null);
+      return true;
     } catch (error) {
+      if (generation !== refreshGenerationRef.current) return false;
       setLoadError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load capabilities", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      if (notifyOnError && hasLoadedCatalogRef.current) {
+        toast.error("Failed to refresh capabilities", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return false;
     } finally {
-      setLoading(false);
+      if (generation === refreshGenerationRef.current) setLoading(false);
     }
+  }
+
+  async function refreshAfterMutation(successMessage: string): Promise<boolean> {
+    const refreshed = await refresh({ notifyOnError: false });
+    if (refreshed) {
+      toast.success(successMessage);
+      return true;
+    }
+    toast.warning("Change saved, but the latest state could not be loaded", {
+      description: "Refresh before making another capability change.",
+    });
+    return false;
   }
 
   function refreshAll() {
@@ -506,9 +550,8 @@ export function CapabilitiesRoute({
     setPersonalSlackBusy(true);
     try {
       await client.deleteConnection(workspaceId, personalSlackConnection.id);
-      await refresh();
       onRuntimeChanged();
-      toast.success("Personal Slack account disconnected");
+      await refreshAfterMutation("Personal Slack account disconnected");
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect your Slack account", {
@@ -541,8 +584,7 @@ export function CapabilitiesRoute({
     setSlackBotBusy(true);
     try {
       await client.deleteConnection(workspaceId, slackBotConnection.id);
-      await refresh();
-      toast.success("OpenGeni Slack bot disconnected");
+      await refreshAfterMutation("OpenGeni Slack bot disconnected");
     } catch (error) {
       toast.error("Couldn't disconnect the OpenGeni Slack bot", {
         description: error instanceof Error ? error.message : String(error),
@@ -590,9 +632,8 @@ export function CapabilitiesRoute({
 
       if (action.type === "disable") {
         await client.disableCapability(workspaceId, item.id);
-        await refresh();
         onRuntimeChanged();
-        toast.success(`Disabled ${item.name}`);
+        await refreshAfterMutation(`Disabled ${item.name}`);
         setSelected(null);
         return;
       }
@@ -612,8 +653,7 @@ export function CapabilitiesRoute({
 
       if (action.type === "disconnect_social") {
         await client.disconnectSocialConnection(workspaceId, action.connectionId);
-        await refresh();
-        toast.success(`Disconnected ${item.name}`);
+        await refreshAfterMutation(`Disconnected ${item.name}`);
         setSelected(null);
         return;
       }
@@ -652,14 +692,21 @@ export function CapabilitiesRoute({
       }
 
       if (action.type === "reconnect_api_key") {
+        let existingConnectionMissing = false;
         if (action.connectionId) {
           // The existing row went inactive — rewrite its credential and
           // reactivate it in place; the installation ref already points at it.
-          await client.updateConnection(workspaceId, action.connectionId, {
-            credential: { headers: action.headers },
-            status: "active",
-          });
-        } else {
+          try {
+            await client.updateConnection(workspaceId, action.connectionId, {
+              credential: { headers: action.headers },
+              status: "active",
+            });
+          } catch (error) {
+            if (!isApiErrorStatus(error, 404)) throw error;
+            existingConnectionMissing = true;
+          }
+        }
+        if (!action.connectionId || existingConnectionMissing) {
           // The row was deleted — mint a fresh connection and re-enable the
           // installation against it (enable upserts the installation config). Domain
           // comes from the plan, or the installation's ref when the catalog drifted.
@@ -681,9 +728,8 @@ export function CapabilitiesRoute({
             ),
           });
         }
-        await refresh();
         onRuntimeChanged();
-        toast.success(`Reconnected ${item.name}`);
+        await refreshAfterMutation(`Reconnected ${item.name}`);
         setSelected(null);
         return;
       }
@@ -737,18 +783,16 @@ export function CapabilitiesRoute({
             connection.providerDomain,
           ),
         });
-        await refresh();
         onRuntimeChanged();
-        toast.success(`Connected and enabled ${persisted.name}`);
+        await refreshAfterMutation(`Connected and enabled ${persisted.name}`);
         setSelected(null);
         return;
       }
 
       // Plain enable (no credentials).
       await client.enableCapability(workspaceId, persisted.id);
-      await refresh();
       if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(`Enabled ${persisted.name}`);
+      await refreshAfterMutation(`Enabled ${persisted.name}`);
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Something went wrong");
@@ -776,8 +820,9 @@ export function CapabilitiesRoute({
     const accountHandle = params.get("accountHandle");
     window.history.replaceState(null, "", window.location.pathname);
     if (outcome === "success") {
-      void refresh();
-      toast.success(accountHandle ? `Connected @${accountHandle}` : "Social account connected");
+      void refreshAfterMutation(
+        accountHandle ? `Connected @${accountHandle}` : "Social account connected",
+      );
       setSelected(null);
       return;
     }
@@ -867,6 +912,7 @@ export function CapabilitiesRoute({
     ownership: ConnectionOwnership | null,
   ) {
     setBusyId(itemId ?? "oauth-return");
+    const refreshGeneration = ++refreshGenerationRef.current;
     // Hoisted above the try so the catch can reopen the sheet from the freshly
     // fetched rows (falling back to closure items only if the fetch itself failed).
     let freshItems: CapabilityCatalogItem[] | null = null;
@@ -878,10 +924,14 @@ export function CapabilitiesRoute({
         client.listConnections(workspaceId).catch(() => null),
       ]);
       freshItems = catalog.items;
-      setItems(catalog.items);
+      if (refreshGeneration === refreshGenerationRef.current) {
+        setItems(catalog.items);
+      }
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload).
-      if (conns !== null) setConnections(conns);
+      if (conns !== null && refreshGeneration === refreshGenerationRef.current) {
+        setConnections(conns);
+      }
       const item =
         (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);
@@ -926,11 +976,10 @@ export function CapabilitiesRoute({
       await client.enableCapability(workspaceId, item!.id, {
         connectionRef: oauthConnectionRef(resolvedOwnership, connectionId!, refDomain),
       });
-      await refresh();
       onRuntimeChanged();
       // An already-enabled item reached here only because its old connection row
       // was gone and OAuth minted a new one — that's a reconnect, not a first enable.
-      toast.success(
+      await refreshAfterMutation(
         item!.enabled ? `Reconnected ${item!.name}` : `Connected and enabled ${item!.name}`,
       );
       setSelected(null);
@@ -954,9 +1003,8 @@ export function CapabilitiesRoute({
     setBusyId(item.id);
     try {
       await client.disableCapability(workspaceId, item.id);
-      await refresh();
       onRuntimeChanged();
-      toast.success(`Disabled ${item.name}`);
+      await refreshAfterMutation(`Disabled ${item.name}`);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Couldn't disable");
       toast.error(copy.title, { description: copy.description });
@@ -1008,22 +1056,25 @@ export function CapabilitiesRoute({
   async function searchRegistry() {
     const term = query.trim();
     if (!term) return;
+    const generation = ++registrySearchGenerationRef.current;
     setRegistryBusy(true);
     try {
       const response = await client.discoverMcpCapabilities(workspaceId, {
         query: term,
         limit: 30,
       });
+      if (generation !== registrySearchGenerationRef.current) return;
       setRegistryResults(response.items);
       setRegistrySearched(term);
     } catch (error) {
+      if (generation !== registrySearchGenerationRef.current) return;
       setRegistryResults([]);
       setRegistrySearched(null);
       toast.error("Registry search failed", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setRegistryBusy(false);
+      if (generation === registrySearchGenerationRef.current) setRegistryBusy(false);
     }
   }
 
@@ -1041,8 +1092,8 @@ export function CapabilitiesRoute({
         workspaceId,
         manifest as Parameters<typeof client.registerPack>[1],
       );
-      await Promise.all([packs.refresh(), refresh()]);
-      toast.success(`Registered ${registered.pack.name} v${registered.pack.version}`);
+      await packs.refresh();
+      await refreshAfterMutation(`Registered ${registered.pack.name} v${registered.pack.version}`);
       return true;
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to register pack");
@@ -1059,9 +1110,9 @@ export function CapabilitiesRoute({
         `pack:${pack.id}`,
         variableSetId ? { variableSetId } : {},
       );
-      await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
-      toast.success(`Enabled ${pack.name}`);
+      await packs.refresh();
+      await refreshAfterMutation(`Enabled ${pack.name}`);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to enable pack");
       toast.error(copy.title, { description: copy.description });
@@ -1074,9 +1125,9 @@ export function CapabilitiesRoute({
     setBusyId(`pack:${pack.id}`);
     try {
       await client.disableCapability(workspaceId, `pack:${pack.id}`);
-      await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
-      toast.success(`Disabled ${pack.name}`);
+      await packs.refresh();
+      await refreshAfterMutation(`Disabled ${pack.name}`);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to disable pack");
       toast.error(copy.title, { description: copy.description });
@@ -1089,8 +1140,8 @@ export function CapabilitiesRoute({
     setBusyId(`pack:${pack.id}`);
     try {
       await client.deletePack(workspaceId, pack.id);
-      await Promise.all([packs.refresh(), refresh()]);
-      toast.success(`Unregistered ${pack.name}`);
+      await packs.refresh();
+      await refreshAfterMutation(`Unregistered ${pack.name}`);
       return true;
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to unregister pack");
@@ -1113,6 +1164,7 @@ export function CapabilitiesRoute({
       ref={capabilityFocusFallbackRef}
       role="region"
       aria-label="Capabilities"
+      aria-busy={loading || packs.loading}
       tabIndex={-1}
       className="min-h-0 flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset"
     >
@@ -1140,10 +1192,17 @@ export function CapabilitiesRoute({
           onValueChange={(value) => setView(value as CapabilityView)}
           className="mt-5 gap-0"
         >
-          <div className="sticky top-0 z-20 -mx-1 overflow-x-auto border-b border-border bg-bg/95 px-1 pt-1 backdrop-blur supports-[backdrop-filter]:bg-bg/85">
-            <TabsList variant="line" aria-label="Capability views" className="h-10 gap-1">
-              <TabsTrigger value="current" className="px-3 text-xs">
-                <Layers3Icon />
+          <div className="sticky top-0 z-20 -mx-1 border-b border-border bg-bg/95 px-1 pt-1 backdrop-blur supports-[backdrop-filter]:bg-bg/85">
+            <TabsList
+              variant="line"
+              aria-label="Capability views"
+              className="grid h-11 w-full grid-cols-4 gap-0 sm:flex sm:w-fit sm:gap-1"
+            >
+              <TabsTrigger
+                value="current"
+                className="!h-11 min-w-0 px-1 text-[11px] sm:px-3 sm:text-xs"
+              >
+                <Layers3Icon className="hidden sm:block" />
                 Current
                 {attentionRows.length > 0 ? (
                   <span
@@ -1152,16 +1211,25 @@ export function CapabilitiesRoute({
                   />
                 ) : null}
               </TabsTrigger>
-              <TabsTrigger value="discover" className="px-3 text-xs">
-                <SparklesIcon />
+              <TabsTrigger
+                value="discover"
+                className="!h-11 min-w-0 px-1 text-[11px] sm:px-3 sm:text-xs"
+              >
+                <SparklesIcon className="hidden sm:block" />
                 Discover
               </TabsTrigger>
-              <TabsTrigger value="connections" className="px-3 text-xs">
-                <PlugIcon />
+              <TabsTrigger
+                value="connections"
+                className="!h-11 min-w-0 px-1 text-[11px] sm:px-3 sm:text-xs"
+              >
+                <PlugIcon className="hidden sm:block" />
                 Connections
               </TabsTrigger>
-              <TabsTrigger value="custom" className="px-3 text-xs">
-                <WrenchIcon />
+              <TabsTrigger
+                value="custom"
+                className="!h-11 min-w-0 px-1 text-[11px] sm:px-3 sm:text-xs"
+              >
+                <WrenchIcon className="hidden sm:block" />
                 Custom
               </TabsTrigger>
             </TabsList>
@@ -1172,11 +1240,12 @@ export function CapabilitiesRoute({
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
                   <h2 id="capability-summary-heading" className="text-base font-semibold text-fg">
-                    What agents can use now
+                    What this workspace makes available
                   </h2>
                   <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
-                    Workspace capabilities define what can be selected. Each session can narrow its
-                    tools, while workspace policy and built-ins cannot be widened here.
+                    This is the workspace inventory, not a promise that every session exposes every
+                    item. Personal connections require explicit delegation, and each session can
+                    narrow its selected tools.
                   </p>
                 </div>
                 <Button
@@ -1192,8 +1261,8 @@ export function CapabilitiesRoute({
 
               <div className="mt-4 grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-surface/40 lg:grid-cols-4">
                 <SummaryMetric
-                  label="Ready now"
-                  value={readyRows.length}
+                  label="Workspace ready"
+                  value={workspaceReadyCount}
                   icon={<CheckCircle2Icon />}
                 />
                 <SummaryMetric
@@ -1207,7 +1276,11 @@ export function CapabilitiesRoute({
                   value={connectionsLoaded ? activeConnectionCount : "—"}
                   icon={<PlugIcon />}
                 />
-                <SummaryMetric label="Built in" value={builtInCount} icon={<ShieldCheckIcon />} />
+                <SummaryMetric
+                  label="Platform built-ins"
+                  value={builtInCount}
+                  icon={<ShieldCheckIcon />}
+                />
               </div>
             </section>
 
@@ -1245,8 +1318,8 @@ export function CapabilitiesRoute({
                 ) : null}
                 {readyRows.length > 0 ? (
                   <CapabilityListSection
-                    title="Available now"
-                    description="Built-ins, configured tools, and workspace selections in one compact inventory."
+                    title="Available to select"
+                    description="Workspace availability is shown here. Open a session to inspect its effective tool selection; personal rows still require delegation."
                     rows={readyRows}
                     logoUrl={logoUrl}
                     busyId={busyId}
@@ -1288,13 +1361,12 @@ export function CapabilitiesRoute({
                   onClick={() => setFilter("pack")}
                 />
                 <RecommendationCard
-                  icon={<Settings2Icon />}
-                  title="Infrastructure and Terraform"
-                  description="Specialist guidance, available intentionally rather than globally."
-                  action="Browse infrastructure"
+                  icon={<PlugIcon />}
+                  title="Connect the tools your team uses"
+                  description="Review provider health and choose a personal or workspace identity."
+                  action="Manage connections"
                   onClick={() => {
-                    setCategory("infrastructure");
-                    setFilter("skill");
+                    setView("connections");
                   }}
                 />
               </div>
@@ -1312,6 +1384,7 @@ export function CapabilitiesRoute({
                 onEnable={(pack, variableSetId) => void enablePack(pack, variableSetId)}
                 onDisable={(pack) => void disablePack(pack)}
                 onUnregister={unregisterPack}
+                builtInPackIds={builtInPackIds}
               />
             ) : null}
 
@@ -1322,7 +1395,12 @@ export function CapabilitiesRoute({
                     <h2 id="catalog-heading" className="text-base font-semibold text-fg">
                       Capability library
                     </h2>
-                    <p className="mt-1 text-xs text-fg-muted">
+                    <p
+                      className="mt-1 text-xs text-fg-muted"
+                      role="status"
+                      aria-live="polite"
+                      aria-atomic="true"
+                    >
                       {discoveryItems.length.toLocaleString()} matching capabilities
                       {filter === "all" && counts.pack > 0
                         ? ` · ${counts.pack.toLocaleString()} ${counts.pack === 1 ? "pack" : "packs"} managed separately`
@@ -1343,16 +1421,54 @@ export function CapabilitiesRoute({
                         value={query}
                         onChange={(event) => setQuery(event.target.value)}
                         placeholder="Search by task, product, or capability"
-                        className="h-10 pl-9"
+                        className="h-11 pl-9"
                         aria-label="Search capabilities"
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-2 sm:flex">
+                    {sourceFilter === "curated" ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-11"
+                        onClick={() => setSourceFilter("community")}
+                      >
+                        <GlobeIcon />
+                        Browse community registry
+                      </Button>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 flex gap-2 overflow-x-auto pb-0.5" aria-label="Categories">
+                    {DISCOVERY_CATEGORIES.map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={category === value}
+                        onClick={() => setCategory(value)}
+                        className={cn(
+                          "inline-flex h-11 shrink-0 items-center rounded-md border px-3 text-xs font-medium transition-colors motion-reduce:transition-none sm:h-8 sm:px-2.5",
+                          category === value
+                            ? "border-brand/30 bg-brand/10 text-brand"
+                            : "border-border bg-surface/40 text-fg-muted hover:border-border-strong hover:text-fg",
+                        )}
+                      >
+                        {discoveryCategoryLabel(value)}
+                      </button>
+                    ))}
+                  </div>
+                  <details className="group mt-3 rounded-lg border border-border bg-surface/30">
+                    <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 text-xs font-medium text-fg-muted hover:text-fg">
+                      <span className="inline-flex items-center gap-2">
+                        <Settings2Icon className="size-3.5" />
+                        Format and source filters
+                      </span>
+                      <ChevronDownIcon className="size-3.5 transition-transform motion-reduce:transition-none group-open:rotate-180" />
+                    </summary>
+                    <div className="grid grid-cols-1 gap-2 border-t border-border p-3 sm:grid-cols-2">
                       <Select
                         aria-label="Capability format"
                         value={filter}
                         onChange={(event) => setFilter(event.target.value as CapabilityFilter)}
-                        className="h-10 min-w-0 text-xs sm:w-36"
+                        className="h-11 min-w-0 text-xs"
                       >
                         {FILTERS.map((kind) => (
                           <option key={kind} value={kind}>
@@ -1364,8 +1480,9 @@ export function CapabilitiesRoute({
                         aria-label="Capability source"
                         value={sourceFilter}
                         onChange={(event) => setSourceFilter(event.target.value as DiscoverySource)}
-                        className="h-10 min-w-0 text-xs sm:w-40"
+                        className="h-11 min-w-0 text-xs"
                       >
+                        <option value="curated">Trusted and added</option>
                         <option value="all">All sources</option>
                         <option value="opengeni">OpenGeni</option>
                         <option value="verified">Verified library</option>
@@ -1373,25 +1490,7 @@ export function CapabilitiesRoute({
                         <option value="custom">Custom</option>
                       </Select>
                     </div>
-                  </div>
-                  <div className="mt-3 flex gap-2 overflow-x-auto pb-0.5" aria-label="Categories">
-                    {DISCOVERY_CATEGORIES.map((value) => (
-                      <button
-                        key={value}
-                        type="button"
-                        aria-pressed={category === value}
-                        onClick={() => setCategory(value)}
-                        className={cn(
-                          "inline-flex h-8 shrink-0 items-center rounded-md border px-2.5 text-xs font-medium transition-colors",
-                          category === value
-                            ? "border-brand/30 bg-brand/10 text-brand"
-                            : "border-border bg-surface/40 text-fg-muted hover:border-border-strong hover:text-fg",
-                        )}
-                      >
-                        {discoveryCategoryLabel(value)}
-                      </button>
-                    ))}
-                  </div>
+                  </details>
                 </div>
 
                 {catalogView === "loading" ? (
@@ -1431,6 +1530,8 @@ export function CapabilitiesRoute({
                     </div>
                     {visibleCount < discoveryItems.length ? (
                       <LoadMoreSentinel
+                        shown={visibleDiscover.length}
+                        total={discoveryItems.length}
                         onReach={() =>
                           setVisibleCount((count) =>
                             Math.min(count + PAGE_SIZE, discoveryItems.length),
@@ -1455,14 +1556,22 @@ export function CapabilitiesRoute({
                 <MetaChip dot="idle">
                   {connectionsLoaded ? `${activeConnectionCount} active` : "Health unavailable"}
                 </MetaChip>
-                <MetaChip>Workspace shared by default</MetaChip>
-                <MetaChip>Personal access stays subject scoped</MetaChip>
+                <MetaChip>Workspace connections are shared</MetaChip>
+                <MetaChip>Personal connections require delegation</MetaChip>
               </div>
             </section>
 
-            <Suspense fallback={<Skeleton className="h-40 w-full rounded-xl" />}>
-              <GoogleDriveConnectorCard workspaceId={workspaceId} />
-            </Suspense>
+            {otherConnectionRows.length > 0 ? (
+              <CapabilityListSection
+                title="Connected capabilities"
+                description="Connection-backed capabilities, ordered by health. Provider-specific setup stays below."
+                rows={otherConnectionRows}
+                logoUrl={logoUrl}
+                busyId={busyId}
+                onOpen={openItem}
+                onDisable={disableFromStrip}
+              />
+            ) : null}
 
             <section aria-labelledby="slack-connections-heading">
               <div>
@@ -1510,7 +1619,12 @@ export function CapabilitiesRoute({
                     </div>
                   </div>
 
-                  {slackBotConnection && slackBotMetadata ? (
+                  {!connectionsLoaded ? (
+                    <Notice tone="failed" title="Slack bot health is unavailable" className="mt-4">
+                      OpenGeni could not verify the workspace bot connection. Refresh before
+                      installing or changing it.
+                    </Notice>
+                  ) : slackBotConnection && slackBotMetadata ? (
                     <>
                       <div className="mt-4 flex items-start gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
                         <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-brand" />
@@ -1593,17 +1707,20 @@ export function CapabilitiesRoute({
               </div>
             </section>
 
-            {currentRows.some((row) => row.item.connectionRef) ? (
-              <CapabilityListSection
-                title="Other connected capabilities"
-                description="Connection-backed catalog items that are currently available."
-                rows={currentRows.filter((row) => row.item.connectionRef)}
-                logoUrl={logoUrl}
-                busyId={busyId}
-                onOpen={openItem}
-                onDisable={disableFromStrip}
-              />
-            ) : null}
+            <section aria-labelledby="google-drive-connection-heading">
+              <div>
+                <h2 id="google-drive-connection-heading" className="text-sm font-semibold text-fg">
+                  Knowledge sources
+                </h2>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
+                  Provider setup is secondary to connection health and stays compact until you need
+                  its controls.
+                </p>
+              </div>
+              <Suspense fallback={<Skeleton className="mt-3 h-28 w-full rounded-xl" />}>
+                <GoogleDriveConnectorCard workspaceId={workspaceId} compact />
+              </Suspense>
+            </section>
           </TabsContent>
 
           <TabsContent value="custom" className="mt-6 space-y-8">
@@ -1910,11 +2027,11 @@ function CapabilityInventoryRow({
             <span aria-hidden className="text-fg-subtle/50">
               ·
             </span>
-            <span className="truncate">{capabilityKindLabel(item.kind)}</span>
+            <span className="truncate">{scope}</span>
             <span aria-hidden className="hidden text-fg-subtle/50 sm:inline">
               ·
             </span>
-            <span className="hidden truncate sm:inline">{scope}</span>
+            <span className="hidden truncate sm:inline">{capabilityKindLabel(item.kind)}</span>
           </div>
         </div>
       </button>
@@ -1929,7 +2046,7 @@ function CapabilityInventoryRow({
           size="sm"
           disabled={busy}
           onClick={onDisable}
-          className="shrink-0"
+          className="min-h-11 shrink-0 sm:min-h-8"
         >
           {busy ? <Loader2Icon className="animate-spin" /> : "Disable"}
         </Button>
@@ -1938,7 +2055,7 @@ function CapabilityInventoryRow({
           type="button"
           onClick={onOpen}
           aria-label={`Open ${item.name} details`}
-          className="grid size-10 shrink-0 place-items-center rounded-md text-fg-subtle opacity-70 transition-colors hover:bg-bg hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+          className="grid size-11 shrink-0 place-items-center rounded-md text-fg-subtle opacity-70 transition-colors motion-reduce:transition-none hover:bg-bg hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand sm:size-10 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
         >
           <ChevronRightIcon className="size-4" />
         </button>
@@ -1989,7 +2106,9 @@ function capabilityAvailabilityLabel(
   item: CapabilityCatalogItem,
   health: ConnectionHealth,
 ): string {
-  if (health.state === "connected") return "Connected";
+  if (health.state === "connected") {
+    return health.connection.subjectId === null ? "Connected" : "Delegation required";
+  }
   if (item.source === "built_in") return "Built in";
   if (item.source === "configured") return "Configured";
   if (item.source === "library") return "Selected for workspace";
@@ -2011,6 +2130,9 @@ function capabilityScopeLabel(item: CapabilityCatalogItem, health: ConnectionHea
       : "Workspace";
   }
   if (item.source === "built_in" || item.source === "configured") return "Deployment";
+  if (!item.enabled && (item.authKind === "oauth2" || item.authKind === "api_key")) {
+    return "Choose scope";
+  }
   return "Workspace";
 }
 
@@ -2042,6 +2164,14 @@ function matchesDiscoveryCategory(
 }
 
 function matchesDiscoverySource(item: CapabilityCatalogItem, source: DiscoverySource): boolean {
+  if (source === "curated") {
+    return (
+      item.enabled ||
+      item.source === "built_in" ||
+      item.source === "configured" ||
+      item.source === "library"
+    );
+  }
   if (source === "all") return true;
   if (source === "opengeni") return item.source === "built_in" || item.source === "configured";
   if (source === "verified") return item.source === "library" || item.tier === "verified";
@@ -2151,7 +2281,15 @@ function RegistryFallback({
 // ref — the parent passes a fresh inline onReach every render, and rebuilding
 // the observer each time would re-fire the intersection immediately while the
 // sentinel is still in view, defeating the windowing (a runaway page load).
-function LoadMoreSentinel({ onReach }: { onReach: () => void }) {
+function LoadMoreSentinel({
+  shown,
+  total,
+  onReach,
+}: {
+  shown: number;
+  total: number;
+  onReach: () => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const onReachRef = useRef(onReach);
   useEffect(() => {
@@ -2169,5 +2307,20 @@ function LoadMoreSentinel({ onReach }: { onReach: () => void }) {
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  return <div ref={ref} className="h-1" aria-hidden />;
+  return (
+    <div ref={ref} className="flex flex-col items-center gap-2 py-2">
+      <p className="text-2xs text-fg-subtle" role="status" aria-live="polite">
+        Showing {shown.toLocaleString()} of {total.toLocaleString()}
+      </p>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="min-h-11 sm:min-h-8"
+        onClick={onReach}
+      >
+        Show more
+      </Button>
+    </div>
+  );
 }

@@ -36,6 +36,7 @@ export function PacksSection(props: {
   onEnable: (pack: CapabilityPack, variableSetId: string | undefined) => void;
   onDisable: (pack: CapabilityPack) => void;
   onUnregister: (pack: CapabilityPack) => Promise<boolean>;
+  builtInPackIds?: ReadonlySet<string>;
 }) {
   const { packs } = props;
   const [registerOpen, setRegisterOpen] = useState(false);
@@ -148,6 +149,7 @@ export function PacksSection(props: {
               onEnable={(variableSetId) => props.onEnable(pack, variableSetId)}
               onDisable={() => props.onDisable(pack)}
               onUnregister={() => props.onUnregister(pack)}
+              canUnregister={props.builtInPackIds?.has(pack.id) !== true}
             />
           ))}
         </div>
@@ -164,6 +166,7 @@ function PackCard(props: {
   onEnable: (variableSetId: string | undefined) => void;
   onDisable: () => void;
   onUnregister: () => Promise<boolean>;
+  canUnregister: boolean;
 }) {
   const { pack, installation } = props;
   const enabled = installation?.status === "active";
@@ -254,18 +257,20 @@ function PackCard(props: {
                 Enable
               </Button>
             )}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`Unregister ${pack.name}`}
-              className="text-fg-subtle hover:text-status-failed"
-              disabled={props.busy}
-              title="Unregister this pack (built-ins can't be removed)"
-              onClick={() => setConfirmUnregister(true)}
-            >
-              <Trash2Icon className="size-3.5" />
-            </Button>
+            {props.canUnregister ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={`Unregister ${pack.name}`}
+                className="text-fg-subtle hover:text-status-failed"
+                disabled={props.busy}
+                title="Unregister this pack"
+                onClick={() => setConfirmUnregister(true)}
+              >
+                <Trash2Icon className="size-3.5" />
+              </Button>
+            ) : null}
           </div>
           {pack.variableSet ? (
             <Select
@@ -400,18 +405,20 @@ function PackCard(props: {
         </div>
       ) : null}
 
-      <ConfirmDialog
-        open={confirmUnregister}
-        onOpenChange={setConfirmUnregister}
-        title={`Unregister ${pack.name}?`}
-        description={
-          enabled
-            ? "This pack is enabled. Unregistering removes it from the workspace and disables it for every session."
-            : "This removes the pack from the workspace. You can register its manifest again later."
-        }
-        confirmLabel="Unregister pack"
-        onConfirm={props.onUnregister}
-      />
+      {props.canUnregister ? (
+        <ConfirmDialog
+          open={confirmUnregister}
+          onOpenChange={setConfirmUnregister}
+          title={`Unregister ${pack.name}?`}
+          description={
+            enabled
+              ? "This pack is enabled. Unregistering removes it from the workspace and disables it for every session."
+              : "This removes the pack from the workspace. You can register its manifest again later."
+          }
+          confirmLabel="Unregister pack"
+          onConfirm={props.onUnregister}
+        />
+      ) : null}
     </article>
   );
 }

@@ -360,7 +360,10 @@ async function openBrowseSheet(page: Page) {
 }
 
 async function openMobbinSheet(page: Page, enabled: boolean): Promise<void> {
-  if (!enabled) await page.getByRole("tab", { name: /Discover/ }).click();
+  if (!enabled) {
+    await page.getByRole("tab", { name: /Discover/ }).click();
+    await page.getByRole("button", { name: "Browse community registry" }).click();
+  }
   const opener = enabled
     ? page.locator(`[data-capability-focus-target][data-capability-id="${mobbinCapabilityId}"]`)
     : page.getByRole("button").filter({ hasText: "Mobbin" }).first();

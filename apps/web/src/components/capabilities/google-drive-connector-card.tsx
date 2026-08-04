@@ -1,5 +1,5 @@
-import { FolderOpenIcon, HardDriveIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { ChevronDownIcon, FolderOpenIcon, HardDriveIcon, Loader2Icon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice, type NoticeTone } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
@@ -45,7 +46,13 @@ type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
   readPolicy: GoogleDriveReadPolicy;
 };
 
-export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string }) {
+export function GoogleDriveConnectorCard({
+  workspaceId,
+  compact = false,
+}: {
+  workspaceId: string;
+  compact?: boolean;
+}) {
   const context = useAppContext();
   const client = context.client;
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
@@ -64,10 +71,12 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   );
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [pendingDisconnect, setPendingDisconnect] = useState<GoogleDriveDisconnectAttempt | null>(
     null,
   );
@@ -81,6 +90,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [folderIdDraft, setFolderIdDraft] = useState("");
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
+  const browseGenerationRef = useRef(0);
 
   const connection = useMemo(() => preferredGoogleDriveConnection(connections), [connections]);
   const accountState = googleDriveAccountState(connection, !loading);
@@ -95,13 +105,16 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const refreshConnections = useCallback(async () => {
     if (!canRead) {
       setConnections([]);
+      setLoadFailed(false);
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
       setConnections(await client.listConnections(workspaceId));
+      setLoadFailed(false);
     } catch (error) {
+      setLoadFailed(true);
       toast.error("Google Drive connection could not be loaded", {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -211,6 +224,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     pageToken?: string,
   ): Promise<GoogleDriveBrowseItem | null> {
     if (!connection) return null;
+    const generation = ++browseGenerationRef.current;
     setBrowseBusy(true);
     try {
       const query = new URLSearchParams({
@@ -220,6 +234,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       const response = await apiRequest<GoogleDriveBrowseResponse>(
         `/v1/workspaces/${workspaceId}/connections/google-drive/${connection.id}/browse?${query}`,
       );
+      if (generation !== browseGenerationRef.current) return null;
       setItems((current) => (mode === "append" ? [...current, ...response.items] : response.items));
       setNextPageToken(response.nextPageToken);
       if (mode === "replace") {
@@ -241,13 +256,14 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       );
       return response.current;
     } catch (error) {
+      if (generation !== browseGenerationRef.current) return null;
       toast.error("Google Drive folder could not be opened", {
         description: error instanceof Error ? error.message : String(error),
       });
       await refreshConnections();
       return null;
     } finally {
-      setBrowseBusy(false);
+      if (generation === browseGenerationRef.current) setBrowseBusy(false);
     }
   }
 
@@ -368,7 +384,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
 
   return (
     <>
-      <section className="mt-5 rounded-lg border border-border bg-surface/35 p-4">
+      <section className="mt-3 rounded-lg border border-border bg-surface/35 p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 gap-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand">
@@ -377,7 +393,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
               <p className="mt-0.5 text-xs leading-5 text-fg-muted">
-                Connect folders and Shared Drives for recurring knowledge import.
+                Personal Google identity for folder and Shared Drive knowledge imports.
               </p>
             </div>
           </div>
@@ -386,6 +402,15 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <Button type="button" variant="secondary" size="sm" disabled>
                 <Loader2Icon className="size-3.5 animate-spin" />
                 Loading
+              </Button>
+            ) : loadFailed ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => void refreshConnections()}
+              >
+                Retry
               </Button>
             ) : connection && accountState.state !== "disconnected" ? (
               <>
@@ -404,6 +429,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                       type="button"
                       variant="secondary"
                       size="sm"
+                      className={compact ? "hidden" : undefined}
                       disabled={busy || !canWrite}
                       onClick={() => void transitionLifecycle("pause")}
                     >
@@ -425,6 +451,12 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   type="button"
                   variant="secondary"
                   size="sm"
+                  className={
+                    compact &&
+                    (accountState.state === "connected" || accountState.state === "paused")
+                      ? "hidden"
+                      : undefined
+                  }
                   disabled={busy || !canWrite}
                   onClick={() => void connect(true)}
                 >
@@ -438,11 +470,26 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   type="button"
                   variant="ghost"
                   size="sm"
+                  className={compact ? "hidden" : undefined}
                   disabled={busy || !canWrite}
                   onClick={() => setDisconnectOpen(true)}
                 >
                   Disconnect
                 </Button>
+                {compact ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-expanded={detailsOpen}
+                    onClick={() => setDetailsOpen((open) => !open)}
+                  >
+                    <ChevronDownIcon
+                      className={`size-3.5 transition-transform motion-reduce:transition-none ${detailsOpen ? "rotate-180" : ""}`}
+                    />
+                    More
+                  </Button>
+                ) : null}
               </>
             ) : (
               <Button
@@ -462,7 +509,77 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
           </div>
         </div>
 
-        {connection && metadata ? (
+        {loadFailed ? (
+          <Notice tone="failed" title="Google Drive health is unavailable" className="mt-3">
+            OpenGeni could not verify whether this personal connection is ready. Retry before
+            connecting or changing folders.
+          </Notice>
+        ) : null}
+
+        {compact && !detailsOpen && !loadFailed ? (
+          <div className="mt-3 flex flex-wrap gap-2 border-t border-border/70 pt-3">
+            <MetaChip
+              dot={
+                accountState.state === "connected"
+                  ? "idle"
+                  : accountState.state === "app_removed"
+                    ? "failed"
+                    : "waiting"
+              }
+            >
+              {stateNotice.title}
+            </MetaChip>
+            <MetaChip>Personal · only you</MetaChip>
+            {savedSources.length > 0 ? (
+              <MetaChip>
+                {savedSources.length} connected location{savedSources.length === 1 ? "" : "s"}
+              </MetaChip>
+            ) : null}
+            <MetaChip>
+              {savedDefaults
+                ? `Knowledge destination · ${scopeLabel(savedDefaults.authorityKind)}`
+                : "Knowledge destination not configured"}
+            </MetaChip>
+          </div>
+        ) : null}
+
+        {compact && detailsOpen && connection && accountState.state !== "disconnected" ? (
+          <div className="mt-3 flex flex-wrap gap-2 border-t border-border/70 pt-3">
+            {accountState.state === "connected" ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy || !canWrite}
+                onClick={() => void transitionLifecycle("pause")}
+              >
+                Pause
+              </Button>
+            ) : null}
+            {accountState.state === "connected" || accountState.state === "paused" ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy || !canWrite}
+                onClick={() => void connect(true)}
+              >
+                Reconnect
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || !canWrite}
+              onClick={() => setDisconnectOpen(true)}
+            >
+              Disconnect
+            </Button>
+          </div>
+        ) : null}
+
+        {(!compact || detailsOpen) && connection && metadata ? (
           <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-3">
             <div>
               <span className="text-fg-subtle">Account</span>
@@ -493,9 +610,11 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
           </div>
         ) : null}
 
-        <Notice tone={stateNotice.tone} title={stateNotice.title} className="mt-3">
-          {stateNotice.description}
-        </Notice>
+        {(!compact || detailsOpen) && !loadFailed ? (
+          <Notice tone={stateNotice.tone} title={stateNotice.title} className="mt-3">
+            {stateNotice.description}
+          </Notice>
+        ) : null}
       </section>
 
       <ConfirmDialog

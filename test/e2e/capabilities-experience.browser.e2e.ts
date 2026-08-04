@@ -19,8 +19,14 @@ type JsonRecord = Record<string, unknown>;
 type ExperienceState = {
   items: JsonRecord[];
   connections: JsonRecord[];
+  packs?: JsonRecord[];
   catalogDelayMs?: number;
   catalogError?: boolean;
+  catalogResponses?: Array<{
+    items: JsonRecord[];
+    delayMs?: number;
+    error?: boolean;
+  }>;
 };
 
 describe("capabilities experience browser e2e", () => {
@@ -77,7 +83,9 @@ describe("capabilities experience browser e2e", () => {
         waitUntil: "networkidle",
       });
 
-      await expectVisible(page.getByRole("heading", { name: "What agents can use now" }));
+      await expectVisible(
+        page.getByRole("heading", { name: "What this workspace makes available" }),
+      );
       await expectText(
         page.getByRole("region", { name: "Capabilities", exact: true }),
         "Needs attention",
@@ -99,18 +107,32 @@ describe("capabilities experience browser e2e", () => {
       );
 
       const discoverPanel = page.getByRole("tabpanel", { name: "Discover" });
-      await expectText(discoverPanel, "636 matching capabilities · 1 pack managed separately");
+      await expectText(discoverPanel, "18 matching capabilities · 1 pack managed separately");
+      expect(await discoverPanel.getByText("Specialist MCP 0618", { exact: true }).count()).toBe(0);
       expect(await discoverPanel.locator("[data-capability-id]").count()).toBeLessThanOrEqual(48);
       await assertAccessibleAndBounded(page);
       await capture(page, "discover-desktop-1440x900.png");
 
+      await discoverPanel.getByRole("button", { name: "Browse community registry" }).click();
+      await expectText(discoverPanel, "622 matching capabilities · 1 pack managed separately");
       const search = page.getByRole("textbox", { name: "Search capabilities" });
       await search.fill("Specialist MCP 0618");
       await expectVisible(discoverPanel.getByText("Specialist MCP 0618", { exact: true }));
       expect(await discoverPanel.locator("[data-capability-id]").count()).toBe(1);
       await search.fill("");
+      await discoverPanel.getByText("Format and source filters", { exact: true }).click();
+      await page.getByRole("combobox", { name: "Capability source" }).selectOption("all");
       await page.getByRole("combobox", { name: "Capability format" }).selectOption("mcp");
       await expectText(discoverPanel, "623 matching capabilities");
+
+      await discoverPanel.getByRole("button", { name: /Run a repeatable workflow/ }).click();
+      await expectVisible(discoverPanel.getByRole("heading", { name: "Packs", exact: true }));
+      await expectText(discoverPanel, "Marketing social daily analysis");
+      expect(
+        await discoverPanel
+          .getByRole("button", { name: "Unregister Marketing social daily analysis" })
+          .count(),
+      ).toBe(0);
 
       await page.getByRole("tab", { name: "Connections" }).click();
       const connectionsPanel = page.getByRole("tabpanel", { name: "Connections" });
@@ -119,6 +141,11 @@ describe("capabilities experience browser e2e", () => {
       await expectText(connectionsPanel, "Personal · only you");
       await expectText(connectionsPanel, "OpenGeni workspace bot");
       await expectVisible(connectionsPanel.getByText("Google Drive", { exact: true }).first());
+      await expectVisible(connectionsPanel.getByRole("button", { name: "More" }));
+      const connectedSection = connectionsPanel.locator(
+        'section[aria-labelledby="capability-section-connected-capabilities"]',
+      );
+      expect(await connectedSection.getByText("Slack", { exact: true }).count()).toBe(0);
       await assertAccessibleAndBounded(page);
       await capture(page, "connections-desktop-1440x900.png");
 
@@ -150,7 +177,16 @@ describe("capabilities experience browser e2e", () => {
       expect(
         await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches),
       ).toBe(true);
-      await expectVisible(page.getByRole("heading", { name: "What agents can use now" }));
+      await expectVisible(
+        page.getByRole("heading", { name: "What this workspace makes available" }),
+      );
+      const tabs = page.getByRole("tab");
+      for (let index = 0; index < (await tabs.count()); index += 1) {
+        const box = await tabs.nth(index).boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.height).toBeGreaterThanOrEqual(44);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+      }
       await assertAccessibleAndBounded(page);
       await capture(page, "current-mobile-390x844.png");
 
@@ -196,10 +232,12 @@ describe("capabilities experience browser e2e", () => {
       await loadingPage.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "domcontentloaded",
       });
-      await expectVisible(loadingPage.getByRole("heading", { name: "What agents can use now" }));
+      await expectVisible(
+        loadingPage.getByRole("heading", { name: "What this workspace makes available" }),
+      );
       await expectVisible(loadingPage.locator(".animate-pulse").first());
       await capture(loadingPage, "loading-desktop-1440x900.png");
-      await expectVisible(loadingPage.getByText("Available now"));
+      await expectVisible(loadingPage.getByText("Available to select"));
     } finally {
       await loadingContext.close();
     }
@@ -224,6 +262,35 @@ describe("capabilities experience browser e2e", () => {
       await capture(errorPage, "error-desktop-1440x900.png");
     } finally {
       await errorContext.close();
+    }
+  }, 90_000);
+
+  test("overlapping refreshes keep the newest catalog response", async () => {
+    const initial = connectedExperienceState();
+    const staleItems = renameCapability(initial.items, "mcp:linear", "Linear · stale response");
+    const latestItems = renameCapability(initial.items, "mcp:linear", "Linear · latest response");
+    const state: ExperienceState = { ...initial };
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installExperienceApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      state.catalogResponses = [
+        { items: staleItems, delayMs: 700 },
+        { items: latestItems, delayMs: 40 },
+      ];
+      const refresh = page.getByRole("button", { name: "Refresh" });
+      await refresh.click();
+      await refresh.click();
+      await expectVisible(page.getByText("Linear · latest response", { exact: true }));
+      await Bun.sleep(800);
+      expect(await page.getByText("Linear · stale response", { exact: true }).count()).toBe(0);
+      await assertAccessibleAndBounded(page);
+    } finally {
+      await context.close();
     }
   }, 90_000);
 });
@@ -289,17 +356,19 @@ async function installExperienceApi(page: Page, state: ExperienceState): Promise
     }
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
-      if (state.catalogDelayMs) await Bun.sleep(state.catalogDelayMs);
-      if (state.catalogError)
+      const response = state.catalogResponses?.shift();
+      const delayMs = response?.delayMs ?? state.catalogDelayMs;
+      if (delayMs) await Bun.sleep(delayMs);
+      if (response?.error ?? state.catalogError)
         return json({ message: "Catalog unavailable for browser fixture" }, 503);
-      return json({ items: state.items, installations: [] });
+      return json({ items: response?.items ?? state.items, installations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: state.connections });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
+      return json({ packs: state.packs ?? [], installations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
@@ -316,7 +385,15 @@ async function installExperienceApi(page: Page, state: ExperienceState): Promise
 }
 
 function connectedExperienceState(): ExperienceState {
-  return { items: experienceCatalog(), connections: experienceConnections() };
+  return {
+    items: experienceCatalog(),
+    connections: experienceConnections(),
+    packs: [experiencePack()],
+  };
+}
+
+function renameCapability(items: JsonRecord[], id: string, name: string): JsonRecord[] {
+  return items.map((item) => (item.id === id ? { ...item, name } : item));
 }
 
 function experienceCatalog(): JsonRecord[] {
@@ -449,18 +526,39 @@ function experienceCatalog(): JsonRecord[] {
 
   items.push(
     baseCapability({
-      id: "pack:infrastructure-review",
+      id: "pack:marketing-social-daily-analysis",
       kind: "pack",
-      source: "library",
-      name: "Infrastructure review",
-      description: "Checkov and Terraform review guidance enabled as one intentional collection.",
-      category: "infrastructure",
-      tags: ["pack", "terraform", "security"],
+      source: "built_in",
+      name: "Marketing social daily analysis",
+      description: "Connect social accounts and schedule recurring media analysis.",
+      category: "social-media",
+      tags: ["pack", "marketing", "social-media"],
       enabled: false,
+      metadata: { packId: "marketing-social-daily-analysis", version: "0.1.0" },
     }),
   );
 
   return items;
+}
+
+function experiencePack(): JsonRecord {
+  return {
+    id: "marketing-social-daily-analysis",
+    name: "Marketing social daily analysis",
+    description: "Connect social accounts and schedule recurring media analysis.",
+    role: "marketing",
+    category: "social-media",
+    version: "0.1.0",
+    skills: [],
+    tools: [
+      { kind: "mcp", id: "opengeni" },
+      { kind: "mcp", id: "docs" },
+    ],
+    connectors: [],
+    knowledge: [],
+    scheduledTaskTemplates: [],
+    metadata: { skill: "social-media-marketing" },
+  };
 }
 
 function mcpCapability(input: {

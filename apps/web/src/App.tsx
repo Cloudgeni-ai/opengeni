@@ -438,6 +438,7 @@ function Capabilities() {
   const { section, slack_link: slackLinkToken } = workspaceCapabilitiesRoute.useSearch();
   return (
     <LazyCapabilitiesRoute
+      key={workspaceId}
       workspaceId={workspaceId}
       initialSection={section}
       slackLinkToken={slackLinkToken}

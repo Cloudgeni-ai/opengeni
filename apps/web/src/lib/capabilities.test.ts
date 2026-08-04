@@ -143,6 +143,15 @@ describe("filterCapabilityCatalogItems", () => {
     );
     expect(filterCapabilityCatalogItems(items, "api", "summar")).toHaveLength(0);
   });
+
+  test("query ignores implementation metadata that is not rendered to the user", () => {
+    const hidden = item({
+      id: "hidden",
+      name: "Visible name",
+      metadata: { internalAlias: "secret-search-hit" },
+    });
+    expect(filterCapabilityCatalogItems([hidden], "all", "secret-search-hit")).toEqual([]);
+  });
 });
 
 describe("human labels", () => {

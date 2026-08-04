@@ -1,4 +1,5 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
@@ -150,25 +151,39 @@ export function LoadErrorState({
   error?: Error | null;
   onRetry: () => void;
 }) {
+  const reference = error instanceof OpenGeniApiError ? error.correlationId : undefined;
+  const message = error?.message
+    ? reference
+      ? error.message.replace(new RegExp(`\\s*Reference:\\s*${escapeRegExp(reference)}\\.?$`), "")
+      : error.message
+    : null;
   return (
     <div className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-status-failed">
       <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>
-        {error?.message ? (
-          <div className="mt-0.5 break-words text-xs leading-4 text-status-failed">
-            {error.message}
-          </div>
+        {message ? (
+          <div className="mt-0.5 break-words text-xs leading-4 text-status-failed">{message}</div>
+        ) : null}
+        {reference ? (
+          <details className="group mt-2 text-xs text-status-failed/90">
+            <summary className="w-fit cursor-pointer font-medium">Technical details</summary>
+            <div className="mt-1 break-all font-mono text-2xs">Reference {reference}</div>
+          </details>
         ) : null}
       </div>
       <button
         type="button"
         onClick={onRetry}
-        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/40 px-2 text-xs font-medium text-status-failed transition-colors hover:bg-status-failed/20"
+        className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/40 px-3 text-xs font-medium text-status-failed transition-colors motion-reduce:transition-none hover:bg-status-failed/20 sm:min-h-8"
       >
         <RefreshCwIcon className="size-3" />
         Retry
       </button>
     </div>
   );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

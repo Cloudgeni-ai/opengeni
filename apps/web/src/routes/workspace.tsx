@@ -45,7 +45,9 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     setSelectedRepoRefs({});
     void refreshGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
-      if (!isAbortError(error)) {
+      // Capabilities owns an inline, retryable catalog failure state. Avoid a
+      // second global toast for the same request while that route is visible.
+      if (!isAbortError(error) && !isCapabilitiesPath(window.location.pathname)) {
         toast.error("Failed to load workspace MCP tools", { description: String(error) });
       }
     });
@@ -102,4 +104,8 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
       </RailProvider>
     </OpenGeniProvider>
   );
+}
+
+function isCapabilitiesPath(pathname: string): boolean {
+  return /^\/workspaces\/[^/]+\/capabilities\/?$/.test(pathname);
 }

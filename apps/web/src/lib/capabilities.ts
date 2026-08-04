@@ -139,7 +139,6 @@ export function filterCapabilityCatalogItems(
       item.homepageUrl,
       item.installUrl,
       ...item.tags,
-      JSON.stringify(item.metadata),
     ]
       .filter(Boolean)
       .join(" ")
