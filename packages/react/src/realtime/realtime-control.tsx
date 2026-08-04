@@ -713,11 +713,13 @@ export function RealtimeVoiceControl(props: {
           onClick={() => void runMainAction().catch(() => undefined)}
           className={cn(
             // Match transcription mic: ghost icon when idle; filled only when live.
+            // Public contract: coarse pointers keep a 44px target; split menu uses
+            // left-only rounding at `sm+` where the chevron attaches.
             "relative inline-flex size-8 items-center justify-center outline-none",
             "rounded-og-md transition-[background-color,border-color,color,box-shadow] duration-200 ease-og-out",
             "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
-            "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-9",
-            showAttachedModelMenu && "sm:rounded-r-none",
+            "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-11",
+            showAttachedModelMenu && "sm:rounded-l-og-md sm:rounded-r-none",
             voiceButtonTone(status.phase),
           )}
         >
@@ -741,7 +743,7 @@ export function RealtimeVoiceControl(props: {
                   "hidden sm:inline-flex h-8 w-5 items-center justify-center rounded-r-og-md outline-none",
                   "transition-[background-color,border-color,color] duration-200 ease-og-out",
                   "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
-                  "pointer-coarse:h-9 pointer-coarse:w-6",
+                  "pointer-coarse:h-11 pointer-coarse:w-7",
                   voiceChevronTone(status.phase),
                 )}
               >
@@ -923,7 +925,7 @@ function RealtimeMuteButton(props: {
       className={cn(
         "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md outline-none",
         "transition-[background-color,border-color,color] duration-150 ease-og-out",
-        "focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:size-9",
+        "focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:size-11",
         props.muted
           ? "border border-og-accent/35 bg-og-accent-soft text-og-accent"
           : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg",

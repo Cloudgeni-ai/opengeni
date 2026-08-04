@@ -7,7 +7,7 @@ import {
   PlugIcon,
   PlusIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { cloneElement, isValidElement, useState, type ReactElement, type ReactNode } from "react";
 
 import {
   SessionToolsMenuBody,
@@ -42,13 +42,15 @@ export function ComposerMobilePlus(props: {
   repositories?: {
     selectedCount: number;
     disabled?: boolean;
-    renderBody: (leading: ReactNode) => ReactNode;
+    /** Panel element; receives `leading` (back control) via clone. */
+    panel: ReactElement<{ leading?: ReactNode }>;
   };
   /** When set, Voice model appears under + (bar keeps a start-only control). */
   voiceModel?: {
     selectedLabel: string;
     disabled?: boolean;
-    renderBody: (leading: ReactNode) => ReactNode;
+    /** Panel element; receives `leading` (back control) via clone. */
+    panel: ReactElement<{ leading?: ReactNode }>;
   };
 }) {
   const [open, setOpen] = useState(false);
@@ -188,11 +190,21 @@ export function ComposerMobilePlus(props: {
             leading={backButton}
           />
         ) : panel === "repos" && repositories ? (
-          repositories.renderBody(backButton)
+          withLeading(repositories.panel, backButton)
         ) : panel === "voice" && voiceModel ? (
-          voiceModel.renderBody(backButton)
+          withLeading(voiceModel.panel, backButton)
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function withLeading(
+  panel: ReactElement<{ leading?: ReactNode }>,
+  leading: ReactNode,
+): ReactElement {
+  if (!isValidElement(panel)) {
+    throw new Error("ComposerMobilePlus panel must be a valid React element");
+  }
+  return cloneElement(panel, { leading });
 }

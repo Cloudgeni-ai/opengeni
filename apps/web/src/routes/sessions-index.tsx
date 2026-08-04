@@ -410,11 +410,10 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                           context.selectedRepoIds.size +
                           context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
                         disabled: busy || newSessionDraft.loading,
-                        renderBody: (leading) => (
+                        panel: (
                           <WorkspaceRepositoryMenuBody
                             workspaceId={workspaceId}
                             disabled={busy || newSessionDraft.loading}
-                            leading={leading}
                           />
                         ),
                       },
@@ -423,12 +422,11 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                 voiceModel={{
                   selectedLabel: voiceSelection.selectedModel.label,
                   disabled: busy || newSessionDraft.loading,
-                  renderBody: (leading) => (
+                  panel: (
                     <RealtimeVoiceModelPanel
                       models={voiceSelection.models}
                       selectedModel={voiceSelection.selectedModel}
                       disabled={busy || newSessionDraft.loading}
-                      leading={leading}
                       onSelect={voiceSelection.selectModel}
                     />
                   ),
