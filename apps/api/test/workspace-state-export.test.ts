@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
-import { WorkspaceStateExportResponse, WorkspaceStateResponse } from "@opengeni/contracts";
+import {
+  WorkspaceStateExportResponse,
+  WorkspaceStateResponse,
+} from "@opengeni/contracts";
 
 import {
   canonicalWorkspaceStateJson,
