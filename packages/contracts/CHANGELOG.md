@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.36.0
+
+### Minor Changes
+
+- 00f7d3b: Add durable, tenant-isolated onboarding proposals that atomically create inactive instruction-policy drafts with typed replay, stale-baseline, conflict, and audit contracts, plus a bounded Workspace State admin composer.
+
 ## 0.35.0
 
 ### Minor Changes
