@@ -354,10 +354,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         payload: await c.req.json(),
         canManageOrganizationDestination:
           authorization.accountGrant?.permissions.includes("account:admin") === true,
-        canManageWorkspaceDestination: hasPermission(
-          grant.permissions,
-          "workspace:admin",
-        ),
+        canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
         canManagePersonalDestination:
           authorization.contextIntegrity &&
           authorization.authenticatedSubjectId === grant.subjectId,

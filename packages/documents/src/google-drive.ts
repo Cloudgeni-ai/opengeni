@@ -4,9 +4,7 @@ import {
   resolveConnectorDocumentDestination,
   type ConnectorDocumentDestination,
 } from "@opengeni/contracts/connector-destinations";
-import type {
-  GoogleDriveSelectedSource,
-} from "@opengeni/contracts/google-drive";
+import type { GoogleDriveSelectedSource } from "@opengeni/contracts/google-drive";
 
 export const GOOGLE_DRIVE_PROVIDER_KEY = "google-drive" as const;
 export const GOOGLE_DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder" as const;

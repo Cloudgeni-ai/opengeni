@@ -63,13 +63,15 @@ function item(
 
 describe("Google Drive scoped source identity", () => {
   test("maps saved connector destinations to the three fixed knowledge authorities", () => {
-    expect(googleDriveKnowledgeScope({
-      authorityKind: "organization",
-      authorityAccountId: workspaceId,
-      authorityWorkspaceId: null,
-      authoritySubjectId: null,
-      collectionId: null,
-    })).toEqual({
+    expect(
+      googleDriveKnowledgeScope({
+        authorityKind: "organization",
+        authorityAccountId: workspaceId,
+        authorityWorkspaceId: null,
+        authoritySubjectId: null,
+        collectionId: null,
+      }),
+    ).toEqual({
       kind: "organization",
       workspaceId: null,
       subjectId: null,
@@ -79,11 +81,13 @@ describe("Google Drive scoped source identity", () => {
       workspaceId,
       subjectId: null,
     });
-    expect(googleDriveKnowledgeScope({
-      ...source.destination!,
-      authorityKind: "personal",
-      authoritySubjectId: subjectId,
-    })).toEqual({
+    expect(
+      googleDriveKnowledgeScope({
+        ...source.destination!,
+        authorityKind: "personal",
+        authoritySubjectId: subjectId,
+      }),
+    ).toEqual({
       kind: "personal",
       workspaceId,
       subjectId,

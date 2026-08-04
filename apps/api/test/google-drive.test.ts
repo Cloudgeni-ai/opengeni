@@ -527,22 +527,21 @@ describe("Google Drive local source preview", () => {
       });
 
     const writer = await bearer(workspace, "subject-a", ["connections:write"]);
-    expect(
-      (await save(writer, { destination: { authorityKind: "workspace", collectionId: null } }))
-        .status,
-    ).toBe(403);
-    expect(
-      (await save(writer, { destination: { authorityKind: "organization", collectionId: null } }))
-        .status,
-    ).toBe(403);
+    const deniedWorkspace = await save(writer, {
+      destination: { authorityKind: "workspace", collectionId: null },
+    });
+    expect(deniedWorkspace.status).toBe(403);
+    const deniedOrganization = await save(writer, {
+      destination: { authorityKind: "organization", collectionId: null },
+    });
+    expect(deniedOrganization.status).toBe(403);
 
     const workspaceAdmin = await bearer(workspace, "subject-a", [
       "connections:write",
       "workspace:admin",
     ]);
-    expect(
-      (await save(workspaceAdmin, { targetScope: "organization" })).status,
-    ).toBe(200);
+    const legacySave = await save(workspaceAdmin, { targetScope: "organization" });
+    expect(legacySave.status).toBe(200);
     expect(
       (
         await getConnectionMetadata(
@@ -560,13 +559,10 @@ describe("Google Drive local source preview", () => {
       collectionId: null,
     });
 
-    expect(
-      (
-        await save(writer, {
-          destination: { authorityKind: "personal", collectionId: null },
-        })
-      ).status,
-    ).toBe(200);
+    const personalSave = await save(writer, {
+      destination: { authorityKind: "personal", collectionId: null },
+    });
+    expect(personalSave.status).toBe(200);
     expect(
       (
         await getConnectionMetadata(
@@ -586,13 +582,10 @@ describe("Google Drive local source preview", () => {
       "connections:write",
       "account:admin",
     ]);
-    expect(
-      (
-        await save(accountAdmin, {
-          destination: { authorityKind: "organization", collectionId: null },
-        })
-      ).status,
-    ).toBe(200);
+    const organizationSave = await save(accountAdmin, {
+      destination: { authorityKind: "organization", collectionId: null },
+    });
+    expect(organizationSave.status).toBe(200);
     expect(
       (
         await getConnectionMetadata(

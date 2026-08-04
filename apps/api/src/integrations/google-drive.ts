@@ -1,6 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
+  bindConnectorDocumentDestination,
+  type ConnectorDocumentDestinationSelection,
+} from "@opengeni/contracts/connector-destinations";
+import {
   GOOGLE_DRIVE_CREDENTIAL_LABEL,
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
@@ -17,10 +21,6 @@ import {
   type GoogleDriveLifecycleActionRequest,
   type GoogleDriveOAuthStartRequest,
 } from "@opengeni/contracts/google-drive";
-import {
-  bindConnectorDocumentDestination,
-  type ConnectorDocumentDestinationSelection,
-} from "@opengeni/contracts/connector-destinations";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {

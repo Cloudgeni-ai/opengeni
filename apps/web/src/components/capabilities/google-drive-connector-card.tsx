@@ -260,9 +260,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     setFolderIdDraft("");
     const existingSource = configuredGoogleDriveSources(metadata)[0];
     setAuthorityKind(
-      metadata?.documentDestination?.authorityKind ??
-        existingSource?.authorityKind ??
-        "workspace",
+      metadata?.documentDestination?.authorityKind ?? existingSource?.authorityKind ?? "workspace",
     );
     setSyncCadence(existingSource?.syncCadence ?? "hourly");
     setReadPolicy(existingSource?.readPolicy ?? "allow");

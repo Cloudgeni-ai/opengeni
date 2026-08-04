@@ -17,24 +17,27 @@ describe("connector document destinations", () => {
     ["organization", null, null],
     ["workspace", workspaceId, null],
     ["personal", workspaceId, subjectId],
-  ] as const)("binds immutable %s authority", (authorityKind, authorityWorkspaceId, authoritySubjectId) => {
-    const destination = bindConnectorDocumentDestination(
-      { authorityKind, collectionId: null },
-      { accountId, workspaceId, initiatingSubjectId: subjectId },
-    );
-    expect(destination).toEqual({
-      authorityKind,
-      authorityAccountId: accountId,
-      authorityWorkspaceId,
-      authoritySubjectId,
-      collectionId: null,
-    });
-    expect(connectorDestinationDocumentAuthority(destination)).toEqual({
-      authorityKind,
-      authorityWorkspaceId,
-      authoritySubjectId,
-    });
-  });
+  ] as const)(
+    "binds immutable %s authority",
+    (authorityKind, authorityWorkspaceId, authoritySubjectId) => {
+      const destination = bindConnectorDocumentDestination(
+        { authorityKind, collectionId: null },
+        { accountId, workspaceId, initiatingSubjectId: subjectId },
+      );
+      expect(destination).toEqual({
+        authorityKind,
+        authorityAccountId: accountId,
+        authorityWorkspaceId,
+        authoritySubjectId,
+        collectionId: null,
+      });
+      expect(connectorDestinationDocumentAuthority(destination)).toEqual({
+        authorityKind,
+        authorityWorkspaceId,
+        authoritySubjectId,
+      });
+    },
+  );
 
   test("fails closed on mismatched tenant, workspace, and personal subjects", () => {
     const personal = bindConnectorDocumentDestination(
