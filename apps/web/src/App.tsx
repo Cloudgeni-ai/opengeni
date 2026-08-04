@@ -31,10 +31,7 @@ import {
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
 import { RootRouteComponent, useAppContext } from "@/context";
-import {
-  parseComposerLaunchSearch,
-  type ComposerLaunchSearch,
-} from "@/lib/composer-launch";
+import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";

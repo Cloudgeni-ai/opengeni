@@ -315,9 +315,7 @@ export function applyComposerTextareaHeight(
   // Overflow: content taller than the box — scrollHeight is the needed size.
   // Fit/shrink: content fits (or box is oversized) — measure off-DOM.
   const nextPx = Math.min(
-    textarea.scrollHeight > textarea.clientHeight + 1
-      ? textarea.scrollHeight
-      : measure(textarea),
+    textarea.scrollHeight > textarea.clientHeight + 1 ? textarea.scrollHeight : measure(textarea),
     maxPx,
   );
   if (Math.abs(nextPx - before) < 1) {
