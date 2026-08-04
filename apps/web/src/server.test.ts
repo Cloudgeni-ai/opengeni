@@ -89,8 +89,10 @@ describe("production web handler", () => {
     });
     const browserHeaders = new Headers({
       "content-type": "application/json",
+      connection: "keep-alive, x-browser-hop",
       forwarded: "for=spoofed;host=evil.example",
       origin: "https://example.test",
+      "x-browser-hop": "browser-hop-value-that-must-not-be-forwarded",
       "x-forwarded-port": "4444",
       "x-opengeni-access-key": "browser-access-value-that-must-be-replaced",
       "x-real-ip": "203.0.113.10",
@@ -110,6 +112,7 @@ describe("production web handler", () => {
     const headers = new Headers(seen.init?.headers);
     expect(headers.get("authorization")).toBe(["Bearer", serverApiValue].join(" "));
     expect(headers.get("x-opengeni-access-key")).toBe(serverAccessValue);
+    expect(headers.get("x-browser-hop")).toBeNull();
     expect(headers.get("forwarded")).toBeNull();
     expect(headers.get("x-forwarded-host")).toBe("example.test");
     expect(headers.get("x-forwarded-port")).toBeNull();
@@ -160,11 +163,12 @@ describe("production web handler", () => {
           return new Response('{"error":"Unauthorized"}', {
             status: 401,
             headers: {
-              connection: "keep-alive",
+              connection: "keep-alive, x-upstream-hop",
               "content-encoding": "gzip",
               "content-length": "999",
               "content-type": "application/json",
               "transfer-encoding": "chunked",
+              "x-upstream-hop": "upstream-hop-value-that-must-not-be-forwarded",
             },
           });
         },
@@ -183,8 +187,19 @@ describe("production web handler", () => {
     expect(response.headers.get("content-length")).toBeNull();
     expect(response.headers.get("connection")).toBeNull();
     expect(response.headers.get("transfer-encoding")).toBeNull();
+    expect(response.headers.get("x-upstream-hop")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ error: "Unauthorized" });
+
+    const head = await handler(
+      new Request("https://example.test/demo-api/v1/workspaces/ws/sessions", {
+        method: "HEAD",
+      }),
+    );
+    expect(head.headers.get("content-encoding")).toBe("gzip");
+    expect(head.headers.get("content-length")).toBe("999");
+    expect(head.headers.get("x-upstream-hop")).toBeNull();
+    expect(await head.text()).toBe("");
   });
 
   test("derives optional authority headers from environment names", () => {

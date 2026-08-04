@@ -101,12 +101,12 @@ async function proxyDemoApi(
     normalizedBaseUrl(options.targetBaseUrl),
   );
   const headers = new Headers(request.headers);
+  stripHopByHopHeaders(headers);
   for (const name of [
     "authorization",
     "content-length",
     "forwarded",
     "host",
-    ...HOP_BY_HOP_HEADERS,
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-port",
@@ -136,13 +136,15 @@ async function proxyDemoApi(
       signal: request.signal,
     });
     const responseHeaders = new Headers(upstream.headers);
+    stripHopByHopHeaders(responseHeaders);
     // A fetch implementation may retain the upstream representation headers
     // after transparently decoding its body. Forwarding those stale headers
     // makes browsers attempt a second decompression and fail before the SDK can
     // read even an ordinary JSON error response.
-    responseHeaders.delete("content-encoding");
-    responseHeaders.delete("content-length");
-    for (const name of HOP_BY_HOP_HEADERS) responseHeaders.delete(name);
+    if (request.method !== "HEAD") {
+      responseHeaders.delete("content-encoding");
+      responseHeaders.delete("content-length");
+    }
     responseHeaders.set("cache-control", "no-store");
     return new Response(request.method === "HEAD" ? null : upstream.body, {
       status: upstream.status,
@@ -152,6 +154,14 @@ async function proxyDemoApi(
   } catch {
     return new Response("Demo API upstream unavailable", { status: 502 });
   }
+}
+
+function stripHopByHopHeaders(headers: Headers): void {
+  for (const name of headers.get("connection")?.split(",") ?? []) {
+    const normalized = name.trim();
+    if (normalized) headers.delete(normalized);
+  }
+  for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
 }
 
 function normalizedBaseUrl(value: string): string {
