@@ -1146,11 +1146,9 @@ function checkIdentity(kind, context) {
 }
 
 async function findCheckRun(api, context, identity) {
-  const matches = [];
-  const acceptedExternalIds = new Set([
-    identity.externalId,
-    ...(identity.migrationExternalIds ?? []),
-  ]);
+  const canonicalMatches = [];
+  const migrationMatches = [];
+  const migrationExternalIds = new Set(identity.migrationExternalIds ?? []);
   const acceptedExternalIdPatterns = identity.migrationExternalIdPatterns ?? [];
   for (let page = 1; page <= maximumPages; page += 1) {
     const response = record(
@@ -1165,10 +1163,11 @@ async function findCheckRun(api, context, identity) {
     invariant(Array.isArray(response.check_runs), "check-run records are missing");
     for (const check of response.check_runs) {
       const externalId = check?.external_id;
-      if (
-        !acceptedExternalIds.has(externalId) &&
-        !acceptedExternalIdPatterns.some((pattern) => pattern.test(externalId ?? ""))
-      ) {
+      const canonical =
+        externalId === identity.externalId ||
+        acceptedExternalIdPatterns.some((pattern) => pattern.test(externalId ?? ""));
+      const migration = migrationExternalIds.has(externalId);
+      if (!canonical && !migration) {
         if (!identity.exclusive) continue;
         invariant(
           check?.head_sha === context.headSha,
@@ -1183,13 +1182,14 @@ async function findCheckRun(api, context, identity) {
         Number.isSafeInteger(check?.id) && check.id > 0,
         "existing check-run ID is invalid",
       );
-      matches.push(check);
+      (canonical ? canonicalMatches : migrationMatches).push(check);
     }
     if (response.check_runs.length < recordsPerPage) break;
     invariant(page < maximumPages, "check-run listing exceeded its page limit");
   }
-  invariant(matches.length <= 1, "multiple check runs share the idempotency marker");
-  return matches[0];
+  invariant(canonicalMatches.length <= 1, "multiple check runs share the idempotency marker");
+  if (canonicalMatches.length === 1) return canonicalMatches[0];
+  return migrationMatches.length === 1 ? migrationMatches[0] : undefined;
 }
 
 async function upsertCheckRun(api, context, kind, state, now) {

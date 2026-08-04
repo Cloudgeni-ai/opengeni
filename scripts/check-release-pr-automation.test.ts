@@ -1157,6 +1157,36 @@ describe("release head retention recovery", () => {
     ).toHaveLength(0);
   });
 
+  test("creates one recovery receipt when duplicate legacy idempotency markers exist", async () => {
+    const legacyExternalId = String.raw`opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
+    const legacy = (id: number) => ({
+      id,
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      external_id: legacyExternalId,
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    });
+    const fixture = recoverySealFixture({
+      existingRecoveryChecks: [legacy(777), legacy(778)],
+    });
+
+    await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+
+    expect(
+      fixture.checks.filter((check) => check.external_id === recoveredSourceAdmissionExternalId()),
+    ).toHaveLength(1);
+    expect(fixture.checks.filter((check) => check.external_id === legacyExternalId)).toHaveLength(
+      2,
+    );
+  });
+
   test("moves one prior v2 recovery check to the current seal run without duplicating it", async () => {
     const fixture = recoverySealFixture();
     const options = {
