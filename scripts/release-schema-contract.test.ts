@@ -187,12 +187,17 @@ describe("release schema contract", () => {
         (migrations.has("0170_session_control_wake_revision.sql") ? 1 : 0) +
         (migrations.has("0171_social_connection_subject_ownership.sql") ? 1 : 0) +
         (migrations.has("0172_retire_model_visible_github_token.sql") ? 1 : 0) +
-        (migrations.has("0173_codex_auth_boundaries.sql") ? 1 : 0),
+        (migrations.has("0173_codex_auth_boundaries.sql") ? 1 : 0) +
+        (migrations.has("0174_session_wake_live_interruption.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "5c2bcbcf67ebcd1a77ee8525007e966932dee4efc0972a67aa6b3352d0cb8653",
+      "7fbf35b80e1490ce9604604cec928736d6a6e483148e38d0ecc62658c4ac603d",
     );
-    expect(contract.latestMigration).toBe("0173_codex_auth_boundaries.sql");
+    expect(contract.latestMigration).toBe("0174_session_wake_live_interruption.sql");
+    expect(migrations.get("0174_session_wake_live_interruption.sql")).toMatchObject({
+      sha256: "492f93a4ba0f715f3d37cdc539d5e09dd277b8a882d24b1730d01e245e2f85cf",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0173_codex_auth_boundaries.sql")).toMatchObject({
       sha256: "450075954cb9c8bfc346ccf09991edd362cc5ffdcf4e94d1c404d3fc6795e2ca",
       deploymentMode: "maintenance",
