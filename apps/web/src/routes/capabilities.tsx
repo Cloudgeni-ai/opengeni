@@ -67,7 +67,7 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
-import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import {
   personalSlackAccountState,
   personalSlackCapability,
@@ -753,14 +753,13 @@ export function CapabilitiesRoute({
       );
     } else {
       const reason = params.get("reason");
+      const message = mcpOAuthCallbackFailureMessage(params.get("stage"), reason);
       const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
       if (item) {
-        setSheetError(
-          reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
-        );
+        setSheetError(message);
         setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
       } else {
-        toast.error("Connection failed", { description: reason ?? undefined });
+        toast.error("Connection failed", { description: message });
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -13,6 +13,7 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  loadIntegrationOAuthClient,
   loadConnectionCredentialForBroker,
   type DbClient,
 } from "@opengeni/db";
@@ -188,6 +189,7 @@ function startFakeAuthorizationServer(
     tokenAccessToken?: string | ((body: URLSearchParams) => string);
     tokenStatus?: number;
     tokenError?: string;
+    tokenResponseStalls?: boolean;
     onTokenRequest?: (body: URLSearchParams) => void | Promise<void>;
   } = {},
 ): FakeAuthorizationServer {
@@ -258,6 +260,16 @@ function startFakeAuthorizationServer(
               error_description: "fake token failure",
             },
             { status: options.tokenStatus },
+          );
+        }
+        if (options.tokenResponseStalls) {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"access_token":"partial'));
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
           );
         }
         return Response.json({
@@ -1063,6 +1075,7 @@ describe("connections routes", () => {
       expect(callback.status).toBe(302);
       const location = callback.headers.get("location")!;
       expect(location).toContain("integration_oauth=error");
+      expect(location).toContain("stage=token_exchange");
       expect(location).toContain("reason=invalid_client");
       expect(location).toContain("connect_item=linear");
 
@@ -1076,6 +1089,60 @@ describe("connections routes", () => {
       });
       expect(JSON.stringify(errors)).not.toContain(verifier);
       expect(JSON.stringify(errors)).not.toContain("abc");
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth callback aborts a stalled token response and redirects with its exact stage", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      tokenResponseStalls: true,
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const started = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "stalled-token.example.com",
+            mcpUrl: mcp.url,
+            returnPath: "/integrations?connect_item=stalled-token",
+          }),
+        },
+      );
+      const state = ((await started.json()) as { state: string }).state;
+      const startedAt = performance.now();
+      const callback = await publicAppWithDeps(
+        client.db,
+        {},
+        { oauthCallbackDeadlineMs: 500 },
+      ).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`);
+      expect(callback.status).toBe(302);
+      expect(performance.now() - startedAt).toBeLessThan(2_000);
+      const location = callback.headers.get("location")!;
+      expect(location).toContain("integration_oauth=error");
+      expect(location).toContain("stage=token_exchange");
+      expect(location).toContain("reason=timeout");
+      expect(
+        await loadConnectionCredentialForBroker(client.db, settings, {
+          workspaceId: workspace.workspaceId,
+          providerDomain: "stalled-token.example.com",
+          kind: "oauth2",
+          allowSubjectOwned: false,
+        }),
+      ).toBeNull();
     } finally {
       mcp.close();
       as.close();
@@ -1624,6 +1691,81 @@ describe("connections routes", () => {
     } finally {
       mcp.close();
       as.close();
+    }
+  });
+
+  test("oauth start replaces a stale DCR client when provider endpoints change", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const issuer = "https://stable-issuer.example.test";
+    const firstAs = startFakeAuthorizationServer({
+      issuer,
+      clientIdMetadataDocumentSupported: false,
+      dcr: true,
+      scopesSupported: ["read"],
+    });
+    const firstMcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${firstAs.url}/.well-known/oauth-protected-resource", scope="read"`,
+    });
+    const secondAs = startFakeAuthorizationServer({
+      issuer,
+      clientIdMetadataDocumentSupported: false,
+      dcr: true,
+      scopesSupported: ["read"],
+    });
+    const secondMcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${secondAs.url}/.well-known/oauth-protected-resource", scope="read"`,
+    });
+    const start = async (mcpUrl: string) =>
+      await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerDomain: "moving-provider.example.com",
+          mcpUrl,
+          returnPath: "/integrations?connect_item=moving-provider",
+        }),
+      });
+    try {
+      const first = await start(firstMcp.url);
+      expect(first.status).toBe(200);
+      expect(firstAs.registrations).toHaveLength(1);
+
+      const second = await start(secondMcp.url);
+      const secondText = await second.clone().text();
+      expect(second.status, secondText).toBe(200);
+      const secondBody = (await second.json()) as { state: string; authorizationUrl: string };
+      expect(secondAs.registrations).toHaveLength(1);
+      expect(new URL(secondBody.authorizationUrl).searchParams.get("client_id")).toBe(
+        `${secondAs.url}/registered-client/1`,
+      );
+
+      const stored = await loadIntegrationOAuthClient(
+        client.db,
+        settings,
+        new URL(issuer).toString(),
+      );
+      expect(stored).toMatchObject({
+        authorizationServer: secondAs.url,
+        clientId: `${secondAs.url}/registered-client/1`,
+        metadata: {
+          registrationEndpoint: `${secondAs.url}/register`,
+          authorizationEndpoint: `${secondAs.url}/authorize`,
+          tokenEndpoint: `${secondAs.url}/token`,
+          redirectUri: "https://api.opengeni.test/v1/integrations/oauth/callback",
+          registeredScopes: ["read"],
+        },
+      });
+    } finally {
+      firstMcp.close();
+      firstAs.close();
+      secondMcp.close();
+      secondAs.close();
     }
   });
 
