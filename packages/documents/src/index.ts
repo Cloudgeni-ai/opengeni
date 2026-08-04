@@ -1891,6 +1891,16 @@ function documentMatchesAccess(
   return canViewDocument(document, access?.viewerSubjectId, workspaceId);
 }
 
+function canonicalDocumentAuthoritySubject(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const subjectId = cleanString(value);
+  if (!subjectId || subjectId !== value) return undefined;
+  if (new TextEncoder().encode(subjectId).byteLength > DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES) {
+    return undefined;
+  }
+  return subjectId;
+}
+
 /**
  * Whether a single already-fetched document is readable in this workspace.
  *
@@ -1916,7 +1926,9 @@ export function canViewDocument(
     return document.authoritySubjectId === null;
   }
   if (document.authorityKind === "personal") {
-    return !!viewerSubjectId && document.authoritySubjectId === viewerSubjectId;
+    const authoritySubjectId = canonicalDocumentAuthoritySubject(document.authoritySubjectId);
+    const viewer = canonicalDocumentAuthoritySubject(viewerSubjectId);
+    return !!authoritySubjectId && authoritySubjectId === viewer;
   }
   return false;
 }
