@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.12
+
+### Patch Changes
+
+- 8105c25: Honor explicit non-TTY sandbox commands without injecting terminal control bytes while preserving marker-bound process-group cancellation.
+
 ## 0.18.11
 
 ### Patch Changes
