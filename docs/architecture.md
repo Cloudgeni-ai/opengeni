@@ -621,14 +621,16 @@ Self-hosted deployments therefore emit no analytics unless their operator
 explicitly enables and configures it. OpenGeni's explicit route tracking sends
 pathnames only and suspends providers on public-auth or query-bearing routes.
 The Reo adapter initializes with clipboard/code-copy and supported AI-widget
-capture disabled. It does not send authenticated identity: adding an identify
-call requires a separate privacy review and explicit consent copy. First visit
-shows a consent sheet; after that, visitors reopen preferences from the Account
-menu (no persistent floating chrome) and can withdraw consent. Provider cleanup
-must run without breaking the console even when browser storage or a third-party
-script fails. The event surface must never carry prompts, source code, repository
-content, tool arguments, logs, secrets, or document contents. Provider selection
-belongs to validated runtime configuration, never arbitrary script injection.
+capture disabled. The PostHog adapter may identify a consenting, authenticated
+visitor by stable internal user ID and group them by stable internal account ID;
+it never sends names or email addresses. First visit shows a consent sheet;
+after that, visitors reopen preferences from the Account menu (no persistent
+floating chrome) and can withdraw consent. Provider cleanup must run without
+breaking the console even when browser storage or a third-party script fails.
+The event surface must never carry names, email addresses, prompts, source code,
+repository content, tool arguments, logs, secrets, or document contents.
+Provider selection belongs to validated runtime configuration, never arbitrary
+script injection.
 
 Watch-outs: `/clear-view` is local/this-device-only; stale-bundle auto-reload on revision mismatch; the stock repository picker is GitHub-oriented even though session resources and credential bindings support multiple providers and accounts.
 
