@@ -42,10 +42,13 @@ body {
   scrollbar-color: rgba(45, 48, 60, 0.15) transparent;
 }
 
-.northstar button,
-.northstar select,
-.northstar input,
-.northstar textarea {
+/* Keep a deliberately hostile host reset around the embedded SDK so this demo
+   exercises its isolation contract without flattening Northstar's own control
+   typography. SDK consumers customize these metrics through public --og-* tokens. */
+.northstar .og-root button,
+.northstar .og-root select,
+.northstar .og-root input,
+.northstar .og-root textarea {
   font: inherit;
 }
 
@@ -70,11 +73,6 @@ body {
 
 .northstar-agent-timeline > div:first-child > div {
   gap: 14px;
-}
-
-.northstar-agent-copy {
-  font-size: 13px;
-  line-height: 1.6;
 }
 
 .northstar-agent-copy p,

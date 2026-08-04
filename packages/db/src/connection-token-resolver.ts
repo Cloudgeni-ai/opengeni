@@ -4,7 +4,9 @@ import {
   type Settings,
 } from "@opengeni/config";
 import type {
+  ConnectionKind,
   ConnectionCredentialsPort,
+  ConnectionStatus,
   McpConnectionResourceScope,
   McpCredentialAuthNeededReason,
   McpCredentialsRequest,
@@ -24,14 +26,49 @@ export { isPrivateAddress } from "@opengeni/network";
 import { Buffer } from "node:buffer";
 import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
-import {
-  loadConnectionCredentialForBroker,
-  recordConnectionTokenRefresh,
-  recordConnectionUsed,
-  setConnectionStatus,
-  type ConnectionCredentialForBroker,
-  type Database,
-} from "./index";
+import type { Database } from "./database";
+
+export type ConnectionCredentialForBroker = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+  providerDomain: string;
+  kind: ConnectionKind;
+  status: ConnectionStatus;
+  credential: Record<string, unknown>;
+  grantedScopes: string[];
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  version: number;
+  metadata: Record<string, unknown>;
+};
+
+export type ConnectionCredentialLookupInput = {
+  workspaceId: string;
+  connectionId?: string;
+  providerDomain: string;
+  kind?: ConnectionKind;
+  subjectId?: string | null;
+  allowSubjectOwned?: boolean;
+};
+
+export type ConnectionTokenRefreshInput = {
+  id: string;
+  version: number;
+  workspaceId: string;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+  grantedScopes?: string[];
+  lastRefreshAt: Date;
+  subjectId?: string | null;
+};
+
+export type ConnectionStatusGuard = {
+  id: string;
+  version: number;
+  subjectId?: string | null;
+};
 
 export type ResolveConnectionCredentialResult =
   | {
@@ -334,10 +371,25 @@ function parseHostCredentialExpiry(value: string | null | undefined): Date | nul
 }
 
 export type ConnectionBrokerDeps = {
-  loadCredential: typeof loadConnectionCredentialForBroker;
-  recordRefresh: typeof recordConnectionTokenRefresh;
-  setStatus: typeof setConnectionStatus;
-  recordUsed: typeof recordConnectionUsed;
+  loadCredential: (
+    db: Database,
+    settings: Settings,
+    input: ConnectionCredentialLookupInput,
+  ) => Promise<ConnectionCredentialForBroker | null>;
+  recordRefresh: (db: Database, input: ConnectionTokenRefreshInput) => Promise<boolean>;
+  setStatus: (
+    db: Database,
+    workspaceId: string,
+    status: ConnectionStatus,
+    lastError: string | null,
+    guard: ConnectionStatusGuard,
+  ) => Promise<boolean>;
+  recordUsed: (
+    db: Database,
+    workspaceId: string,
+    connectionId: string,
+    subjectId?: string | null,
+  ) => Promise<void>;
   refresh: typeof refreshOAuthConnectionCredential;
   encrypt: typeof encryptEnvironmentValue;
   keyBytes: typeof environmentsEncryptionKeyBytes;
@@ -372,17 +424,6 @@ export type RefreshTransportOptions = {
   dnsLookup?: DnsLookup;
 };
 
-const defaultDeps: ConnectionBrokerDeps = {
-  loadCredential: loadConnectionCredentialForBroker,
-  recordRefresh: recordConnectionTokenRefresh,
-  setStatus: setConnectionStatus,
-  recordUsed: recordConnectionUsed,
-  refresh: refreshOAuthConnectionCredential,
-  encrypt: encryptEnvironmentValue,
-  keyBytes: environmentsEncryptionKeyBytes,
-  now: () => new Date(),
-};
-
 const inflight = new Map<string, Promise<ConnectionCredentialForBroker>>();
 const REFRESH_WINDOW_MS = 60_000;
 const CONNECTION_REFRESH_TIMEOUT_MS = 10_000;
@@ -390,7 +431,7 @@ const CONNECTION_REFRESH_TIMEOUT_MS = 10_000;
 export function buildConnectionTokenResolver(
   db: Database,
   settings: Settings,
-  deps: ConnectionBrokerDeps = defaultDeps,
+  deps: ConnectionBrokerDeps,
   options: ConnectionTokenResolverOptions = {},
 ): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
   type CredentialLookupInput = Pick<
@@ -404,7 +445,7 @@ export function buildConnectionTokenResolver(
     if (subjectOwned && !input.subjectId) {
       return null;
     }
-    const request: Parameters<typeof loadConnectionCredentialForBroker>[2] = {
+    const request: ConnectionCredentialLookupInput = {
       workspaceId: input.workspaceId,
       providerDomain: input.connectionRef.providerDomain,
       allowSubjectOwned: subjectOwned,
@@ -484,7 +525,7 @@ export function buildConnectionTokenResolver(
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
     const refreshed = await deps.refresh(cred, ref, settings, options.refreshTransport);
-    const refreshRecord: Parameters<typeof recordConnectionTokenRefresh>[1] = {
+    const refreshRecord: ConnectionTokenRefreshInput = {
       id: cred.id,
       version: cred.version,
       workspaceId: cred.workspaceId,

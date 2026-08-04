@@ -25,8 +25,8 @@ import type {
   WorkspaceInstructionPolicyTarget,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
-import type { Database } from "./index";
-import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./index";
+import type { Database } from "./database";
+import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 

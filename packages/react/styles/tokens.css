@@ -17,8 +17,39 @@
   --og-font-sans: "Inter Variable", "Inter", "Noto Sans JP Variable", "Noto Sans Arabic Variable", ui-sans-serif, system-ui, sans-serif;
   --og-font-mono: "JetBrains Mono Variable", "JetBrains Mono", "Noto Sans JP Variable", "Noto Sans Arabic Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
   --og-font-features: "cv11", "ss01", "ss03";
+  /* Runtime type tokens. Defaults are the exact values used by apps/web, so
+     adopting the public token surface is render-compatible with the product.
+     Hosts can override these on any SDK ancestor; portalled surfaces copy the
+     effective --og-* values from their trigger. */
+  --og-font-size-xs: 11px;
+  --og-line-height-xs: 1.45;
+  --og-font-size-sm: 12px;
+  --og-line-height-sm: 1.5;
+  --og-font-size-base: 13px;
+  --og-line-height-base: 1.55;
+  --og-font-size-md: 15px;
+  --og-line-height-md: 1.6;
+  --og-font-size-control: 12px;
+  --og-line-height-control: 16px;
+  --og-font-size-menu: 14px;
+  --og-line-height-menu: 20px;
+  --og-font-size-composer: 16px;
+  --og-line-height-composer: 24px;
+  --og-font-size-composer-wide: 15px;
+  --og-line-height-composer-wide: 24px;
   --og-code-font-size: 12px;
   --og-code-line-height: 18px;
+
+  /* Model-policy picker density. These defaults preserve today's apps/web
+     geometry. They are tokens (rather than host-only class overrides) so an
+     embedded composer and its portalled menu can be tuned as one surface. */
+  --og-model-picker-trigger-height: 2rem;
+  --og-model-picker-trigger-height-mobile: 1.75rem;
+  --og-model-picker-menu-width: 18rem;
+  --og-model-picker-menu-padding: 0.375rem;
+  --og-model-picker-row-padding-x: 0.625rem;
+  --og-model-picker-row-padding-y: 0.5rem;
+  --og-model-picker-effort-height: 2rem;
 
   /* Radius ----------------------------------------------------------------- */
   --og-radius-xs: 4px;
@@ -117,6 +148,36 @@
   --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 55%, transparent);
 
   color-scheme: dark;
+}
+
+/* One supported dense preset for embedded product panels. It changes only
+   typography and model-picker density; colors, radii, and brand tokens remain
+   independently customizable. Apply either form to an SDK ancestor. */
+[data-og-density="compact"],
+.og-density-compact {
+  --og-font-size-xs: 10px;
+  --og-line-height-xs: 1.5;
+  --og-font-size-sm: 11px;
+  --og-line-height-sm: 1.5;
+  --og-font-size-base: 12px;
+  --og-line-height-base: 1.55;
+  --og-font-size-md: 13px;
+  --og-line-height-md: 1.6;
+  --og-font-size-control: 11px;
+  --og-line-height-control: 16px;
+  --og-font-size-menu: 12px;
+  --og-line-height-menu: 18px;
+  --og-font-size-composer: 13px;
+  --og-line-height-composer: 20px;
+  --og-font-size-composer-wide: 13px;
+  --og-line-height-composer-wide: 20px;
+  --og-model-picker-trigger-height: 1.75rem;
+  --og-model-picker-trigger-height-mobile: 1.75rem;
+  --og-model-picker-menu-width: 15rem;
+  --og-model-picker-menu-padding: 0.25rem;
+  --og-model-picker-row-padding-x: 0.5rem;
+  --og-model-picker-row-padding-y: 0.375rem;
+  --og-model-picker-effort-height: 1.75rem;
 }
 
 /* Light theme — explicit opt-in, themable per subtree ----------------------- */

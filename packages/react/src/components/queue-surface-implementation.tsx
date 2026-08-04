@@ -40,6 +40,7 @@ import {
 import { DropdownMenu } from "radix-ui";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
+import { type PortalTokenStyle, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 
@@ -80,6 +81,7 @@ export function QueueSurface({
   const [announcement, setAnnouncement] = useState("");
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const portalTokenStyle = usePortalTokenStyle(surfaceRef);
   const [keyboardDrag, setKeyboardDrag] = useState<{
     turnId: string;
     projectedIndex: number;
@@ -244,7 +246,7 @@ export function QueueSurface({
   return (
     <div
       ref={surfaceRef}
-      className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
+      className="og-root mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
       data-testid="queue-surface"
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface/80 shadow-sm">
@@ -265,7 +267,7 @@ export function QueueSurface({
             aria-hidden="true"
             className={`size-3.5 shrink-0 text-fg-subtle transition-transform ${open ? "rotate-180" : ""}`}
           />
-          <span className="text-xs font-medium text-fg">
+          <span className="text-og-control font-medium text-fg">
             {count > 0 ? `${count} queued prompt${count === 1 ? "" : "s"}` : null}
             {count > 0 && pendingInputCount > 0 ? " · " : null}
             {pendingInputCount > 0
@@ -273,7 +275,7 @@ export function QueueSurface({
               : null}
           </span>
           {readOnly ? (
-            <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">
+            <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-og-xs text-fg-subtle">
               Read-only
             </span>
           ) : null}
@@ -282,7 +284,7 @@ export function QueueSurface({
               aria-hidden="true"
               className={`max-w-full truncate text-fg-muted ${
                 collapsedPreview.collapsedVisual === collapsedPreview.summary
-                  ? "min-w-0 flex-1 text-xs"
+                  ? "min-w-0 flex-1 text-og-control"
                   : "shrink-0 text-[10px]"
               }`}
               data-testid="queue-collapsed-preview"
@@ -352,6 +354,7 @@ export function QueueSurface({
                     pending={queue.mutationFor(turn.id)}
                     confirmingReplace={replaceDraftFor === turn.id}
                     keyboardDragging={keyboardDrag?.turnId === turn.id}
+                    portalTokenStyle={portalTokenStyle}
                     onHandleKeyDown={(event) => onHandleKeyDown(event, turn.id)}
                     onMove={(nextIndex) => void moveToIndex(turn.id, nextIndex)}
                     onEdit={canEditInComposer ? () => requestEdit(turn) : undefined}
@@ -393,7 +396,7 @@ export function QueueSurface({
             <DragOverlay modifiers={[verticalOnly]}>
               {draggedTurnId ? (
                 <div
-                  className="max-h-20 w-[min(36rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-hidden rounded-md border border-brand/40 bg-surface px-3 py-2 text-xs text-fg shadow-lg"
+                  className="max-h-20 w-[min(36rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-hidden rounded-md border border-brand/40 bg-surface px-3 py-2 text-og-control text-fg shadow-lg"
                   data-testid="queue-drag-overlay"
                 >
                   <p
@@ -434,14 +437,18 @@ function PendingMachineInputs({
 }) {
   return (
     <section className="border-t border-border px-3 py-2">
-      <p className="text-2xs font-medium text-fg-subtle">
+      <p className="text-og-xs font-medium text-fg-subtle">
         {attached
           ? `${inputs.length} update${inputs.length === 1 ? "" : "s"} will join this prompt`
           : "Incoming updates waiting to run"}
       </p>
       <ol className="mt-1 space-y-1">
         {inputs.map((input) => (
-          <li key={input.id} className="line-clamp-3 break-words text-xs text-fg" dir="auto">
+          <li
+            key={input.id}
+            className="line-clamp-3 break-words text-og-control text-fg"
+            dir="auto"
+          >
             <strong className="capitalize text-fg-muted">
               {input.kind.replace("_terminal", "").replaceAll("_", " ")}
             </strong>{" "}
@@ -756,7 +763,7 @@ function QueuePrompt({
     <div className="w-full min-w-0 max-w-full">
       <div
         aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
-        className="max-w-full overflow-hidden text-xs leading-5 text-fg"
+        className="max-w-full overflow-hidden text-og-control leading-5 text-fg"
         data-testid={`queue-prompt-preview-${index + 1}`}
         dir="auto"
         role="note"
@@ -771,7 +778,7 @@ function QueuePrompt({
           </span>
           {preview.visibleIdentity && preview.visibleIdentityLabel ? (
             <span
-              className="flex min-w-0 max-w-[70%] shrink-0 items-center gap-1 text-2xs leading-4 text-fg-muted sm:mt-0.5 sm:max-w-full"
+              className="flex min-w-0 max-w-[70%] shrink-0 items-center gap-1 text-og-xs leading-4 text-fg-muted sm:mt-0.5 sm:max-w-full"
               data-testid={`queue-prompt-identity-row-${index + 1}`}
             >
               <span className="shrink-0 font-medium text-fg-subtle">
@@ -793,7 +800,7 @@ function QueuePrompt({
         aria-controls={fullContentId}
         aria-expanded={expanded}
         aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
-        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-2xs font-medium text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
+        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-og-xs font-medium text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
         data-testid={`queue-prompt-disclosure-${index + 1}`}
         onClick={() => {
           const next = !expanded;
@@ -812,7 +819,7 @@ function QueuePrompt({
           id={fullContentId}
           role="region"
           aria-label={`Full content for queued prompt ${index + 1}`}
-          className="mt-1.5 max-h-64 w-full min-w-0 max-w-full overflow-auto overscroll-contain rounded-md border border-border bg-surface-2/60 p-2 whitespace-pre-wrap break-all font-mono text-xs leading-5 text-fg [unicode-bidi:plaintext]"
+          className="mt-1.5 max-h-64 w-full min-w-0 max-w-full overflow-auto overscroll-contain rounded-md border border-border bg-surface-2/60 p-2 whitespace-pre-wrap break-all font-mono text-og-control leading-5 text-fg [unicode-bidi:plaintext]"
           data-testid={`queue-prompt-full-${index + 1}`}
           dir="auto"
           tabIndex={0}
@@ -837,13 +844,13 @@ function ReadOnlyQueueRow({
 }) {
   return (
     <li className="flex min-w-0 items-start gap-2 bg-surface px-3 py-2">
-      <span className="mt-1 shrink-0 font-mono text-2xs text-fg-subtle">{index + 1}</span>
+      <span className="mt-1 shrink-0 font-mono text-og-xs text-fg-subtle">{index + 1}</span>
       <div className="min-w-0 flex-1">
         <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
         {attachedInputs.length > 0 ? (
           <PendingMachineInputs inputs={attachedInputs} attached />
         ) : null}
-        <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
+        <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
           {turn.resources.length > 0 ? (
             <span className="shrink-0">
               {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
@@ -870,6 +877,7 @@ function SortableQueueRow({
   pending,
   confirmingReplace,
   keyboardDragging,
+  portalTokenStyle,
   onHandleKeyDown,
   onMove,
   onEdit,
@@ -886,6 +894,7 @@ function SortableQueueRow({
   pending: QueueMutationKind | null;
   confirmingReplace: boolean;
   keyboardDragging: boolean;
+  portalTokenStyle: PortalTokenStyle;
   onHandleKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onMove: (index: number) => void;
   onEdit?: (() => void) | undefined;
@@ -924,7 +933,7 @@ function SortableQueueRow({
         >
           <GripVerticalIcon className="size-3.5" />
         </button>
-        <span className="col-start-2 row-start-1 mt-1 shrink-0 font-mono text-2xs text-fg-subtle">
+        <span className="col-start-2 row-start-1 mt-1 shrink-0 font-mono text-og-xs text-fg-subtle">
           {index + 1}
         </span>
         <div className="col-span-full row-start-2 min-w-0 sm:col-span-1 sm:col-start-3 sm:row-start-1">
@@ -932,7 +941,7 @@ function SortableQueueRow({
           {attachedInputs.length > 0 ? (
             <PendingMachineInputs inputs={attachedInputs} attached />
           ) : null}
-          <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
+          <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
             {turn.resources.length > 0 ? (
               <span className="shrink-0">
                 {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
@@ -954,7 +963,7 @@ function SortableQueueRow({
             onClick={onSteer}
             aria-label={`Steer queued prompt ${index + 1}`}
             title="Steer — interrupt the current turn and send this message now"
-            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium text-fg outline-none transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-og-control font-medium text-fg outline-none transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >
             {pending === "steer" ? (
               <Loader2Icon className="size-3.5 animate-spin" />
@@ -996,7 +1005,8 @@ function SortableQueueRow({
               <DropdownMenu.Content
                 align="end"
                 sideOffset={4}
-                className="z-50 w-48 max-w-[calc(100vw-16px)] rounded-md border border-border bg-surface p-1 text-xs text-fg shadow-lg"
+                className="og-root z-50 w-48 max-w-[calc(100vw-16px)] rounded-md border border-border bg-surface p-1 text-og-control text-fg shadow-lg"
+                style={portalTokenStyle}
                 data-testid={`queue-actions-menu-${index + 1}`}
               >
                 {onEdit ? (
@@ -1044,7 +1054,7 @@ function SortableQueueRow({
         </div>
       </div>
       {confirmingReplace ? (
-        <div className="mx-3 mb-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-fg">
+        <div className="mx-3 mb-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-og-control text-fg">
           <p>Your composer already has a draft. Replace it with this queued prompt?</p>
           <p className="mt-0.5 text-fg-muted">
             The current draft will be permanently discarded; this queued prompt is preserved until

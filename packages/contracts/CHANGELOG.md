@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.38.2
+
+### Patch Changes
+
+- 4502474: Add workspace-default and explicitly personal ownership for first-party social connections, preserve causal personal authority for agent work, and retain actionable structured gateway errors.
+
 ## 0.38.1
 
 ### Patch Changes

@@ -82,7 +82,7 @@ export function EnrollmentDeviceFlow({
           <span className="flex size-7 items-center justify-center rounded-full bg-og-surface-2 text-og-fg-muted">
             <LaptopIcon className="size-4" aria-hidden />
           </span>
-          <h2 className="text-sm font-semibold text-og-fg">Connect a machine</h2>
+          <h2 className="text-og-menu font-semibold text-og-fg">Connect a machine</h2>
         </div>
         <ConnectionStatusPill
           status={
@@ -156,7 +156,7 @@ export function EnrollmentDeviceFlow({
         target="_blank"
         rel="noreferrer"
         onClick={onOpenVerification}
-        className="inline-flex items-center justify-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-2 text-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong"
+        className="inline-flex items-center justify-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-2 text-og-menu font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong"
       >
         Open approval page
         <ExternalLinkIcon className="size-3.5" aria-hidden />

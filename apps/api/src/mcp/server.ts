@@ -54,7 +54,6 @@ import {
   listRigs,
   listRigChangeMonitoringSummaries,
   listRigVersionMonitoringSummaries,
-  listSocialConnections,
   listSocialPosts,
   recordAuditEvent,
   recordSyncedSocialPosts,
@@ -97,6 +96,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import * as z4 from "zod/v4";
 import {
   hasPermission,
+  authorizedSocialConnectionsForGrant,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   type ResolvedSessionAuthorization,
@@ -357,6 +357,20 @@ export function buildOpenGeniMcpServer(
   });
   const can = (permission: Permission) => hasPermission(grant.permissions, permission);
   const toolspaceMode = options.toolspace != null;
+  let socialConnectionsPromise: ReturnType<typeof authorizedSocialConnectionsForGrant> | undefined;
+  const authorizedSocialConnections = () =>
+    (socialConnectionsPromise ??= authorizedSocialConnectionsForGrant({
+      db: deps.db,
+      grant,
+      limit: 500,
+    }));
+  const requireAuthorizedSocialConnection = async (connectionId: string) => {
+    const authority = (await authorizedSocialConnections()).find(
+      ({ connection }) => connection.id === connectionId,
+    );
+    if (!authority) throw new Error(`Unknown or unavailable social connection: ${connectionId}`);
+    return authority;
+  };
 
   // Session-scoped tools key off the worker-asserted sessionId claim (signed
   // into the delegated token by the worker, never agent-controlled).
@@ -482,11 +496,9 @@ export function buildOpenGeniMcpServer(
       },
       async ({ limit }) =>
         json({
-          connections: await listSocialConnections(
-            deps.db,
-            grant.workspaceId,
-            boundedMcpLimit(limit),
-          ),
+          connections: (await authorizedSocialConnections())
+            .slice(0, boundedMcpLimit(limit))
+            .map(({ connection }) => connection),
         }),
     );
 
@@ -502,6 +514,15 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionIds, since, windowHours, limit }) => {
+        const authorized = await authorizedSocialConnections();
+        const selected = connectionIds?.length
+          ? connectionIds.map((id) => {
+              const match = authorized.find(({ connection }) => connection.id === id);
+              if (!match) throw new Error(`Unknown or unavailable social connection: ${id}`);
+              return match;
+            })
+          : authorized;
+        const personalSubjectId = selected.find(({ subjectId }) => subjectId)?.subjectId ?? null;
         const sinceDate = since
           ? parseMcpDate(since, "since")
           : new Date(Date.now() - (windowHours ?? 24) * 60 * 60 * 1000);
@@ -509,7 +530,8 @@ export function buildOpenGeniMcpServer(
           since: sinceDate.toISOString(),
           posts: await listSocialPosts(deps.db, {
             workspaceId: grant.workspaceId,
-            ...(connectionIds?.length ? { connectionIds } : {}),
+            subjectId: personalSubjectId,
+            connectionIds: selected.map(({ connection }) => connection.id),
             since: sinceDate,
             limit: boundedMcpLimit(limit),
           }),
@@ -531,7 +553,8 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionIds, documentBaseIds, since, windowHours, limit }) => {
-        const allConnections = await listSocialConnections(deps.db, grant.workspaceId, 500);
+        const authorized = await authorizedSocialConnections();
+        const allConnections = authorized.map(({ connection }) => connection);
         const selectedIds =
           connectionIds && connectionIds.length > 0 ? new Set(connectionIds) : null;
         const connections = selectedIds
@@ -551,6 +574,11 @@ export function buildOpenGeniMcpServer(
           connections.length > 0
             ? await listSocialPosts(deps.db, {
                 workspaceId: grant.workspaceId,
+                subjectId:
+                  authorized.find(
+                    ({ connection, subjectId }) =>
+                      subjectId && connections.some((selected) => selected.id === connection.id),
+                  )?.subjectId ?? null,
                 connectionIds: connections.map((connection) => connection.id),
                 since: sinceDate,
                 limit: boundedMcpLimit(limit),
@@ -589,9 +617,10 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionId, query, subreddit, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialSearchLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId },
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
           { query, subreddit, limit },
         );
         return json({ provider: result.connection.provider, posts: result.posts });
@@ -610,9 +639,10 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionId, sinceId, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialMentionsLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId },
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
           { sinceId, limit },
         );
         return json({ provider: result.connection.provider, posts: result.posts });
@@ -631,9 +661,10 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionId, id, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialThreadLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId },
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
           { id, limit },
         );
         return json({ provider: result.connection.provider, posts: result.posts });
@@ -656,9 +687,10 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionId, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialOwnPostsLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId },
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
           { limit },
         );
         // A post without a provider timestamp is skipped rather than recorded
@@ -669,6 +701,7 @@ export function buildOpenGeniMcpServer(
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           connectionId,
+          subjectId: authority.subjectId,
           posts: datedPosts.map((post) => ({
             externalPostId: post.id,
             url: post.url,
@@ -700,9 +733,10 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionId, inReplyToId, text }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialPostReply(
           deps,
-          { workspaceId: grant.workspaceId, connectionId },
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
           { inReplyToId, text },
         );
         // Outbound publishes leave a durable, secret-free receipt (house

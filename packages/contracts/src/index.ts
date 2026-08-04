@@ -2649,6 +2649,7 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+    connectionType: z.enum(["mcp", "social"]).optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
@@ -5686,6 +5687,9 @@ export type SocialProvider = z.infer<typeof SocialProvider>;
 export const SocialConnectionStatus = z.enum(["connected", "needs_reauth", "disabled"]);
 export type SocialConnectionStatus = z.infer<typeof SocialConnectionStatus>;
 
+export const ConnectionOwnership = z.enum(["workspace", "personal"]);
+export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
+
 export const SocialConnection = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -5694,6 +5698,7 @@ export const SocialConnection = z.object({
   accountHandle: z.string().min(1),
   accountName: z.string().nullable(),
   externalAccountId: z.string().nullable(),
+  ownership: ConnectionOwnership,
   status: SocialConnectionStatus,
   scopes: z.array(z.string()),
   credentialRef: z.string().nullable(),
@@ -5754,6 +5759,7 @@ export type SocialOAuthProviderId = z.infer<typeof SocialOAuthProviderId>;
 
 export const SocialOAuthStartRequest = z.object({
   provider: SocialOAuthProviderId,
+  ownership: ConnectionOwnership.default("workspace"),
   scopes: z.array(z.string().min(1)).optional(),
   returnPath: z.string().optional(),
 });
@@ -5874,9 +5880,6 @@ function compareDescending(left: number | string, right: number | string): numbe
 
 export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
-
-export const ConnectionOwnership = z.enum(["workspace", "personal"]);
-export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
 
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),

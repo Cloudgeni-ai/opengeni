@@ -1,5 +1,29 @@
 # @opengeni/core
 
+## 0.20.13
+
+### Patch Changes
+
+- Updated dependencies [8105c25]
+  - @opengeni/runtime@0.18.12
+
+## 0.20.12
+
+### Patch Changes
+
+- 4502474: Add workspace-default and explicitly personal ownership for first-party social connections, preserve causal personal authority for agent work, and retain actionable structured gateway errors.
+- ee79969: Repair release-head recovery when GitHub emits duplicate legacy check projections.
+- Updated dependencies [4502474]
+- Updated dependencies [1ea5e62]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/db@0.27.9
+  - @opengeni/runtime@0.18.11
+  - @opengeni/config@0.10.12
+  - @opengeni/documents@0.5.5
+  - @opengeni/events@0.3.75
+  - @opengeni/observability@0.4.15
+  - @opengeni/storage@0.2.65
+
 ## 0.20.11
 
 ### Patch Changes

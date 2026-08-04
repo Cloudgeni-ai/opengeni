@@ -58,7 +58,6 @@ import {
   oauthConnectionRef,
   oauthConnectionOwnership,
   oauthResumeAction,
-  preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
   type CapabilityFilter,
@@ -292,14 +291,14 @@ export function CapabilitiesRoute({
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
-  const selectedSocialConnection = selectedItem
+  const selectedSocialConnections = selectedItem
     ? (() => {
         const plan = capabilityConnectPlan(selectedItem);
         return plan.mode === "social_oauth"
-          ? preferredSocialConnection(socialConnections, plan.provider)
-          : null;
+          ? socialConnections.filter((connection) => connection.provider === plan.provider)
+          : [];
       })()
-    : null;
+    : [];
   const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
   useEffect(() => {
@@ -535,6 +534,7 @@ export function CapabilitiesRoute({
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
         const response = await client.startSocialOAuth(workspaceId, {
           provider: action.provider,
+          ownership: action.ownership,
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -1387,7 +1387,7 @@ export function CapabilitiesRoute({
         }}
         busy={busyId === selectedItem?.id}
         errorMessage={sheetError}
-        socialConnection={selectedSocialConnection}
+        socialConnections={selectedSocialConnections}
         canManageSocial={canManageSocial}
         onAction={handleAction}
       />

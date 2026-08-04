@@ -475,10 +475,7 @@ function NorthstarComposer({
           <Composer.PausedState />
           <Composer.RestoredResources />
           <Composer.Attachments />
-          <Composer.Input
-            placeholder="Ask OpenGeni…"
-            className="min-h-[42px] px-3.5 pb-1 pt-2.5 !text-[13px] !leading-5"
-          />
+          <Composer.Input placeholder="Ask OpenGeni…" className="min-h-[42px] px-3.5 pb-1 pt-2.5" />
           {controller.confirmState ? (
             <Composer.Confirmation />
           ) : (

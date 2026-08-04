@@ -12,7 +12,7 @@ import {
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
