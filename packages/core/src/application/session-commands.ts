@@ -184,6 +184,7 @@ async function publishAndWakeAgentCommand(
     wakeRevision: number | null;
     shouldSignal: boolean;
     interruptionCount: number;
+    controlRequested?: boolean;
   },
 ): Promise<void> {
   await publishSessionEventIds(deps, input.workspaceId, input.sessionId, input.eventIds);
@@ -195,7 +196,9 @@ async function publishAndWakeAgentCommand(
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       wakeRevision: input.wakeRevision,
-      ...(input.interruptionCount > 0 ? { interruptionRequested: true } : {}),
+      ...(input.controlRequested || input.interruptionCount > 0
+        ? { interruptionRequested: true }
+        : {}),
     });
   } catch (error) {
     console.warn(
@@ -329,6 +332,7 @@ export async function steerAgentSession(
     wakeRevision: result.wakeRevision,
     shouldSignal: result.shouldSignal,
     interruptionCount: result.interruptionCount,
+    controlRequested: true,
   });
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   return result;

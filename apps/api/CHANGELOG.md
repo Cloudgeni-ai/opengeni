@@ -1,5 +1,21 @@
 # @opengeni/api-router
 
+## 0.21.9
+
+### Patch Changes
+
+- Updated dependencies [dfa3aef]
+  - @opengeni/core@0.20.11
+  - @opengeni/db@0.27.8
+  - @opengeni/documents@0.5.4
+  - @opengeni/events@0.3.74
+
+## 0.21.8
+
+### Patch Changes
+
+- 8c9b9a7: Return actionable operator configuration guidance when social OAuth credentials are missing.
+
 ## 0.21.7
 
 ### Patch Changes

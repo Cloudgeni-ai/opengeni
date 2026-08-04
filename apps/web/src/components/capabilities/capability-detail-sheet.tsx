@@ -28,6 +28,7 @@ import {
   capabilityReconnectPlan,
   capabilitySourceLabel,
   curatedSkillProvenance,
+  preferredSocialConnection,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
@@ -37,7 +38,12 @@ import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } fro
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
-  | { type: "social_oauth"; item: CapabilityCatalogItem; provider: "x" | "reddit" }
+  | {
+      type: "social_oauth";
+      item: CapabilityCatalogItem;
+      provider: "x" | "reddit";
+      ownership: ConnectionOwnership;
+    }
   | { type: "disconnect_social"; item: CapabilityCatalogItem; connectionId: string }
   | { type: "oauth"; item: CapabilityCatalogItem; ownership: ConnectionOwnership }
   | {
@@ -75,7 +81,7 @@ export function CapabilityDetailSheet({
   restoreFocusFallbackRef,
   busy,
   errorMessage,
-  socialConnection,
+  socialConnections,
   canManageSocial = false,
   onAction,
 }: {
@@ -88,7 +94,7 @@ export function CapabilityDetailSheet({
   restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
   busy: boolean;
   errorMessage: string | null;
-  socialConnection?: SocialConnection | null;
+  socialConnections?: SocialConnection[];
   canManageSocial?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
@@ -153,7 +159,7 @@ export function CapabilityDetailSheet({
             logoSrc={logoSrc}
             busy={busy}
             errorMessage={errorMessage}
-            socialConnection={socialConnection}
+            socialConnections={socialConnections}
             canManageSocial={canManageSocial}
             onAction={onAction}
           />
@@ -169,7 +175,7 @@ function DetailBody({
   logoSrc,
   busy,
   errorMessage,
-  socialConnection,
+  socialConnections,
   canManageSocial,
   onAction,
 }: {
@@ -178,7 +184,7 @@ function DetailBody({
   logoSrc: string | null;
   busy: boolean;
   errorMessage: string | null;
-  socialConnection?: SocialConnection | null;
+  socialConnections?: SocialConnection[];
   canManageSocial: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
@@ -270,7 +276,9 @@ function DetailBody({
             <SocialConnectorControls
               item={item}
               provider={plan.provider}
-              connection={socialConnection ?? null}
+              connections={socialConnections ?? []}
+              ownership={connectionOwnership}
+              onOwnershipChange={setConnectionOwnership}
               busy={busy}
               canManage={canManageSocial}
               onAction={onAction}
@@ -412,20 +420,30 @@ function DetailBody({
 export function SocialConnectorControls({
   item,
   provider,
-  connection,
+  connections,
+  ownership,
+  onOwnershipChange,
   busy,
   canManage,
   onAction,
 }: {
   item: CapabilityCatalogItem;
   provider: "x" | "reddit";
-  connection: SocialConnection | null;
+  connections: SocialConnection[];
+  ownership: ConnectionOwnership;
+  onOwnershipChange: (ownership: ConnectionOwnership) => void;
   busy: boolean;
   canManage: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
+  const connection = preferredSocialConnection(
+    connections.filter((candidate) => candidate.ownership === ownership),
+    provider,
+  );
+  const canConnect = ownership === "personal" || canManage;
   return (
     <div className="space-y-3">
+      <OwnershipSelector value={ownership} onChange={onOwnershipChange} />
       {connection ? (
         <Notice tone={connection.status === "connected" ? "success" : "waiting"}>
           <span className="font-medium">
@@ -440,31 +458,34 @@ export function SocialConnectorControls({
       <Button
         type="button"
         className="w-full"
-        disabled={busy || !canManage}
-        onClick={() => onAction({ type: "social_oauth", item, provider })}
+        disabled={busy || !canConnect}
+        onClick={() => onAction({ type: "social_oauth", item, provider, ownership })}
       >
         {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
         {connection && connection.status !== "disabled"
           ? `Reconnect ${item.name}`
-          : `Connect ${item.name} for workspace`}
+          : ownership === "workspace"
+            ? `Connect ${item.name} for workspace`
+            : `Connect ${item.name} only for me`}
       </Button>
       <p className="text-center text-xs text-fg-subtle">
-        Workspace shared. Agents and scheduled automations can use the connected account; connect a
-        brand account rather than a personal one.
+        {ownership === "workspace"
+          ? "Workspace shared. Agents and scheduled automations can use the connected account; connect a brand account rather than a personal one."
+          : "Personal. Used only by work carrying your explicit connection authority, including tasks you create from that authority."}
       </p>
       {connection?.status === "connected" ? (
         <Button
           type="button"
           variant="outline"
           className="w-full"
-          disabled={busy || !canManage}
+          disabled={busy || !canConnect}
           onClick={() => onAction({ type: "disconnect_social", item, connectionId: connection.id })}
         >
           <TrashIcon />
           Disconnect
         </Button>
       ) : null}
-      {!canManage ? (
+      {ownership === "workspace" && !canManage ? (
         <p className="text-center text-xs text-fg-subtle">
           Workspace admin permission is required to manage this connection.
         </p>

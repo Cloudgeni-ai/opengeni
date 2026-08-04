@@ -31,8 +31,17 @@ const apiBaseUrl = (process.env.OPENGENI_API_BASE_URL ?? "https://app.opengeni.a
   "",
 );
 const mcpToken = process.env.OPENGENI_DEMO_MCP_TOKEN?.trim() ?? "";
-const model = process.env.OPENGENI_MODEL?.trim() ?? "";
 const openGeni = new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey });
+
+const createDemoSessionInput = z.object({
+  ticketId: z.string().trim().min(1),
+  initialMessage: z.string().trim().min(1).optional(),
+  model: z.string().trim().min(1).max(256),
+  reasoningEffort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+    .default("medium"),
+  latencyMode: z.enum(["standard", "priority", "fast"]).default("standard"),
+});
 
 function minutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString();
@@ -423,20 +432,25 @@ async function createAgentSession(request: Request): Promise<Response> {
       503,
     );
   }
-  const input = (await request.json().catch(() => ({}))) as {
-    initialMessage?: unknown;
-    ticketId?: unknown;
-  };
-  const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+  const parsedInput = createDemoSessionInput.safeParse(await request.json().catch(() => ({})));
+  if (!parsedInput.success) {
+    return json({ error: "Choose a valid workspace model before starting the agent." }, 400);
+  }
+  const {
+    ticketId,
+    initialMessage: requestedMessage,
+    model,
+    reasoningEffort,
+    latencyMode,
+  } = parsedInput.data;
   const supportCase = getCase(ticketId);
   if (!supportCase) {
     return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
   }
   const { ticket, customer } = supportCase;
-  const initialMessage =
-    typeof input.initialMessage === "string" && input.initialMessage.trim()
-      ? input.initialMessage.trim()
-      : `Investigate ${ticket.id}. Use the available support tools, explain the evidence, and take the appropriate actions.`;
+  const initialMessage = requestedMessage
+    ? requestedMessage
+    : `Investigate ${ticket.id}. Use the available support tools, explain the evidence, and take the appropriate actions.`;
 
   const mcpServer = {
     id: MCP_SERVER_ID,
@@ -451,8 +465,9 @@ async function createAgentSession(request: Request): Promise<Response> {
   const sessionRequest: CreateSessionRequest = {
     initialMessage,
     instructions: `You are the embedded support copilot inside Northstar, a fictional SaaS product. You are working only on ticket ${ticket.id} for ${customer.name}. Always inspect the ticket and customer with Northstar Support tools before drawing conclusions. When evidence warrants action, call update_ticket and add_internal_note immediately. Product actions are pre-approved for this demo, so execute them without asking for confirmation. Never invent customer data. Keep the final answer brief and operational.`,
-    ...(model ? { model } : {}),
-    reasoningEffort: "high",
+    model,
+    reasoningEffort,
+    latencyMode,
     tools: [{ kind: "mcp", id: MCP_SERVER_ID }],
     mcpServers: [mcpServer] as CreateSessionRequest["mcpServers"],
     metadata: { demo: "northstar-support", ticketId: ticket.id },

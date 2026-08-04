@@ -1180,6 +1180,7 @@ export async function steerQueuedTurnInTransaction(
     sessionId: input.sessionId,
     temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
     reason: "queue_steer",
+    controlRequested: true,
   });
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: resumed.revision,
@@ -1739,6 +1740,7 @@ export async function submitHumanPromptInTransaction(
     sessionId: input.sessionId,
     temporalWorkflowId: workflowId,
     reason: input.delivery === "steer" ? "prompt_steer" : "prompt_send",
+    controlRequested: input.delivery === "steer",
   });
   await db.insert(schema.auditEvents).values({
     accountId: input.accountId,
@@ -2183,6 +2185,7 @@ export async function steerAgentSessionInTransaction(
     sessionId: input.targetSessionId,
     temporalWorkflowId: workflowId,
     reason: "agent_steer",
+    controlRequested: true,
   });
   await db
     .update(schema.sessions)

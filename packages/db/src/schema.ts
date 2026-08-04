@@ -3246,6 +3246,7 @@ export const sessionWorkflowWakeOutbox = pgTable(
     temporalWorkflowId: text("temporal_workflow_id").notNull(),
     wakeRevision: bigint("wake_revision", { mode: "number" }).notNull().default(1),
     deliveredRevision: bigint("delivered_revision", { mode: "number" }).notNull().default(0),
+    controlRevision: bigint("control_revision", { mode: "number" }).notNull().default(0),
     reason: text("reason").notNull(),
     attempts: integer("attempts").notNull().default(0),
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3261,6 +3262,10 @@ export const sessionWorkflowWakeOutbox = pgTable(
     revisionSafe: check(
       "session_workflow_wake_outbox_revision_safe_check",
       sql`${table.wakeRevision} <= 9007199254740991 and ${table.deliveredRevision} <= 9007199254740991`,
+    ),
+    controlRevisionValid: check(
+      "session_workflow_wake_outbox_control_revision_check",
+      sql`${table.controlRevision} >= 0 and ${table.controlRevision} <= ${table.wakeRevision} and ${table.controlRevision} <= 9007199254740991`,
     ),
     workspaceAccount: foreignKey({
       name: "session_workflow_wake_outbox_workspace_account_fk",
@@ -5823,6 +5828,7 @@ export const socialConnections = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id"),
     provider: text("provider").notNull(),
     accountHandle: text("account_handle").notNull(),
     accountName: text("account_name"),
@@ -5840,13 +5846,20 @@ export const socialConnections = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceProviderHandle: uniqueIndex("social_connections_workspace_provider_handle_idx").on(
-      table.workspaceId,
-      table.provider,
-      table.accountHandle,
-    ),
+    workspaceProviderHandle: uniqueIndex("social_connections_workspace_provider_handle_idx")
+      .on(table.workspaceId, table.provider, table.accountHandle)
+      .where(sql`${table.subjectId} is null`),
+    subjectProviderHandle: uniqueIndex("social_connections_subject_provider_handle_idx")
+      .on(table.workspaceId, table.subjectId, table.provider)
+      .where(sql`${table.subjectId} is not null`),
     providerStatus: index("social_connections_workspace_provider_status_idx").on(
       table.workspaceId,
+      table.provider,
+      table.status,
+    ),
+    subjectProviderStatus: index("social_connections_subject_provider_status_idx").on(
+      table.workspaceId,
+      table.subjectId,
       table.provider,
       table.status,
     ),

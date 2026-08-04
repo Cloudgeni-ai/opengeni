@@ -67,6 +67,8 @@ import {
   processModelResponseUsageEvent,
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
+  providerRecoveryCountFromMetadata,
+  providerRetryAfterMs,
   providerRecoveryResult,
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
@@ -2939,9 +2941,11 @@ describe("transient provider error classifier", () => {
       retryable: true,
     });
     expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
-    expect(providerRecoveryResult()).toEqual({
+    expect(
+      providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber: 1 }),
+    ).toEqual({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
   });
 
@@ -3121,9 +3125,14 @@ describe("transient provider error classifier", () => {
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });
-    expect(providerRecoveryResult()).toEqual({
+    expect(
+      providerRecoveryResult({
+        failureCode: "upstream_connectivity_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
 
     // HTTP status remains authoritative: a request-owned 4xx with the same body
@@ -3253,10 +3262,73 @@ describe("transient provider error classifier", () => {
       }),
     );
     expect(failure.retryable).toBe(true); // enters the recovery branch (not the terminal one)
-    expect(providerRecoveryResult()).toEqual({
+    expect(
+      providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber: 1 }),
+    ).toEqual({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
+  });
+
+  test("provider recovery backs off connectivity failures and honors rate-limit hints", () => {
+    expect(
+      [1, 2, 3, 4, 5, 6].map(
+        (attemptNumber) =>
+          providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber })
+            .continueDelayMs,
+      ),
+    ).toEqual([2_000, 5_000, 15_000, 30_000, 60_000, 60_000]);
+    expect(
+      providerRecoveryResult({
+        failureCode: "provider_rate_limited",
+        attemptNumber: 1,
+      }).continueDelayMs,
+    ).toBe(PROVIDER_BACKPRESSURE_DELAY_MS);
+    expect(
+      providerRecoveryResult({
+        failureCode: "provider_rate_limited",
+        attemptNumber: 1,
+        retryAfterMs: 12_000,
+      }).continueDelayMs,
+    ).toBe(12_000);
+    expect(
+      providerRecoveryResult({
+        failureCode: "provider_unavailable",
+        attemptNumber: 1,
+        retryAfterMs: 7_000,
+      }).continueDelayMs,
+    ).toBe(7_000);
+    expect(
+      providerRetryAfterMs(
+        Object.assign(new Error("rate limited"), {
+          headers: new Headers({ "retry-after": "7" }),
+        }),
+      ),
+    ).toBe(7_000);
+    expect(
+      providerRetryAfterMs(
+        Object.assign(new Error("gateway rate limited"), {
+          responseHeaders: { "Retry-After": "9" },
+        }),
+      ),
+    ).toBe(9_000);
+    expect(providerRecoveryCountFromMetadata({})).toBe(0);
+    expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: 3 })).toBe(3);
+    expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: -1 })).toBe(0);
+  });
+
+  test("recognizes SDK statusCode when status is not present", () => {
+    const transient = Object.assign(new Error("provider unavailable"), { statusCode: 503 });
+    expect(isTransientProviderError(transient)).toBe(true);
+    expect(agentRunFailurePayload(transient)).toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("invalid provider request"), { statusCode: 400 }),
+      ),
+    ).toBe(false);
   });
 
   test("agentRunFailurePayload keeps a ChatGPT/Codex usage cap non-retryable (429 that won't clear)", () => {

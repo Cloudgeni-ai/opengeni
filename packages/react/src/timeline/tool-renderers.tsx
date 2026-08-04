@@ -17,6 +17,7 @@ import {
   MessagesSquareIcon,
   MessageSquareIcon,
   MousePointer2Icon,
+  PackageSearchIcon,
   PanelsTopLeftIcon,
   PlugIcon,
   SearchIcon,
@@ -1033,6 +1034,204 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
   );
 }
 
+/* ---- tool_search (progressive MCP disclosure) ------------------------------ */
+
+type DisclosedTool = {
+  /** Full wire name (`server__leaf` or bare). */
+  name: string;
+  /** Server / namespace prefix before `__`, when present. */
+  source: string | null;
+  /** Leaf tool name after `__`. */
+  leaf: string;
+};
+
+function splitToolWireName(name: string): DisclosedTool {
+  const boundary = name.indexOf("__");
+  if (boundary <= 0) {
+    return { name, source: null, leaf: name };
+  }
+  return {
+    name,
+    source: name.slice(0, boundary),
+    leaf: name.slice(boundary + 2),
+  };
+}
+
+/** Capability query from live tool_search args (object or JSON string). */
+function toolSearchQuery(item: ToolRendererProps["item"]): string {
+  const fromArgs = parseToolArgs(item.arguments);
+  if (typeof fromArgs.query === "string" && fromArgs.query.trim()) {
+    return fromArgs.query.trim();
+  }
+  const raw = item.raw;
+  if (raw && typeof raw === "object") {
+    const rawArgs = (raw as { arguments?: unknown }).arguments;
+    if (typeof rawArgs === "string" && rawArgs.trim()) {
+      const parsed = tryParseJson(rawArgs);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const query = (parsed as { query?: unknown }).query;
+        if (typeof query === "string" && query.trim()) {
+          return query.trim();
+        }
+      }
+    } else if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+      const query = (rawArgs as { query?: unknown }).query;
+      if (typeof query === "string" && query.trim()) {
+        return query.trim();
+      }
+    }
+  }
+  return "";
+}
+
+/**
+ * Parse disclosed tools from the runtime event shape.
+ * `normalizeSdkEvent` collapses `tool_search_output.tools[]` into text:
+ *   "Disclosed tools: a, b" | "No matching tools found."
+ * Also accept a structured `tools` array when a host/enricher preserves it.
+ */
+function parseDisclosedTools(output: unknown): DisclosedTool[] | null {
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const tools = (output as { tools?: unknown }).tools;
+    if (Array.isArray(tools)) {
+      return tools
+        .map((tool) => {
+          if (typeof tool === "string" && tool.trim()) {
+            return splitToolWireName(tool.trim());
+          }
+          if (
+            tool &&
+            typeof tool === "object" &&
+            typeof (tool as { name?: unknown }).name === "string"
+          ) {
+            const name = (tool as { name: string }).name.trim();
+            return name ? splitToolWireName(name) : null;
+          }
+          return null;
+        })
+        .filter((tool): tool is DisclosedTool => tool != null);
+    }
+  }
+
+  const { text } = unwrapMcpOutput(output);
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^no matching tools found\.?$/i.test(trimmed)) {
+    return [];
+  }
+  const disclosed = trimmed.match(/^disclosed tools:\s*(.+)$/i);
+  if (disclosed?.[1]) {
+    return disclosed[1]
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map(splitToolWireName);
+  }
+  const parsed = tryParseJson(trimmed);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return parseDisclosedTools(parsed);
+  }
+  return null;
+}
+
+function toolSearchPreview(tools: DisclosedTool[] | null, cancelled: boolean): string | undefined {
+  if (cancelled) {
+    return undefined;
+  }
+  if (!tools) {
+    return "Done";
+  }
+  if (tools.length === 0) {
+    return "No matches";
+  }
+  if (tools.length === 1) {
+    return tools[0]!.leaf;
+  }
+  const head = tools[0]!.leaf;
+  return `${tools.length} tools · ${truncatePreview(head, 28)}`;
+}
+
+function ToolSearchRenderer({ item }: ToolRendererProps) {
+  const query = toolSearchQuery(item);
+  const icon = <PackageSearchIcon className={ICON_SIZE} />;
+  const running = item.status === "running";
+  const queryPreview = query ? truncatePreview(query, 64) : "";
+
+  if (running) {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="running"
+        title="Looking up tools"
+        running
+        preview={
+          queryPreview ? (
+            <RunningPreview>{queryPreview}</RunningPreview>
+          ) : (
+            <RunningPreview>Matching capabilities…</RunningPreview>
+          )
+        }
+      >
+        {query ? <BodyNote>capability query: {query}</BodyNote> : null}
+        <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+      </ActivityDisclosure>
+    );
+  }
+
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="failed"
+        title="Tool lookup failed"
+        failed
+        preview={truncatePreview(outText, 80) || queryPreview || "Lookup failed"}
+      >
+        {query ? <BodyNote>capability query: {query}</BodyNote> : null}
+        <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+        <PayloadBlock label="Error" value={outText} failed />
+      </ActivityDisclosure>
+    );
+  }
+
+  const tools = parseDisclosedTools(item.output);
+  const preview = toolSearchPreview(tools, item.status === "cancelled");
+
+  return (
+    <ActivityDisclosure
+      icon={icon}
+      iconTone="muted"
+      title="Looked up tools"
+      cancelled={item.status === "cancelled"}
+      preview={preview}
+    >
+      {query ? <BodyNote>capability query: {query}</BodyNote> : null}
+      {tools && tools.length > 0 ? (
+        <ul className="grid gap-1.5">
+          {tools.slice(0, 12).map((tool) => (
+            <li key={tool.name} className="flex min-w-0 items-baseline gap-2">
+              {tool.source ? (
+                <span className="shrink-0 text-og-xs text-og-fg-subtle">{tool.source}</span>
+              ) : null}
+              <span className="truncate font-mono text-og-sm text-og-fg">{tool.leaf}</span>
+            </li>
+          ))}
+          {tools.length > 12 ? (
+            <li className="text-og-xs text-og-fg-muted">+{tools.length - 12} more</li>
+          ) : null}
+        </ul>
+      ) : tools && tools.length === 0 ? (
+        <BodyNote>no deferred tools matched this capability query.</BodyNote>
+      ) : null}
+      <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+      {tools == null && outText ? <PayloadBlock label="Result" value={outText} /> : null}
+    </ActivityDisclosure>
+  );
+}
+
 /* ---- docs / knowledge search ----------------------------------------------- */
 
 function DocsSearchRenderer({ item }: ToolRendererProps) {
@@ -1577,9 +1776,11 @@ function GenericToolIcon({ name }: { name: string }) {
                                   leaf.includes("knowledge") ||
                                   leaf === "list_document_bases"
                                 ? FileSearchIcon
-                                : leaf === "tool_search" || leaf === "load_skill"
-                                  ? PlugIcon
-                                  : WrenchIcon;
+                                : leaf === "tool_search"
+                                  ? PackageSearchIcon
+                                  : leaf === "load_skill"
+                                    ? PlugIcon
+                                    : WrenchIcon;
   return <Icon className={ICON_SIZE} />;
 }
 
@@ -1591,6 +1792,7 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "rawType", type: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "rawType", type: "computer_call", render: ComputerCallRenderer },
   { match: "rawType", type: "hosted_tool_call", render: WebSearchRenderer },
+  { match: "rawType", type: "tool_search_call", render: ToolSearchRenderer },
   // First-party sandbox + MCP tools resolve by name (exact or MCP leaf).
   { match: "name", name: "exec_command", render: ExecRenderer },
   { match: "name", name: "request_human_input", render: AskRenderer },
@@ -1609,6 +1811,7 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "computer_keypress", render: ComputerCallRenderer },
   { match: "name", name: "computer_drag", render: ComputerCallRenderer },
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
+  { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },
   { match: "name", name: "variable_set_set_variable", render: SecretSetRenderer },

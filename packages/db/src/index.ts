@@ -3174,6 +3174,7 @@ export type WorkspaceStateMemoryRecord = {
 export type CreateSocialConnectionInput = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string | null;
   provider: SocialProvider;
   accountHandle: string;
   accountName?: string | null;
@@ -3189,6 +3190,7 @@ export type CreateSocialConnectionInput = {
 export type UpsertSocialOAuthConnectionInput = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string | null;
   provider: SocialProvider;
   accountHandle: string;
   accountName?: string | null;
@@ -3201,6 +3203,7 @@ export type UpsertSocialOAuthConnectionInput = {
 export type UpdateSocialConnectionCredentialInput = {
   workspaceId: string;
   connectionId: string;
+  subjectId?: string | null;
   credentialEncrypted?: string | null;
   status?: SocialConnectionStatus;
   tokenMetadata?: Record<string, unknown>;
@@ -3209,6 +3212,7 @@ export type UpdateSocialConnectionCredentialInput = {
 export type CreateSocialPostInput = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string | null;
   connectionId: string;
   externalPostId?: string | null;
   url?: string | null;
@@ -8921,11 +8925,13 @@ export async function createSocialConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const [row] = await scopedDb
         .insert(schema.socialConnections)
         .values({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
           provider: input.provider,
           accountHandle: input.accountHandle,
           accountName: input.accountName ?? null,
@@ -8959,11 +8965,13 @@ export async function upsertSocialOAuthConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const [row] = await scopedDb
         .insert(schema.socialConnections)
         .values({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
           provider: input.provider,
           accountHandle: input.accountHandle,
           accountName: input.accountName ?? null,
@@ -8974,12 +8982,21 @@ export async function upsertSocialOAuthConnection(
           tokenMetadata: input.tokenMetadata ?? {},
         })
         .onConflictDoUpdate({
-          target: [
-            schema.socialConnections.workspaceId,
-            schema.socialConnections.provider,
-            schema.socialConnections.accountHandle,
-          ],
+          target: input.subjectId
+            ? [
+                schema.socialConnections.workspaceId,
+                schema.socialConnections.subjectId,
+                schema.socialConnections.provider,
+              ]
+            : [
+                schema.socialConnections.workspaceId,
+                schema.socialConnections.provider,
+                schema.socialConnections.accountHandle,
+              ],
+          targetWhere: input.subjectId ? sql`subject_id is not null` : sql`subject_id is null`,
           set: {
+            accountId: input.accountId,
+            accountHandle: input.accountHandle,
             accountName: input.accountName ?? null,
             externalAccountId: input.externalAccountId ?? null,
             status: "connected",
@@ -9007,8 +9024,9 @@ export async function loadSocialConnectionCredential(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<{ connection: SocialConnection; credentialEncrypted: string | null } | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withSocialConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
       .from(schema.socialConnections)
@@ -9016,6 +9034,7 @@ export async function loadSocialConnectionCredential(
         and(
           eq(schema.socialConnections.workspaceId, workspaceId),
           eq(schema.socialConnections.id, connectionId),
+          socialConnectionSubjectVisibility(subjectId),
         ),
       )
       .limit(1);
@@ -9030,26 +9049,32 @@ export async function updateSocialConnectionCredential(
   db: Database,
   input: UpdateSocialConnectionCredentialInput,
 ): Promise<SocialConnection | null> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.socialConnections)
-      .set({
-        ...(input.credentialEncrypted !== undefined
-          ? { credentialEncrypted: input.credentialEncrypted }
-          : {}),
-        ...(input.status !== undefined ? { status: input.status } : {}),
-        ...(input.tokenMetadata !== undefined ? { tokenMetadata: input.tokenMetadata } : {}),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.socialConnections.workspaceId, input.workspaceId),
-          eq(schema.socialConnections.id, input.connectionId),
-        ),
-      )
-      .returning();
-    return row ? mapSocialConnection(row) : null;
-  });
+  return await withSocialConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .update(schema.socialConnections)
+        .set({
+          ...(input.credentialEncrypted !== undefined
+            ? { credentialEncrypted: input.credentialEncrypted }
+            : {}),
+          ...(input.status !== undefined ? { status: input.status } : {}),
+          ...(input.tokenMetadata !== undefined ? { tokenMetadata: input.tokenMetadata } : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.socialConnections.workspaceId, input.workspaceId),
+            eq(schema.socialConnections.id, input.connectionId),
+            socialConnectionSubjectVisibility(input.subjectId),
+          ),
+        )
+        .returning();
+      return row ? mapSocialConnection(row) : null;
+    },
+  );
 }
 
 // List/get never select credential_encrypted (same posture as the broker
@@ -9062,12 +9087,18 @@ export async function listSocialConnections(
   db: Database,
   workspaceId: string,
   limit = 100,
+  subjectId?: string | null,
 ): Promise<SocialConnection[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withSocialConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const rows = await scopedDb
       .select(socialConnectionPublicColumns)
       .from(schema.socialConnections)
-      .where(eq(schema.socialConnections.workspaceId, workspaceId))
+      .where(
+        and(
+          eq(schema.socialConnections.workspaceId, workspaceId),
+          socialConnectionSubjectVisibility(subjectId),
+        ),
+      )
       .orderBy(desc(schema.socialConnections.createdAt))
       .limit(limit);
     return rows.map(mapSocialConnection);
@@ -9078,8 +9109,9 @@ export async function getSocialConnection(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<SocialConnection | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withSocialConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select(socialConnectionPublicColumns)
       .from(schema.socialConnections)
@@ -9087,6 +9119,7 @@ export async function getSocialConnection(
         and(
           eq(schema.socialConnections.workspaceId, workspaceId),
           eq(schema.socialConnections.id, connectionId),
+          socialConnectionSubjectVisibility(subjectId),
         ),
       )
       .limit(1);
@@ -9098,8 +9131,9 @@ export async function requireSocialConnection(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<SocialConnection> {
-  const connection = await getSocialConnection(db, workspaceId, connectionId);
+  const connection = await getSocialConnection(db, workspaceId, connectionId, subjectId);
   if (!connection) {
     throw new Error(`Social connection not found: ${connectionId}`);
   }
@@ -9114,10 +9148,12 @@ export async function createSocialPost(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const connection = await requireSocialConnection(
         scopedDb,
         input.workspaceId,
         input.connectionId,
+        input.subjectId,
       );
       const [row] = await scopedDb
         .insert(schema.socialPosts)
@@ -9154,6 +9190,7 @@ export async function recordSyncedSocialPosts(
     accountId: string;
     workspaceId: string;
     connectionId: string;
+    subjectId?: string | null;
     posts: Array<{
       externalPostId: string;
       url?: string | null;
@@ -9172,10 +9209,12 @@ export async function recordSyncedSocialPosts(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const connection = await requireSocialConnection(
         scopedDb,
         input.workspaceId,
         input.connectionId,
+        input.subjectId,
       );
       const rows = await scopedDb
         .insert(schema.socialPosts)
@@ -9211,6 +9250,7 @@ export async function listSocialPosts(
   db: Database,
   options: {
     workspaceId: string;
+    subjectId?: string | null;
     connectionIds?: string[];
     since?: Date;
     limit?: number;
@@ -9224,15 +9264,20 @@ export async function listSocialPosts(
     conditions.push(gte(schema.socialPosts.publishedAt, options.since));
   }
   const limit = options.limit ?? 100;
-  return await withWorkspaceRls(db, options.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.socialPosts)
-      .where(and(...conditions))
-      .orderBy(desc(schema.socialPosts.publishedAt))
-      .limit(limit);
-    return rows.map(mapSocialPost);
-  });
+  return await withSocialConnectionSubjectRls(
+    db,
+    options.workspaceId,
+    options.subjectId,
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select()
+        .from(schema.socialPosts)
+        .where(and(...conditions))
+        .orderBy(desc(schema.socialPosts.publishedAt))
+        .limit(limit);
+      return rows.map(mapSocialPost);
+    },
+  );
 }
 
 export async function createScheduledTask(
@@ -37182,6 +37227,7 @@ export async function claimSessionWorkForAttempt(
                 "delivered",
                 "acknowledged",
                 "settled",
+                "rejected_stale",
               ]),
               isNull(schema.sessionTurnAttempts.quiescedAt),
             ),
@@ -38109,28 +38155,6 @@ export async function claimSessionWorkForAttempt(
             turn: mapSessionTurnForExecution(internalTurn),
           };
         }
-        const predecessorAttemptId = queuedSteerReplacementAttemptId(queuedTurn.metadata);
-        if (predecessorAttemptId) {
-          const [predecessor] = await tx
-            .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
-            .from(schema.sessionTurnAttempts)
-            .where(
-              and(
-                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
-                eq(schema.sessionTurnAttempts.sessionId, sessionId),
-                eq(schema.sessionTurnAttempts.id, predecessorAttemptId),
-              ),
-            )
-            .limit(1);
-          if (!predecessor) {
-            throw new SessionControlInvariantError(
-              `Queued Steer ${id} points to missing predecessor attempt ${predecessorAttemptId}`,
-            );
-          }
-          if (!predecessor.quiescedAt) {
-            return { action: "unclaimed", reason: "control-pending" };
-          }
-        }
         // The database guard makes this function the only supported
         // queued-to-running transition. Raw or stale claimers cannot bypass the
         // generation/active-pointer transaction.
@@ -38764,6 +38788,14 @@ export async function settleSessionAttemptInterruptions(
               interruptions.map((interruption) => interruption.id),
             ),
           );
+        await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          temporalWorkflowId: session.temporalWorkflowId ?? `session-${sessionId}`,
+          reason: "attempt_interruption_rejected_stale",
+          controlRequested: true,
+        });
         return {
           action: effectiveControl.state === "paused" ? "paused" : "continue",
           events: [],
@@ -38955,6 +38987,14 @@ export async function settleSessionAttemptInterruptions(
             interruptions.map((interruption) => interruption.id),
           ),
         );
+      await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: session.temporalWorkflowId ?? `session-${sessionId}`,
+        reason: "attempt_interruption_settled",
+        controlRequested: true,
+      });
       return {
         action: effectiveControl.state === "paused" ? "paused" : "continue",
         events: [...closedTools.events, ...eventRows.map(mapEvent)],
@@ -38982,6 +39022,50 @@ export type SessionWorkPeek =
   | { kind: "interruption-pending"; attemptId: string }
   | { kind: "cancellation-wait"; attemptId: string }
   | { kind: "idle" };
+
+/**
+ * Return the oldest exact attempt whose logical interruption settled but whose
+ * physical quiescence receipt is still missing. This deliberately searches all
+ * attempts: a provider-recovery race can create a newer generation before the
+ * predecessor receipt is reconciled, and looking only at the newest attempt
+ * would strand the replacement forever.
+ */
+async function nextSessionAttemptAwaitingQuiescence(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  attemptId: string;
+} | null> {
+  const [row] = await db
+    .select({
+      attemptId: schema.sessionTurnAttempts.id,
+    })
+    .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionAttemptInterruptions,
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
+        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, sessionId),
+        eq(schema.sessionTurnAttempts.state, "closed"),
+        isNull(schema.sessionTurnAttempts.quiescedAt),
+        inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+      ),
+    )
+    .orderBy(
+      asc(schema.sessionAttemptInterruptions.requestedAt),
+      asc(schema.sessionAttemptInterruptions.id),
+    )
+    .limit(1);
+  return row ?? null;
+}
 
 async function latestSessionAttemptInterruption(
   db: Database,
@@ -39030,6 +39114,43 @@ async function latestSessionAttemptInterruption(
     : null;
 }
 
+async function queuedSteerHasUnquiescedPredecessor(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  predecessorAttemptIds: string[],
+): Promise<boolean> {
+  if (predecessorAttemptIds.length === 0) return false;
+  const [row] = await db
+    .select({ attemptId: schema.sessionTurnAttempts.id })
+    .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionAttemptInterruptions,
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
+        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, sessionId),
+        inArray(schema.sessionTurnAttempts.id, predecessorAttemptIds),
+        isNull(schema.sessionTurnAttempts.quiescedAt),
+        inArray(schema.sessionAttemptInterruptions.state, [
+          "pending",
+          "delivered",
+          "acknowledged",
+          "settled",
+          "rejected_stale",
+        ]),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 export async function peekSessionWork(
   db: Database,
@@ -39073,19 +39194,15 @@ export async function peekSessionWork(
     }
     if (effectiveControl.state !== "active") return { kind: "idle" };
 
-    const latestInterruption = await latestSessionAttemptInterruption(
+    const awaitingQuiescence = await nextSessionAttemptAwaitingQuiescence(
       scopedDb,
       workspaceId,
       sessionId,
     );
-    if (
-      latestInterruption &&
-      latestInterruption.quiescedAt === null &&
-      latestInterruption.interruptionState === "settled"
-    ) {
+    if (awaitingQuiescence) {
       return {
         kind: "cancellation-wait",
-        attemptId: latestInterruption.attemptId,
+        attemptId: awaitingQuiescence.attemptId,
       };
     }
 
@@ -40943,6 +41060,7 @@ export type RequestSessionTurnRecoveryInput = {
   attemptId: string;
   reason: string;
   detail?: Record<string, unknown>;
+  providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
     codexCredentialId: string;
@@ -40996,6 +41114,25 @@ export async function requestSessionTurnRecovery(
         { workspaceControl: locks.control ?? undefined },
       );
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
+      const [pendingInterruption] = attempt
+        ? await tx
+            .select({ id: schema.sessionAttemptInterruptions.id })
+            .from(schema.sessionAttemptInterruptions)
+            .where(
+              and(
+                eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+                eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+                eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+                inArray(schema.sessionAttemptInterruptions.state, [
+                  "pending",
+                  "delivered",
+                  "acknowledged",
+                ]),
+              ),
+            )
+            .limit(1)
+            .for("update")
+        : [];
       if (
         !locks.workspace ||
         !turn ||
@@ -41009,7 +41146,8 @@ export async function requestSessionTurnRecovery(
         effectiveControl.state !== "active" ||
         session.activeTurnId !== input.turnId ||
         !fromStatuses.includes(turnStatus as SessionTurnStatus) ||
-        turn.activeAttemptId !== input.attemptId
+        turn.activeAttemptId !== input.attemptId ||
+        pendingInterruption !== undefined
       ) {
         return {
           action: "stale" as const,
@@ -41020,6 +41158,12 @@ export async function requestSessionTurnRecovery(
       }
 
       const now = new Date();
+      if (
+        input.providerRecoveryCount !== undefined &&
+        (!Number.isSafeInteger(input.providerRecoveryCount) || input.providerRecoveryCount <= 0)
+      ) {
+        throw new Error("providerRecoveryCount must be a positive safe integer");
+      }
       let providerArtifactsInvalidated = 0;
       if (input.providerArtifactInvalidation) {
         const invalidatedHistory = await tx
@@ -41161,7 +41305,12 @@ export async function requestSessionTurnRecovery(
           cancelledBy: null,
           cancelReason: null,
           version: turn.version + 1,
-          metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+          metadata: {
+            ...metadataWithoutTurnDispatchAttempt(turn.metadata),
+            ...(input.providerRecoveryCount !== undefined
+              ? { providerRecoveryCount: input.providerRecoveryCount }
+              : {}),
+          },
           updatedAt: now,
         })
         .where(
@@ -41770,12 +41919,25 @@ export async function getSessionQueueSnapshot(
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
+    const items = rows.map(mapSessionTurn);
     const latestInterruption = await latestSessionAttemptInterruption(
       scopedDb,
       workspaceId,
       sessionId,
     );
-    const items = rows.map(mapSessionTurn);
+    const queuedSteerPredecessorIds = items
+      .map((turn) => queuedSteerReplacementAttemptId(turn.metadata))
+      .filter((attemptId): attemptId is string => attemptId !== null);
+    const stoppingPreviousAttempt =
+      (latestInterruption !== null &&
+        latestInterruption.interruptionState !== "rejected_stale" &&
+        latestInterruption.quiescedAt === null) ||
+      (await queuedSteerHasUnquiescedPredecessor(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        queuedSteerPredecessorIds,
+      ));
     const nextInputBatch = selectBoundedSystemUpdateBatch(pendingInputs);
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
@@ -41787,10 +41949,7 @@ export async function getSessionQueueSnapshot(
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
       activePersonalConnections,
-      stoppingPreviousAttempt:
-        latestInterruption !== null &&
-        latestInterruption.interruptionState !== "rejected_stale" &&
-        latestInterruption.quiescedAt === null,
+      stoppingPreviousAttempt,
       items,
       pendingInputs: pendingInputs.map((update) => {
         const canonical = mapSessionSystemUpdate(update);
@@ -41829,7 +41988,9 @@ function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): str
   ) {
     return attemptId;
   }
-  throw new SessionControlInvariantError("Queued Steer has malformed predecessor metadata");
+  // The interruption ledger is authoritative. Historical or malformed display
+  // metadata must not make the read-only queue projection fail.
+  return null;
 }
 
 async function enqueueFailedChildOutboxForTurnTx(
@@ -42046,6 +42207,7 @@ export async function enqueueSessionWorkflowWakeInTransaction(
     temporalWorkflowId: string;
     reason: string;
     notBefore?: Date;
+    controlRequested?: boolean;
   },
 ): Promise<number> {
   const now = new Date();
@@ -42057,6 +42219,7 @@ export async function enqueueSessionWorkflowWakeInTransaction(
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       temporalWorkflowId: input.temporalWorkflowId,
+      controlRevision: input.controlRequested ? 1 : 0,
       reason: input.reason,
       nextAttemptAt,
     })
@@ -42065,6 +42228,9 @@ export async function enqueueSessionWorkflowWakeInTransaction(
       set: {
         temporalWorkflowId: input.temporalWorkflowId,
         wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
+        controlRevision: input.controlRequested
+          ? sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`
+          : sql`${schema.sessionWorkflowWakeOutbox.controlRevision}`,
         reason: input.reason,
         attempts: 0,
         // Coalescing a delayed retry must never postpone an already-due wake
@@ -42090,6 +42256,7 @@ export async function enqueueSessionWorkflowWake(
     temporalWorkflowId: string;
     reason: string;
     notBefore?: Date;
+    controlRequested?: boolean;
   },
 ): Promise<number> {
   return await withRlsContext(
@@ -42113,6 +42280,7 @@ export async function enqueueSessionWorkflowWakeIfRunnable(
     temporalWorkflowId: string;
     reason: string;
     notBefore?: Date;
+    controlRequested?: boolean;
   },
 ): Promise<number | null> {
   return await withRlsContext(
@@ -44314,6 +44482,7 @@ function mapSocialConnection(
     accountHandle: row.accountHandle,
     accountName: row.accountName,
     externalAccountId: row.externalAccountId,
+    ownership: row.subjectId ? "personal" : "workspace",
     status: row.status as SocialConnectionStatus,
     scopes: row.scopes,
     credentialRef: row.credentialRef,
@@ -44322,6 +44491,25 @@ function mapSocialConnection(
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+function socialConnectionSubjectVisibility(subjectId?: string | null): SQL {
+  return subjectId
+    ? or(
+        isNull(schema.socialConnections.subjectId),
+        eq(schema.socialConnections.subjectId, subjectId),
+      )!
+    : isNull(schema.socialConnections.subjectId);
+}
+async function withSocialConnectionSubjectRls<T>(
+  db: Database,
+  workspaceId: string,
+  subjectId: string | null | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
+    : await withWorkspaceRls(db, workspaceId, fn);
 }
 
 function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {

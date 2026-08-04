@@ -585,6 +585,22 @@ export function useComposer(
     }
     void loadDraft(false);
   }, [durableDrafts, loadDraft, sessionId]);
+  // After long background / sleep the in-memory revision is often stale while
+  // a prior autosave already advanced the server. Soft-reload on wake so the
+  // next keystroke does not OCC against a dead revision.
+  useEffect(() => {
+    if (!sessionId || !durableDrafts) return;
+    const onWake = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void loadDraft(false);
+    };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("pageshow", onWake);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("pageshow", onWake);
+    };
+  }, [durableDrafts, loadDraft, sessionId]);
   useEffect(() => {
     if (!sessionId || !durableDrafts) return;
     return registerSessionReconciler(sessionId, "composer", async () => await loadDraft(false));
@@ -692,7 +708,16 @@ export function useComposer(
         }
         setDraftSaving(true);
         try {
-          const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
+          const saved = await saveComposerDraftWithStaleRetry({
+            client,
+            workspaceId,
+            sessionId,
+            request,
+            onAdoptRemote: (remote) => {
+              draftRef.current = remote;
+              setDraft(remote);
+            },
+          });
           if (
             targetKeyRef.current !== ownedTargetKey ||
             targetGeneration.current !== ownedGeneration
@@ -701,8 +726,12 @@ export function useComposer(
           }
           draftRef.current = saved;
           setDraft(saved);
-          lastSavedSignature.current = signature;
+          lastSavedSignature.current = draftSignature({
+            ...request,
+            expectedRevision: saved.revision,
+          });
           setDraftConflict(null);
+          setError(null);
           success = true;
         } catch (cause) {
           if (
@@ -1260,11 +1289,13 @@ export function useComposer(
       }
       if (choice === "use_remote") {
         applyDraft(remote);
+        setError(null);
         return;
       }
       draftRef.current = remote;
       setDraft(remote);
       setDraftConflict(null);
+      setError(null);
       const payload = currentDraftPayload();
       if (payload) await persistPayload({ ...payload, expectedRevision: remote.revision });
     },
@@ -1393,13 +1424,52 @@ function asError(cause: unknown): Error {
 
 function isDraftConflictError(error: Error): boolean {
   const apiError = error as Partial<OpenGeniApiError>;
-  return (
-    apiError.status === 409 &&
-    apiError.outcomeUnknown === false &&
-    (apiError.code === undefined ||
-      apiError.code === "conflict" ||
-      apiError.code === "idempotency_conflict")
-  );
+  if (apiError.status !== 409 || apiError.outcomeUnknown === true) return false;
+  // Production queue OCC returns `DRAFT_CHANGED`. Older/SDK-shaped 409s may
+  // omit code or use the generic conflict labels — all are recoverable OCC.
+  const code = apiError.code;
+  if (
+    code === undefined ||
+    code === "DRAFT_CHANGED" ||
+    code === "conflict" ||
+    code === "idempotency_conflict"
+  ) {
+    return true;
+  }
+  return /draft changed/i.test(error.message);
+}
+
+/**
+ * One OCC retry: adopt the server revision and rewrite the same local content.
+ * Covers the common "tab slept through a successful autosave" case without
+ * stranding the operator on a raw 409 toast.
+ */
+async function saveComposerDraftWithStaleRetry(input: {
+  client: {
+    getComposerDraft: (workspaceId: string, sessionId: string) => Promise<ComposerDraft>;
+    saveComposerDraft: (
+      workspaceId: string,
+      sessionId: string,
+      request: SaveComposerDraftRequest,
+    ) => Promise<ComposerDraft>;
+  };
+  workspaceId: string;
+  sessionId: string;
+  request: SaveComposerDraftRequest;
+  onAdoptRemote: (remote: ComposerDraft) => void;
+}): Promise<ComposerDraft> {
+  try {
+    return await input.client.saveComposerDraft(input.workspaceId, input.sessionId, input.request);
+  } catch (cause) {
+    const problem = asError(cause);
+    if (!isDraftConflictError(problem)) throw problem;
+    const remote = await input.client.getComposerDraft(input.workspaceId, input.sessionId);
+    input.onAdoptRemote(remote);
+    return await input.client.saveComposerDraft(input.workspaceId, input.sessionId, {
+      ...input.request,
+      expectedRevision: remote.revision,
+    });
+  }
 }
 
 function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {

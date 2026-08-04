@@ -35,7 +35,7 @@ type SocialApiDeps = {
   providerFetch?: SocialProviderFetch | undefined;
 };
 
-type ConnectionRef = { workspaceId: string; connectionId: string };
+type ConnectionRef = { workspaceId: string; connectionId: string; subjectId?: string | null };
 
 const MAX_LIVE_RESULTS = 50;
 
