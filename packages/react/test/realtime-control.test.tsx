@@ -215,10 +215,10 @@ describe("ordinary session Codex realtime control", () => {
       'button[aria-label="Choose voice model and options"]',
     );
     expect(voiceOptions).not.toBeNull();
-    // Desktop-only chevron (hidden below sm); still present for wider viewports.
+    // Public default: chevron available at every breakpoint.
     expect(voiceOptions?.classList.contains("w-5")).toBe(true);
-    expect(voiceOptions?.classList.contains("hidden")).toBe(true);
-    expect(voiceOptions?.classList.contains("sm:inline-flex")).toBe(true);
+    expect(voiceOptions?.classList.contains("hidden")).toBe(false);
+    expect(voiceOptions?.classList.contains("inline-flex")).toBe(true);
     expect(container.textContent).not.toContain("Realtime diagnostics");
     expect(start?.disabled).toBe(false);
     await act(async () => start?.click());
