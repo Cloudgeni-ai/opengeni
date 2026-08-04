@@ -454,6 +454,11 @@ cancelled descendants do not notify parents inside the same terminal subtree.
 Only physical attempt quiescence can clear the stopping projection.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
+Wake repair treats only an undelivered control revision, an actionable
+interruption, or a settled interruption whose exact attempt still lacks its
+quiescence receipt as control work. A fully quiesced historical interruption is
+audit evidence and cannot upgrade a later ordinary queue wake to
+`sessionControl`.
 For Agent Steer, accepting that signal is not an admission acknowledgement: if
 effective control is active while the newest `agent_steer_instruction` remains
 pending, the delivery path leaves its coalesced workflow-wake revision
