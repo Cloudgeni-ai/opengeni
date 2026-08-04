@@ -89,8 +89,10 @@ describe("production web handler", () => {
     });
     const browserHeaders = new Headers({
       "content-type": "application/json",
+      connection: "keep-alive, x-browser-hop",
       forwarded: "for=spoofed;host=evil.example",
       origin: "https://example.test",
+      "x-browser-hop": "browser-hop-value-that-must-not-be-forwarded",
       "x-forwarded-port": "4444",
       "x-opengeni-access-key": "browser-access-value-that-must-be-replaced",
       "x-real-ip": "203.0.113.10",
@@ -110,10 +112,12 @@ describe("production web handler", () => {
     const headers = new Headers(seen.init?.headers);
     expect(headers.get("authorization")).toBe(["Bearer", serverApiValue].join(" "));
     expect(headers.get("x-opengeni-access-key")).toBe(serverAccessValue);
+    expect(headers.get("x-browser-hop")).toBeNull();
     expect(headers.get("forwarded")).toBeNull();
     expect(headers.get("x-forwarded-host")).toBe("example.test");
     expect(headers.get("x-forwarded-port")).toBeNull();
     expect(headers.get("x-real-ip")).toBeNull();
+    expect(headers.get("accept-encoding")).toBe("identity");
     expect(seen.init?.redirect).toBe("manual");
     expect(seen.body).toContain("realtime");
 
@@ -144,6 +148,94 @@ describe("production web handler", () => {
         )
       ).status,
     ).toBe(400);
+  });
+
+  test("normalizes representation and hop-by-hop headers after upstream decoding", async () => {
+    const root = await fixture();
+    const seen: { acceptEncoding?: string | null } = {};
+    const handler = createWebHandler(root, {
+      demoApiProxy: {
+        targetBaseUrl: "http://api.internal:8000",
+        fetch: async (_input, init) => {
+          seen.acceptEncoding = new Headers(init?.headers).get("accept-encoding");
+          // This is the shape exposed by Bun when it has already decoded a
+          // gzip response body but retained the upstream response headers.
+          return new Response('{"error":"Unauthorized"}', {
+            status: 401,
+            headers: {
+              connection: "keep-alive, x-upstream-hop",
+              "content-encoding": "gzip",
+              "content-length": "999",
+              "content-type": "application/json",
+              "transfer-encoding": "chunked",
+              "x-upstream-hop": "upstream-hop-value-that-must-not-be-forwarded",
+            },
+          });
+        },
+      },
+    });
+
+    const response = await handler(
+      new Request("https://example.test/demo-api/v1/workspaces/ws/sessions", {
+        headers: { "accept-encoding": "br, gzip" },
+      }),
+    );
+
+    expect(seen.acceptEncoding).toBe("identity");
+    expect(response.status).toBe(401);
+    expect(response.headers.get("content-encoding")).toBeNull();
+    expect(response.headers.get("content-length")).toBeNull();
+    expect(response.headers.get("connection")).toBeNull();
+    expect(response.headers.get("transfer-encoding")).toBeNull();
+    expect(response.headers.get("x-upstream-hop")).toBeNull();
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ error: "Unauthorized" });
+
+    const head = await handler(
+      new Request("https://example.test/demo-api/v1/workspaces/ws/sessions", {
+        method: "HEAD",
+      }),
+    );
+    expect(head.headers.get("content-encoding")).toBe("gzip");
+    expect(head.headers.get("content-length")).toBe("999");
+    expect(head.headers.get("x-upstream-hop")).toBeNull();
+    expect(await head.text()).toBe("");
+  });
+
+  test("ignores malformed connection options while stripping valid hop-by-hop names", async () => {
+    const root = await fixture();
+    let upstreamRequestHeaders = new Headers();
+    const handler = createWebHandler(root, {
+      demoApiProxy: {
+        targetBaseUrl: "http://api.internal:8000",
+        fetch: async (_input, init) => {
+          upstreamRequestHeaders = new Headers(init?.headers);
+          return new Response('{"ok":true}', {
+            headers: {
+              connection: "keep-alive, bad name, x-upstream-hop",
+              "content-type": "application/json",
+              "x-upstream-hop": "must-not-be-forwarded",
+            },
+          });
+        },
+      },
+    });
+
+    const response = await handler(
+      new Request("https://example.test/demo-api/v1/workspaces", {
+        headers: {
+          connection: "keep-alive, bad name, x-browser-hop",
+          "x-browser-hop": "must-not-be-forwarded",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamRequestHeaders.get("connection")).toBeNull();
+    expect(upstreamRequestHeaders.get("x-browser-hop")).toBeNull();
+    expect(response.headers.get("connection")).toBeNull();
+    expect(response.headers.get("x-upstream-hop")).toBeNull();
+    expect(await response.json()).toEqual({ ok: true });
   });
 
   test("derives optional authority headers from environment names", () => {
