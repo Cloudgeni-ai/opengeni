@@ -473,10 +473,11 @@ export function NewSessionRealtimeControl(props: {
   selectedModel?: RealtimeModelOption | undefined;
   onSelectModel?: ((modelId: string) => void) | undefined;
   /**
-   * `split` keeps a desktop chevron menu (hidden below `sm` — use “+” there).
+   * `split` attaches the model chevron at every breakpoint (public default).
+   * `split-desktop` hides it below `sm` when the host owns mobile selection (e.g. “+”).
    * `none` never attaches a model menu to the bar button.
    */
-  modelMenu?: "split" | "none" | undefined;
+  modelMenu?: "split" | "split-desktop" | "none" | undefined;
 }) {
   const internalSelection = useRealtimeModelSelection({
     client: props.client,
@@ -553,10 +554,11 @@ export function RealtimeVoiceControl(props: {
   /** Prefer `bottom` on home/new-session; `top` for the docked session composer. */
   menuSide?: "top" | "bottom" | undefined;
   /**
-   * `split` = start + desktop-only model chevron (mobile uses the composer “+”).
+   * `split` = start + model chevron at every breakpoint (public SDK default).
+   * `split-desktop` = chevron from `sm` up; below that the host owns selection.
    * `none` = start button only.
    */
-  modelMenu?: "split" | "none" | undefined;
+  modelMenu?: "split" | "split-desktop" | "none" | undefined;
   showDiagnostics?: boolean;
   /** Extra classes on the in-bar mute cluster (e.g. `max-sm:hidden` when mutes live in “+”). */
   muteControlsClassName?: string | undefined;
@@ -613,7 +615,8 @@ export function RealtimeVoiceControl(props: {
         : props.onStart;
   const diagnosticsVisible = props.showDiagnostics ?? import.meta.env.DEV;
   const modelMenu = props.modelMenu ?? "split";
-  const showAttachedModelMenu = modelMenu === "split";
+  const showAttachedModelMenu = modelMenu === "split" || modelMenu === "split-desktop";
+  const desktopOnlyModelMenu = modelMenu === "split-desktop";
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerProvider, setPickerProvider] = useState<RealtimeModelProvider | null>(
     selectedModel.provider,
@@ -719,7 +722,10 @@ export function RealtimeVoiceControl(props: {
             "rounded-og-md transition-[background-color,border-color,color,box-shadow] duration-200 ease-og-out",
             "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
             "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-11",
-            showAttachedModelMenu && "sm:rounded-l-og-md sm:rounded-r-none",
+            showAttachedModelMenu &&
+              (desktopOnlyModelMenu
+                ? "sm:rounded-l-og-md sm:rounded-r-none"
+                : "rounded-l-og-md rounded-r-none"),
             voiceButtonTone(status.phase),
           )}
         >
@@ -739,11 +745,11 @@ export function RealtimeVoiceControl(props: {
                 title={`Voice model: ${selectedModel.label}`}
                 disabled={props.selectionDisabled}
                 className={cn(
-                  // Desktop-only: mobile picks the model from composer “+”.
-                  "hidden sm:inline-flex h-8 w-5 items-center justify-center rounded-r-og-md outline-none",
+                  "inline-flex h-8 w-5 items-center justify-center rounded-r-og-md outline-none",
                   "transition-[background-color,border-color,color] duration-200 ease-og-out",
                   "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
                   "pointer-coarse:h-11 pointer-coarse:w-7",
+                  desktopOnlyModelMenu && "hidden sm:inline-flex",
                   voiceChevronTone(status.phase),
                 )}
               >

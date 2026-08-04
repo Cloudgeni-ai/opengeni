@@ -441,6 +441,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                 models={voiceSelection.models}
                 selectedModel={voiceSelection.selectedModel}
                 onSelectModel={voiceSelection.selectModel}
+                modelMenu="split-desktop"
                 disabled={
                   busy ||
                   newSessionDraft.loading ||
