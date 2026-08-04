@@ -1,5 +1,25 @@
 # @opengeni/api-router
 
+## 0.21.12
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+- Updated dependencies [69bc207]
+- Updated dependencies [c0f8e40]
+  - @opengeni/codex@0.2.11
+  - @opengeni/core@0.20.14
+  - @opengeni/db@0.27.10
+  - @opengeni/runtime@0.18.13
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+  - @opengeni/documents@0.5.6
+  - @opengeni/events@0.3.76
+  - @opengeni/github@0.4.29
+  - @opengeni/observability@0.4.16
+  - @opengeni/storage@0.2.66
+
 ## 0.21.11
 
 ### Patch Changes

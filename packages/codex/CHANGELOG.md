@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.11
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+
 ## 0.2.10
 
 ### Patch Changes
