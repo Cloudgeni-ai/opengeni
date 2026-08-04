@@ -745,7 +745,8 @@ export function RealtimeVoiceControl(props: {
                 title={`Voice model: ${selectedModel.label}`}
                 disabled={props.selectionDisabled}
                 className={cn(
-                  "inline-flex h-8 w-5 items-center justify-center rounded-r-og-md outline-none",
+                  // ≥24px wide so WCAG 2.2 target-size passes when the chevron is shown.
+                  "inline-flex h-8 w-6 items-center justify-center rounded-r-og-md outline-none",
                   "transition-[background-color,border-color,color] duration-200 ease-og-out",
                   "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
                   "pointer-coarse:h-11 pointer-coarse:w-7",
