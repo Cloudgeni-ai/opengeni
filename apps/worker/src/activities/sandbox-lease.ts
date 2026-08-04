@@ -43,7 +43,6 @@ import {
   countActiveRetainedProcessesByOwnerState,
   countSandboxCheckpointArtifactsByState,
   countExpiredDrainingSandboxLeases,
-  countQueuedTurns,
   countSandboxLeasesByLiveness,
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
@@ -122,7 +121,6 @@ import {
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
   recordSandboxRotationBacklogGauges,
-  recordTurnsQueuedGauge,
 } from "../observability-metrics";
 import { providerIdentityFromResumeState } from "../sandbox-routing";
 
@@ -1218,13 +1216,6 @@ async function refreshQueueLeaseAndCreditGauges(
   db: ActivityServices["db"],
   observability: ActivityServices["observability"],
 ): Promise<void> {
-  try {
-    recordTurnsQueuedGauge(observability, await countQueuedTurns(db));
-  } catch (error) {
-    observability.warn("sandbox reaper: queued-turn gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
   await refreshSandboxInventoryGauge(observability, "leases", "sandbox-lease", async () => {
     recordSandboxLeaseGauges(observability, await countSandboxLeasesByLiveness(db));
   });

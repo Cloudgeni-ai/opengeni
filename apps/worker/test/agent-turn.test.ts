@@ -12,6 +12,8 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import {
+  ActiveSessionHistoryLimitExceededError,
+  ApprovalRunStateLimitExceededError,
   interruptedToolCallResult,
   runIdempotentPersistenceTransaction,
   SandboxImageConflictError,
@@ -92,6 +94,17 @@ import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("approval RunState materialization boundary", () => {
+  test("ordinary agent turns read resume metadata without decoding the approval blob", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+
+    expect(source).toContain("getLatestRunStateResumeMetadata(");
+    expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
+  });
+});
 
 describe("disconnected MCP turn instructions", () => {
   test("warns the model without exposing an unbounded unavailable registry", () => {
@@ -3217,6 +3230,32 @@ describe("transient provider error classifier", () => {
     expect(payload.retryable).toBeUndefined();
     expect(payload.code).toBeUndefined();
     expect(payload.error).toBe("Invalid 'input': expected a string");
+  });
+
+  test("agentRunFailurePayload reports the active-history envelope as deterministic", () => {
+    expect(
+      agentRunFailurePayload(new ActiveSessionHistoryLimitExceededError(2_048, 1_024)),
+    ).toEqual({
+      error:
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+      code: "active_history_too_large",
+      retryable: false,
+      detail:
+        "Active session history is 2048 UTF-8 JSON bytes, exceeding the 1024-byte materialization limit.",
+    });
+  });
+
+  test("agentRunFailurePayload reports the approval RunState envelope as deterministic", () => {
+    expect(
+      agentRunFailurePayload(new ApprovalRunStateLimitExceededError("json_properties", 101, 100)),
+    ).toEqual({
+      error:
+        "The saved approval state exceeds the worker's safe materialization envelope. Clear the pending approval context before retrying.",
+      code: "approval_run_state_too_large",
+      retryable: false,
+      detail:
+        "Approval run state has 101 decoded JSON object properties; the materialization limit is 100.",
+    });
   });
 
   test("only transient provider compaction failures use same-turn recovery", () => {

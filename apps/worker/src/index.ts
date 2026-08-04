@@ -49,7 +49,12 @@ import {
   temporalReadyCheck,
   type WorkerLifecycleState,
 } from "./http";
-import { observabilityEventLogger } from "./observability-metrics";
+import {
+  normalizeTurnTaskQueueStats,
+  observabilityEventLogger,
+  startTurnCapacityMonitor,
+  type TurnTaskQueueStats,
+} from "./observability-metrics";
 import {
   SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
@@ -58,8 +63,8 @@ import {
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+  createTurnWorkerConcurrencyPlan,
   turnWorkerConcurrencyLogFields,
-  turnWorkerConcurrencyOptions,
 } from "./concurrency";
 import {
   constructWithOwnedConnection,
@@ -197,6 +202,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
           settings,
           observability,
         });
+      const turnConcurrency =
+        options.role === "turn"
+          ? createTurnWorkerConcurrencyPlan(settings, { observability })
+          : null;
       const worker = await Worker.create({
         connection,
         namespace: settings.temporalNamespace,
@@ -212,7 +221,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
               maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
               maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
             }
-          : turnWorkerConcurrencyOptions(settings)),
+          : turnConcurrency!.options),
         activities,
         // Cancellation is delivered through an activity heartbeat. The SDK would
         // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
@@ -233,6 +242,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         // into the kubelet's SIGKILL mid-DB-write.
         shutdownForceTime: "100s",
       });
+      turnConcurrency?.admission?.finalizeStartupBaseline();
       return { worker, connection };
     },
     (connection) => connection.close(),
@@ -252,6 +262,7 @@ export async function createWorkerWorkflowSignaler(
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
   inspectSessionAttemptActivity: InspectSessionAttemptActivity;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
+  getTurnTaskQueueStats: () => Promise<TurnTaskQueueStats>;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -339,6 +350,18 @@ export async function createWorkerWorkflowSignaler(
       // A typed capacity signal cannot acknowledge the generic outbox row:
       // another producer may have advanced it with a Pause/Steer that requires
       // sessionControl. The global dispatcher owns that acknowledgement.
+    },
+    getTurnTaskQueueStats: async () => {
+      const response = await connection.workflowService.describeTaskQueue({
+        namespace: settings.temporalNamespace,
+        taskQueue: { name: turnTaskQueue(settings.temporalTaskQueue) },
+        // temporal.api.enums.v1.TASK_QUEUE_TYPE_ACTIVITY. Keep this request in
+        // the supported DEFAULT mode; `stats.approximateBacklogCount` is the
+        // server-documented scaling signal.
+        taskQueueType: 2,
+        reportStats: true,
+      });
+      return normalizeTurnTaskQueueStats(response.stats);
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
@@ -568,11 +591,13 @@ export async function createOpenGeniWorkerService(
   let lifecycle: WorkerServiceLifecycle | undefined;
   let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
   let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
+  let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
   const schedules: Array<{ close: () => Promise<void> }> = [];
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
 
   try {
     const needsSignaler =
+      options.role === "turn" ||
       !options.activityDependencies.wakeSessionWorkflow ||
       !options.activityDependencies.signalSessionAttemptQuiesced ||
       !options.activityDependencies.inspectSessionAttemptActivity ||
@@ -619,6 +644,16 @@ export async function createOpenGeniWorkerService(
       },
     });
 
+    if (options.role === "turn") {
+      if (!signaler) {
+        throw new Error("Turn worker capacity monitor could not resolve its Temporal stats client");
+      }
+      turnCapacityMonitor = startTurnCapacityMonitor({
+        observability,
+        read: signaler.getTurnTaskQueueStats,
+      });
+    }
+
     if (workerOwnsInternalSchedules(options.role, options.internalSchedules)) {
       schedules.push(
         await retryStartupDependency(
@@ -659,6 +694,7 @@ export async function createOpenGeniWorkerService(
   } catch (error) {
     httpServer?.stop(true);
     await Promise.allSettled([
+      turnCapacityMonitor?.close(),
       workerBundle?.connection.close(),
       signaler?.close(),
       ...schedules.map((schedule) => schedule.close()),
@@ -679,6 +715,7 @@ export async function createOpenGeniWorkerService(
     closeOwnedResources: async () => {
       httpServer?.stop(true);
       await Promise.allSettled([
+        turnCapacityMonitor?.close(),
         activeWorkerBundle.connection.close(),
         activeSignaler?.close(),
         ...schedules.map((schedule) => schedule.close()),

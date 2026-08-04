@@ -15,7 +15,7 @@ import {
   getSessionEvent,
   getSessionRootId,
   getSessionGoal,
-  getLatestRunState,
+  getLatestRunStateResumeMetadata,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   installOrReadTurnExecutionPolicyForAttempt,
@@ -50,7 +50,6 @@ import {
   appendSessionHistoryItems,
   isSessionCompactionRequested,
   countSessionHistoryItems,
-  getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -66,6 +65,8 @@ import {
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
+  ActiveSessionHistoryLimitExceededError,
+  ApprovalRunStateLimitExceededError,
   isSessionEventPersistenceError,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -102,7 +103,6 @@ import {
   composeAgentInstructions,
   hasActiveWorkspaceInstructionPolicy,
   renderWorkspaceGovernanceContext,
-  summarizeForCompaction,
   requestRemoteCompactionV2,
   serializedToolsForRemoteCompaction,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
@@ -2301,6 +2301,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       db,
       bus,
       runtime,
+      summarizeContextForCompaction,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -3224,7 +3225,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         trigger,
       );
       triggerType = trigger.type;
-      const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
+      const latestTurnState = await getLatestRunStateResumeMetadata(
+        db,
+        input.workspaceId,
+        input.sessionId,
+      );
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
       redispatchesAtDispatch = Number(
@@ -4393,7 +4398,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         resolvedModel
           ? (s: Settings, m: Array<Record<string, unknown>>) =>
               withCodex(() =>
-                summarizeForCompaction(s, m, {
+                summarizeContextForCompaction(s, m, {
                   client: resolvedModel.client,
                   api: resolvedModel.provider.api,
                   model: turnExecutionPolicy.upstreamModelId,
@@ -4404,7 +4409,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }),
               )
           : (s: Settings, m: Array<Record<string, unknown>>) =>
-              summarizeForCompaction(s, m, {
+              summarizeContextForCompaction(s, m, {
                 model: turnExecutionPolicy.upstreamModelId,
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                 onUsage: recordCompactionUsage,
@@ -6416,18 +6421,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // and bricks the session (issue-61). The sanitized seed is already
         // orphan-free, so it is a stable prefix of the re-sanitized history and the
         // slice begins exactly at the first genuinely-new item.
-        const activeSeedRows = await getActiveSessionHistoryItems(
-          db,
-          input.workspaceId,
-          input.sessionId,
-        );
-        // Seed the reconcile watermark from EXACTLY the view the model's
-        // `state.history` was seeded from (items strip on the items path = HOLE D; NO
-        // strip on the run-state blob path, where foreign reasoning is neutralized but
-        // KEPT = HOLE E), so the model-input length and the watermark never disagree.
-        persistedHistoryCount = reconcileSeedCount(activeSeedRows, prepared.modelHistoryFromItems, {
-          currentCodexCredentialId: effectiveCodexCredentialId,
-        });
+        // prepareInput already sanitized the exact durable prefix represented
+        // by state.history. Carry its count forward instead of loading and
+        // retaining the full active transcript a second time beside runInput.
+        persistedHistoryCount = prepared.persistedHistoryCount;
         nextHistoryPosition = await nextSessionHistoryPosition(
           db,
           input.workspaceId,
@@ -8864,6 +8861,24 @@ export function agentRunFailurePayload(
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  if (error instanceof ActiveSessionHistoryLimitExceededError) {
+    return {
+      error:
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+      code: error.code,
+      retryable: false,
+      detail: error.message,
+    };
+  }
+  if (error instanceof ApprovalRunStateLimitExceededError) {
+    return {
+      error:
+        "The saved approval state exceeds the worker's safe materialization envelope. Clear the pending approval context before retrying.",
+      code: error.code,
+      retryable: false,
+      detail: error.message,
+    };
+  }
   // An accepted Codex stream with no terminal response is malformed/partial,
   // not provider backpressure. Replaying the same accepted turn could repeat
   // model or tool effects, so this marked transport failure must outrank the

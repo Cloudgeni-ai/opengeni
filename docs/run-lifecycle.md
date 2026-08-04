@@ -185,6 +185,30 @@ No path infers personal authority from the session creator, current user,
 service initiator, latest connection, latest queue head, or an unrelated newer
 turn.
 
+The prompt queue is not worker backlog. In particular, human prompts preserved
+behind paused session/workspace gates are intentionally ineligible and do not
+schedule an activity. Fleet pressure comes from Temporal's dedicated
+`runAgentTurn` activity queue (`approximateBacklogCount` and oldest backlog
+age), together with the turn workers' used/memory-safe slots. Each turn worker
+must obtain a cgroup-aware slot before polling. Admission is capped at the
+measured density of 16 and reserves a hard 100 MiB per turn plus 512 MiB of
+runtime/native headroom; a finite container that cannot safely admit one turn
+does not start. The invariant is checked both before and after Temporal's native
+worker construction, and live retained-memory growth contracts new slot
+availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
+active transcript above any of four materialization limits: 3 MiB UTF-8 JSON,
+4,096 rows, 65,536 decoded JSON nodes, or 32,768 object properties. It never
+silently trims conversation truth; normal proactive compaction keeps long
+sessions under the boundary. Approval `RunState` uses the same 3 MiB, 65,536-node,
+and 32,768-property serving envelope before SDK decoding. A missing or malformed Temporal task-queue stats
+object is a failed read and makes the capacity sample stale; it is never
+normalized into a fresh zero backlog. The release target remains at most
+50 MiB incremental RSS per active turn. A production read-only forensic
+fingerprint over 3,823 sessions exited 137 inside a 1 GiB serving API pod; heavy
+forensics and density profiling therefore run only in a bounded non-serving
+execution class and never in API or turn-worker serving pods. See
+[`deployment.md`](deployment.md) for the reproducible density harness.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing

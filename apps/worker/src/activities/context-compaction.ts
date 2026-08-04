@@ -1,6 +1,6 @@
 import {
   applyContextCompaction,
-  getActiveSessionHistoryItems,
+  getActiveSessionHistoryItemsPaged,
   recordSkippedContextCompaction,
   recordStartedContextCompaction,
   type Database,
@@ -113,7 +113,9 @@ export async function maybeCompactContext(
   }
   const useRemoteV2 = options.codexCompactionMode === "remote_v2";
 
-  const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
+  // Preserve the complete ordered transcript while bounding each Postgres
+  // driver result frame beside the decoded history already held by this turn.
+  const active = await getActiveSessionHistoryItemsPaged(db, scope.workspaceId, scope.sessionId);
   if (active.length === 0) {
     let requestConsumed = false;
     if (options.clearRequestedCompaction) {
