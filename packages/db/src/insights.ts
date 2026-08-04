@@ -1,7 +1,7 @@
 import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import type { Database } from "./index";
-import { rlsContextForWorkspace, withRlsContext } from "./index";
+import type { Database } from "./database";
+import { rlsContextForWorkspace, withRlsContext } from "./database";
 import * as schema from "./schema";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

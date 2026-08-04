@@ -7,7 +7,7 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 
 export type NewSessionDraftRow = typeof schema.newSessionDrafts.$inferSelect;
