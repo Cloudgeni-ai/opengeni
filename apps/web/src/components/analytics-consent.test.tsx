@@ -3,6 +3,8 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
+import { openAnalyticsPreferences } from "@/lib/analytics-consent";
+
 import { AnalyticsManager } from "./analytics-consent";
 
 beforeAll(() => {
@@ -19,6 +21,7 @@ afterAll(() => {
 describe("analytics consent accessibility", () => {
   test("subjects modern theme colors to the manual contrast audit", async () => {
     window.localStorage.clear();
+    window.localStorage.setItem("opengeni.analyticsConsent", "denied");
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -39,6 +42,7 @@ describe("analytics consent accessibility", () => {
           />,
         );
       });
+      await act(async () => openAnalyticsPreferences());
 
       const copy = container.querySelector<HTMLElement>(
         'section[aria-label="Analytics preferences"] > p.mt-1',
