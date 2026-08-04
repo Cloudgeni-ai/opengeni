@@ -99,7 +99,10 @@ const TOOLSPACE_NO_ACTIVE_TURN_MESSAGE =
 // /mcp mount. They are excluded from the toolspace surface by construction so a
 // toolspace principal can never re-enter /mcp as a first-party caller, even if
 // a future grant carried files:read / documents:search (see docs invariants).
-const FIRST_PARTY_PROXY_IDS = new Set(["files", "docs"]);
+// Codex Apps is also excluded: its dynamic designated-owner authorization and
+// wire sanitizer live on the model MCP path and must never degrade into static
+// Toolspace headers.
+const FIRST_PARTY_PROXY_IDS = new Set(["files", "docs", "codex_apps"]);
 // In-process cache of the per-session upstream tool listing. Keyed on the set of
 // proxyable server ids + their credential versions, so a credential rotation
 // busts the entry; a short TTL bounds staleness for everything else. This is
@@ -851,9 +854,9 @@ function selectedMcpServerIds(tools: ToolRef[], sessionServerIds: string[]): Set
 }
 
 // Whether a selected server id may enter the toolspace proxy at all. The
-// first-party OpenGeni tool server and the files/docs proxies are excluded by
-// construction: they route back through /mcp, so admitting them would let a
-// toolspace principal re-enter as a first-party caller (recursion guard).
+// The first-party OpenGeni tool server and files/docs proxies are excluded by
+// construction because they route back through /mcp (recursion guard). Codex
+// Apps is excluded because Toolspace does not own its dynamic authorization.
 export function toolspaceCanProxyServerId(serverId: string): boolean {
   return serverId !== "opengeni" && !FIRST_PARTY_PROXY_IDS.has(serverId);
 }

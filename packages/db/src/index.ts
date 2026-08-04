@@ -11473,11 +11473,10 @@ export async function upsertCodexSubscriptionCredential(
             // it when still null) so a re-connect never clobbers a rename.
             accountEmail: input.accountEmail ?? null,
             label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
-            // Ownership follows the most recent connection exactly. A
-            // configured/delegated/API-key reconnect is intentionally
-            // nonhuman and clears the prior human owner, making the row
-            // view-only until a direct managed-cookie human reconnects it.
-            connectedBySubjectId: input.connectedBySubjectId ?? null,
+            // Reconnect refreshes credential material, never ownership. A row
+            // without an owner may be claimed by its first direct managed human;
+            // after that, disconnect is the explicit ownership-reset boundary.
+            connectedBySubjectId: sql`coalesce(${schema.codexSubscriptionCredentials.connectedBySubjectId}, ${input.connectedBySubjectId ?? null})`,
             status: "active",
             lastError: null,
             version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
@@ -11499,6 +11498,333 @@ export async function upsertCodexSubscriptionCredential(
       // insert from update without a second read.
       const isNew = row.createdAt.getTime() === row.updatedAt.getTime();
       return { kind: "upserted", id: row.id, isNew };
+    },
+  );
+}
+
+export type CodexAppsSettings = {
+  credentialId: string | null;
+  version: number;
+  designatedAt: Date | null;
+};
+
+export async function getCodexAppsSettings(
+  db: Database,
+  workspaceId: string,
+): Promise<CodexAppsSettings> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        credentialId: schema.codexAppsSettings.credentialId,
+        version: schema.codexAppsSettings.version,
+        designatedAt: schema.codexAppsSettings.designatedAt,
+      })
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .limit(1);
+    return row ?? { credentialId: null, version: 0, designatedAt: null };
+  });
+}
+
+export type CodexAppsCredentialAuthorization = {
+  credentialId: string;
+  ownerSubjectId: string;
+};
+
+function canManageCodexApps(permissions: unknown): boolean {
+  return (
+    Array.isArray(permissions) &&
+    (permissions.includes("connections:write") || permissions.includes("workspace:admin"))
+  );
+}
+
+export class CodexAppsAuthorizationRevokedError extends Error {
+  constructor() {
+    super("Codex Apps authorization is no longer active");
+    this.name = "CodexAppsAuthorizationRevokedError";
+  }
+}
+
+/** Exact Apps credential and owner, independent of every inference-capacity field. */
+export async function getCodexAppsCredentialAuthorizationForRun(
+  db: Database,
+  workspaceId: string,
+): Promise<CodexAppsCredentialAuthorization | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        credentialId: schema.codexAppsSettings.credentialId,
+        ownerSubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+      })
+      .from(schema.codexAppsSettings)
+      .innerJoin(
+        schema.codexSubscriptionCredentials,
+        and(
+          eq(schema.codexSubscriptionCredentials.id, schema.codexAppsSettings.credentialId),
+          eq(schema.codexSubscriptionCredentials.accountId, schema.codexAppsSettings.accountId),
+          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+          eq(schema.codexSubscriptionCredentials.status, "active"),
+        ),
+      )
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .limit(1);
+    return row?.credentialId && row.ownerSubjectId
+      ? { credentialId: row.credentialId, ownerSubjectId: row.ownerSubjectId }
+      : null;
+  });
+}
+
+/**
+ * Hold the exact designation, credential, and owner-membership authorization
+ * stable through one outbound Apps request. Clear/disconnect operations share
+ * the workspace advisory lock; credential or membership revocation must wait on
+ * the row locks. The callback deliberately runs inside this short transaction so
+ * no revocation can commit in the gap between a final check and network dispatch.
+ */
+export async function withCodexAppsRequestAuthorization<T>(
+  db: Database,
+  input: { workspaceId: string; credentialId: string },
+  use: () => Promise<T>,
+): Promise<T> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
+    );
+    const [designation] = await scopedDb
+      .select({ credentialId: schema.codexAppsSettings.credentialId })
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+      .for("share")
+      .limit(1);
+    if (designation?.credentialId !== input.credentialId) {
+      throw new CodexAppsAuthorizationRevokedError();
+    }
+    const [credential] = await scopedDb
+      .select({
+        ownerSubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+        status: schema.codexSubscriptionCredentials.status,
+      })
+      .from(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (!credential?.ownerSubjectId || credential.status !== "active") {
+      throw new CodexAppsAuthorizationRevokedError();
+    }
+    const [membership] = await scopedDb
+      .select({ permissions: schema.workspaceMemberships.permissions })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+          eq(schema.workspaceMemberships.subjectId, credential.ownerSubjectId),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (!canManageCodexApps(membership?.permissions)) {
+      throw new CodexAppsAuthorizationRevokedError();
+    }
+    return await use();
+  });
+}
+
+export type DesignateCodexAppsCredentialResult =
+  | ({ kind: "updated" } & CodexAppsSettings)
+  | ({ kind: "conflict" | "already_designated" } & CodexAppsSettings)
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+  | { kind: "forbidden" }
+  | { kind: "unavailable" };
+
+export async function designateCodexAppsCredential(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    credentialId: string;
+    subjectId: string;
+    expectedVersion: number;
+  },
+): Promise<DesignateCodexAppsCredentialResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
+      );
+      const [currentRow] = await scopedDb
+        .select()
+        .from(schema.codexAppsSettings)
+        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+        .for("update")
+        .limit(1);
+      const current: CodexAppsSettings = currentRow
+        ? {
+            credentialId: currentRow.credentialId,
+            version: currentRow.version,
+            designatedAt: currentRow.designatedAt,
+          }
+        : { credentialId: null, version: 0, designatedAt: null };
+      if (current.version !== input.expectedVersion) return { kind: "conflict", ...current };
+      if (current.credentialId !== null) return { kind: "already_designated", ...current };
+
+      const [credential] = await scopedDb
+        .select({
+          connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+          status: schema.codexSubscriptionCredentials.status,
+        })
+        .from(schema.codexSubscriptionCredentials)
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+            eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+            eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!credential) return { kind: "not_found" };
+      if (credential.connectedBySubjectId !== input.subjectId) return { kind: "not_owner" };
+      if (credential.status !== "active") return { kind: "unavailable" };
+
+      const [membership] = await scopedDb
+        .select({ permissions: schema.workspaceMemberships.permissions })
+        .from(schema.workspaceMemberships)
+        .where(
+          and(
+            eq(schema.workspaceMemberships.accountId, input.accountId),
+            eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+            eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!canManageCodexApps(membership?.permissions)) return { kind: "forbidden" };
+
+      const now = new Date();
+      const version = current.version + 1;
+      const [updated] = await scopedDb
+        .insert(schema.codexAppsSettings)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          credentialId: input.credentialId,
+          version,
+          designatedAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: schema.codexAppsSettings.workspaceId,
+          set: {
+            credentialId: input.credentialId,
+            version,
+            designatedAt: now,
+            updatedAt: now,
+          },
+        })
+        .returning({
+          credentialId: schema.codexAppsSettings.credentialId,
+          version: schema.codexAppsSettings.version,
+          designatedAt: schema.codexAppsSettings.designatedAt,
+        });
+      if (!updated?.credentialId || !updated.designatedAt) {
+        throw new Error("Codex Apps designation was not persisted");
+      }
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "codex_apps.designated",
+        targetType: "codex_subscription_credential",
+        targetId: input.credentialId,
+        metadata: { version },
+      });
+      return { kind: "updated", ...updated };
+    },
+  );
+}
+
+export type ClearCodexAppsCredentialResult = {
+  kind: "updated" | "unchanged" | "conflict" | "forbidden";
+} & CodexAppsSettings;
+
+export async function clearCodexAppsCredential(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    expectedVersion: number;
+  },
+): Promise<ClearCodexAppsCredentialResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
+      );
+      const [row] = await scopedDb
+        .select()
+        .from(schema.codexAppsSettings)
+        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+        .for("update")
+        .limit(1);
+      const current: CodexAppsSettings = row
+        ? { credentialId: row.credentialId, version: row.version, designatedAt: row.designatedAt }
+        : { credentialId: null, version: 0, designatedAt: null };
+      const [membership] = await scopedDb
+        .select({ permissions: schema.workspaceMemberships.permissions })
+        .from(schema.workspaceMemberships)
+        .where(
+          and(
+            eq(schema.workspaceMemberships.accountId, input.accountId),
+            eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+            eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!canManageCodexApps(membership?.permissions)) {
+        return { kind: "forbidden", ...current };
+      }
+      if (current.version !== input.expectedVersion) return { kind: "conflict", ...current };
+      if (current.credentialId === null) return { kind: "unchanged", ...current };
+
+      const now = new Date();
+      const version = current.version + 1;
+      const [updated] = await scopedDb
+        .update(schema.codexAppsSettings)
+        .set({
+          credentialId: null,
+          version,
+          designatedAt: null,
+          updatedAt: now,
+        })
+        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+        .returning({
+          credentialId: schema.codexAppsSettings.credentialId,
+          version: schema.codexAppsSettings.version,
+          designatedAt: schema.codexAppsSettings.designatedAt,
+        });
+      if (!updated) throw new Error("Codex Apps designation clear was not persisted");
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "codex_apps.cleared",
+        targetType: "codex_subscription_credential",
+        targetId: current.credentialId,
+        metadata: { version },
+      });
+      return { kind: "updated", ...updated };
     },
   );
 }
@@ -11989,11 +12315,6 @@ export type CodexAccountStatus = {
   // P3 rotation cooldown: when set and in the future, this account is cooling-down
   // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
   exhaustedUntil: Date | null;
-  // P4 connector-aware rotation: the ORIGINAL-dotted connector namespaces this
-  // account exposes via codex_apps (github/gmail/linear/…). null ⇒ never probed
-  // (the ranker treats it as unknown: never credited as covering, never excluded).
-  connectorNamespaces: string[] | null;
-  connectorsCheckedAt: Date | null;
 };
 
 /**
@@ -12112,8 +12433,6 @@ type CodexLeaseCandidateRow = {
   secondary_reset_at: Date | string | null;
   usage_checked_at: Date | string | null;
   exhausted_until: Date | string | null;
-  connector_namespaces: string[] | null;
-  connectors_checked_at: Date | string | null;
   selection_count: number;
   last_selected_at: Date | string | null;
   active_lease_count: number;
@@ -12146,8 +12465,6 @@ function mapCodexLeaseCandidate(
     secondaryResetAt: codexMetadataDate(row.secondary_reset_at),
     usageCheckedAt: codexMetadataDate(row.usage_checked_at),
     exhaustedUntil: codexMetadataDate(row.exhausted_until),
-    connectorNamespaces: row.connector_namespaces,
-    connectorsCheckedAt: codexMetadataDate(row.connectors_checked_at),
     selectionCount: Number(row.selection_count),
     lastSelectedAt: codexMetadataDate(row.last_selected_at),
     activeLeaseCount: Number(row.active_lease_count),
@@ -12207,8 +12524,6 @@ async function listCodexLeaseCandidatesInTransaction(
       c.secondary_reset_at,
       c.usage_checked_at,
       c.exhausted_until,
-      c.connector_namespaces,
-      c.connectors_checked_at,
       c.selection_count,
       c.last_selected_at,
       count(l.id) filter (
@@ -12255,8 +12570,6 @@ export async function acquireCodexCredentialLease<
     holderId: string;
     /** Pins must not move the workspace-global cursor. */
     advanceActivePointer: boolean;
-    /** Exact frozen credential for this same durable turn, if it is resuming. */
-    continuationCredentialId?: string | null;
     /**
      * Optional downstream parser for private accepted-turn policy metadata.
      * It is pure, runs under the turn/rotation transaction, and must not query
@@ -12265,8 +12578,8 @@ export async function acquireCodexCredentialLease<
     resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
     /**
      * Optional downstream membership policy for NEW allocations only. A live
-     * lease or validated frozen credential is offered to the selector against
-     * the complete workspace rows first and can never be filtered out here.
+     * exact-turn lease is offered to the selector against the complete workspace
+     * rows first and can never be filtered out here.
      */
     filterNewAllocationCandidates?: CodexCredentialLeaseCandidateFilter<
       TPolicyScope,
@@ -12332,23 +12645,6 @@ export async function acquireCodexCredentialLease<
         throw new Error(`Session turn not found for Codex lease: ${input.turnId}`);
       }
       const policyScope = input.resolvePolicyScope?.(turns[0].metadata ?? {}) ?? null;
-      const continuationRows = input.continuationCredentialId
-        ? await tx.execute(
-            sql<{ frozen_codex_credential_id: string | null }>`
-              select frozen_codex_credential_id
-              from agent_run_states
-              where account_id = ${input.accountId}
-                and workspace_id = ${input.workspaceId}
-                and turn_id = ${input.turnId}
-              order by state_version desc
-              limit 1
-            `,
-          )
-        : [];
-      const validatedContinuationCredentialId =
-        continuationRows[0]?.frozen_codex_credential_id === input.continuationCredentialId
-          ? input.continuationCredentialId
-          : null;
       const activeCredentialId = settingsRow.active_credential_id;
       const rotationEnabled = settingsRow.rotation_enabled;
       // Fail closed on a torn/manual legacy write. The user-intent bit and the
@@ -12390,7 +12686,7 @@ export async function acquireCodexCredentialLease<
         activeCredentialId,
         excludeTurnId: input.turnId,
       });
-      const sameTurnCredentialId = existingCredentialId ?? validatedContinuationCredentialId;
+      const sameTurnCredentialId = existingCredentialId;
       const selectionContext = (
         accounts: CodexLeaseAccountStatus[],
         unavailableDiagnostics: readonly TUnavailableDiagnostic[],
@@ -12414,10 +12710,9 @@ export async function acquireCodexCredentialLease<
         }
       }
 
-      // Exact-turn continuity is resolved before any future pool membership
+      // A live exact-turn lease is resolved before any future pool membership
       // filter. The normal selector still owns health validation: a quarantined
-      // live/frozen row falls through to scoped new acquisition rather than
-      // being reused blindly.
+      // row falls through to scoped new acquisition rather than being reused.
       if (!selected) {
         const filtered = filterCodexLeaseCandidatesForPolicy(
           allAccounts,
@@ -12454,11 +12749,7 @@ export async function acquireCodexCredentialLease<
       if (!selectedAccount) {
         throw new Error("Codex lease selector returned a credential outside the workspace pool");
       }
-      if (
-        !selectedAccount.allocatorEnabled &&
-        selectedAccount.id !== existingCredentialId &&
-        selectedAccount.id !== validatedContinuationCredentialId
-      ) {
+      if (!selectedAccount.allocatorEnabled && selectedAccount.id !== existingCredentialId) {
         throw new Error("Codex lease selector returned a credential disabled for new allocations");
       }
 
@@ -13873,9 +14164,6 @@ export async function listCodexAccountStatuses(
         secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
         usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
         exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
-        // P4 connector-set cache — metadata-only, rides along on this read.
-        connectorNamespaces: schema.codexSubscriptionCredentials.connectorNamespaces,
-        connectorsCheckedAt: schema.codexSubscriptionCredentials.connectorsCheckedAt,
       })
       .from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
@@ -13893,7 +14181,6 @@ export async function listCodexAccountStatuses(
       secondaryResetAt: codexMetadataDate(row.secondaryResetAt),
       usageCheckedAt: codexMetadataDate(row.usageCheckedAt),
       exhaustedUntil: codexMetadataDate(row.exhaustedUntil),
-      connectorsCheckedAt: codexMetadataDate(row.connectorsCheckedAt),
       isActive: row.id === activeId,
     }));
   });
@@ -15156,46 +15443,6 @@ export async function countConsecutiveReactiveRotations(
   });
 }
 
-/**
- * P4 connector-set cache writer: persist the set of ORIGINAL-dotted connector
- * namespaces a SPECIFIC credential exposes via codex_apps (+ the freshness clock).
- * Modeled byte-for-byte on recordCodexAccountUsage / setCodexCredentialExhausted:
- * RLS-scoped, guarded by (id, workspace_id), and — critically — NO `version` bump and
- * NO `updatedAt` touch, so it can never race the (id, version) token-refresh CAS.
- *
- * The CALLER must only invoke this with a NON-EMPTY set: codex_apps connects
- * best-effort (a transient failure yields an empty tools/list), and overwriting a
- * known non-empty set with [] would falsely "drop" coverage on a flaky turn. A
- * genuinely connector-less account stays null (the ranker treats null as unknown).
- * Returns true iff a row was updated (false ⇒ the credential was disconnected under us).
- */
-export async function recordCodexAccountConnectors(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  namespaces: string[],
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({
-        connectorNamespaces: namespaces,
-        connectorsCheckedAt: new Date(),
-        // NB: no `version` bump and no `updatedAt` touch — connector set is non-credential
-        // metadata and must NOT race the (id, version) refresh CAS (same discipline as
-        // recordCodexAccountUsage / setCodexCredentialExhausted).
-      })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
-}
-
 /** The supported rotation strategies (P3). */
 export const CODEX_ROTATION_STRATEGIES = [
   "most_remaining",
@@ -15406,6 +15653,7 @@ export async function disconnectCodexAccount(
   db: Database,
   workspaceId: string,
   credentialId: string,
+  actorSubjectId: string | null = null,
 ): Promise<{
   removed: boolean;
   newActiveCredentialId: string | null;
@@ -15417,8 +15665,20 @@ export async function disconnectCodexAccount(
       where workspace_id = ${workspaceId}
       for update
     `);
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${workspaceId}`}, 0))`,
+    );
+    const [appsSettings] = await scopedDb
+      .select()
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .for("update")
+      .limit(1);
     const [credential] = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
+      .select({
+        id: schema.codexSubscriptionCredentials.id,
+        accountId: schema.codexSubscriptionCredentials.accountId,
+      })
       .from(schema.codexSubscriptionCredentials)
       .where(
         and(
@@ -15459,6 +15719,27 @@ export async function disconnectCodexAccount(
         newActiveCredentialId: settingsBefore?.activeCredentialId ?? null,
         blockedByUnresolvedRedemption: true,
       };
+    }
+    if (appsSettings?.credentialId === credentialId) {
+      const version = appsSettings.version + 1;
+      await scopedDb
+        .update(schema.codexAppsSettings)
+        .set({
+          credentialId: null,
+          version,
+          designatedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.codexAppsSettings.id, appsSettings.id));
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: credential.accountId,
+        workspaceId,
+        subjectId: actorSubjectId,
+        action: "codex_apps.cleared_on_disconnect",
+        targetType: "codex_subscription_credential",
+        targetId: credentialId,
+        metadata: { version },
+      });
     }
     const removedRows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
@@ -15512,10 +15793,23 @@ export async function disconnectCodexAccount(
 export async function disconnectAllCodexAccounts(
   db: Database,
   workspaceId: string,
+  actorSubjectId: string | null = null,
 ): Promise<{ removed: number; blockedCredentialIds: string[] }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${workspaceId}`}, 0))`,
+    );
+    const [appsSettings] = await scopedDb
+      .select()
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .for("update")
+      .limit(1);
     const credentials = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
+      .select({
+        id: schema.codexSubscriptionCredentials.id,
+        accountId: schema.codexSubscriptionCredentials.accountId,
+      })
       .from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .orderBy(asc(schema.codexSubscriptionCredentials.id))
@@ -15537,6 +15831,27 @@ export async function disconnectAllCodexAccounts(
         removed: 0,
         blockedCredentialIds: blocked.map((row) => row.credentialId).sort(),
       };
+    }
+    if (appsSettings?.credentialId) {
+      const version = appsSettings.version + 1;
+      await scopedDb
+        .update(schema.codexAppsSettings)
+        .set({
+          credentialId: null,
+          version,
+          designatedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.codexAppsSettings.id, appsSettings.id));
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: credentials[0]!.accountId,
+        workspaceId,
+        subjectId: actorSubjectId,
+        action: "codex_apps.cleared_on_disconnect",
+        targetType: "codex_subscription_credential",
+        targetId: appsSettings.credentialId,
+        metadata: { version },
+      });
     }
     const rows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
@@ -20250,11 +20565,6 @@ export async function getLatestRunState(
   turnId: string | null;
   serializedRunState: string;
   pendingApprovals: unknown[];
-  // The codex account that froze this state (pin > workspace-active), or null
-  // when frozen on the non-codex path / before the column existed. The replay
-  // path compares it to the resuming turn's codex account to decide whether the
-  // blob's account-bound reasoning must be neutralized before being replayed.
-  frozenCodexCredentialId: string | null;
   providerArtifactInvalidatedAt: Date | null;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -20275,7 +20585,6 @@ export async function getLatestRunState(
           turnId: row.turnId ?? null,
           serializedRunState: row.serializedRunState,
           pendingApprovals: row.pendingApprovals,
-          frozenCodexCredentialId: row.frozenCodexCredentialId ?? null,
           providerArtifactInvalidatedAt: row.providerArtifactInvalidatedAt ?? null,
         }
       : null;
@@ -21032,10 +21341,6 @@ export async function appendSessionHistoryItems(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
-    // The codex account that produced these items (the turn's resolved credential
-    // id), or null/undefined on the non-codex path. Stored verbatim so the read
-    // path can strip cross-account reasoning.encrypted_content blobs per turn.
-    producerCodexCredentialId?: string | null;
     modelToolOutputTruncationTokens?: number;
     items: Array<{ position: number; item: Record<string, unknown> }>;
   },
@@ -21064,7 +21369,6 @@ export async function appendSessionHistoryItems(
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId: input.turnId,
-              producerCodexCredentialId: input.producerCodexCredentialId ?? null,
               position: entry.position,
               // This is the canonical model-memory boundary. The pending-call
               // ledger and audit event may retain their separate raw/preview
@@ -21443,18 +21747,18 @@ export async function getActiveSessionHistoryItems(
   sessionId: string,
 ): Promise<
   Array<{
+    id: string;
     position: number;
     item: Record<string, unknown>;
-    producerCodexCredentialId: string | null;
     providerArtifactInvalidatedAt: Date | null;
   }>
 > {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select({
+        id: schema.sessionHistoryItems.id,
         position: schema.sessionHistoryItems.position,
         item: schema.sessionHistoryItems.item,
-        producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
         providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
       })
       .from(schema.sessionHistoryItems)
@@ -21652,8 +21956,6 @@ export async function applyContextCompaction(
     replacementInputTokens: number;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
-    /** Tag inserted history rows with the Codex credential that produced them. */
-    producerCodexCredentialId?: string | null;
   },
 ): Promise<ApplyContextCompactionResult> {
   return await withRlsContext(
@@ -21703,9 +22005,6 @@ export async function applyContextCompaction(
               position: supersededFrom + index,
               item: sanitizeModelPayload(item),
               active: true,
-              ...(input.producerCodexCredentialId
-                ? { producerCodexCredentialId: input.producerCodexCredentialId }
-                : {}),
             })),
           );
         }
@@ -21718,9 +22017,6 @@ export async function applyContextCompaction(
           position: summaryPosition,
           item: sanitizeModelPayload(input.summaryItem),
           active: true,
-          ...(input.producerCodexCredentialId
-            ? { producerCodexCredentialId: input.producerCodexCredentialId }
-            : {}),
         });
         const insertedEvents = input.eventPayload
           ? await tx
@@ -34416,11 +34712,6 @@ export async function saveRunState(
     expectedAttemptId: string;
     serializedRunState: string;
     pendingApprovals: unknown[];
-    // The codex account freezing this state (the turn's resolved credential id),
-    // or null on a non-codex turn. Stamped so a resume on a DIFFERENT codex
-    // account can strip the blob's account-bound reasoning. Defaults null so
-    // every legacy caller (and the non-codex path) is byte-identical.
-    frozenCodexCredentialId?: string | null;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -34455,7 +34746,6 @@ export async function saveRunState(
           stateVersion: Number(maxVersion) + 1,
           serializedRunState: input.serializedRunState,
           pendingApprovals: input.pendingApprovals,
-          frozenCodexCredentialId: input.frozenCodexCredentialId ?? null,
         });
         return true;
       });
@@ -37165,7 +37455,6 @@ export async function claimSessionWorkForAttempt(
             turnId,
             position: Number(position),
             item: sanitizeModelPayload(delivered.historyItem),
-            producerCodexCredentialId: null,
           });
         };
 
@@ -38213,7 +38502,6 @@ export async function claimSessionWorkForAttempt(
             row.prompt,
             Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
           ),
-          producerCodexCredentialId: null,
         });
         const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
         // Cross-session updates are already projected through
@@ -39849,7 +40137,6 @@ export type ApplySessionTurnSettlementInput = {
   runState?: {
     serializedRunState: string;
     pendingApprovals: unknown[];
-    frozenCodexCredentialId?: string | null;
     humanInputRequests?: Array<{
       id: string;
       toolCallId: string;
@@ -40078,7 +40365,6 @@ export async function applySessionTurnSettlement(
           stateVersion: Number(maxVersion) + 1,
           serializedRunState: input.runState.serializedRunState,
           pendingApprovals: input.runState.pendingApprovals,
-          frozenCodexCredentialId: input.runState.frozenCodexCredentialId ?? null,
         });
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
@@ -41063,7 +41349,8 @@ export type RequestSessionTurnRecoveryInput = {
   providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
-    codexCredentialId: string;
+    historyItemIds: string[];
+    runStateId?: string;
     reason: "encrypted_content_rejected";
   };
 };
@@ -41166,47 +41453,36 @@ export async function requestSessionTurnRecovery(
       }
       let providerArtifactsInvalidated = 0;
       if (input.providerArtifactInvalidation) {
-        const invalidatedHistory = await tx
-          .update(schema.sessionHistoryItems)
-          .set({
-            providerArtifactInvalidatedAt: now,
-            providerArtifactInvalidationReason: input.providerArtifactInvalidation.reason,
-            providerArtifactInvalidatedByAttemptId: input.attemptId,
-          })
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.accountId, session.accountId),
-              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-              eq(
-                schema.sessionHistoryItems.producerCodexCredentialId,
-                input.providerArtifactInvalidation.codexCredentialId,
-              ),
-              isNull(schema.sessionHistoryItems.providerArtifactInvalidatedAt),
-              sql`${schema.sessionHistoryItems.item} ->> 'type' in ('reasoning', 'compaction')`,
-            ),
-          )
-          .returning({ id: schema.sessionHistoryItems.id });
-        const [latestRunState] = await tx
-          .select({ id: schema.agentRunStates.id })
-          .from(schema.agentRunStates)
-          .where(
-            and(
-              eq(schema.agentRunStates.accountId, session.accountId),
-              eq(schema.agentRunStates.workspaceId, workspaceId),
-              eq(schema.agentRunStates.sessionId, input.sessionId),
-              eq(schema.agentRunStates.turnId, input.turnId),
-              eq(
-                schema.agentRunStates.frozenCodexCredentialId,
-                input.providerArtifactInvalidation.codexCredentialId,
-              ),
-              isNull(schema.agentRunStates.providerArtifactInvalidatedAt),
-            ),
-          )
-          .orderBy(desc(schema.agentRunStates.stateVersion))
-          .limit(1);
-        const invalidatedRunState = latestRunState
+        const historyItemIds = [...new Set(input.providerArtifactInvalidation.historyItemIds)];
+        const invalidatedHistory =
+          historyItemIds.length > 0
+            ? await tx
+                .update(schema.sessionHistoryItems)
+                .set({
+                  providerArtifactInvalidatedAt: now,
+                  providerArtifactInvalidationReason: input.providerArtifactInvalidation.reason,
+                  providerArtifactInvalidatedByAttemptId: input.attemptId,
+                })
+                .where(
+                  and(
+                    eq(schema.sessionHistoryItems.accountId, session.accountId),
+                    eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+                    eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+                    eq(schema.sessionHistoryItems.active, true),
+                    inArray(schema.sessionHistoryItems.id, historyItemIds),
+                    isNull(schema.sessionHistoryItems.providerArtifactInvalidatedAt),
+                    sql`${schema.sessionHistoryItems.item} ->> 'type' in ('reasoning', 'compaction')`,
+                    sql`(
+                      nullif(${schema.sessionHistoryItems.item} ->> 'encrypted_content', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} ->> 'encryptedContent', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encrypted_content', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encryptedContent', '') is not null
+                    )`,
+                  ),
+                )
+                .returning({ id: schema.sessionHistoryItems.id })
+            : [];
+        const invalidatedRunState = input.providerArtifactInvalidation.runStateId
           ? await tx
               .update(schema.agentRunStates)
               .set({
@@ -41216,8 +41492,20 @@ export async function requestSessionTurnRecovery(
               })
               .where(
                 and(
-                  eq(schema.agentRunStates.id, latestRunState.id),
+                  eq(schema.agentRunStates.accountId, session.accountId),
+                  eq(schema.agentRunStates.workspaceId, workspaceId),
+                  eq(schema.agentRunStates.sessionId, input.sessionId),
+                  eq(schema.agentRunStates.turnId, input.turnId),
+                  eq(schema.agentRunStates.id, input.providerArtifactInvalidation.runStateId),
                   isNull(schema.agentRunStates.providerArtifactInvalidatedAt),
+                  sql`${schema.agentRunStates.stateVersion} = (
+                    select max(latest.state_version)
+                    from agent_run_states latest
+                    where latest.account_id = ${session.accountId}
+                      and latest.workspace_id = ${workspaceId}
+                      and latest.session_id = ${input.sessionId}
+                      and latest.turn_id = ${input.turnId}
+                  )`,
                 ),
               )
               .returning({ id: schema.agentRunStates.id })

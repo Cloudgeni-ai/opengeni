@@ -909,10 +909,21 @@ strips provider item ids from every model-call input by default
 self-contained and reasoning continuity does not hinge on provider storage.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
-the same-credential active reasoning/compaction rows and the current turn's
-latest frozen RunState as provider-invalid. Their durable rows, summaries,
-messages, provenance, and timeline truth remain intact. Recovery then reclaims
-the same logical turn with a new attempt and omits or neutralizes only the
-rejected provider-bound identity. A generic 400, a different provider error, or
-a rejection that invalidates no matching artifact is terminal rather than an
-equivalent retry loop.
+the exact active reasoning/compaction row IDs and the current turn's latest
+RunState receipt containing opaque artifacts that participated in the rejected
+request as provider-invalid.
+Their durable rows, readable content, provenance, and timeline truth remain
+intact. Recovery then reclaims the same logical turn with a new attempt and
+builds one temporary input view that omits or neutralizes only that rejected
+identity; an unusable remote-compaction blob is omitted because no portable
+plaintext exists. Credential identity is irrelevant. A generic 400, a different
+provider error, or a rejection that invalidates none of that exact candidate set is terminal
+rather than an equivalent retry loop.
+
+Subscription, model, and provider-route changes never alter canonical history
+or a saved approval RunState. Responses consumes canonical history directly;
+Chat Completions receives one request-local transcript projection only for item
+types its wire protocol cannot represent. Historical `tool_search` and other
+tool call/output pairs are completed facts, not authorization to execute again.
+The projection is discarded after the request. Portable sessions may switch
+between supported providers; `remote_v2` sessions remain Codex-only.

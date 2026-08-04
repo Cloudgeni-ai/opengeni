@@ -11,6 +11,8 @@ import {
   claimCodexResetRedemption,
   completeCodexResetRedemption,
   createDb,
+  clearCodexAppsCredential,
+  designateCodexAppsCredential,
   disconnectAllCodexAccounts,
   disconnectCodexAccount,
   encryptEnvironmentValue,
@@ -18,6 +20,8 @@ import {
   fetchCodexUsageForAccount,
   fenceCodexResetRedemptionSend,
   getCodexResetRedemptionAttempt,
+  getCodexAppsCredentialAuthorizationForRun,
+  getCodexAppsSettings,
   listCodexAccountStatuses,
   listCodexResetRedemptionRecoveries,
   loadCodexCredentialForRun,
@@ -27,6 +31,7 @@ import {
   setCodexCredentialExhausted,
   updateCodexAllocatorEligibility,
   upsertCodexSubscriptionCredential,
+  withCodexAppsRequestAuthorization,
   type Database,
   type DbClient,
 } from "../src";
@@ -76,6 +81,16 @@ async function freshWorkspace(name: string): Promise<Workspace> {
   await admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
+  await admin`
+    insert into workspace_memberships (
+      account_id, workspace_id, subject_id, role, permissions
+    )
+    select ${account!.id}, ${workspace!.id}, subject_id, 'member',
+      '["connections:write"]'::jsonb
+    from unnest(array[
+      'user:owner', 'user:other', 'user:manager', 'user:scoped-manager',
+      'user:disconnect-manager', 'user:first-human', 'user:new-owner'
+    ]::text[]) as subject_id`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -233,18 +248,342 @@ describe("Codex quota Codex overview and irreversible reset state", () => {
       (await loadCodexCredentialForRun(dbA, settings, ws.workspaceId, credentialId))?.version,
     ).toBe(before?.version);
 
-    // Ownership is the most recent connector, not historical authority. A
-    // delegated/nonhuman reconnect makes the row view-only; a later direct
-    // managed-cookie human reconnect becomes the new owner.
+    // Reconnection refreshes tokens, never ownership.
     await connectCredential(ws, "metadata-provider", null);
     expect((await listCodexAccountStatuses(dbA, ws.workspaceId))[0]?.connectedBySubjectId).toBe(
-      null,
+      "user:owner",
     );
     await connectCredential(ws, "metadata-provider", "user:new-owner");
     expect((await listCodexAccountStatuses(dbA, ws.workspaceId))[0]?.connectedBySubjectId).toBe(
-      "user:new-owner",
+      "user:owner",
     );
+
+    const unowned = await freshWorkspace("ownership-claim");
+    await connectCredential(unowned, "unowned-provider", null);
+    expect(
+      (await listCodexAccountStatuses(dbA, unowned.workspaceId))[0]?.connectedBySubjectId,
+    ).toBe(null);
+    await connectCredential(unowned, "unowned-provider", "user:first-human");
+    expect(
+      (await listCodexAccountStatuses(dbA, unowned.workspaceId))[0]?.connectedBySubjectId,
+    ).toBe("user:first-human");
   });
+
+  test("Apps designation is owner-enabled, scope-disabled, OCC-safe, and inference-independent", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace("apps-boundary");
+    const ownerCredentialId = await connectCredential(ws, "apps-owner", "user:owner");
+    const otherCredentialId = await connectCredential(ws, "apps-other", "user:other");
+
+    expect(await getCodexAppsSettings(dbA, ws.workspaceId)).toEqual({
+      credentialId: null,
+      version: 0,
+      designatedAt: null,
+    });
+    expect(
+      await designateCodexAppsCredential(dbA, {
+        ...ws,
+        credentialId: ownerCredentialId,
+        subjectId: "user:other",
+        expectedVersion: 0,
+      }),
+    ).toEqual({ kind: "not_owner" });
+
+    const raced = await Promise.all([
+      designateCodexAppsCredential(dbA, {
+        ...ws,
+        credentialId: ownerCredentialId,
+        subjectId: "user:owner",
+        expectedVersion: 0,
+      }),
+      designateCodexAppsCredential(dbB, {
+        ...ws,
+        credentialId: otherCredentialId,
+        subjectId: "user:other",
+        expectedVersion: 0,
+      }),
+    ]);
+    expect(raced.filter((result) => result.kind === "updated")).toHaveLength(1);
+    expect(raced.filter((result) => result.kind === "conflict")).toHaveLength(1);
+    const designated = await getCodexAppsSettings(dbA, ws.workspaceId);
+    expect(designated.credentialId).not.toBeNull();
+    expect(designated.version).toBe(1);
+    const designatedCredentialId = designated.credentialId;
+    if (!designatedCredentialId) throw new Error("expected a designated Codex Apps credential");
+    const designatedAccount = (await listCodexAccountStatuses(dbA, ws.workspaceId)).find(
+      (account) => account.id === designatedCredentialId,
+    )!;
+    const designatedOwnerSubjectId = designatedAccount.connectedBySubjectId;
+    if (!designatedOwnerSubjectId) throw new Error("expected the Apps credential to have an owner");
+    expect(await getCodexAppsCredentialAuthorizationForRun(dbA, ws.workspaceId)).toEqual({
+      credentialId: designatedCredentialId,
+      ownerSubjectId: designatedOwnerSubjectId,
+    });
+
+    // Exhaust quota, enter cooldown, pause new allocations, and point inference
+    // at the other account. None of these fields participate in Apps lookup.
+    await admin`
+      update codex_subscription_credentials
+      set primary_used_percent = 100,
+          secondary_used_percent = 100,
+          exhausted_until = now() + interval '1 day',
+          allocator_enabled = false
+      where workspace_id = ${ws.workspaceId}
+        and id = ${designatedCredentialId}`;
+    await admin`
+      update codex_rotation_settings
+      set active_credential_id = ${
+        designatedCredentialId === ownerCredentialId ? otherCredentialId : ownerCredentialId
+      }
+      where workspace_id = ${ws.workspaceId}`;
+    expect(await getCodexAppsCredentialAuthorizationForRun(dbA, ws.workspaceId)).toEqual({
+      credentialId: designatedCredentialId,
+      ownerSubjectId: designatedOwnerSubjectId,
+    });
+
+    const cleared = await clearCodexAppsCredential(dbA, {
+      ...ws,
+      subjectId: "user:scoped-manager",
+      expectedVersion: designated.version,
+    });
+    expect(cleared).toMatchObject({ kind: "updated", credentialId: null, version: 2 });
+    expect(await getCodexAppsCredentialAuthorizationForRun(dbA, ws.workspaceId)).toBeNull();
+
+    const redesignated = await designateCodexAppsCredential(dbA, {
+      ...ws,
+      credentialId: designatedCredentialId,
+      subjectId: designatedOwnerSubjectId,
+      expectedVersion: cleared.version,
+    });
+    expect(redesignated.kind).toBe("updated");
+    const disconnected = await disconnectCodexAccount(
+      dbA,
+      ws.workspaceId,
+      designated.credentialId!,
+      "user:disconnect-manager",
+    );
+    expect(disconnected.removed).toBe(true);
+    expect(await getCodexAppsCredentialAuthorizationForRun(dbA, ws.workspaceId)).toBeNull();
+    expect(await getCodexAppsSettings(dbA, ws.workspaceId)).toMatchObject({
+      credentialId: null,
+      version: 4,
+    });
+
+    const audit = await admin<{ action: string; subject_id: string | null }[]>`
+      select action, subject_id from audit_events
+      where workspace_id = ${ws.workspaceId}
+        and action in (
+          'codex_apps.designated',
+          'codex_apps.cleared',
+          'codex_apps.cleared_on_disconnect'
+        )
+      order by occurred_at, action`;
+    expect(audit.map((row) => row.action).sort()).toEqual([
+      "codex_apps.cleared",
+      "codex_apps.cleared_on_disconnect",
+      "codex_apps.designated",
+      "codex_apps.designated",
+    ]);
+    expect(audit.find((row) => row.action === "codex_apps.cleared")?.subject_id).toBe(
+      "user:scoped-manager",
+    );
+    expect(audit.find((row) => row.action === "codex_apps.cleared_on_disconnect")?.subject_id).toBe(
+      "user:disconnect-manager",
+    );
+  }, 15_000);
+
+  test("Apps enable, clear, and hard-disconnect races converge without fallback", async () => {
+    if (!available) return;
+
+    const clearRace = await freshWorkspace("apps-clear-disconnect-race");
+    const clearRaceCredential = await connectCredential(
+      clearRace,
+      "apps-clear-disconnect",
+      "user:owner",
+    );
+    expect(
+      await designateCodexAppsCredential(dbA, {
+        ...clearRace,
+        credentialId: clearRaceCredential,
+        subjectId: "user:owner",
+        expectedVersion: 0,
+      }),
+    ).toMatchObject({ kind: "updated", version: 1 });
+    const [cleared, disconnected] = await Promise.all([
+      clearCodexAppsCredential(dbA, {
+        ...clearRace,
+        subjectId: "user:manager",
+        expectedVersion: 1,
+      }),
+      disconnectCodexAccount(dbB, clearRace.workspaceId, clearRaceCredential, "user:manager"),
+    ]);
+    expect(["updated", "conflict"]).toContain(cleared.kind);
+    expect(disconnected.removed).toBe(true);
+    expect(await getCodexAppsSettings(dbA, clearRace.workspaceId)).toMatchObject({
+      credentialId: null,
+      version: 2,
+    });
+    expect(await getCodexAppsCredentialAuthorizationForRun(dbA, clearRace.workspaceId)).toBeNull();
+
+    const enableRace = await freshWorkspace("apps-enable-disconnect-race");
+    const enableRaceCredential = await connectCredential(
+      enableRace,
+      "apps-enable-disconnect",
+      "user:owner",
+    );
+    const [enabled, removed] = await Promise.all([
+      designateCodexAppsCredential(dbA, {
+        ...enableRace,
+        credentialId: enableRaceCredential,
+        subjectId: "user:owner",
+        expectedVersion: 0,
+      }),
+      disconnectCodexAccount(dbB, enableRace.workspaceId, enableRaceCredential, "user:manager"),
+    ]);
+    expect(["updated", "not_found"]).toContain(enabled.kind);
+    expect(removed.removed).toBe(true);
+    const final = await getCodexAppsSettings(dbA, enableRace.workspaceId);
+    expect(final.credentialId).toBeNull();
+    expect(final.version).toBe(enabled.kind === "updated" ? 2 : 0);
+    expect(await getCodexAppsCredentialAuthorizationForRun(dbA, enableRace.workspaceId)).toBeNull();
+
+    const workspaceCascade = await freshWorkspace("apps-workspace-cascade");
+    const cascadeCredential = await connectCredential(
+      workspaceCascade,
+      "apps-workspace-cascade",
+      "user:owner",
+    );
+    expect(
+      await designateCodexAppsCredential(dbA, {
+        ...workspaceCascade,
+        credentialId: cascadeCredential,
+        subjectId: "user:owner",
+        expectedVersion: 0,
+      }),
+    ).toMatchObject({ kind: "updated" });
+    await admin`delete from workspaces where id = ${workspaceCascade.workspaceId}`;
+    const [remainingCascadeRows] = await admin<{ count: number }[]>`
+      select count(*)::int as count from codex_apps_settings
+      where workspace_id = ${workspaceCascade.workspaceId}`;
+    expect(remainingCascadeRows?.count).toBe(0);
+  }, 15_000);
+
+  test("Apps authorization is fenced through dispatch and mutations recheck live scope", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace("apps-dispatch-fence");
+    const credentialId = await connectCredential(ws, "apps-dispatch-fence", "user:owner");
+    expect(
+      await designateCodexAppsCredential(dbA, {
+        ...ws,
+        credentialId,
+        subjectId: "user:owner",
+        expectedVersion: 0,
+      }),
+    ).toMatchObject({ kind: "updated", version: 1 });
+
+    let enterDispatch!: () => void;
+    const dispatchEntered = new Promise<void>((resolve) => {
+      enterDispatch = resolve;
+    });
+    let releaseDispatch!: () => void;
+    const dispatchReleased = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const request = withCodexAppsRequestAuthorization(
+      dbA,
+      { workspaceId: ws.workspaceId, credentialId },
+      async () => {
+        enterDispatch();
+        await dispatchReleased;
+        return "sent";
+      },
+    );
+    await dispatchEntered;
+
+    let clearSettled = false;
+    const clear = clearCodexAppsCredential(dbB, {
+      ...ws,
+      subjectId: "user:manager",
+      expectedVersion: 1,
+    }).then((result) => {
+      clearSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(clearSettled).toBe(false);
+    releaseDispatch();
+    expect(await request).toBe("sent");
+    expect(await clear).toMatchObject({ kind: "updated", version: 2 });
+    await expect(
+      withCodexAppsRequestAuthorization(
+        dbA,
+        { workspaceId: ws.workspaceId, credentialId },
+        async () => "must-not-send",
+      ),
+    ).rejects.toThrow("authorization is no longer active");
+
+    expect(
+      await designateCodexAppsCredential(dbA, {
+        ...ws,
+        credentialId,
+        subjectId: "user:owner",
+        expectedVersion: 2,
+      }),
+    ).toMatchObject({ kind: "updated", version: 3 });
+    let releaseSecondDispatch!: () => void;
+    const secondDispatchReleased = new Promise<void>((resolve) => {
+      releaseSecondDispatch = resolve;
+    });
+    let enterSecondDispatch!: () => void;
+    const secondDispatchEntered = new Promise<void>((resolve) => {
+      enterSecondDispatch = resolve;
+    });
+    const secondRequest = withCodexAppsRequestAuthorization(
+      dbA,
+      { workspaceId: ws.workspaceId, credentialId },
+      async () => {
+        enterSecondDispatch();
+        await secondDispatchReleased;
+      },
+    );
+    await secondDispatchEntered;
+    let membershipRevoked = false;
+    const revokeMembership = admin`
+      update workspace_memberships set permissions = '[]'::jsonb
+      where workspace_id = ${ws.workspaceId} and subject_id = 'user:owner'`.then(() => {
+      membershipRevoked = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(membershipRevoked).toBe(false);
+    releaseSecondDispatch();
+    await secondRequest;
+    await revokeMembership;
+    await expect(
+      withCodexAppsRequestAuthorization(
+        dbA,
+        { workspaceId: ws.workspaceId, credentialId },
+        async () => "must-not-send",
+      ),
+    ).rejects.toThrow("authorization is no longer active");
+
+    const unscoped = await freshWorkspace("apps-mutation-scope");
+    const unscopedCredential = await connectCredential(
+      unscoped,
+      "apps-mutation-scope",
+      "user:owner",
+    );
+    await admin`
+      update workspace_memberships set permissions = '[]'::jsonb
+      where workspace_id = ${unscoped.workspaceId} and subject_id = 'user:owner'`;
+    expect(
+      await designateCodexAppsCredential(dbA, {
+        ...unscoped,
+        credentialId: unscopedCredential,
+        subjectId: "user:owner",
+        expectedVersion: 0,
+      }),
+    ).toEqual({ kind: "forbidden" });
+  }, 15_000);
 
   test("allocator OCC is same-state idempotent, conflict-safe, exactly audited, and token-CAS independent", async () => {
     if (!available) return;

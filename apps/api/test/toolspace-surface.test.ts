@@ -266,6 +266,7 @@ describe("toolspaceCanProxyServerId (recursion guard predicate)", () => {
     expect(toolspaceCanProxyServerId("opengeni")).toBe(false);
     expect(toolspaceCanProxyServerId("files")).toBe(false);
     expect(toolspaceCanProxyServerId("docs")).toBe(false);
+    expect(toolspaceCanProxyServerId("codex_apps")).toBe(false);
     expect(toolspaceCanProxyServerId("thirdparty")).toBe(true);
     expect(toolspaceCanProxyServerId("github-mcp")).toBe(true);
   });

@@ -13,6 +13,7 @@ import {
   codexRequestStorage,
   codexSubscriptionFetch,
   isCodexTransportError,
+  opaqueProviderArtifactFingerprint,
   parseCodexUsageHeaders,
 } from "../src";
 
@@ -132,6 +133,41 @@ describe("codexSubscriptionFetch", () => {
     expect("max_output_tokens" in sent).toBe(false);
     expect(sent.include).toEqual(["reasoning.encrypted_content"]);
     expect("id" in sent.input[0]).toBe(false);
+  });
+
+  test("reports only the exact opaque artifacts on the normalized wire request", async () => {
+    const { base } = baseRecorder();
+    const observed: Array<{ requestId: string; fingerprints: readonly string[] }> = [];
+    const opaque = {
+      type: "reasoning",
+      id: "rs-wire",
+      content: [],
+      providerData: { encrypted_content: "opaque-wire-secret" },
+    };
+    await codexRequestStorage.run(
+      ctx({
+        nextRequestId: () => "request-wire-1",
+        onRequestOpaqueArtifacts: (artifacts) => observed.push(artifacts),
+      }),
+      () =>
+        codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            input: [opaque, { type: "message", role: "user", content: "continue" }],
+          }),
+        }),
+    );
+
+    const fingerprint = opaqueProviderArtifactFingerprint(opaque);
+    if (!fingerprint) throw new Error("opaque fixture did not produce a fingerprint");
+    expect(observed).toEqual([
+      {
+        requestId: "request-wire-1",
+        fingerprints: [fingerprint],
+      },
+    ]);
+    expect(JSON.stringify(observed)).not.toContain("opaque-wire-secret");
   });
 
   test("sends the session_id affinity header when the context carries a sessionId", async () => {

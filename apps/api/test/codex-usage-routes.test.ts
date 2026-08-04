@@ -77,8 +77,6 @@ function account(
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
-    connectorNamespaces: null,
-    connectorsCheckedAt: null,
     ...over,
   };
 }
