@@ -154,6 +154,23 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([parent[0]]);
   });
 
+  test("children retain frozen first-party social authority alongside selected MCP grants", () => {
+    const social: McpPersonalConnectionDelegation = {
+      serverId: "social:x",
+      connectionId: crypto.randomUUID(),
+      ownerSubjectId: "user:owner",
+      providerDomain: "x.com",
+      kind: "oauth2",
+      connectionType: "social",
+    };
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [personalServer],
+        parentDelegations: [social],
+      }),
+    ).toEqual([social]);
+  });
+
   test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {
     const frozenConnectionId = "11111111-1111-4111-8111-111111111111";
     const received: ResolveConnectionCredentialInput[] = [];

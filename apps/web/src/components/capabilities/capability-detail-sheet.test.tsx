@@ -70,6 +70,7 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
     id: "44444444-4444-4444-8444-444444444444",
     accountId: "22222222-2222-4222-8222-222222222222",
     workspaceId: "33333333-3333-4333-8333-333333333333",
+    ownership: "workspace",
     provider: "x",
     accountHandle: "opengeni",
     accountName: "OpenGeni",
@@ -170,7 +171,9 @@ describe("first-party social connector UI", () => {
       <SocialConnectorControls
         item={x}
         provider="x"
-        connection={connected}
+        connections={[connected]}
+        ownership="workspace"
+        onOwnershipChange={() => undefined}
         busy={false}
         canManage
         onAction={onAction}
@@ -191,6 +194,7 @@ describe("first-party social connector UI", () => {
         type: "social_oauth",
         item: x,
         provider: "x",
+        ownership: "workspace",
       });
       expect(onAction).toHaveBeenNthCalledWith(2, {
         type: "disconnect_social",
@@ -207,7 +211,9 @@ describe("first-party social connector UI", () => {
       <SocialConnectorControls
         item={x}
         provider="x"
-        connection={null}
+        connections={[]}
+        ownership="workspace"
+        onOwnershipChange={() => undefined}
         busy={false}
         canManage={false}
         onAction={() => undefined}
@@ -218,7 +224,7 @@ describe("first-party social connector UI", () => {
       expect(button?.textContent).toContain("Connect X for workspace");
       expect(button?.disabled).toBe(true);
       expect(rendered.container.textContent).toContain("Workspace admin permission is required");
-      expect(rendered.container.textContent).not.toContain("Connect only for me");
+      expect(rendered.container.textContent).toContain("Connect only for me");
     } finally {
       await rendered.unmount();
     }

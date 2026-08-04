@@ -448,10 +448,9 @@ async function createAgentSession(request: Request): Promise<Response> {
     return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
   }
   const { ticket, customer } = supportCase;
-  const initialMessage =
-    requestedMessage
-      ? requestedMessage
-      : `Investigate ${ticket.id}. Use the available support tools, explain the evidence, and take the appropriate actions.`;
+  const initialMessage = requestedMessage
+    ? requestedMessage
+    : `Investigate ${ticket.id}. Use the available support tools, explain the evidence, and take the appropriate actions.`;
 
   const mcpServer = {
     id: MCP_SERVER_ID,

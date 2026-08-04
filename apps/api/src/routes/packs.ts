@@ -187,7 +187,12 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
         action: "schedule:create",
         quantity: 1,
       });
-      const connections = await resolveSocialConnections(db, workspaceId, payload.connectionIds);
+      const connections = await resolveSocialConnections(
+        db,
+        workspaceId,
+        payload.connectionIds,
+        grant.subjectId,
+      );
       if (connections.length === 0) {
         throw new HTTPException(422, {
           message: "at least one connected social account is required",
@@ -254,20 +259,21 @@ async function resolveSocialConnections(
   db: ApiRouteDeps["db"],
   workspaceId: string,
   connectionIds: string[],
+  subjectId: string,
 ): Promise<SocialConnection[]> {
   const ids = [...new Set(connectionIds)];
   const connections =
     ids.length > 0
       ? await Promise.all(
           ids.map(async (id) => {
-            const connection = await getSocialConnection(db, workspaceId, id);
+            const connection = await getSocialConnection(db, workspaceId, id, subjectId);
             if (!connection) {
               throw new HTTPException(422, { message: `unknown social connection: ${id}` });
             }
             return connection;
           }),
         )
-      : (await listSocialConnections(db, workspaceId, 500)).filter(
+      : (await listSocialConnections(db, workspaceId, 500, subjectId)).filter(
           (connection) => connection.status === "connected",
         );
   const inactive = connections.find((connection) => connection.status !== "connected");
