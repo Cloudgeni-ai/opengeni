@@ -60,7 +60,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   );
   const canManageOrganizationDestination = Boolean(
     workspaceGrant &&
-      hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
   );
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
