@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.44.3
+
+### Patch Changes
+
+- Updated dependencies [4502474]
+  - @opengeni/sdk@0.44.3
+
 ## 0.44.2
 
 ### Patch Changes
