@@ -1306,6 +1306,7 @@ const RegistryModelSchema = z
     upstreamModelId: z.string().min(1).optional(), // exact provider slug; defaults to id
     aliases: z.array(z.string().min(1)).optional(), // accepted input only; never sent upstream
     label: z.string().min(1).optional(), // display name; defaults to id
+    shortLabel: z.string().min(1).max(64).optional(), // compact UI label; optional
     contextWindowTokens: z.number().int().positive().optional(),
     effectiveContextWindowTokens: z.number().int().positive().optional(),
     autoCompactTokenLimit: z.number().int().positive().optional(),
@@ -1406,6 +1407,8 @@ export interface ConfiguredModel {
   id: string;
   aliases: string[];
   label: string;
+  /** Optional curated compact label for dense UI (e.g. mobile composer). */
+  shortLabel?: string | undefined;
   providerId: string;
   providerLabel: string;
   api: ModelProviderApi;
@@ -1491,6 +1494,7 @@ export const OPENGENI_GATEWAY_MODELS = {
     workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
     upstreamModelId: "deepseek/deepseek-v4-flash-0731",
     label: "DeepSeek V4 Flash 0731",
+    shortLabel: "V4 Flash",
     providers: ["baseten", "novita", "deepinfra"],
     implicitCaching: true,
   },
@@ -1499,6 +1503,7 @@ export const OPENGENI_GATEWAY_MODELS = {
     workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}kimi-k3`,
     upstreamModelId: "moonshotai/kimi-k3",
     label: "Kimi K3",
+    shortLabel: "Kimi K3",
     providers: ["baseten", "fireworks"],
     implicitCaching: true,
   },
@@ -2381,6 +2386,7 @@ function gatewayRegistryProvider(
       id: workspace ? model.workspaceProductId : model.productId,
       upstreamModelId: model.upstreamModelId,
       label: model.label,
+      shortLabel: model.shortLabel,
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
         vision: kimi,
@@ -2479,6 +2485,26 @@ export function productLabelForModelId(modelId: string): string {
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(" ");
   return suffix.length > 0 ? `${family} ${suffix}` : family;
+}
+
+/**
+ * Curated compact product labels for dense UI. Only known GPT family slugs;
+ * everything else returns null so callers fall back to the full `label`.
+ */
+export function productShortLabelForModelId(modelId: string): string | null {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  switch (slug) {
+    case "gpt-5.6-sol":
+      return "5.6 Sol";
+    case "gpt-5.6-terra":
+      return "5.6 Terra";
+    case "gpt-5.6-luna":
+      return "5.6 Luna";
+    default:
+      return null;
+  }
 }
 
 function builtinLatencyModesForModel(modelId: string): Array<{
@@ -2780,6 +2806,9 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
         id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
         upstreamModelId: slug,
         label: productLabelForModelId(slug),
+        ...(productShortLabelForModelId(slug)
+          ? { shortLabel: productShortLabelForModelId(slug)! }
+          : {}),
         reasoningEffort: true,
         // The ChatGPT/Codex Responses backend accepts the native web_search
         // hosted tool (unlike hosted apply_patch/computer transports). Declaring
@@ -2965,6 +2994,9 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         id,
         aliases: [],
         label: productLabelForModelId(id),
+        ...(productShortLabelForModelId(id)
+          ? { shortLabel: productShortLabelForModelId(id)! }
+          : {}),
         providerId: builtinId,
         providerLabel: builtinLabel,
         api: "responses" as const,
@@ -2999,6 +3031,11 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
           id: model.id,
           aliases: [...(model.aliases ?? [])],
           label: model.label ?? productLabelForModelId(model.id),
+          ...(model.shortLabel
+            ? { shortLabel: model.shortLabel }
+            : productShortLabelForModelId(model.id)
+              ? { shortLabel: productShortLabelForModelId(model.id)! }
+              : {}),
           providerId: provider.id,
           providerLabel,
           api: provider.api,

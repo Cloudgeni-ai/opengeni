@@ -9773,6 +9773,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     id: z.string(),
     label: z.string(),
+    /** Optional curated compact label for dense UI (e.g. mobile composer). */
+    shortLabel: z.string().min(1).max(64).optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),

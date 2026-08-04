@@ -934,7 +934,8 @@ export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function C
       ref={ref}
       className={cn(
         "flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5",
-        "max-sm:items-center max-sm:gap-1",
+        // Mobile: one control row — never wrap into a second toolbar line.
+        "max-sm:flex-nowrap max-sm:items-center max-sm:gap-1",
         className,
       )}
     />
@@ -987,7 +988,11 @@ export const Actions = forwardRef<HTMLSpanElement, ComposerActionsProps>(functio
     <span
       {...props}
       ref={ref}
-      className={cn("ml-auto flex shrink-0 items-center gap-1.5", className)}
+      className={cn(
+        "ml-auto flex shrink-0 items-center gap-1.5",
+        "max-sm:flex-nowrap max-sm:gap-1",
+        className,
+      )}
     />
   );
 });

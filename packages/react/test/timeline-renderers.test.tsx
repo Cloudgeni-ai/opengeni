@@ -1394,6 +1394,40 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
 
     await r.unmount();
   });
+
+  test("Codex function-tool { patch } shape uses the specialized renderer", async () => {
+    const freeform = [
+      "*** Begin Patch",
+      "*** Update File: src/hello.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    const item = toolItem({
+      name: "apply_patch",
+      raw: {
+        type: "function_call",
+        name: "apply_patch",
+        arguments: JSON.stringify({ patch: freeform }),
+      },
+      arguments: JSON.stringify({ patch: freeform }),
+      status: "complete",
+      output: "Patch applied.",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Edited");
+    expect(text).toContain("hello.ts");
+    // Must not fall through to GenericRenderer chrome.
+    expect(text).not.toMatch(/Apply patch/i);
+    expect(r.container.textContent).not.toContain("Arguments");
+
+    await r.unmount();
+  });
 });
 
 /* ---- Running-state: write_stdin ------------------------------------------- */

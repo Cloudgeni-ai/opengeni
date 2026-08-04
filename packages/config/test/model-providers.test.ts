@@ -14,6 +14,7 @@ import {
   parseModelProvidersJson,
   policyProviderIdForModel,
   productLabelForModelId,
+  productShortLabelForModelId,
   resolveModelProvider,
   resolveProviderApiKey,
   resolveTurnExecutionPolicyV1,
@@ -82,6 +83,9 @@ describe("curated AI Gateway catalogue", () => {
     )!;
     const kimi = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.kimi.productId)!;
     expect(deepseek.upstreamModelId).toBe(OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId);
+    expect(deepseek.label).toBe("DeepSeek V4 Flash 0731");
+    expect(deepseek.shortLabel).toBe("V4 Flash");
+    expect(kimi.shortLabel).toBe("Kimi K3");
     expect(deepseek.requestPolicy).toEqual({
       gateway: { only: ["baseten", "novita", "deepinfra"], caching: "auto" },
     });
@@ -613,6 +617,16 @@ describe("productLabelForModelId", () => {
   });
 });
 
+describe("productShortLabelForModelId", () => {
+  test("curates compact GPT-5.6 product labels and leaves others unset", () => {
+    expect(productShortLabelForModelId("gpt-5.6-sol")).toBe("5.6 Sol");
+    expect(productShortLabelForModelId("codex/gpt-5.6-sol")).toBe("5.6 Sol");
+    expect(productShortLabelForModelId("gpt-5.6-luna")).toBe("5.6 Luna");
+    expect(productShortLabelForModelId("gpt-5.6-terra")).toBe("5.6 Terra");
+    expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
+  });
+});
+
 describe("configuredModels", () => {
   test("Codex catalog overlay uses the same product labels as OpenAI", () => {
     const settings = withEnv(
@@ -627,6 +641,10 @@ describe("configuredModels", () => {
     const models = configuredModels(settings);
     expect(models.find((model) => model.id === "gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
     expect(models.find((model) => model.id === "codex/gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+    expect(models.find((model) => model.id === "gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
+    expect(models.find((model) => model.id === "codex/gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
+    expect(models.find((model) => model.id === "gpt-5.6-luna")?.shortLabel).toBe("5.6 Luna");
+    expect(models.find((model) => model.id === "gpt-5.6-terra")?.shortLabel).toBe("5.6 Terra");
     expect(
       models.find((model) => model.id === "gpt-5.6-luna")?.capabilities.inputModalities,
     ).toEqual(["text", "image"]);

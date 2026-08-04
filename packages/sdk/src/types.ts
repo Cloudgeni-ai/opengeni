@@ -2203,6 +2203,8 @@ export type ModelPricingScheduleV1 = {
 export type ClientModel = {
   id: string;
   label: string;
+  /** Optional curated compact label for dense UI (e.g. mobile composer). */
+  shortLabel?: string | undefined;
   /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
   provider: string;
   providerLabel: string;

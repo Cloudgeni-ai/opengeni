@@ -73,6 +73,23 @@ describe("model-policy", () => {
     expect(rows[0]).toMatchObject({ billingClass: "byok", billingClassLabel: "Your Gateway" });
   });
 
+  test("projects curated shortLabel into picker rows", () => {
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6 Sol",
+        shortLabel: "5.6 Sol",
+      }),
+      catalogModel({
+        id: "deepseek-v4-flash-0731",
+        label: "DeepSeek V4 Flash 0731",
+        shortLabel: "V4 Flash",
+      }),
+    ]);
+    expect(rows.find((row) => row.id === "gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
+    expect(rows.find((row) => row.id === "deepseek-v4-flash-0731")?.shortLabel).toBe("V4 Flash");
+  });
+
   test("groups catalog rows by billing class", () => {
     const rows = projectPickerRows([
       catalogModel({

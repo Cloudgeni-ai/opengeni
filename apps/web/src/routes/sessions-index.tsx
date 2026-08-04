@@ -23,7 +23,11 @@ import {
   type ComposerState,
 } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
-import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
+import {
+  NewSessionRealtimeControl,
+  RealtimeVoiceModelPanel,
+  useRealtimeModelSelection,
+} from "@opengeni/react/realtime";
 import { OpenGeniApiError, type SessionRealtimeModel } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -40,7 +44,7 @@ import { BillingClassMark } from "@/components/billing-class-mark";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
-import { RepositoryContextPicker } from "@/components/repository-picker";
+import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
@@ -48,6 +52,7 @@ import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
+import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import {
@@ -219,6 +224,12 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
+  // Shared with the bar start control and the mobile “+ → Voice model” panel.
+  const voiceSelection = useRealtimeModelSelection({
+    client: context.client,
+    workspaceId,
+    codexConnected,
+  });
 
   useEffect(() => {
     if (createComposerFocusGen === 0 || newSessionDraft.loading) return;
@@ -392,6 +403,34 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                     firstPartyMcpTools: selection.firstPartyToolIds,
                   }));
                 }}
+                {...(draft.compute.kind === "sandbox"
+                  ? {
+                      repositories: {
+                        selectedCount:
+                          context.selectedRepoIds.size +
+                          context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
+                        disabled: busy || newSessionDraft.loading,
+                        panel: (
+                          <WorkspaceRepositoryMenuBody
+                            workspaceId={workspaceId}
+                            disabled={busy || newSessionDraft.loading}
+                          />
+                        ),
+                      },
+                    }
+                  : {})}
+                voiceModel={{
+                  selectedLabel: voiceSelection.selectedModel.label,
+                  disabled: busy || newSessionDraft.loading,
+                  panel: (
+                    <RealtimeVoiceModelPanel
+                      models={voiceSelection.models}
+                      selectedModel={voiceSelection.selectedModel}
+                      disabled={busy || newSessionDraft.loading}
+                      onSelect={voiceSelection.selectModel}
+                    />
+                  ),
+                }}
               />
             }
             actions={
@@ -399,6 +438,10 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                 client={context.client}
                 workspaceId={workspaceId}
                 codexConnected={codexConnected}
+                models={voiceSelection.models}
+                selectedModel={voiceSelection.selectedModel}
+                onSelectModel={voiceSelection.selectModel}
+                modelMenu="split-desktop"
                 disabled={
                   busy ||
                   newSessionDraft.loading ||
@@ -639,67 +682,98 @@ function SessionControlStrip({
         onChange={onToolSelectionChange}
       />
       {showRepos ? (
-        <WorkspaceRepositoryPicker workspaceId={workspaceId} disabled={disabled} />
+        <WorkspaceRepositoryPicker
+          workspaceId={workspaceId}
+          disabled={disabled}
+          triggerClassName="max-sm:hidden"
+        />
       ) : null}
     </div>
   );
 }
 
+function workspaceRepositoryPickerProps(
+  context: ReturnType<typeof useAppContext>,
+  workspaceId: string,
+  disabled: boolean,
+) {
+  return {
+    setupMode:
+      context.githubStatus?.setupMode ??
+      (context.clientConfig.productAccessMode === "managed" ? "platform" : "operator"),
+    configured: context.githubStatus?.configured === true,
+    status: context.githubStatus?.status ?? ("disabled" as const),
+    installUrl: context.githubStatus?.installUrl ?? null,
+    linkUrl: context.githubStatus?.linkUrl ?? null,
+    installations: context.githubStatus?.installations ?? [],
+    repositories: context.githubRepos,
+    groups: context.repositoryGroups,
+    selectedRepoIds: context.selectedRepoIds,
+    selectedRepoRefs: context.selectedRepoRefs,
+    selectedInstallationId: context.selectedInstallationId,
+    manualRepos: context.manualRepos,
+    manualOpen: context.manualReposOpen,
+    githubAppOpen: context.githubAppOpen,
+    org: context.githubOrg,
+    pending: context.busy || disabled,
+    repoBusy: context.repoBusy,
+    githubAppBusy: context.githubAppBusy,
+    onRefresh: () => context.refreshGitHub(workspaceId, undefined, { sync: true }),
+    onToggleRepo: context.toggleGitHubRepository,
+    onRefChange: (repoId: number, ref: string) =>
+      context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref })),
+    onManualOpenChange: context.setManualReposOpen,
+    onManualAdd: context.addManualRepository,
+    onManualUpdate: (id: number, patch: Partial<RepoDraft>) =>
+      context.setManualRepos((current) =>
+        current.map((repo) => (repo.id === id ? { ...repo, ...patch } : repo)),
+      ),
+    onManualRemove: (id: number) =>
+      context.setManualRepos((current) => current.filter((repo) => repo.id !== id)),
+    onGitHubAppOpenChange: context.setGithubAppOpen,
+    onOrgChange: context.setGithubOrg,
+    onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
+    onDisconnectInstallation: (installationId: number) =>
+      context.disconnectGitHubInstallation(workspaceId, installationId),
+  };
+}
+
 // The workspace repository picker, wired to the cross-route selection in context.
 // Reused in both compute kinds: the primary clone source on a managed sandbox,
 // and grayed/disabled on a connected machine (which uses its own checkout).
+// Mobile opens the same body from ComposerMobilePlus — hide the bar pill there.
 function WorkspaceRepositoryPicker({
   workspaceId,
   disabled,
+  triggerClassName,
 }: {
   workspaceId: string;
   disabled: boolean;
+  triggerClassName?: string;
 }) {
   const context = useAppContext();
   return (
     <RepositoryContextPicker
-      setupMode={
-        context.githubStatus?.setupMode ??
-        (context.clientConfig.productAccessMode === "managed" ? "platform" : "operator")
-      }
-      configured={context.githubStatus?.configured === true}
-      status={context.githubStatus?.status ?? "disabled"}
-      installUrl={context.githubStatus?.installUrl ?? null}
-      linkUrl={context.githubStatus?.linkUrl ?? null}
-      installations={context.githubStatus?.installations ?? []}
-      repositories={context.githubRepos}
-      groups={context.repositoryGroups}
-      selectedRepoIds={context.selectedRepoIds}
-      selectedRepoRefs={context.selectedRepoRefs}
-      selectedInstallationId={context.selectedInstallationId}
-      manualRepos={context.manualRepos}
-      manualOpen={context.manualReposOpen}
-      githubAppOpen={context.githubAppOpen}
-      org={context.githubOrg}
-      pending={context.busy || disabled}
-      repoBusy={context.repoBusy}
-      githubAppBusy={context.githubAppBusy}
-      onRefresh={() => context.refreshGitHub(workspaceId, undefined, { sync: true })}
-      onToggleRepo={context.toggleGitHubRepository}
-      onRefChange={(repoId, ref) =>
-        context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }))
-      }
-      onManualOpenChange={context.setManualReposOpen}
-      onManualAdd={context.addManualRepository}
-      onManualUpdate={(id, patch) =>
-        context.setManualRepos((current) =>
-          current.map((repo) => (repo.id === id ? { ...repo, ...patch } : repo)),
-        )
-      }
-      onManualRemove={(id) =>
-        context.setManualRepos((current) => current.filter((repo) => repo.id !== id))
-      }
-      onGitHubAppOpenChange={context.setGithubAppOpen}
-      onOrgChange={context.setGithubOrg}
-      onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
-      onDisconnectInstallation={(installationId) =>
-        context.disconnectGitHubInstallation(workspaceId, installationId)
-      }
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...(triggerClassName ? { triggerClassName } : {})}
+    />
+  );
+}
+
+function WorkspaceRepositoryMenuBody({
+  workspaceId,
+  disabled,
+  leading,
+}: {
+  workspaceId: string;
+  disabled: boolean;
+  leading?: ReactNode;
+}) {
+  const context = useAppContext();
+  return (
+    <RepositoryContextMenuBody
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...(leading ? { leading } : {})}
     />
   );
 }

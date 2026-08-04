@@ -114,6 +114,8 @@ export type {
 // parsers (pure, reusable by custom renderers)
 export {
   applyPatchOps,
+  applyPatchOpsFromToolItem,
+  parseFreeformApplyPatch,
   controlCaret,
   execTruncated,
   isApplyPatch,

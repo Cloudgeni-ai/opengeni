@@ -1602,6 +1602,71 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("solo goal_continuation machine-input batches are suppressed (GoalRow owns the tick)", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.continuation", { text: "Extract the realtime controller" }),
+      event("system.update.delivered", {
+        historyItemId: "history-1",
+        count: 1,
+        members: [
+          {
+            id: "update-1",
+            kind: "goal_continuation",
+            classification: "info",
+            sourceId: "goal-1",
+            summary: "The session goal is not done. Goal: Extract the realtime controller",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "goal",
+      action: "continuation",
+      text: "Extract the realtime controller",
+    });
+  });
+
+  test("mixed batches that include goal_continuation still render as machine-input", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.continuation", { text: "keep going" }),
+      event("system.update.delivered", {
+        historyItemId: "history-2",
+        count: 2,
+        members: [
+          {
+            id: "update-1",
+            kind: "goal_continuation",
+            classification: "info",
+            sourceId: "goal-1",
+            summary: "The session goal is not done.",
+          },
+          {
+            id: "update-2",
+            kind: "child_terminal_result",
+            classification: "success",
+            sourceId: "child-1",
+            summary: "Child finished.",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "goal", action: "continuation" }),
+        expect.objectContaining({
+          kind: "machine-input-batch",
+          members: expect.arrayContaining([
+            expect.objectContaining({ kind: "goal_continuation" }),
+            expect.objectContaining({ kind: "child_terminal_result" }),
+          ]),
+        }),
+      ]),
+    );
+  });
+
   test("goal.cleared is tolerated as a goal landmark", () => {
     reset();
     const items = buildTimeline([event("goal.cleared", { goalId: "goal-1" })]);
