@@ -1187,10 +1187,7 @@ async function findCheckRun(api, context, identity) {
     if (response.check_runs.length < recordsPerPage) break;
     invariant(page < maximumPages, "check-run listing exceeded its page limit");
   }
-  invariant(
-    canonicalMatches.length <= 1,
-    "multiple check runs share the idempotency marker",
-  );
+  invariant(canonicalMatches.length <= 1, "multiple check runs share the idempotency marker");
   if (canonicalMatches.length === 1) return canonicalMatches[0];
   return migrationMatches.length === 1 ? migrationMatches[0] : undefined;
 }

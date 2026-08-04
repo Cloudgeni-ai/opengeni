@@ -1180,13 +1180,11 @@ describe("release head retention recovery", () => {
     });
 
     expect(
-      fixture.checks.filter(
-        (check) => check.external_id === recoveredSourceAdmissionExternalId(),
-      ),
+      fixture.checks.filter((check) => check.external_id === recoveredSourceAdmissionExternalId()),
     ).toHaveLength(1);
-    expect(
-      fixture.checks.filter((check) => check.external_id === legacyExternalId),
-    ).toHaveLength(2);
+    expect(fixture.checks.filter((check) => check.external_id === legacyExternalId)).toHaveLength(
+      2,
+    );
   });
 
   test("moves one prior v2 recovery check to the current seal run without duplicating it", async () => {
