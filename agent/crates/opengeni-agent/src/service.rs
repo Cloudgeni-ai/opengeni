@@ -59,6 +59,7 @@ fn spec_for(install_scope: ServiceScope) -> Result<ServiceSpec, String> {
         binary_path: binary_path()?,
         args: vec!["run".to_string()],
         scope: install_scope,
+        environment_path: std::env::var("PATH").ok().filter(|value| !value.is_empty()),
     })
 }
 

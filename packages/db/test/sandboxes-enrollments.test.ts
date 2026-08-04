@@ -517,6 +517,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       activeEpoch: 1,
       workingDir: "/home/u/proj",
     });
+    expect((await getSession(db, workspaceId, session.id))?.workingDir).toBe("/home/u/proj");
 
     // A plain swap with workingDir OMITTED (undefined) leaves the column UNCHANGED —
     // a live swap/attach never touches the working dir.
@@ -555,6 +556,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       activeEpoch: 3,
       workingDir: null,
     });
+    expect((await getSession(db, workspaceId, session.id))?.workingDir).toBeNull();
   }, 60_000);
 
   test("metrics: last-sample upsert (one row per enrollment) + append-only series", async () => {

@@ -6210,6 +6210,9 @@ export const Session = z.object({
   // stale in-flight op and retry against the new active sandbox.
   activeSandboxId: z.string().uuid().nullable(),
   activeEpoch: z.number().int().nonnegative(),
+  // The explicit connected-machine project root selected for this session.
+  // Null means the enrolled agent's launch workspace root.
+  workingDir: z.string().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
