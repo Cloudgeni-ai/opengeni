@@ -14,9 +14,10 @@ export type ComposerLaunchSearch = {
   realtime?: SessionRealtimeModel;
 };
 
-export function parseComposerLaunchSearch(
-  search: Record<string, unknown>,
-): ComposerLaunchSearch {
+/** Stable empty search — safe default prop (no per-render object literal). */
+export const EMPTY_COMPOSER_LAUNCH: ComposerLaunchSearch = {};
+
+export function parseComposerLaunchSearch(search: Record<string, unknown>): ComposerLaunchSearch {
   const out: ComposerLaunchSearch = {};
   if (typeof search.model === "string") {
     const model = search.model.trim();

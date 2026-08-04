@@ -53,6 +53,7 @@ import {
   summarizeSessionFailure,
 } from "@/lib/events";
 import {
+  EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchAfterPolicyApply,
   composerLaunchSearchKey,
   type ComposerLaunchSearch,
@@ -85,7 +86,7 @@ const LazyCodexRealtimeControl = lazy(() =>
 export function SessionRoute({
   workspaceId,
   sessionId,
-  launch = {},
+  launch = EMPTY_COMPOSER_LAUNCH,
   realtimeAutostartModel,
 }: {
   workspaceId: string;
@@ -676,32 +677,41 @@ function SessionChatPane(props: {
     pickerTouchedRef.current = false;
   }, [props.session.id]);
   const navigate = useNavigate();
-  const launch = props.launch ?? {};
+  const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
+  const launchModel = launch.model;
+  const launchEffort = launch.effort;
+  const launchLatency = launch.latency;
+  const launchRealtime = launch.realtime;
   const launchKey = composerLaunchSearchKey(launch);
   const appliedLaunchKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!launchKey || appliedLaunchKeyRef.current === launchKey) return;
-    const hasPolicy = Boolean(launch.model || launch.effort || launch.latency);
+    const hasPolicy = Boolean(launchModel || launchEffort || launchLatency);
     if (!hasPolicy) {
       appliedLaunchKeyRef.current = launchKey;
       return;
     }
     appliedLaunchKeyRef.current = launchKey;
     pickerTouchedRef.current = true;
-    if (launch.model) setModelForSession(props.session.id, launch.model);
-    if (launch.effort) setEffortForSession(props.session.id, launch.effort);
-    if (launch.latency) setLatencyMode(launch.latency);
+    if (launchModel) setModelForSession(props.session.id, launchModel);
+    if (launchEffort) setEffortForSession(props.session.id, launchEffort);
+    if (launchLatency) setLatencyMode(launchLatency);
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
-      search: composerLaunchSearchAfterPolicyApply(launch),
+      search: composerLaunchSearchAfterPolicyApply({
+        model: launchModel,
+        effort: launchEffort,
+        latency: launchLatency,
+        realtime: launchRealtime,
+      }),
       replace: true,
     });
   }, [
-    launch,
-    launch.effort,
-    launch.latency,
-    launch.model,
+    launchEffort,
+    launchLatency,
+    launchModel,
+    launchRealtime,
     launchKey,
     navigate,
     props.session.id,

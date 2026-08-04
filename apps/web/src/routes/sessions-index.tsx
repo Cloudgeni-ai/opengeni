@@ -52,6 +52,7 @@ import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import {
+  EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
@@ -97,7 +98,7 @@ import type { Session } from "@/types";
 
 export function SessionsIndexRoute({
   workspaceId,
-  launch = {},
+  launch = EMPTY_COMPOSER_LAUNCH,
 }: {
   workspaceId: string;
   launch?: ComposerLaunchSearch;
@@ -261,7 +262,8 @@ function SessionsIndexRouteContent({
       policy?: Pick<ComposerLaunchSearch, "model" | "effort" | "latency">,
     ): Promise<boolean> => {
       const typedText = message.trim();
-      const text = typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+      const text =
+        typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
       if (busy || newSessionDraft.loading || newSessionDraft.conflict) return false;
       if (
         createdSessionAuthority === null &&
@@ -385,15 +387,19 @@ function SessionsIndexRouteContent({
   // creates a realtime-first session and autostarts voice on the session page.
   // Wait for the durable new-session draft so remote hydrate cannot stomp the
   // URL policy after we apply it.
+  const launchModel = launch.model;
+  const launchEffort = launch.effort;
+  const launchLatency = launch.latency;
+  const launchRealtime = launch.realtime;
   const launchKey = composerLaunchSearchKey(launch);
   const handledLaunchKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!launchKey || handledLaunchKeyRef.current === launchKey) return;
     if (newSessionDraft.loading || newSessionDraft.conflict !== null) return;
-    if (launch.model) setModel(launch.model);
-    if (launch.effort) setReasoningEffort(launch.effort);
-    if (launch.latency) setLatencyMode(launch.latency);
-    if (!launch.realtime) {
+    if (launchModel) setModel(launchModel);
+    if (launchEffort) setReasoningEffort(launchEffort);
+    if (launchLatency) setLatencyMode(launchLatency);
+    if (!launchRealtime) {
       handledLaunchKeyRef.current = launchKey;
       void navigate({
         to: "/workspaces/$workspaceId/sessions",
@@ -403,19 +409,14 @@ function SessionsIndexRouteContent({
       });
       return;
     }
-    if (
-      busy ||
-      !computeReady ||
-      !context.workspaceMcpCatalogReady ||
-      attachments.hasUnresolved
-    ) {
+    if (busy || !computeReady || !context.workspaceMcpCatalogReady || attachments.hasUnresolved) {
       return;
     }
     handledLaunchKeyRef.current = launchKey;
-    void submitNewSession(launch.realtime, {
-      model: launch.model,
-      effort: launch.effort,
-      latency: launch.latency,
+    void submitNewSession(launchRealtime, {
+      model: launchModel,
+      effort: launchEffort,
+      latency: launchLatency,
     }).then((ok) => {
       if (!ok) handledLaunchKeyRef.current = null;
     });
@@ -424,11 +425,10 @@ function SessionsIndexRouteContent({
     busy,
     computeReady,
     context.workspaceMcpCatalogReady,
-    launch,
-    launch.effort,
-    launch.latency,
-    launch.model,
-    launch.realtime,
+    launchEffort,
+    launchLatency,
+    launchModel,
+    launchRealtime,
     launchKey,
     navigate,
     newSessionDraft.conflict,
