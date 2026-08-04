@@ -4,10 +4,7 @@ import {
   WorkspaceStateResponse as ContractWorkspaceStateResponse,
 } from "@opengeni/contracts";
 import { OpenGeniClient } from "../src/client";
-import type {
-  WorkspaceStateExportResponse,
-  WorkspaceStateResponse,
-} from "../src/workspace-state";
+import type { WorkspaceStateExportResponse, WorkspaceStateResponse } from "../src/workspace-state";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 

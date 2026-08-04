@@ -772,14 +772,8 @@ function KnowledgeInventory({
       </div>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        <Metric
-          label="Company documents"
-          value={knowledge.authorityKindCounts.organization}
-        />
-        <Metric
-          label="Workspace documents"
-          value={knowledge.authorityKindCounts.workspace}
-        />
+        <Metric label="Company documents" value={knowledge.authorityKindCounts.organization} />
+        <Metric label="Workspace documents" value={knowledge.authorityKindCounts.workspace} />
         <Metric label="Personal documents" value={knowledge.authorityKindCounts.personal} />
       </div>
 
