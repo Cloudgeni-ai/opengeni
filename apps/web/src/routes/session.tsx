@@ -52,6 +52,11 @@ import {
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
+import {
+  composerLaunchSearchAfterPolicyApply,
+  composerLaunchSearchKey,
+  type ComposerLaunchSearch,
+} from "@/lib/composer-launch";
 import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
@@ -80,10 +85,12 @@ const LazyCodexRealtimeControl = lazy(() =>
 export function SessionRoute({
   workspaceId,
   sessionId,
+  launch = {},
   realtimeAutostartModel,
 }: {
   workspaceId: string;
   sessionId: string;
+  launch?: ComposerLaunchSearch;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
 }) {
   const context = useAppContext();
@@ -363,6 +370,7 @@ export function SessionRoute({
       events={events}
       timeline={timeline}
       initialLoading={initialLoading}
+      launch={launch}
       realtimeAutostartModel={realtimeAutostartModel}
       onRealtimeAutostartConsumed={consumeRealtimeAutostart}
       approvals={approvals}
@@ -509,6 +517,7 @@ function SessionChatPane(props: {
   events: SessionEvent[];
   timeline: TimelineItem[];
   initialLoading: boolean;
+  launch?: ComposerLaunchSearch;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed: () => void;
   approvals: PendingApproval[];
@@ -666,9 +675,45 @@ function SessionChatPane(props: {
   useEffect(() => {
     pickerTouchedRef.current = false;
   }, [props.session.id]);
+  const navigate = useNavigate();
+  const launch = props.launch ?? {};
+  const launchKey = composerLaunchSearchKey(launch);
+  const appliedLaunchKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!launchKey || appliedLaunchKeyRef.current === launchKey) return;
+    const hasPolicy = Boolean(launch.model || launch.effort || launch.latency);
+    if (!hasPolicy) {
+      appliedLaunchKeyRef.current = launchKey;
+      return;
+    }
+    appliedLaunchKeyRef.current = launchKey;
+    pickerTouchedRef.current = true;
+    if (launch.model) setModelForSession(props.session.id, launch.model);
+    if (launch.effort) setEffortForSession(props.session.id, launch.effort);
+    if (launch.latency) setLatencyMode(launch.latency);
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
+      search: composerLaunchSearchAfterPolicyApply(launch),
+      replace: true,
+    });
+  }, [
+    launch,
+    launch.effort,
+    launch.latency,
+    launch.model,
+    launchKey,
+    navigate,
+    props.session.id,
+    props.session.workspaceId,
+    setEffortForSession,
+    setLatencyMode,
+    setModelForSession,
+  ]);
   // Seed once from durable session facts so open sessions never inherit the
   // mutable new-session composer picks. Draft apply / picker writes still win.
   useEffect(() => {
+    if (pickerTouchedRef.current) return;
     ensureModelForSession(props.session.id, props.session.model);
     const metaEffort = props.session.metadata.reasoningEffort;
     if (isIntelligenceEffort(metaEffort)) {
@@ -676,11 +721,9 @@ function SessionChatPane(props: {
     }
     // Seed latency from durable session metadata until the composer draft
     // applies (draft wins). Avoids flashing the global leftover/standard mode.
-    if (!pickerTouchedRef.current) {
-      const metaLatency = props.session.metadata.latencyMode;
-      if (metaLatency === "fast" || metaLatency === "priority" || metaLatency === "standard") {
-        setLatencyMode(metaLatency);
-      }
+    const metaLatency = props.session.metadata.latencyMode;
+    if (metaLatency === "fast" || metaLatency === "priority" || metaLatency === "standard") {
+      setLatencyMode(metaLatency);
     }
   }, [
     setLatencyMode,

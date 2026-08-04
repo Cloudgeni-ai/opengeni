@@ -29,11 +29,12 @@ import {
   createRouter,
   lazyRouteComponent,
 } from "@tanstack/react-router";
-import { SessionRealtimeModel as SessionRealtimeModelSchema } from "@opengeni/contracts";
-import type { SessionRealtimeModel } from "@opengeni/sdk";
-
 import { ProblemPanel } from "@/components/common";
 import { RootRouteComponent, useAppContext } from "@/context";
+import {
+  parseComposerLaunchSearch,
+  type ComposerLaunchSearch,
+} from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
@@ -168,15 +169,15 @@ const workspaceAgentRoute = createRoute({
 const workspaceSessionsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions",
+  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
+    parseComposerLaunchSearch(search),
   component: SessionsIndex,
 });
 const workspaceSessionRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions/$sessionId",
-  validateSearch: (search: Record<string, unknown>): { realtime?: SessionRealtimeModel } => {
-    const realtime = SessionRealtimeModelSchema.safeParse(search.realtime);
-    return realtime.success ? { realtime: realtime.data } : {};
-  },
+  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
+    parseComposerLaunchSearch(search),
   component: SessionView,
 });
 const workspaceVariableSetsRoute = createRoute({
@@ -371,17 +372,19 @@ function WorkspaceShell() {
 
 function SessionsIndex() {
   const { workspaceId } = workspaceSessionsRoute.useParams();
-  return <LazySessionsIndexRoute workspaceId={workspaceId} />;
+  const launch = workspaceSessionsRoute.useSearch();
+  return <LazySessionsIndexRoute workspaceId={workspaceId} launch={launch} />;
 }
 
 function SessionView() {
   const { workspaceId, sessionId } = workspaceSessionRoute.useParams();
-  const { realtime } = workspaceSessionRoute.useSearch();
+  const launch = workspaceSessionRoute.useSearch();
   return (
     <LazySessionRoute
       workspaceId={workspaceId}
       sessionId={sessionId}
-      realtimeAutostartModel={realtime}
+      launch={launch}
+      realtimeAutostartModel={launch.realtime}
     />
   );
 }

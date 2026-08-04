@@ -241,25 +241,86 @@ export type UseChatComposerControllerOptions = {
 };
 
 /**
- * Autosize a composer textarea up to `maxPx` without the classic height→0
- * measure collapse (that flash expands the timeline flex sibling and yanks
- * tip-follow while a stream is pinned).
+ * Off-document mirror for shrink/steady measure. Measuring with
+ * `height: auto` on the live `rows={1}` textarea collapses it for a layout
+ * frame, expands the flex timeline sibling, and yanks tip-follow — the
+ * multi-line typing flicker that stops only once the box is capped.
+ */
+let composerHeightMirror: HTMLTextAreaElement | null = null;
+
+function measureComposerContentHeight(textarea: HTMLTextAreaElement): number {
+  if (typeof document === "undefined") {
+    return textarea.scrollHeight;
+  }
+  const width = textarea.clientWidth;
+  if (width <= 0) {
+    return textarea.offsetHeight;
+  }
+
+  let mirror = composerHeightMirror;
+  if (!mirror) {
+    mirror = document.createElement("textarea");
+    mirror.setAttribute("aria-hidden", "true");
+    mirror.tabIndex = -1;
+    mirror.rows = 1;
+    mirror.style.cssText =
+      "position:absolute;top:0;left:0;visibility:hidden;pointer-events:none;height:auto;min-height:0;max-height:none;overflow:hidden;z-index:-1;";
+    composerHeightMirror = mirror;
+  }
+
+  const style = getComputedStyle(textarea);
+  mirror.style.width = `${width}px`;
+  mirror.style.boxSizing = style.boxSizing;
+  mirror.style.font = style.font;
+  mirror.style.fontSize = style.fontSize;
+  mirror.style.fontFamily = style.fontFamily;
+  mirror.style.fontWeight = style.fontWeight;
+  mirror.style.fontStyle = style.fontStyle;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.textTransform = style.textTransform;
+  mirror.style.paddingTop = style.paddingTop;
+  mirror.style.paddingRight = style.paddingRight;
+  mirror.style.paddingBottom = style.paddingBottom;
+  mirror.style.paddingLeft = style.paddingLeft;
+  mirror.style.borderTopWidth = style.borderTopWidth;
+  mirror.style.borderRightWidth = style.borderRightWidth;
+  mirror.style.borderBottomWidth = style.borderBottomWidth;
+  mirror.style.borderLeftWidth = style.borderLeftWidth;
+  mirror.style.borderStyle = style.borderStyle;
+  mirror.style.whiteSpace = style.whiteSpace;
+  mirror.style.wordBreak = style.wordBreak;
+  mirror.style.overflowWrap = style.overflowWrap;
+  mirror.value = textarea.value;
+
+  if (!mirror.isConnected) {
+    document.documentElement.appendChild(mirror);
+  }
+  return mirror.scrollHeight;
+}
+
+/**
+ * Autosize a composer textarea up to `maxPx`. Never writes intermediate
+ * `height: auto` / `0` on the live element — only the final pixel height.
+ *
+ * `measure` is injectable for unit tests; production always uses the off-DOM
+ * mirror so shrink/steady never collapses the laid-out box.
  */
 export function applyComposerTextareaHeight(
   textarea: HTMLTextAreaElement,
   maxPx: number = 220,
+  measure: (el: HTMLTextAreaElement) => number = measureComposerContentHeight,
 ): void {
-  // Grow path: content already overflows — raise height, no measure collapse.
-  if (textarea.scrollHeight > textarea.clientHeight + 1) {
-    textarea.style.height = `${Math.min(textarea.scrollHeight, maxPx)}px`;
-    return;
-  }
-  // Shrink / steady: `auto` measures natural height without flashing empty.
   const before = textarea.offsetHeight;
-  textarea.style.height = "auto";
-  const nextPx = Math.min(textarea.scrollHeight, maxPx);
+  // Overflow: content taller than the box — scrollHeight is the needed size.
+  // Fit/shrink: content fits (or box is oversized) — measure off-DOM.
+  const nextPx = Math.min(
+    textarea.scrollHeight > textarea.clientHeight + 1
+      ? textarea.scrollHeight
+      : measure(textarea),
+    maxPx,
+  );
   if (Math.abs(nextPx - before) < 1) {
-    textarea.style.height = `${before}px`;
     return;
   }
   textarea.style.height = `${nextPx}px`;
