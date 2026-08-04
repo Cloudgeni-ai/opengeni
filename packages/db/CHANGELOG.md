@@ -1,5 +1,14 @@
 # @opengeni/db
 
+## 0.27.10
+
+### Patch Changes
+
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+- Updated dependencies [c0f8e40]
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+
 ## 0.27.9
 
 ### Patch Changes
