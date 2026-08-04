@@ -35,6 +35,8 @@ import {
   buildCodexTokenResolver,
   claimCodexResetRedemption,
   completeCodexResetRedemption,
+  clearCodexAppsCredential,
+  designateCodexAppsCredential,
   disconnectAllCodexAccounts,
   disconnectCodexAccount,
   encryptEnvironmentValue,
@@ -44,6 +46,7 @@ import {
   fenceCodexResetRedemptionSend,
   getCodexResetRedemptionAttempt,
   getCodexCredentialStatus,
+  getCodexAppsSettings,
   getCodexRotationSettings,
   listPendingCodexCapacityWakeTargets,
   listCodexAccountStatuses,
@@ -68,7 +71,14 @@ const CODEX_PROVIDER_LABEL = "Codex subscription · no credits";
 // The wire shape for one Codex account (metadata only; never the secret column).
 // P2: fiveHour/weekly ride along, built from the CACHED usage columns (zero
 // provider calls, zero decrypts) so the bars render instantly off this read.
-function codexAccountJson(row: CodexAccountStatus) {
+function codexAccountJson(
+  row: CodexAccountStatus,
+  options: {
+    appsCredentialId?: string | null;
+    canManageApps?: boolean;
+    humanSubjectId?: string | null;
+  } = {},
+) {
   return {
     id: row.id,
     chatgptAccountId: row.chatgptAccountId,
@@ -98,6 +108,14 @@ function codexAccountJson(row: CodexAccountStatus) {
     resetCreditsCheckedAt: row.resetCreditsCheckedAt,
     // P3 rotation cooldown: when set and in the future, this account is cooling-down.
     exhaustedUntil: row.exhaustedUntil,
+    appsDesignated: options.appsCredentialId === row.id,
+    canEnableApps:
+      options.appsCredentialId === null &&
+      options.canManageApps === true &&
+      options.humanSubjectId !== null &&
+      options.humanSubjectId !== undefined &&
+      row.connectedBySubjectId === options.humanSubjectId &&
+      row.status === "active",
   };
 }
 
@@ -238,6 +256,28 @@ async function requireRedemptionHuman(
     throw new HTTPException(403, {
       message: "managed browser identity mismatch",
     });
+  }
+  return { human, accountId: grant.accountId };
+}
+
+async function requireCodexAppsHuman(
+  c: Context,
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<{ human: ManagedCookieHuman; accountId: string }> {
+  if (c.req.header("authorization")) {
+    throw new HTTPException(403, {
+      message: "authorization bearer is not allowed for Codex Apps designation",
+    });
+  }
+  requireSameOriginBrowserMutation(c, deps);
+  const human = await managedCookieHuman(c, deps);
+  if (!human) {
+    throw new HTTPException(401, { message: "managed browser session required" });
+  }
+  const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+  if (grant.subjectId !== human.subjectId) {
+    throw new HTTPException(403, { message: "managed browser identity mismatch" });
   }
   return { human, accountId: grant.accountId };
 }
@@ -721,15 +761,33 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // workspace active pointer + rotation settings. Read access.
   app.get("/v1/workspaces/:workspaceId/codex/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [accounts, rotation] = await Promise.all([
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [accounts, rotation, apps, human] = await Promise.all([
       listCodexAccountStatuses(db, workspaceId),
       getCodexRotationSettings(db, workspaceId),
+      getCodexAppsSettings(db, workspaceId),
+      managedCookieHuman(c, deps),
     ]);
     const activeAccountId = rotation?.activeCredentialId ?? null;
+    const humanSubjectId = human?.subjectId === grant.subjectId ? human.subjectId : null;
+    const canManageApps =
+      humanSubjectId !== null && hasPermission(grant.permissions, "connections:write");
     return c.json({
-      accounts: accounts.map(codexAccountJson),
+      accounts: accounts.map((account) =>
+        codexAccountJson(account, {
+          appsCredentialId: apps.credentialId,
+          canManageApps: settings.codexConnectedAppsEnabled && canManageApps,
+          humanSubjectId,
+        }),
+      ),
       activeAccountId,
+      apps: {
+        available: settings.codexConnectedAppsEnabled,
+        credentialId: apps.credentialId,
+        version: apps.version,
+        designatedAt: apps.designatedAt,
+        canDisable: canManageApps && apps.credentialId !== null,
+      },
       settings: {
         rotationEnabled: rotation?.rotationEnabled ?? false,
         // sharded-rotation policy: rotation-enabled always behaves as sticky-sharded; report the
@@ -738,6 +796,78 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         activeCredentialId: activeAccountId,
       },
     });
+  });
+
+  app.post("/v1/workspaces/:workspaceId/codex/apps", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    if (!settings.codexConnectedAppsEnabled) {
+      throw new HTTPException(409, { message: "Codex Apps is disabled for this deployment" });
+    }
+    const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
+    const parsed = z
+      .object({
+        accountId: z.string().uuid(),
+        expectedVersion: z.number().int().nonnegative(),
+      })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "accountId and expectedVersion are required" });
+    }
+    const result = await designateCodexAppsCredential(db, {
+      accountId,
+      workspaceId,
+      credentialId: parsed.data.accountId,
+      subjectId: human.subjectId,
+      expectedVersion: parsed.data.expectedVersion,
+    });
+    if (result.kind === "not_found") {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    if (result.kind === "not_owner") {
+      throw new HTTPException(403, {
+        message: "only the managed human who connected this subscription may designate it",
+      });
+    }
+    if (result.kind === "forbidden") {
+      throw new HTTPException(403, { message: "missing permission: connections:write" });
+    }
+    if (result.kind === "unavailable") {
+      throw new HTTPException(409, { message: "codex account requires relogin" });
+    }
+    const response = {
+      credentialId: result.credentialId,
+      version: result.version,
+      designatedAt: result.designatedAt,
+      changed: result.kind === "updated",
+    };
+    return result.kind === "updated" ? c.json(response) : c.json(response, 409);
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/codex/apps", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
+    const parsed = z
+      .object({ expectedVersion: z.number().int().nonnegative() })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "expectedVersion is required" });
+    }
+    const result = await clearCodexAppsCredential(db, {
+      accountId,
+      workspaceId,
+      subjectId: human.subjectId,
+      expectedVersion: parsed.data.expectedVersion,
+    });
+    if (result.kind === "forbidden") {
+      throw new HTTPException(403, { message: "missing permission: connections:write" });
+    }
+    const response = {
+      credentialId: result.credentialId,
+      version: result.version,
+      designatedAt: result.designatedAt,
+      changed: result.kind === "updated",
+    };
+    return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
   });
 
   // Manually switch the workspace ACTIVE account (the one unpinned sessions use).
@@ -872,13 +1002,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // row was active (FK ON DELETE SET NULL + re-pick in the same RLS txn).
   app.delete("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const accountId = c.req.param("accountId");
     const mutation = await withCodexCapacityMutation(
       db,
       { workspaceId, reason: "codex_credential_disconnected" },
       async (tx) => {
-        const result = await disconnectCodexAccount(tx, workspaceId, accountId);
+        const result = await disconnectCodexAccount(tx, workspaceId, accountId, grant.subjectId);
         return { result, changed: result.removed };
       },
     );
@@ -897,12 +1027,12 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // the by-id route above.
   app.delete("/v1/workspaces/:workspaceId/codex", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const mutation = await withCodexCapacityMutation(
       db,
       { workspaceId, reason: "codex_credentials_disconnected" },
       async (tx) => {
-        const result = await disconnectAllCodexAccounts(tx, workspaceId);
+        const result = await disconnectAllCodexAccounts(tx, workspaceId, grant.subjectId);
         return { result, changed: result.removed > 0 };
       },
     );

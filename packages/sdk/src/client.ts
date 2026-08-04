@@ -20,6 +20,7 @@ import type {
   BillingEntitlementsResponse,
   CodexAccount,
   CodexAccountsResponse,
+  CodexAppsUpdate,
   CodexRotationSettings,
   CodexOverviewResponse,
   CodexAllocatorUpdate,
@@ -3418,11 +3419,37 @@ export class OpenGeniClient {
     );
   }
 
-  /** P3: enable/disable Codex auto-rotation and/or pick the strategy. Returns the effective settings. */
+  /** Designate one owner-connected subscription for Apps only. */
+  async designateCodexAppsAccount(
+    workspaceId: string,
+    accountId: string,
+    expectedVersion: number,
+  ): Promise<CodexAppsUpdate> {
+    return await this.requestJson<CodexAppsUpdate>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/codex/apps`,
+      { accountId, expectedVersion },
+    );
+  }
+
+  /** Clear the Apps credential without changing any inference selection. */
+  async clearCodexAppsAccount(
+    workspaceId: string,
+    expectedVersion: number,
+  ): Promise<CodexAppsUpdate> {
+    return await this.requestJson<CodexAppsUpdate>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/codex/apps`,
+      { expectedVersion },
+    );
+  }
+
+  /** Enable or disable Codex auto-rotation. Returns the effective settings. */
   async setCodexRotationSettings(
     workspaceId: string,
     patch: {
       rotationEnabled?: boolean;
+      /** @deprecated Rotation now has one effective sharded strategy. */
       rotationStrategy?: CodexRotationSettings["rotationStrategy"];
     },
   ): Promise<CodexRotationSettings> {

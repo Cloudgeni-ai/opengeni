@@ -283,8 +283,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 
   return (
     <ContentPage width="standard">
-      <section className="grid gap-6 text-left">
-        <header className="grid gap-3 border-b border-border pb-4">
+      <section className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-6 text-left">
+        <header className="grid min-w-0 gap-3 border-b border-border pb-4">
           <div className="flex min-w-0 items-center gap-2 text-sm text-fg-muted">
             <SettingsIcon className="size-4 shrink-0 text-brand" />
             <span>Workspace</span>
@@ -356,7 +356,10 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 
         <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
 
-        <section aria-labelledby="workspace-preferences-heading" className="grid gap-1">
+        <section
+          aria-labelledby="workspace-preferences-heading"
+          className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1"
+        >
           <h2 id="workspace-preferences-heading" className="text-sm font-medium">
             Preferences
           </h2>
