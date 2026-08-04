@@ -714,6 +714,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sandbox_swap",
   "run_on",
   "sandbox_provision",
+  "connected_machine_remove",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -9274,8 +9275,25 @@ export type ListEnrollmentsResponse = z.infer<typeof ListEnrollmentsResponse>;
 
 export const RevokeEnrollmentResponse = z.object({
   revoked: z.boolean(),
+  outcome: z.enum(["removed", "already_removed", "blocked"]),
+  enrollmentId: z.string().uuid(),
+  machineName: z.string().nullable(),
+  lastSeenAt: z.string().datetime({ offset: true }).nullable(),
+  revokedAt: z.string().datetime({ offset: true }).nullable(),
+  code: z
+    .enum(["active_route", "active_commands", "active_lease", "recovery_pending", "not_selfhosted"])
+    .nullable(),
+  message: z.string(),
+  action: z.string(),
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
+
+/** POST /v1/workspaces/:workspaceId/enrollments/:id/revoke body. */
+export const RemoveEnrollmentRequest = z.object({
+  expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
+  idempotencyKey: z.string().trim().min(1).max(200).optional(),
+});
+export type RemoveEnrollmentRequest = z.infer<typeof RemoveEnrollmentRequest>;
 
 // =============================================================================
 // Enrollment UX (self-hosted enrollment UX, design 11): the click-Grant approve

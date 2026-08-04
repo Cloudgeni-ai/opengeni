@@ -677,6 +677,8 @@ export type {
   MachineView,
   MachinesResponse,
   MachineMetricsSeriesResponse,
+  RemoveEnrollmentRequest,
+  RemoveEnrollmentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,

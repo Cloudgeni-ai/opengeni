@@ -113,6 +113,36 @@ describe("OpenGeniClient", () => {
     await expect(request).rejects.toHaveProperty("name", "AbortError");
   });
 
+  test("removeEnrollment posts the workspace-scoped idempotent removal contract", async () => {
+    const enrollmentId = "11111111-1111-4111-8111-111111111111";
+    const response = {
+      revoked: true,
+      outcome: "removed",
+      enrollmentId,
+      machineName: "Jrgens-MacBook-Pro-2.local",
+      lastSeenAt: "2026-08-04T09:13:46.102Z",
+      revokedAt: "2026-08-04T10:00:00.000Z",
+      code: null,
+      message: "Machine access was revoked. History was retained for audit.",
+      action: "A fresh human-approved device-flow enrollment is required to reconnect.",
+    } as const;
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    const result = await client.removeEnrollment(WORKSPACE_ID, enrollmentId, {
+      expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
+      idempotencyKey: "remove-sdk-contract-1",
+    });
+
+    expect(result).toEqual(response);
+    expect(requests[0]).toMatchObject({
+      method: "POST",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/enrollments/${enrollmentId}/revoke`,
+    });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
+      idempotencyKey: "remove-sdk-contract-1",
+    });
+  });
+
   test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
     const session = {
       id: SESSION_ID,

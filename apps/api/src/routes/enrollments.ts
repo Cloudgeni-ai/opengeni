@@ -20,6 +20,7 @@
 // workspace can approve it (the approve's user_code lookup is workspace-scoped) — a
 // start can never grant access to a workspace no authorized user later approves in.
 
+import { randomUUID } from "node:crypto";
 import {
   DeviceEnrollmentApproveRequest,
   DeviceEnrollmentApproveResponse,
@@ -35,11 +36,18 @@ import {
   ListEnrollmentsResponse,
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
+  RemoveEnrollmentRequest,
   RevokeEnrollmentResponse,
   type EnrollmentArch,
   type EnrollmentOs,
 } from "@opengeni/contracts";
-import { getWorkspace, listEnrollments, revokeEnrollment } from "@opengeni/db";
+import {
+  getWorkspace,
+  listEnrollments,
+  MachineRemovalIdempotencyError,
+  MachineRemovalRevisionConflictError,
+  removeEnrollment,
+} from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
@@ -301,11 +309,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
     assertSelfhostedEnabled();
     const statusFilter = c.req.query("status");
-    const rows = await listEnrollments(
-      db,
-      workspaceId,
-      statusFilter === "active" ? { status: "active" } : {},
-    );
+    if (statusFilter !== undefined && statusFilter !== "active" && statusFilter !== "revoked") {
+      throw new HTTPException(400, { message: "status must be active or revoked" });
+    }
+    const rows = await listEnrollments(db, workspaceId, {
+      status: statusFilter === "revoked" ? "revoked" : "active",
+    });
     return c.json(
       ListEnrollmentsResponse.parse({
         enrollments: rows.map((row) =>
@@ -333,12 +342,45 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
     assertSelfhostedEnabled();
-    const result = await revokeEnrollment(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      enrollmentId: c.req.param("enrollmentId"),
-    });
-    return c.json(RevokeEnrollmentResponse.parse(result));
+    const parsed = RemoveEnrollmentRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid machine removal request" });
+    }
+    const idempotencyKey =
+      parsed.data.idempotencyKey?.trim() || c.req.header("idempotency-key")?.trim() || randomUUID();
+    try {
+      const result = await removeEnrollment(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        enrollmentId: c.req.param("enrollmentId"),
+        operationKey: idempotencyKey,
+        ...(parsed.data.expectedUpdatedAt
+          ? { expectedUpdatedAt: parsed.data.expectedUpdatedAt }
+          : {}),
+        subjectId: grant.subjectId,
+      });
+      if (!result) {
+        throw new HTTPException(404, { message: "machine enrollment not found" });
+      }
+      return c.json(
+        RevokeEnrollmentResponse.parse({
+          revoked: result.removed,
+          ...result,
+        }),
+        200,
+      );
+    } catch (error) {
+      if (error instanceof MachineRemovalIdempotencyError) {
+        throw new HTTPException(409, { message: error.message });
+      }
+      if (error instanceof MachineRemovalRevisionConflictError) {
+        throw new HTTPException(409, {
+          message: error.message,
+          cause: { code: "stale_revision", currentUpdatedAt: error.currentUpdatedAt },
+        });
+      }
+      throw error;
+    }
   });
 }
 

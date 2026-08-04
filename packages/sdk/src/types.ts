@@ -2075,6 +2075,8 @@ export type FirstPartyMcpToolName =
   | "sandbox_swap"
   | "run_on"
   | "sandbox_provision"
+  | "connected_machine_remove"
+  | "connected_machine_remove"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -4384,6 +4386,32 @@ export type MachinesResponse = {
  *  (~1/min) history the dashboard time-range reads. */
 export type MachineMetricsSeriesResponse = {
   samples: MetricSample[];
+};
+
+/** POST /v1/workspaces/:ws/enrollments/:id/revoke body. */
+export type RemoveEnrollmentRequest = {
+  expectedUpdatedAt?: string;
+  idempotencyKey?: string;
+};
+
+/** Typed removal/revocation outcome. Blocked outcomes preserve the exact
+ * dependency and the action needed to make removal safe. */
+export type RemoveEnrollmentResponse = {
+  revoked: boolean;
+  outcome: "removed" | "already_removed" | "blocked";
+  enrollmentId: string;
+  machineName: string | null;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+  code:
+    | "active_route"
+    | "active_commands"
+    | "active_lease"
+    | "recovery_pending"
+    | "not_selfhosted"
+    | null;
+  message: string;
+  action: string;
 };
 
 /** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's

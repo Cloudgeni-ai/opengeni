@@ -4791,6 +4791,68 @@ export const enrollments = pgTable(
   }),
 );
 
+// One durable receipt per workspace-authorized connected-machine removal
+// request. The enrollment row remains the lifecycle truth; this table preserves
+// the exact idempotency key, request fingerprint, and terminal result so a lost
+// response can be replayed without re-running dependency checks or mutating a
+// different enrollment that happens to share the same display name.
+export const machineRemovalOperationOutcomeValues = [
+  "removed",
+  "already_removed",
+  "blocked",
+] as const;
+
+export const machineRemovalOperations = pgTable(
+  "machine_removal_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    enrollmentId: uuid("enrollment_id")
+      .notNull()
+      .references(() => enrollments.id, { onDelete: "restrict" }),
+    operationKey: text("operation_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    outcome: text("outcome", { enum: machineRemovalOperationOutcomeValues }).notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "machine_removal_operations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceOperation: uniqueIndex("machine_removal_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationKey,
+    ),
+    workspaceIdentity: uniqueIndex("machine_removal_operations_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    enrollmentTimeline: index("machine_removal_operations_enrollment_created_idx").on(
+      table.workspaceId,
+      table.enrollmentId,
+      table.createdAt,
+    ),
+    requestFingerprintValid: check(
+      "machine_removal_operations_request_fingerprint_chk",
+      sql`${table.requestFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    operationKeyValid: check(
+      "machine_removal_operations_operation_key_chk",
+      sql`length(btrim(${table.operationKey})) between 1 and 200
+        and ${table.operationKey} = btrim(${table.operationKey})`,
+    ),
+  }),
+);
+
 // The OAuth 2.0 device-authorization (RFC 8628) PENDING request (M5, migration
 // 0025 / enrollment + §18 LOUD consent). An agent's `enroll` starts
 // a flow (POST /enrollments/device/start) → one short-TTL, single-use row keyed by

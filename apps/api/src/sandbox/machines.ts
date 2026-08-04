@@ -219,7 +219,7 @@ export async function listMachines(
   // onto the machines (no N+1). Each machine is probed for liveness.
   const [sandboxes, enrollments, metricsByEnrollment] = await Promise.all([
     listSandboxes(db, workspaceId),
-    listEnrollments(db, workspaceId),
+    listEnrollments(db, workspaceId, { status: "active" }),
     readMachineMetricsLatestForWorkspace(db, workspaceId),
   ]);
   const enrollmentById = new Map(enrollments.map((e) => [e.id, e]));
