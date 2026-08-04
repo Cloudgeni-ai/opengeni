@@ -28,10 +28,10 @@ import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type {
+  DocumentAuthorityKind,
   DocumentBase,
   DocumentSearchMode,
   DocumentSearchResult,
-  DocumentVisibility,
   IndexedDocument,
   KnowledgeSourceKind,
 } from "@/types";
@@ -46,6 +46,25 @@ const sourceKindOptions: KnowledgeSourceKind[] = [
   "web",
   "other",
 ];
+
+export const documentAuthorityOptions = [
+  { value: "organization", label: "Company" },
+  { value: "workspace", label: "Current workspace" },
+  { value: "personal", label: "Only me" },
+] as const satisfies ReadonlyArray<{ value: DocumentAuthorityKind; label: string }>;
+
+export function documentAuthorityRequest(authorityKind: DocumentAuthorityKind): {
+  authorityKind: DocumentAuthorityKind;
+} {
+  return { authorityKind };
+}
+
+export function documentAuthorityLabel(authorityKind: DocumentAuthorityKind): string {
+  return (
+    documentAuthorityOptions.find((option) => option.value === authorityKind)?.label ??
+    "Current workspace"
+  );
+}
 
 export function isDefaultDocumentCollection(base: Pick<DocumentBase, "name">): boolean {
   return base.name.trim().toLowerCase() === "default";
@@ -83,10 +102,10 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const [uploadSourceTitle, setUploadSourceTitle] = useState("");
   const [uploadSourceAuthor, setUploadSourceAuthor] = useState("");
   const [uploadAclTags, setUploadAclTags] = useState("");
-  const [uploadVisibility, setUploadVisibility] = useState<DocumentVisibility>("workspace");
+  const [uploadAuthority, setUploadAuthority] = useState<DocumentAuthorityKind>("workspace");
   const [uploadAgentAccess, setUploadAgentAccess] = useState(true);
   const [dropText, setDropText] = useState("");
-  const [dropVisibility, setDropVisibility] = useState<DocumentVisibility>("workspace");
+  const [dropAuthority, setDropAuthority] = useState<DocumentAuthorityKind>("workspace");
   const [dropAgentAccess, setDropAgentAccess] = useState(true);
   const [dropping, setDropping] = useState(false);
   const [creatingBase, setCreatingBase] = useState(false);
@@ -220,7 +239,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         const indexed = await client.addDocument(workspaceId, selectedBaseId, {
           fileId: asset.id,
           sourceKind: uploadSourceKind,
-          visibility: uploadVisibility,
+          ...documentAuthorityRequest(uploadAuthority),
           agentAccess: uploadAgentAccess,
           ...(uploadSourceUri.trim() ? { sourceUri: uploadSourceUri.trim() } : {}),
           ...(uploadSourceTitle.trim() ? { sourceTitle: uploadSourceTitle.trim() } : {}),
@@ -260,7 +279,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
     try {
       const document = await client.createKnowledgeDrop(workspaceId, {
         text,
-        visibility: dropVisibility,
+        ...documentAuthorityRequest(dropAuthority),
         agentAccess: dropAgentAccess,
       });
       setDropText("");
@@ -290,7 +309,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         });
         last = await client.createKnowledgeDrop(workspaceId, {
           fileId: asset.id,
-          visibility: dropVisibility,
+          ...documentAuthorityRequest(dropAuthority),
           agentAccess: dropAgentAccess,
         });
       }
@@ -475,14 +494,19 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             />
             <div className="flex flex-col gap-2">
               <select
-                value={dropVisibility}
-                onChange={(event) => setDropVisibility(event.target.value as DocumentVisibility)}
+                value={dropAuthority}
+                onChange={(event) =>
+                  setDropAuthority(event.target.value as DocumentAuthorityKind)
+                }
                 disabled={dropping}
-                aria-label="Who can see this document"
+                aria-label="Drop document authority"
                 className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
               >
-                <option value="workspace">Everyone in workspace</option>
-                <option value="private">Private — creator subject only</option>
+                {documentAuthorityOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
               <label className="flex items-center gap-2 text-xs text-fg-muted">
                 <input
@@ -699,16 +723,20 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                       placeholder="team, confidential"
                     />
                   </FormField>
-                  <FormField label="Visibility">
+                  <FormField label="Authority">
                     <Select
-                      value={uploadVisibility}
+                      value={uploadAuthority}
                       onChange={(event) =>
-                        setUploadVisibility(event.target.value as DocumentVisibility)
+                        setUploadAuthority(event.target.value as DocumentAuthorityKind)
                       }
+                      aria-label="Upload document authority"
                       className="h-8 text-xs pointer-coarse:min-h-10"
                     >
-                      <option value="workspace">Everyone in workspace</option>
-                      <option value="private">Private — creator subject only</option>
+                      {documentAuthorityOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
                     </Select>
                   </FormField>
                   <FormField label="Agent access">
@@ -806,19 +834,19 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                           <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-[color:var(--color-fg-subtle)]">
                             <span>{formatToken(document.sourceKind)}</span>
                             {document.sourceTitle ? <span>· {document.sourceTitle}</span> : null}
-                            {document.visibility === "private" ? (
-                              <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                              {document.authorityKind === "personal" ? (
                                 <LockIcon className="size-3" />
-                                creator subject only
-                              </span>
-                            ) : null}
+                              ) : null}
+                              {documentAuthorityLabel(document.authorityKind)}
+                            </span>
                             <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
                               {document.agentAccess === false ? (
                                 <BotOffIcon className="size-3" />
                               ) : null}
                               {document.agentAccess
-                                ? document.visibility === "private"
-                                  ? "creator's subject-aware agent can read"
+                                ? document.authorityKind === "personal"
+                                  ? "only my subject-aware agents can read"
                                   : "subject-aware agents can read"
                                 : "agents blocked"}
                             </span>
