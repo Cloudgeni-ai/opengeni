@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
-const migration = "0169_retire_model_visible_github_token.sql";
+const migration = "0171_retire_model_visible_github_token.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -14,11 +14,11 @@ let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0169-retire-model-visible-github-token");
+  blank = await acquireBlankTestDatabase("migration-0171-retire-model-visible-github-token");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0169-retire-model-visible-github-token] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0171-retire-model-visible-github-token] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;

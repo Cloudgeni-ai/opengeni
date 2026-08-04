@@ -185,12 +185,12 @@ describe("release schema contract", () => {
         (migrations.has("0168_workspace_instruction_policy_operation_receipts.sql") ? 1 : 0) +
         (migrations.has("0169_workspace_instruction_policy_onboarding_proposals.sql") ? 1 : 0) +
         (migrations.has("0170_session_control_wake_revision.sql") ? 1 : 0) +
-        (migrations.has("0169_retire_model_visible_github_token.sql") ? 1 : 0),
+        (migrations.has("0171_retire_model_visible_github_token.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "400714b776507fb40985fdaefb2286d863d8d663b67f9396d64a4a10f570ddee",
+      "586d315b3f11d97f8cad3a48b9b888d6613534250e9c2b94b5f6e43de935fe39",
     );
-    expect(contract.latestMigration).toBe("0169_retire_model_visible_github_token.sql");
+    expect(contract.latestMigration).toBe("0171_retire_model_visible_github_token.sql");
     expect(migrations.get("0170_session_control_wake_revision.sql")).toMatchObject({
       sha256: "cec3593e377f1cdc6aac3441b89d57e7c19d7377ff31991f340e14af1e64453d",
       deploymentMode: "rolling",
@@ -201,7 +201,7 @@ describe("release schema contract", () => {
       sha256: "71d36ab95a1711c78ab36a09af9a14ddbf6ee84a3bac5ec5fdb460c768c54ef8",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0169_retire_model_visible_github_token.sql")).toMatchObject({
+    expect(migrations.get("0171_retire_model_visible_github_token.sql")).toMatchObject({
       sha256: "6e2123085f5574a046eaea7db7b5168540625d554771ee9e5639787bbde4c713",
       deploymentMode: "maintenance",
     });
