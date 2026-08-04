@@ -154,7 +154,12 @@ import {
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
 } from "@opengeni/config";
-import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
+import {
+  boundModelToolOutputItem,
+  isCodexBilledModel,
+  refreshCodexToken,
+  type CodexFetch,
+} from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
@@ -187,7 +192,7 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
-import { decryptEnvironmentValue } from "./environment-crypto";
+import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
@@ -332,6 +337,22 @@ export {
   type RlsStrategy,
   type UserLookup,
 } from "./database";
+import {
+  buildCodexTokenResolver as buildCodexTokenResolverCore,
+  fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
+  fetchCodexUsageForAccount as fetchCodexUsageForAccountCore,
+  type CodexAccountUsageSnapshot,
+  type CodexAuthDeps,
+  type CodexCredentialForRun,
+  type CodexCredentialTokens,
+} from "./codex-token-resolver";
+import {
+  buildConnectionTokenResolver as buildConnectionTokenResolverCore,
+  refreshOAuthConnectionCredential as refreshOAuthConnectionCredentialCore,
+  type ConnectionBrokerDeps,
+  type ConnectionCredentialForBroker,
+  type ConnectionTokenResolverOptions,
+} from "./connection-token-resolver";
 
 function parsedPersonalConnectionDelegations(
   value: unknown,
@@ -3324,22 +3345,6 @@ export type SlackBotDeleteOperation = {
   completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
-};
-
-export type ConnectionCredentialForBroker = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  subjectId: string | null;
-  providerDomain: string;
-  kind: ConnectionKind;
-  status: ConnectionStatus;
-  credential: Record<string, unknown>;
-  grantedScopes: string[];
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  version: number;
-  metadata: Record<string, unknown>;
 };
 
 export type IntegrationOAuthClientForUse = {
@@ -11300,27 +11305,6 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
-export type CodexCredentialTokens = {
-  accessToken: string;
-  refreshToken: string;
-  idToken: string;
-};
-
-export type CodexCredentialForRun = {
-  id: string; // row id — for compare-and-set writes (P1-c)
-  version: number; // optimistic-concurrency version loaded with this snapshot
-  workspaceId: string;
-  tokens: CodexCredentialTokens; // decrypted — never logged, never returned by a route
-  chatgptAccountId: string | null;
-  scopes: string | null;
-  planType: string | null;
-  isFedramp: boolean;
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  status: string;
-  lastError: string | null;
-};
-
 /**
  * Login / rotation write (multi-account P1). Caller passes the PRE-encrypted
  * credential blob. Keyed on the composite partial index (workspace, chatgpt
@@ -14765,16 +14749,6 @@ export async function completeCodexResetRedemption(
 }
 
 /** The P2 usage-cache snapshot written by the refreshing usage wrapper. */
-export type CodexAccountUsageSnapshot = {
-  primaryUsedPercent?: number | null;
-  primaryResetAt?: Date | null;
-  secondaryUsedPercent?: number | null;
-  secondaryResetAt?: Date | null;
-  /** Present only when the quota body parsed successfully. */
-  checkedAt?: Date;
-  resetCreditAvailableCount?: number | null;
-  resetCreditsCheckedAt?: Date | null;
-};
 
 /**
  * Cache-write for P2 quota bars: persist the five plaintext usage columns on a
@@ -44558,11 +44532,118 @@ function shortHash(value: string): string {
   return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }
 
-// Shared, refreshing, id-addressed Codex token resolver + the per-account usage
-// wrapper (P2). Placed at the END so every accessor it orchestrates
-// (loadCodexCredentialForRun / recordCodexTokenRefresh / setCodexCredentialStatus /
-// recordCodexAccountUsage) is already initialized when its default-deps bag
-// evaluates under the index↔resolver module cycle.
-export * from "./codex-token-resolver";
-export * from "./connection-token-resolver";
+// The resolver modules are cycle-free orchestration leaves. The root barrel is
+// the composition point that supplies their existing persistence accessors while
+// retaining the historical public builder/fetcher signatures.
+function codexAuthDeps(): CodexAuthDeps {
+  return {
+    loadCredential: loadCodexCredentialForRun,
+    recordRefresh: recordCodexTokenRefresh,
+    setStatus: setCodexCredentialStatus,
+    refresh: refreshCodexToken,
+    encrypt: encryptEnvironmentValue,
+    keyBytes: environmentsEncryptionKeyBytes,
+    withRefreshLock: withCodexCredentialRefreshLock,
+    recordUsage: recordCodexAccountUsage,
+  };
+}
+
+function connectionBrokerDeps(): ConnectionBrokerDeps {
+  return {
+    loadCredential: loadConnectionCredentialForBroker,
+    recordRefresh: recordConnectionTokenRefresh,
+    setStatus: setConnectionStatus,
+    recordUsed: recordConnectionUsed,
+    refresh: refreshOAuthConnectionCredentialCore,
+    encrypt: encryptEnvironmentValue,
+    keyBytes: environmentsEncryptionKeyBytes,
+    now: () => new Date(),
+  };
+}
+
+export function buildCodexTokenResolver(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  deps: CodexAuthDeps = codexAuthDeps(),
+): ReturnType<typeof buildCodexTokenResolverCore> {
+  return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);
+}
+
+export async function fetchCodexUsageForAccount(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  fetchImpl: CodexFetch = fetch,
+): ReturnType<typeof fetchCodexUsageForAccountCore> {
+  return await fetchCodexUsageForAccountCore(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    codexAuthDeps(),
+    fetchImpl,
+  );
+}
+
+export async function fetchCodexRateLimitResetCreditsForAccount(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  fetchImpl: CodexFetch = fetch,
+): ReturnType<typeof fetchCodexRateLimitResetCreditsForAccountCore> {
+  return await fetchCodexRateLimitResetCreditsForAccountCore(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    codexAuthDeps(),
+    fetchImpl,
+  );
+}
+
+export function buildConnectionTokenResolver(
+  db: Database,
+  settings: Settings,
+  deps: ConnectionBrokerDeps = connectionBrokerDeps(),
+  options: ConnectionTokenResolverOptions = {},
+): ReturnType<typeof buildConnectionTokenResolverCore> {
+  return buildConnectionTokenResolverCore(db, settings, deps, options);
+}
+
+export {
+  withCodexTokenDeadline,
+  type CodexAccountUsageSnapshot,
+  type CodexAuthDeps,
+  type CodexCredentialForRun,
+  type CodexCredentialTokens,
+  type CodexRateLimitResetCreditsAccountResult,
+  type CodexTokenDeadlineClock,
+  type CodexTokenDeadlineOptions,
+} from "./codex-token-resolver";
+
+export {
+  buildHostConnectionTokenResolver,
+  ConnectionRefreshHttpError,
+  HostMcpCredentialBindingError,
+  HostMcpCredentialScopeError,
+  isPrivateAddress,
+  normalizeBearerScheme,
+  refreshOAuthConnectionCredential,
+  type ConnectionBrokerDeps,
+  type ConnectionCredentialForBroker,
+  type ConnectionCredentialLookupInput,
+  type ConnectionStatusGuard,
+  type ConnectionTokenRefreshInput,
+  type ConnectionTokenResolverOptions,
+  type HostMcpCredentialResolverContext,
+  type PermanentConnectionRefreshFailure,
+  type RefreshTransportOptions,
+  type ResolveConnectionCredentialInput,
+  type ResolveConnectionCredentialResult,
+} from "./connection-token-resolver";
+
 export * from "./workspace-artifacts";

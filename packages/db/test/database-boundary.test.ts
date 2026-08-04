@@ -60,10 +60,6 @@ describe("database foundation boundary", () => {
     const allowedRootConsumers = new Set([
       // Executable entry point; the root does not import it.
       "runtime-posture-cli.ts",
-      // Leaf token resolvers consume broad repository APIs and are not imported
-      // or re-exported by the root barrel.
-      "codex-token-resolver.ts",
-      "connection-token-resolver.ts",
     ]);
 
     const offenders: string[] = [];
