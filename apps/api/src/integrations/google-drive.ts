@@ -17,6 +17,10 @@ import {
   type GoogleDriveLifecycleActionRequest,
   type GoogleDriveOAuthStartRequest,
 } from "@opengeni/contracts/google-drive";
+import {
+  bindConnectorDocumentDestination,
+  type ConnectorDocumentDestinationSelection,
+} from "@opengeni/contracts/connector-destinations";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -253,6 +257,9 @@ export async function completeGoogleDriveOAuthCallback(
       verifiedAt: new Date().toISOString(),
       accessMode: scopeDecision.accessMode,
       lifecycle: googleDriveLifecycle("active"),
+      ...(previousMetadata?.documentDestination
+        ? { documentDestination: previousMetadata.documentDestination }
+        : {}),
       ...(previousMetadata?.selectedSources
         ? { selectedSources: previousMetadata.selectedSources }
         : previousMetadata?.selectedSource
@@ -496,10 +503,14 @@ export async function browseGoogleDrive(
 export async function saveGoogleDriveSource(
   deps: ApiRouteDeps,
   input: {
+    accountId: string;
     workspaceId: string;
     subjectId: string;
     connectionId: string;
     payload: unknown;
+    canManageOrganizationDestination: boolean;
+    canManageWorkspaceDestination: boolean;
+    canManagePersonalDestination: boolean;
   },
 ) {
   const parsedPayload = SaveGoogleDriveSourceRequest.safeParse(input.payload);
@@ -516,7 +527,37 @@ export async function saveGoogleDriveSource(
   if (!existing) {
     throw new HTTPException(404, { message: "Google Drive connection not found" });
   }
+  if (existing.accountId !== input.accountId || existing.workspaceId !== input.workspaceId) {
+    throw new HTTPException(403, { message: "Google Drive connection authority mismatch" });
+  }
   await requireGoogleDriveSourceConnection(deps, existing, input.subjectId);
+  const destinationSelection: ConnectorDocumentDestinationSelection = payload.destination ?? {
+    authorityKind: "workspace",
+    collectionId: null,
+  };
+  if (
+    destinationSelection.authorityKind === "organization" &&
+    !input.canManageOrganizationDestination
+  ) {
+    throw new HTTPException(403, { message: "missing permission: account:admin" });
+  }
+  if (
+    destinationSelection.authorityKind === "workspace" &&
+    !input.canManageWorkspaceDestination
+  ) {
+    throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+  }
+  if (
+    destinationSelection.authorityKind === "personal" &&
+    !input.canManagePersonalDestination
+  ) {
+    throw new HTTPException(403, { message: "personal destination requires the exact actor" });
+  }
+  const documentDestination = bindConnectorDocumentDestination(destinationSelection, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId: input.subjectId,
+  });
   const verifiedSources = [];
   for (const source of payload.sources) {
     const sourceId = validDriveId(source.id, "source.id");
@@ -552,13 +593,14 @@ export async function saveGoogleDriveSource(
     expectedVersion: latest.version,
     metadata: GoogleDriveConnectionMetadata.parse({
       ...latestMetadata,
+      documentDestination,
       selectedSource: null,
       selectedSources: verifiedSources.map((verified) => ({
         id: verified.id,
         name: verified.name,
         mimeType: verified.mimeType,
         driveId: verified.driveId,
-        targetScope: payload.targetScope,
+        destination: documentDestination,
         syncCadence: payload.syncCadence,
         readPolicy: payload.readPolicy,
         selectedAt: new Date().toISOString(),

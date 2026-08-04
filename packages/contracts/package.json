@@ -29,6 +29,10 @@
     "./google-drive": {
       "types": "./src/google-drive.ts",
       "default": "./src/google-drive.ts"
+    },
+    "./connector-destinations": {
+      "types": "./src/connector-destinations.ts",
+      "default": "./src/connector-destinations.ts"
     }
   },
   "publishConfig": {

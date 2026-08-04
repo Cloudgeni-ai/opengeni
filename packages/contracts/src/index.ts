@@ -8,6 +8,7 @@ import {
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 
 export * from "./slack-bot-scopes";
+export * from "./connector-destinations";
 
 export {
   CreateWorkspaceArtifactRequest,

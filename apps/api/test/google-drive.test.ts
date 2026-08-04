@@ -397,6 +397,7 @@ describe("Google Drive local source preview", () => {
     const authorization = await bearer(workspace, "subject-a", [
       "connections:read",
       "connections:write",
+      "workspace:admin",
     ]);
     const browse = await app(google.fetch).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
@@ -443,7 +444,7 @@ describe("Google Drive local source preview", () => {
               driveId: null,
             },
           ],
-          targetScope: "workspace",
+          destination: { authorityKind: "workspace", collectionId: null },
           syncCadence: "hourly",
           readPolicy: "allow",
         }),
@@ -457,18 +458,35 @@ describe("Google Drive local source preview", () => {
       "subject-a",
     );
     expect(persisted?.metadata).toMatchObject({
+      documentDestination: {
+        authorityKind: "workspace",
+        authorityAccountId: workspace.accountId,
+        authorityWorkspaceId: workspace.workspaceId,
+        authoritySubjectId: null,
+        collectionId: null,
+      },
       selectedSources: [
         {
           id: "folder-1",
           name: "Product",
-          targetScope: "workspace",
+          destination: {
+            authorityKind: "workspace",
+            authorityAccountId: workspace.accountId,
+            authorityWorkspaceId: workspace.workspaceId,
+            authoritySubjectId: null,
+          },
           syncCadence: "hourly",
           readPolicy: "allow",
         },
         {
           id: "root",
           name: "My Drive",
-          targetScope: "workspace",
+          destination: {
+            authorityKind: "workspace",
+            authorityAccountId: workspace.accountId,
+            authorityWorkspaceId: workspace.workspaceId,
+            authoritySubjectId: null,
+          },
           syncCadence: "hourly",
           readPolicy: "allow",
         },

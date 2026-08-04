@@ -21,7 +21,13 @@ const source: GoogleDriveSelectedSource = {
   name: "Knowledge",
   mimeType: GOOGLE_DRIVE_FOLDER_MIME_TYPE,
   driveId: "shared-drive",
-  targetScope: "workspace",
+  destination: {
+    authorityKind: "workspace",
+    authorityAccountId: workspaceId,
+    authorityWorkspaceId: workspaceId,
+    authoritySubjectId: null,
+    collectionId: null,
+  },
   syncCadence: "hourly",
   readPolicy: "allow",
   selectedAt: "2026-08-02T00:00:00.000Z",
@@ -56,18 +62,28 @@ function item(
 }
 
 describe("Google Drive scoped source identity", () => {
-  test("maps the picker scopes to the three fixed knowledge authorities", () => {
-    expect(googleDriveKnowledgeScope("organization", workspaceId, subjectId)).toEqual({
+  test("maps saved connector destinations to the three fixed knowledge authorities", () => {
+    expect(googleDriveKnowledgeScope({
+      authorityKind: "organization",
+      authorityAccountId: workspaceId,
+      authorityWorkspaceId: null,
+      authoritySubjectId: null,
+      collectionId: null,
+    })).toEqual({
       kind: "organization",
       workspaceId: null,
       subjectId: null,
     });
-    expect(googleDriveKnowledgeScope("workspace", workspaceId, subjectId)).toEqual({
+    expect(googleDriveKnowledgeScope(source.destination!)).toEqual({
       kind: "workspace",
       workspaceId,
       subjectId: null,
     });
-    expect(googleDriveKnowledgeScope("user", workspaceId, subjectId)).toEqual({
+    expect(googleDriveKnowledgeScope({
+      ...source.destination!,
+      authorityKind: "personal",
+      authoritySubjectId: subjectId,
+    })).toEqual({
       kind: "personal",
       workspaceId,
       subjectId,
@@ -579,8 +595,16 @@ describe("bounded Google Drive inventory", () => {
   test("compares checkpoint authority fields without delimiter collisions", async () => {
     const first = await inventoryGoogleDriveSource({
       googlePermissionId: "permission-123",
-      source: { ...source, targetScope: "personal" },
-      workspaceId: "workspace",
+      source: {
+        ...source,
+        destination: {
+          ...source.destination!,
+          authorityKind: "personal",
+          authorityWorkspaceId: workspaceId,
+          authoritySubjectId: "subject:a:b",
+        },
+      },
+      workspaceId,
       initiatingSubjectId: "subject:a:b",
       limits: { ...limits, maxItems: 1 },
       listChildren: async () => ({
@@ -598,8 +622,16 @@ describe("bounded Google Drive inventory", () => {
     await expect(
       inventoryGoogleDriveSource({
         googlePermissionId: "permission-123",
-        source: { ...source, targetScope: "personal" },
-        workspaceId: "workspace",
+        source: {
+          ...source,
+          destination: {
+            ...source.destination!,
+            authorityKind: "personal",
+            authorityWorkspaceId: workspaceId,
+            authoritySubjectId: "subject:a:b",
+          },
+        },
+        workspaceId,
         initiatingSubjectId: "subject:a:b",
         limits: { ...limits, maxItems: 2 },
         checkpoint: tampered,

@@ -25,8 +25,9 @@ import {
   type GoogleDriveAccountState,
   type GoogleDriveDisconnectAttempt,
 } from "@/lib/google-drive-connection";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
+  ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
@@ -35,12 +36,11 @@ import type {
   GoogleDriveOAuthStartResponse,
   GoogleDriveReadPolicy,
   GoogleDriveSyncCadence,
-  GoogleDriveTargetScope,
 } from "@/types";
 
 type FolderCrumb = { id: string; name: string };
 type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
-  targetScope: GoogleDriveTargetScope;
+  authorityKind: ConnectorDocumentDestinationAuthority;
   syncCadence: GoogleDriveSyncCadence;
   readPolicy: GoogleDriveReadPolicy;
 };
@@ -50,6 +50,18 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const client = context.client;
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const canWrite = hasWorkspacePermission(context.accessContext, workspaceId, "connections:write");
+  const workspaceGrant = context.accessContext?.workspaceGrants.find(
+    (grant) => grant.workspaceId === workspaceId,
+  );
+  const canManageWorkspaceDestination = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
+  );
+  const canManageOrganizationDestination = Boolean(
+    workspaceGrant &&
+      hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  );
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -64,7 +76,8 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [currentFolder, setCurrentFolder] = useState<GoogleDriveBrowseItem | null>(null);
   const [selectedSources, setSelectedSources] = useState<GoogleDriveBrowseItem[]>([]);
-  const [targetScope, setTargetScope] = useState<GoogleDriveTargetScope>("workspace");
+  const [authorityKind, setAuthorityKind] =
+    useState<ConnectorDocumentDestinationAuthority>("workspace");
   const [folderIdDraft, setFolderIdDraft] = useState("");
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
@@ -246,7 +259,11 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     setNextPageToken(null);
     setFolderIdDraft("");
     const existingSource = configuredGoogleDriveSources(metadata)[0];
-    setTargetScope(existingSource?.targetScope ?? "workspace");
+    setAuthorityKind(
+      metadata?.documentDestination?.authorityKind ??
+        existingSource?.authorityKind ??
+        "workspace",
+    );
     setSyncCadence(existingSource?.syncCadence ?? "hourly");
     setReadPolicy(existingSource?.readPolicy ?? "allow");
     setBrowseOpen(true);
@@ -326,7 +343,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               mimeType: selected.mimeType,
               driveId: selected.driveId,
             })),
-            targetScope,
+            destination: { authorityKind, collectionId: null },
             syncCadence,
             readPolicy,
           }),
@@ -469,7 +486,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <span className="text-fg-subtle">Import defaults</span>
               <div className="mt-0.5 truncate text-fg">
                 {savedDefaults
-                  ? `${scopeLabel(savedDefaults.targetScope)} · ${cadenceLabel(savedDefaults.syncCadence)} · ${readPolicyLabel(savedDefaults.readPolicy)}`
+                  ? `${scopeLabel(savedDefaults.authorityKind)} · ${cadenceLabel(savedDefaults.syncCadence)} · ${readPolicyLabel(savedDefaults.readPolicy)}`
                   : "Not configured"}
               </div>
             </div>
@@ -685,12 +702,20 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             <label className="grid gap-1 text-xs text-fg-muted">
               Save to
               <Select
-                value={targetScope}
-                onChange={(event) => setTargetScope(event.target.value as GoogleDriveTargetScope)}
+                value={authorityKind}
+                onChange={(event) =>
+                  setAuthorityKind(
+                    event.target.value as ConnectorDocumentDestinationAuthority,
+                  )
+                }
               >
-                <option value="user">Only me</option>
-                <option value="workspace">This workspace</option>
-                <option value="organization">Company</option>
+                <option value="personal">Only me</option>
+                <option value="workspace" disabled={!canManageWorkspaceDestination}>
+                  This workspace
+                </option>
+                <option value="organization" disabled={!canManageOrganizationDestination}>
+                  Company
+                </option>
               </Select>
             </label>
             <label className="grid gap-1 text-xs text-fg-muted">
@@ -775,14 +800,17 @@ function configuredGoogleDriveSources(
     modifiedTime: null,
     size: null,
     webViewLink: null,
-    targetScope: source.targetScope,
+    authorityKind:
+      source.destination?.authorityKind ??
+      metadata?.documentDestination?.authorityKind ??
+      "workspace",
     syncCadence: source.syncCadence,
     readPolicy: source.readPolicy,
   }));
 }
 
-function scopeLabel(scope: GoogleDriveTargetScope): string {
-  if (scope === "user") return "Only me";
+function scopeLabel(scope: ConnectorDocumentDestinationAuthority): string {
+  if (scope === "personal") return "Only me";
   if (scope === "organization") return "Company";
   return "Workspace";
 }

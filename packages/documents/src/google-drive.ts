@@ -1,7 +1,11 @@
 import type { ScopedKnowledgeScope } from "@opengeni/contracts";
+import {
+  connectorDestinationDocumentAuthority,
+  resolveConnectorDocumentDestination,
+  type ConnectorDocumentDestination,
+} from "@opengeni/contracts/connector-destinations";
 import type {
   GoogleDriveSelectedSource,
-  GoogleDriveTargetScope,
 } from "@opengeni/contracts/google-drive";
 
 export const GOOGLE_DRIVE_PROVIDER_KEY = "google-drive" as const;
@@ -232,36 +236,49 @@ export class GoogleDriveInventoryProviderError extends Error {
 }
 
 export function googleDriveKnowledgeScope(
-  targetScope: GoogleDriveTargetScope,
-  workspaceId: string,
-  initiatingSubjectId: string,
+  destination: ConnectorDocumentDestination,
 ): ScopedKnowledgeScope {
-  const boundedWorkspaceId = boundedText(workspaceId, "workspaceId", 256);
-  const boundedSubjectId = boundedText(initiatingSubjectId, "initiatingSubjectId", 1024);
-  if (targetScope === "organization") {
+  const authority = connectorDestinationDocumentAuthority(destination);
+  if (authority.authorityKind === "organization") {
     return { kind: "organization", workspaceId: null, subjectId: null };
   }
-  if (targetScope === "workspace") {
-    return { kind: "workspace", workspaceId: boundedWorkspaceId, subjectId: null };
+  if (authority.authorityKind === "workspace") {
+    if (!authority.authorityWorkspaceId) {
+      throw new Error("workspace connector destination is missing workspace authority");
+    }
+    return {
+      kind: "workspace",
+      workspaceId: authority.authorityWorkspaceId,
+      subjectId: null,
+    };
   }
-  // Google Drive connections are workspace-bound today. Preserve that boundary
-  // for personal knowledge rather than silently widening it across workspaces.
+  if (!authority.authorityWorkspaceId || !authority.authoritySubjectId) {
+    throw new Error("personal connector destination is missing immutable authority");
+  }
   return {
     kind: "personal",
-    workspaceId: boundedWorkspaceId,
-    subjectId: boundedSubjectId,
+    workspaceId: authority.authorityWorkspaceId,
+    subjectId: authority.authoritySubjectId,
   };
 }
 
 export function googleDriveKnowledgeSourceIdentity(input: {
   googlePermissionId: string;
-  source: Pick<GoogleDriveSelectedSource, "id" | "driveId" | "targetScope">;
+  source: Pick<GoogleDriveSelectedSource, "id" | "driveId" | "destination" | "targetScope">;
+  accountId?: string | undefined;
   workspaceId: string;
-  initiatingSubjectId: string;
+  connectionSubjectId?: string | null | undefined;
+  /** @deprecated Used only to validate old callers while source destinations migrate. */
+  initiatingSubjectId?: string | undefined;
 }): GoogleDriveKnowledgeSourceIdentity {
   const sourceId = driveId(input.source.id, "source.id");
   const externalTenantId = normalizedGooglePermissionId(input.googlePermissionId);
   const sourceDriveId = nullableDriveId(input.source.driveId, "source.driveId");
+  const destination = resolveConnectorDocumentDestination(input.source.destination, {
+    accountId: input.accountId ?? input.workspaceId,
+    workspaceId: input.workspaceId,
+    connectionSubjectId: input.connectionSubjectId ?? input.initiatingSubjectId ?? null,
+  });
   return {
     providerKey: GOOGLE_DRIVE_PROVIDER_KEY,
     externalTenantId,
@@ -273,11 +290,7 @@ export function googleDriveKnowledgeSourceIdentity(input: {
           ? "google-drive-shared-drive"
           : "google-drive-folder",
     sourceUri: googleDriveSourceUri(sourceId),
-    scope: googleDriveKnowledgeScope(
-      input.source.targetScope,
-      input.workspaceId,
-      input.initiatingSubjectId,
-    ),
+    scope: googleDriveKnowledgeScope(destination),
   };
 }
 
@@ -327,8 +340,11 @@ export function planGoogleDriveTransfer(
 export async function inventoryGoogleDriveSource(input: {
   googlePermissionId: string;
   source: GoogleDriveSelectedSource;
+  accountId?: string | undefined;
   workspaceId: string;
-  initiatingSubjectId: string;
+  connectionSubjectId?: string | null | undefined;
+  /** @deprecated Used only to validate old callers while source destinations migrate. */
+  initiatingSubjectId?: string | undefined;
   limits: GoogleDriveInventoryLimits;
   listChildren: GoogleDriveListChildren;
   checkpoint?: GoogleDriveInventoryCheckpoint | null;
@@ -339,8 +355,12 @@ export async function inventoryGoogleDriveSource(input: {
   const source = googleDriveKnowledgeSourceIdentity({
     googlePermissionId,
     source: input.source,
+    ...(input.accountId ? { accountId: input.accountId } : {}),
     workspaceId: input.workspaceId,
-    initiatingSubjectId: input.initiatingSubjectId,
+    ...(input.connectionSubjectId !== undefined
+      ? { connectionSubjectId: input.connectionSubjectId }
+      : {}),
+    ...(input.initiatingSubjectId ? { initiatingSubjectId: input.initiatingSubjectId } : {}),
   });
   const checkpointIdentity: GoogleDriveInventoryCheckpointIdentity = {
     googlePermissionId,
