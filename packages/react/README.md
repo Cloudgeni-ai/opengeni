@@ -66,6 +66,48 @@ entry CSS:
 Consuming only the tokens without Tailwind? Import
 `@opengeni/react/tokens.css` and use the `--og-*` variables directly.)
 
+### Product-compatible theming and density
+
+The default typography and control geometry are the same values used by
+`apps/web`. Put theme overrides on one ancestor; SDK popovers and dropdowns
+copy the effective `--og-*` values from their trigger across the portal
+boundary, so a menu mounted under `<body>` still matches the embedded panel.
+SDK type utilities are also scoped against ordinary host resets such as
+`.app button { font: inherit }`; customize their public tokens instead of
+adding selector-specific overrides.
+
+For a narrow product sidebar, opt into the supported compact preset:
+
+```tsx
+<aside data-og-theme="light" data-og-density="compact">
+  <MessageTimeline {...timelineProps} />
+  <ChatComposer {...composerProps} />
+</aside>
+```
+
+The preset is only a starting point. Override individual runtime tokens on the
+same ancestor without rebuilding Tailwind:
+
+```css
+.my-agent {
+  --og-font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --og-font-size-menu: 12px;
+  --og-line-height-menu: 18px;
+  --og-font-size-composer-wide: 13px;
+  --og-line-height-composer-wide: 20px;
+  --og-model-picker-menu-width: 15rem;
+  --og-color-accent: oklch(0.58 0.19 288);
+}
+```
+
+The type ramp is `--og-font-size-{xs,sm,base,md}` with matching
+`--og-line-height-*` tokens. Interactive chrome uses the semantic `control`,
+`menu`, `composer`, and `composer-wide` pairs. Model picker height, width,
+padding, and row-density tokens are grouped under `--og-model-picker-*` in
+`styles/tokens.css`. `ModelPolicyPicker` also exposes `contentClassName` and
+`contentStyle` for exceptional surface-level customization; tokens are the
+recommended path.
+
 ## Quick start
 
 ```tsx

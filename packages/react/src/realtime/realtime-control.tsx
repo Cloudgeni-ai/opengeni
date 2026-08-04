@@ -866,8 +866,8 @@ export function RealtimeVoiceModelPanel(props: {
       <div className="flex shrink-0 items-start gap-1 px-2 pt-1 pb-1.5">
         {props.leading}
         <div className="min-w-0">
-          <div className="text-sm font-medium text-og-fg">Voice model</div>
-          <p className="mt-0.5 text-xs text-og-fg-subtle">
+          <div className="text-og-menu font-medium text-og-fg">Voice model</div>
+          <p className="mt-0.5 text-og-control text-og-fg-subtle">
             Used when you start a voice conversation.
           </p>
         </div>

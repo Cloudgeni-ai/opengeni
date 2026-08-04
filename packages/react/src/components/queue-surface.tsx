@@ -43,12 +43,12 @@ function QueueSurfaceFallback() {
   return (
     <div
       aria-live="polite"
-      className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
+      className="og-root mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
       data-testid="queue-surface-loading"
       role="status"
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface/80 shadow-sm">
-        <div className="flex items-center gap-2 px-3 py-2 text-xs text-fg-muted pointer-coarse:min-h-[44px]">
+        <div className="flex items-center gap-2 px-3 py-2 text-og-control text-fg-muted pointer-coarse:min-h-[44px]">
           <Loader2Icon
             aria-hidden="true"
             className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
