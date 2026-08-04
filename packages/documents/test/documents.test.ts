@@ -15,20 +15,70 @@ import {
 } from "../src";
 
 describe("documents", () => {
-  test("fails closed for personal documents without the initiating subject", () => {
+  test("keeps legacy authority workspace-anchored and fails closed for ambiguous tuples", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const siblingWorkspaceId = "22222222-2222-4222-8222-222222222222";
     const document = {
       authorityKind: "personal",
+      authorityWorkspaceId: workspaceId,
       authoritySubjectId: "subject:owner",
     } as const;
-    expect(canViewDocument(document, undefined)).toBe(false);
-    expect(canViewDocument(document, "subject:other")).toBe(false);
-    expect(canViewDocument(document, "subject:owner")).toBe(true);
+    expect(canViewDocument(document, undefined, workspaceId)).toBe(false);
+    expect(canViewDocument(document, "subject:other", workspaceId)).toBe(false);
+    expect(canViewDocument(document, "subject:owner", workspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:owner", siblingWorkspaceId)).toBe(false);
+    expect(canViewDocument(document, "subject:owner")).toBe(false);
     expect(
-      canViewDocument({ authorityKind: "workspace", authoritySubjectId: null }, undefined),
+      canViewDocument(
+        { authorityKind: "personal", authoritySubjectId: "subject:owner" },
+        "subject:owner",
+        workspaceId,
+      ),
+    ).toBe(false);
+    expect(
+      canViewDocument(
+        {
+          authorityKind: "workspace",
+          authorityWorkspaceId: workspaceId,
+          authoritySubjectId: null,
+        },
+        undefined,
+        workspaceId,
+      ),
     ).toBe(true);
     expect(
-      canViewDocument({ authorityKind: "organization", authoritySubjectId: null }, undefined),
+      canViewDocument(
+        {
+          authorityKind: "workspace",
+          authorityWorkspaceId: workspaceId,
+          authoritySubjectId: null,
+        },
+        undefined,
+        siblingWorkspaceId,
+      ),
+    ).toBe(false);
+    expect(
+      canViewDocument(
+        {
+          authorityKind: "organization",
+          authorityWorkspaceId: null,
+          authoritySubjectId: null,
+        },
+        undefined,
+        siblingWorkspaceId,
+      ),
     ).toBe(true);
+    expect(
+      canViewDocument(
+        {
+          authorityKind: "legacy-ambiguous",
+          authorityWorkspaceId: workspaceId,
+          authoritySubjectId: null,
+        },
+        "subject:owner",
+        workspaceId,
+      ),
+    ).toBe(false);
   });
 
   test("resolves fixed authority tuples and deterministic legacy compatibility", () => {
