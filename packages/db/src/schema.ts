@@ -2329,6 +2329,61 @@ export const documentChunks = pgTable(
   }),
 );
 
+export const documentAuthorityReclassifications = pgTable(
+  "document_authority_reclassifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    operationId: uuid("operation_id").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    transactionId: bigint("transaction_id", { mode: "bigint" })
+      .notNull()
+      .default(sql`txid_current()`),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").notNull(),
+    baseIdSnapshot: uuid("base_id_snapshot").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    sourceAuthorityKind: text("source_authority_kind").notNull(),
+    sourceAuthorityWorkspaceId: uuid("source_authority_workspace_id"),
+    sourceAuthoritySubjectId: text("source_authority_subject_id"),
+    targetAuthorityKind: text("target_authority_kind").notNull(),
+    targetAuthorityWorkspaceId: uuid("target_authority_workspace_id"),
+    targetAuthoritySubjectId: text("target_authority_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex(
+      "document_authority_reclassifications_workspace_operation_uq",
+    ).on(table.workspaceId, table.operationId),
+    documentTime: index("document_authority_reclassifications_document_time_idx").on(
+      table.documentId,
+      table.createdAt,
+      table.id,
+    ),
+    request: check(
+      "document_authority_reclassifications_request_chk",
+      sql`${table.requestFingerprint} ~ '^[0-9a-f]{64}$'
+        and length(btrim(${table.actorSubjectId})) between 1 and 1024`,
+    ),
+    source: check(
+      "document_authority_reclassifications_source_chk",
+      sql`(${table.sourceAuthorityKind} = 'organization' and ${table.sourceAuthorityWorkspaceId} is null and ${table.sourceAuthoritySubjectId} is null)
+        or (${table.sourceAuthorityKind} = 'workspace' and ${table.sourceAuthorityWorkspaceId} = ${table.workspaceId} and ${table.sourceAuthoritySubjectId} is null)
+        or (${table.sourceAuthorityKind} = 'personal' and ${table.sourceAuthorityWorkspaceId} = ${table.workspaceId} and nullif(btrim(${table.sourceAuthoritySubjectId}), '') is not null and octet_length(convert_to(${table.sourceAuthoritySubjectId}, 'UTF8')) <= 1024)`,
+    ),
+    target: check(
+      "document_authority_reclassifications_target_chk",
+      sql`(${table.targetAuthorityKind} = 'organization' and ${table.targetAuthorityWorkspaceId} is null and ${table.targetAuthoritySubjectId} is null)
+        or (${table.targetAuthorityKind} = 'workspace' and ${table.targetAuthorityWorkspaceId} = ${table.workspaceId} and ${table.targetAuthoritySubjectId} is null)
+        or (${table.targetAuthorityKind} = 'personal' and ${table.targetAuthorityWorkspaceId} = ${table.workspaceId} and ${table.targetAuthoritySubjectId} = ${table.actorSubjectId} and octet_length(convert_to(${table.targetAuthoritySubjectId}, 'UTF8')) <= 1024)`,
+    ),
+  }),
+);
+
 export const knowledgeMemories = pgTable(
   "knowledge_memories",
   {

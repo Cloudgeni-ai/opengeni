@@ -31,6 +31,7 @@ export const FORCE_RLS_TABLES = [
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_bases",
+  "document_authority_reclassifications",
   "document_chunks",
   "documents",
   "enrollments",
@@ -274,6 +275,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "document_authority_reclassifications",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",

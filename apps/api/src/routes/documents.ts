@@ -4,12 +4,14 @@ import {
   CreateKnowledgeMemoryRequest,
   CreateDocumentBaseRequest,
   Document,
+  DocumentAuthorityReclassification,
   DocumentBase,
   DocumentSearchRequest,
   DocumentSearchResponse,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   MoveDocumentRequest,
+  ReclassifyDocumentAuthorityRequest,
   UpdateKnowledgeMemoryRequest,
   WorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse,
@@ -35,6 +37,7 @@ import {
   listDocuments,
   moveDocumentToBase,
   queueDocumentForReindex,
+  reclassifyDocumentAuthority,
   searchEffectiveDocuments,
 } from "@opengeni/documents";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -157,6 +160,31 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       ).map((document) => Document.parse(document)),
     );
   });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/documents/:documentId/authority-reclassifications",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
+      const payload = ReclassifyDocumentAuthorityRequest.parse(await c.req.json());
+      try {
+        return c.json(
+          DocumentAuthorityReclassification.parse(
+            await reclassifyDocumentAuthority(db, {
+              ...payload,
+              accountId: access.grant.accountId,
+              workspaceId,
+              documentId: c.req.param("documentId"),
+              actorSubjectId: access.grant.subjectId,
+              organizationAuthorityGranted: hasAccountAdminAuthority(access),
+            }),
+          ),
+        );
+      } catch (error) {
+        throw documentHttpException(error);
+      }
+    },
+  );
 
   app.delete(
     "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
@@ -672,6 +700,24 @@ function documentHttpException(error: unknown): HTTPException {
   }
   if (message.includes("already exists")) {
     return new HTTPException(409, { message });
+  }
+  if (
+    message.includes("operationId was reused") ||
+    message.includes("no longer matches expectedAuthority") ||
+    message.includes("changed before reclassification")
+  ) {
+    return new HTTPException(409, { message });
+  }
+  if (
+    message.includes("authority tuple is ambiguous") ||
+    message.includes("authority must remain in the originating workspace") ||
+    message.includes("requires a canonical actor subject") ||
+    message.includes("requires a UUID operationId")
+  ) {
+    return new HTTPException(422, { message });
+  }
+  if (message.includes("original creating subject")) {
+    return new HTTPException(403, { message });
   }
   if (message.includes("no suggested base")) {
     return new HTTPException(422, { message });

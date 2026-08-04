@@ -7,6 +7,7 @@ import {
   getDocumentChunk,
   moveDocumentToBase,
   queueDocumentForReindex,
+  reclassifyDocumentAuthority,
   searchEffectiveDocuments,
   searchDocuments,
 } from "../src";
@@ -307,5 +308,203 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         }),
       ).resolves.toBeNull();
     }
+  });
+
+  test("reclassifies authority only through an idempotent exact receipt", async () => {
+    if (!available) return;
+    const origin = await freshWorkspace("reclassification-origin");
+    const sibling = await freshWorkspace("reclassification-sibling", origin.accountId);
+    const workspaceDocument = await createReadyDocument(origin, {
+      label: "reclassification-workspace",
+      kind: "workspace",
+      subjectId: "user:alice",
+      text: "reclassification-needle",
+    });
+    const [targetBase] = await shared!.admin<{ id: string }[]>`
+      insert into document_bases (account_id, workspace_id, name)
+      values (${origin.accountId}, ${origin.workspaceId}, 'Reclassification target')
+      returning id`;
+    const operationId = crypto.randomUUID();
+
+    const receipt = await reclassifyDocumentAuthority(forced.db, {
+      ...origin,
+      documentId: workspaceDocument.documentId,
+      operationId,
+      actorSubjectId: "user:alice",
+      expectedAuthority: {
+        kind: "workspace",
+        workspaceId: origin.workspaceId,
+        subjectId: null,
+      },
+      targetAuthorityKind: "personal",
+    });
+    expect(receipt).toMatchObject({
+      operationId,
+      documentId: workspaceDocument.documentId,
+      baseIdSnapshot: workspaceDocument.baseId,
+      actorSubjectId: "user:alice",
+      sourceAuthority: {
+        kind: "workspace",
+        workspaceId: origin.workspaceId,
+        subjectId: null,
+      },
+      targetAuthority: {
+        kind: "personal",
+        workspaceId: origin.workspaceId,
+        subjectId: "user:alice",
+      },
+    });
+
+    const replayed = await reclassifyDocumentAuthority(forced.db, {
+      ...origin,
+      documentId: workspaceDocument.documentId,
+      operationId,
+      actorSubjectId: "user:alice",
+      expectedAuthority: {
+        kind: "workspace",
+        workspaceId: origin.workspaceId,
+        subjectId: null,
+      },
+      targetAuthorityKind: "personal",
+    });
+    expect(replayed).toEqual(receipt);
+    const [receiptCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from document_authority_reclassifications
+      where workspace_id = ${origin.workspaceId} and operation_id = ${operationId}`;
+    expect(receiptCount).toEqual({ count: 1 });
+
+    await expect(
+      reclassifyDocumentAuthority(forced.db, {
+        ...origin,
+        documentId: workspaceDocument.documentId,
+        operationId,
+        actorSubjectId: "user:alice",
+        expectedAuthority: {
+          kind: "personal",
+          workspaceId: origin.workspaceId,
+          subjectId: "user:alice",
+        },
+        targetAuthorityKind: "workspace",
+      }),
+    ).rejects.toThrow("operationId was reused");
+
+    const [stored] = await shared!.admin<
+      Array<{
+        documentKind: string;
+        documentSubject: string | null;
+        chunkKind: string;
+        chunkSubject: string | null;
+      }>
+    >`
+      select
+        document.authority_kind as "documentKind",
+        document.authority_subject_id as "documentSubject",
+        chunk.authority_kind as "chunkKind",
+        chunk.authority_subject_id as "chunkSubject"
+      from documents document
+      join document_chunks chunk on chunk.document_id = document.id
+      where document.id = ${workspaceDocument.documentId}`;
+    expect(stored).toEqual({
+      documentKind: "personal",
+      documentSubject: "user:alice",
+      chunkKind: "personal",
+      chunkSubject: "user:alice",
+    });
+
+    // Collection changes remain organization-only metadata and cannot widen
+    // the personal authority tuple.
+    await moveDocumentToBase(forced.db, {
+      ...origin,
+      documentId: workspaceDocument.documentId,
+      targetBaseId: targetBase!.id,
+      access: { viewerSubjectId: "user:alice" },
+    });
+    const [afterMove] = await shared!.admin<
+      Array<{ baseId: string; kind: string; subjectId: string | null }>
+    >`
+      select base_id as "baseId", authority_kind as kind,
+        authority_subject_id as "subjectId"
+      from documents where id = ${workspaceDocument.documentId}`;
+    expect(afterMove).toEqual({
+      baseId: targetBase!.id,
+      kind: "personal",
+      subjectId: "user:alice",
+    });
+
+    const bobResults = await searchDocuments(forced.db, {
+      ...origin,
+      query: "reclassification-needle",
+      mode: "keyword",
+      limit: 10,
+      access: { viewerSubjectId: "user:bob" },
+    });
+    expect(bobResults).toHaveLength(0);
+    const siblingResults = await searchDocuments(forced.db, {
+      ...sibling,
+      query: "reclassification-needle",
+      mode: "keyword",
+      limit: 10,
+      access: { viewerSubjectId: "user:alice" },
+    });
+    expect(siblingResults).toHaveLength(0);
+
+    await expect(
+      reclassifyDocumentAuthority(forced.db, {
+        ...origin,
+        documentId: workspaceDocument.documentId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: "user:alice",
+        expectedAuthority: {
+          kind: "personal",
+          workspaceId: sibling.workspaceId,
+          subjectId: "user:alice",
+        },
+        targetAuthorityKind: "workspace",
+      }),
+    ).rejects.toThrow("must remain in the originating workspace");
+
+    const widenReceipt = await reclassifyDocumentAuthority(forced.db, {
+      ...origin,
+      documentId: workspaceDocument.documentId,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: "user:alice",
+      expectedAuthority: {
+        kind: "personal",
+        workspaceId: origin.workspaceId,
+        subjectId: "user:alice",
+      },
+      targetAuthorityKind: "workspace",
+    });
+    expect(widenReceipt.targetAuthority).toEqual({
+      kind: "workspace",
+      workspaceId: origin.workspaceId,
+      subjectId: null,
+    });
+    const bobAfterExplicitWiden = await searchDocuments(forced.db, {
+      ...origin,
+      query: "reclassification-needle",
+      mode: "keyword",
+      limit: 10,
+      access: { viewerSubjectId: "user:bob" },
+    });
+    expect(bobAfterExplicitWiden.map((result) => result.documentId)).toEqual([
+      workspaceDocument.documentId,
+    ]);
+    const siblingAfterExplicitWiden = await searchDocuments(forced.db, {
+      ...sibling,
+      query: "reclassification-needle",
+      mode: "keyword",
+      limit: 10,
+      access: { viewerSubjectId: "user:alice" },
+    });
+    expect(siblingAfterExplicitWiden).toHaveLength(0);
+
+    await expect(
+      shared!.admin`
+        update documents
+        set authority_kind = 'organization', authority_workspace_id = null
+        where id = ${workspaceDocument.documentId}`,
+    ).rejects.toThrow("document authority is immutable outside an explicit reclassification");
   });
 });

@@ -4,6 +4,8 @@ import type {
   CreateDocumentBaseRequest,
   Document,
   DocumentAuthorityKind,
+  DocumentAuthorityReclassification,
+  DocumentAuthorityTuple,
   DocumentBase,
   DocumentCuration,
   DocumentCurationStatus,
@@ -27,6 +29,7 @@ import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
 import { LiteParse } from "@llamaindex/liteparse";
 import { and, asc, desc, eq, inArray, or, sql, type SQL } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import OpenAI from "openai";
 
 export const DEFAULT_DOCUMENT_PARSER = "liteparse";
@@ -132,6 +135,17 @@ export type DocumentAuthority = {
   kind: DocumentAuthorityKind;
   workspaceId: string | null;
   subjectId: string | null;
+};
+
+export type ReclassifyDocumentAuthorityInput = {
+  accountId: string;
+  workspaceId: string;
+  documentId: string;
+  operationId: string;
+  actorSubjectId: string;
+  expectedAuthority: DocumentAuthorityTuple;
+  targetAuthorityKind: DocumentAuthorityKind;
+  organizationAuthorityGranted?: boolean | undefined;
 };
 
 export type DocumentInventoryStatusCounts = Record<DocumentStatus, number>;
@@ -1190,6 +1204,197 @@ export async function getDocument(
   });
 }
 
+export async function reclassifyDocumentAuthority(
+  db: Database,
+  input: ReclassifyDocumentAuthorityInput,
+): Promise<DocumentAuthorityReclassification> {
+  const actorSubjectId = canonicalDocumentAuthoritySubject(input.actorSubjectId);
+  if (!actorSubjectId) {
+    throw new Error("document authority reclassification requires a canonical actor subject");
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.operationId)) {
+    throw new Error("document authority reclassification requires a UUID operationId");
+  }
+  const expectedAuthority = canonicalDocumentAuthorityTuple(
+    input.expectedAuthority,
+    input.workspaceId,
+    "expected",
+  );
+  const targetAuthority = resolveDocumentAuthority({
+    kind: input.targetAuthorityKind,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId: actorSubjectId,
+  });
+  const requestFingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        documentId: input.documentId,
+        operationId: input.operationId.toLowerCase(),
+        actorSubjectId,
+        expectedAuthority,
+        targetAuthority,
+      }),
+    )
+    .digest("hex");
+
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    { viewerSubjectId: actorSubjectId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${input.operationId.toLowerCase()}`}, 0))`,
+        );
+
+        const [existing] = await tx
+          .select()
+          .from(schema.documentAuthorityReclassifications)
+          .where(
+            and(
+              eq(schema.documentAuthorityReclassifications.workspaceId, input.workspaceId),
+              eq(schema.documentAuthorityReclassifications.operationId, input.operationId),
+            ),
+          )
+          .limit(1);
+        if (existing) {
+          if (existing.requestFingerprint !== requestFingerprint) {
+            throw new Error("document authority reclassification operationId was reused");
+          }
+          assertOrganizationDocumentAuthority(
+            existing.sourceAuthorityKind,
+            input.organizationAuthorityGranted,
+          );
+          assertOrganizationDocumentAuthority(
+            existing.targetAuthorityKind,
+            input.organizationAuthorityGranted,
+          );
+          return mapDocumentAuthorityReclassification(existing);
+        }
+
+        const [document] = await tx
+          .select()
+          .from(schema.documents)
+          .where(
+            and(
+              eq(schema.documents.accountId, input.accountId),
+              eq(schema.documents.workspaceId, input.workspaceId),
+              eq(schema.documents.id, input.documentId),
+              ...documentAccessConditions(input.workspaceId, {
+                viewerSubjectId: actorSubjectId,
+              }),
+            ),
+          )
+          .limit(1)
+          .for("update");
+        if (!document) {
+          throw new Error(`Document not found: ${input.documentId}`);
+        }
+
+        const sourceAuthority = canonicalDocumentAuthorityTuple(
+          {
+            kind: normalizeDocumentAuthorityKind(document.authorityKind),
+            workspaceId: document.authorityWorkspaceId,
+            subjectId: document.authoritySubjectId,
+          },
+          input.workspaceId,
+          "stored",
+        );
+        if (!documentAuthorityTuplesEqual(sourceAuthority, expectedAuthority)) {
+          throw new Error("document authority no longer matches expectedAuthority");
+        }
+        assertOrganizationDocumentAuthority(
+          sourceAuthority.kind,
+          input.organizationAuthorityGranted,
+        );
+        assertOrganizationDocumentAuthority(
+          targetAuthority.kind,
+          input.organizationAuthorityGranted,
+        );
+        if (
+          targetAuthority.kind === "personal" &&
+          canonicalDocumentAuthoritySubject(document.createdBy) !== actorSubjectId
+        ) {
+          throw new Error(
+            "personal document authority may only be assigned to the original creating subject",
+          );
+        }
+
+        const [receipt] = await tx
+          .insert(schema.documentAuthorityReclassifications)
+          .values({
+            operationId: input.operationId,
+            requestFingerprint,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            documentId: input.documentId,
+            baseIdSnapshot: document.baseId,
+            actorSubjectId,
+            sourceAuthorityKind: sourceAuthority.kind,
+            sourceAuthorityWorkspaceId: sourceAuthority.workspaceId,
+            sourceAuthoritySubjectId: sourceAuthority.subjectId,
+            targetAuthorityKind: targetAuthority.kind,
+            targetAuthorityWorkspaceId: targetAuthority.workspaceId,
+            targetAuthoritySubjectId: targetAuthority.subjectId,
+          })
+          .returning();
+        if (!receipt) {
+          throw new Error("failed to persist document authority reclassification receipt");
+        }
+
+        await tx.execute(
+          sql`select set_config('opengeni.document_authority_operation_id', ${input.operationId.toLowerCase()}, true)`,
+        );
+        const [updated] = await tx
+          .update(schema.documents)
+          .set({
+            authorityKind: targetAuthority.kind,
+            authorityWorkspaceId: targetAuthority.workspaceId,
+            authoritySubjectId: targetAuthority.subjectId,
+            visibility: targetAuthority.kind === "personal" ? "private" : "workspace",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.documents.accountId, input.accountId),
+              eq(schema.documents.workspaceId, input.workspaceId),
+              eq(schema.documents.id, input.documentId),
+              eq(schema.documents.authorityKind, sourceAuthority.kind),
+              sourceAuthority.workspaceId === null
+                ? sql`${schema.documents.authorityWorkspaceId} is null`
+                : eq(schema.documents.authorityWorkspaceId, sourceAuthority.workspaceId),
+              sourceAuthority.subjectId === null
+                ? sql`${schema.documents.authoritySubjectId} is null`
+                : eq(schema.documents.authoritySubjectId, sourceAuthority.subjectId),
+            ),
+          )
+          .returning({ id: schema.documents.id });
+        if (!updated) {
+          throw new Error("document authority changed before reclassification could commit");
+        }
+        await tx
+          .update(schema.documentChunks)
+          .set({
+            authorityKind: targetAuthority.kind,
+            authorityWorkspaceId: targetAuthority.workspaceId,
+            authoritySubjectId: targetAuthority.subjectId,
+          })
+          .where(
+            and(
+              eq(schema.documentChunks.accountId, input.accountId),
+              eq(schema.documentChunks.workspaceId, input.workspaceId),
+              eq(schema.documentChunks.documentId, input.documentId),
+            ),
+          );
+
+        return mapDocumentAuthorityReclassification(receipt);
+      }),
+  );
+}
+
 export async function queueDocumentForReindex(
   db: Database,
   workspaceId: string,
@@ -1899,6 +2104,67 @@ function canonicalDocumentAuthoritySubject(value: unknown): string | undefined {
     return undefined;
   }
   return subjectId;
+}
+
+function canonicalDocumentAuthorityTuple(
+  value: DocumentAuthorityTuple,
+  workspaceId: string,
+  label: string,
+): DocumentAuthority {
+  if (value.kind === "organization") {
+    if (value.workspaceId !== null || value.subjectId !== null) {
+      throw new Error(`${label} organization authority tuple is ambiguous`);
+    }
+    return { kind: value.kind, workspaceId: null, subjectId: null };
+  }
+  if (value.workspaceId !== workspaceId) {
+    throw new Error(`${label} document authority must remain in the originating workspace`);
+  }
+  if (value.kind === "workspace") {
+    if (value.subjectId !== null) {
+      throw new Error(`${label} workspace authority tuple is ambiguous`);
+    }
+    return { kind: value.kind, workspaceId, subjectId: null };
+  }
+  const subjectId = canonicalDocumentAuthoritySubject(value.subjectId);
+  if (!subjectId) {
+    throw new Error(`${label} personal authority tuple is ambiguous`);
+  }
+  return { kind: value.kind, workspaceId, subjectId };
+}
+
+function documentAuthorityTuplesEqual(
+  left: DocumentAuthority,
+  right: DocumentAuthority,
+): boolean {
+  return (
+    left.kind === right.kind &&
+    left.workspaceId === right.workspaceId &&
+    left.subjectId === right.subjectId
+  );
+}
+
+function mapDocumentAuthorityReclassification(
+  row: typeof schema.documentAuthorityReclassifications.$inferSelect,
+): DocumentAuthorityReclassification {
+  return {
+    id: row.id,
+    operationId: row.operationId,
+    documentId: row.documentId,
+    baseIdSnapshot: row.baseIdSnapshot,
+    actorSubjectId: row.actorSubjectId,
+    sourceAuthority: {
+      kind: normalizeDocumentAuthorityKind(row.sourceAuthorityKind),
+      workspaceId: row.sourceAuthorityWorkspaceId,
+      subjectId: row.sourceAuthoritySubjectId,
+    },
+    targetAuthority: {
+      kind: normalizeDocumentAuthorityKind(row.targetAuthorityKind),
+      workspaceId: row.targetAuthorityWorkspaceId,
+      subjectId: row.targetAuthoritySubjectId,
+    },
+    createdAt: row.createdAt.toISOString(),
+  };
 }
 
 /**

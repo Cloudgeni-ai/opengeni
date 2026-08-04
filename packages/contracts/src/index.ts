@@ -3296,6 +3296,40 @@ export const AddDocumentRequest = z.object({
 });
 export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
 
+export const DocumentAuthorityTuple = z
+  .object({
+    kind: DocumentAuthorityKind,
+    workspaceId: z.string().uuid().nullable(),
+    subjectId: z.string().min(1).max(1024).nullable(),
+  })
+  .strict();
+export type DocumentAuthorityTuple = z.infer<typeof DocumentAuthorityTuple>;
+
+export const ReclassifyDocumentAuthorityRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedAuthority: DocumentAuthorityTuple,
+    targetAuthorityKind: DocumentAuthorityKind,
+  })
+  .strict();
+export type ReclassifyDocumentAuthorityRequest = z.infer<
+  typeof ReclassifyDocumentAuthorityRequest
+>;
+
+export const DocumentAuthorityReclassification = z.object({
+  id: z.string().uuid(),
+  operationId: z.string().uuid(),
+  documentId: z.string().uuid(),
+  baseIdSnapshot: z.string().uuid(),
+  actorSubjectId: z.string(),
+  sourceAuthority: DocumentAuthorityTuple,
+  targetAuthority: DocumentAuthorityTuple,
+  createdAt: z.string(),
+});
+export type DocumentAuthorityReclassification = z.infer<
+  typeof DocumentAuthorityReclassification
+>;
+
 // A knowledge drop: raw text or an already-uploaded file, with no required
 // metadata. The server files it into the workspace Default base. When a
 // curation provider is enabled, it may name, summarize, categorize, and
