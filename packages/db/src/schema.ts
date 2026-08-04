@@ -5828,6 +5828,7 @@ export const socialConnections = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id"),
     provider: text("provider").notNull(),
     accountHandle: text("account_handle").notNull(),
     accountName: text("account_name"),
@@ -5845,13 +5846,20 @@ export const socialConnections = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceProviderHandle: uniqueIndex("social_connections_workspace_provider_handle_idx").on(
-      table.workspaceId,
-      table.provider,
-      table.accountHandle,
-    ),
+    workspaceProviderHandle: uniqueIndex("social_connections_workspace_provider_handle_idx")
+      .on(table.workspaceId, table.provider, table.accountHandle)
+      .where(sql`${table.subjectId} is null`),
+    subjectProviderHandle: uniqueIndex("social_connections_subject_provider_handle_idx")
+      .on(table.workspaceId, table.subjectId, table.provider)
+      .where(sql`${table.subjectId} is not null`),
     providerStatus: index("social_connections_workspace_provider_status_idx").on(
       table.workspaceId,
+      table.provider,
+      table.status,
+    ),
+    subjectProviderStatus: index("social_connections_subject_provider_status_idx").on(
+      table.workspaceId,
+      table.subjectId,
       table.provider,
       table.status,
     ),

@@ -29,7 +29,7 @@ export class OpenGeniApiError extends Error {
     const displayMessage =
       options.displayMessage ??
       (gatewayFailure && fromResponse
-        ? "OpenGeni is temporarily unavailable — retry."
+        ? (decoded?.message ?? "OpenGeni is temporarily unavailable — retry.")
         : `OpenGeni API ${status}: ${message}`);
     super(correlationId ? `${displayMessage} Reference: ${correlationId}.` : displayMessage);
     this.name = "OpenGeniApiError";

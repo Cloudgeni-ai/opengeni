@@ -71,12 +71,16 @@ describe("startSocialOAuth", () => {
     const settings = settingsWithClients({ x: { clientId: "x-client" } });
     const result = await startSocialOAuth(
       { db: noDb, settings },
-      { ...startContext, payload: { provider: "x", returnPath: "/social?tab=x" } },
+      {
+        ...startContext,
+        payload: { provider: "x", ownership: "personal", returnPath: "/social?tab=x" },
+      },
     );
     const payload = readSignedState(result.state, STATE_SECRET) as Record<string, unknown>;
     expect(payload.kind).toBe("social_oauth");
     expect(payload.workspaceId).toBe(startContext.workspaceId);
     expect(payload.provider).toBe("x");
+    expect(payload.ownership).toBe("personal");
     expect(payload.returnPath).toBe("/social?tab=x");
     expect(typeof payload.nonce).toBe("string");
     // The PKCE verifier must never travel in cleartext state.
