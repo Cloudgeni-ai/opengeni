@@ -404,6 +404,7 @@ export type ChromeScenarioId =
   | "goal-held"
   | "goal-completed"
   | "agents-many"
+  | "agents-only"
   | "agents-none"
   | "composer-only";
 
@@ -704,6 +705,17 @@ export function chromeScenarios(): ChromeScenario[] {
         },
       }),
       agentNodes: manyAgents,
+      defaultActive: "agents",
+    },
+    {
+      id: "agents-only",
+      title: "Agents only",
+      description:
+        "Just the agents chip — no queue, incoming, or goal. Open by default to check close-on-chip + highlight.",
+      session,
+      queue: galleryQueue(),
+      goal: galleryGoal(null),
+      agentNodes: fifteenIdleAgents,
       defaultActive: "agents",
     },
     {

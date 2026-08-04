@@ -15,7 +15,7 @@ export function ComposerChromeGalleryRoute() {
   const composer = useMemo(() => idleComposer(), []);
   const scenarios = useGalleryScenarios();
   const [mode, setMode] = useState<ViewMode>("phone");
-  const [phoneScenarioId, setPhoneScenarioId] = useState<ChromeScenarioId>("crowded-mobile");
+  const [phoneScenarioId, setPhoneScenarioId] = useState<ChromeScenarioId>("agents-only");
   const [galleryFilter, setGalleryFilter] = useState<"all" | ChromeScenarioId>("all");
 
   const phoneScenario = scenarios.find((row) => row.id === phoneScenarioId) ?? scenarios[0] ?? null;
