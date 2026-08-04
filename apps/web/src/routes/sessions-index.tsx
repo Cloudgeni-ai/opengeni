@@ -51,6 +51,11 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
+import {
+  EMPTY_COMPOSER_LAUNCH,
+  composerLaunchSearchKey,
+  type ComposerLaunchSearch,
+} from "@/lib/composer-launch";
 import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
@@ -91,17 +96,30 @@ import {
 } from "@/routes/sessions-index-submission";
 import type { Session } from "@/types";
 
-export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
+export function SessionsIndexRoute({
+  workspaceId,
+  launch = EMPTY_COMPOSER_LAUNCH,
+}: {
+  workspaceId: string;
+  launch?: ComposerLaunchSearch;
+}) {
   const { accessKeyVersion } = useAppContext();
   return (
     <SessionsIndexRouteContent
       key={`${workspaceId}:${accessKeyVersion}`}
       workspaceId={workspaceId}
+      launch={launch}
     />
   );
 }
 
-function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
+function SessionsIndexRouteContent({
+  workspaceId,
+  launch,
+}: {
+  workspaceId: string;
+  launch: ComposerLaunchSearch;
+}) {
   const context = useAppContext();
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
@@ -238,86 +256,189 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     textarea.focus();
   }, [createComposerFocusGen, newSessionDraft.loading]);
 
-  const submitNewSession = async (realtimeModel: SessionRealtimeModel | null): Promise<boolean> => {
-    const typedText = message.trim();
-    const text = typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-    if (busy || newSessionDraft.loading || newSessionDraft.conflict) return false;
-    if (
-      createdSessionAuthority === null &&
-      ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
-    ) {
-      return false;
-    }
-    setSubmitting(true);
-    try {
-      return await runNewSessionRouteSubmission({
-        authority: createdSessionAuthority,
-        onAuthorityChange: setCreatedSessionAuthority,
-        create: async () => {
-          const submittedResources =
-            draft.compute.kind === "machine"
-              ? attachments.readyResources
-              : persistedValue.resources;
-          const flushed = await newSessionDraft.flush();
-          if (!flushed) return null;
-          const submission = submissionFromSessionDraft(draft);
-          const created = await context.startSession(
-            workspaceId,
-            {
-              text,
-              resources: submittedResources,
-              tools: persistedValue.tools,
-              model: persistedValue.model,
-              reasoningEffort: persistedValue.reasoningEffort,
-              latencyMode: persistedValue.latencyMode,
-              ...submission.extras,
-            },
-            {
-              targetSandboxId: submission.options.targetSandboxId,
-              workingDir: submission.options.workingDir,
-              omitWorkspaceResources: submission.omitWorkspaceResources,
-              expectedNewSessionDraftRevision: flushed.revision,
-              ...(realtimeModel && !typedText ? { startMode: "realtime" as const } : {}),
-            },
-          );
-          if (!created) return null;
-          return {
-            sessionId: created.id,
-            settleDraft: async () => {
-              const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
-              if (acknowledged?.kind === "consumed") {
-                setMessage("");
-                setDraft(emptySessionDraft());
-                attachments.removeReadyFiles(
-                  submittedResources.flatMap((resource) =>
-                    resource.kind === "file" ? [resource.fileId] : [],
-                  ),
-                );
-              } else if (
-                !acknowledged ||
-                !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-              ) {
-                const preserved = await newSessionDraft.flush();
-                if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                  return false;
+  const submitNewSession = useLatestCallback(
+    async (
+      realtimeModel: SessionRealtimeModel | null,
+      policy?: Pick<ComposerLaunchSearch, "model" | "effort" | "latency">,
+    ): Promise<boolean> => {
+      const typedText = message.trim();
+      const text =
+        typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+      if (busy || newSessionDraft.loading || newSessionDraft.conflict) return false;
+      if (
+        createdSessionAuthority === null &&
+        ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
+      ) {
+        return false;
+      }
+      const model = policy?.model ?? persistedValue.model;
+      const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
+      const latencyMode = policy?.latency ?? persistedValue.latencyMode;
+      setSubmitting(true);
+      try {
+        return await runNewSessionRouteSubmission({
+          authority: createdSessionAuthority,
+          onAuthorityChange: setCreatedSessionAuthority,
+          create: async () => {
+            // Voice launch is realtime-only: never turn composer text/files into
+            // an initial message. Persist the draft so a pending autosave is not
+            // lost on navigate, but do not consume it — text stays for later.
+            if (realtimeModel) {
+              const flushed = await newSessionDraft.flush();
+              if (!flushed) return null;
+              const submission = submissionFromSessionDraft(draft);
+              const created = await context.startSession(
+                workspaceId,
+                {
+                  text: "",
+                  resources: [],
+                  tools: persistedValue.tools,
+                  model,
+                  reasoningEffort,
+                  latencyMode,
+                  ...submission.extras,
+                },
+                {
+                  targetSandboxId: submission.options.targetSandboxId,
+                  workingDir: submission.options.workingDir,
+                  omitWorkspaceResources: submission.omitWorkspaceResources,
+                  startMode: "realtime",
+                },
+              );
+              if (!created) return null;
+              return {
+                sessionId: created.id,
+                settleDraft: async () => true,
+              };
+            }
+
+            const submittedResources =
+              draft.compute.kind === "machine"
+                ? attachments.readyResources
+                : persistedValue.resources;
+            const flushed = await newSessionDraft.flush();
+            if (!flushed) return null;
+            const submission = submissionFromSessionDraft(draft);
+            const created = await context.startSession(
+              workspaceId,
+              {
+                text,
+                resources: submittedResources,
+                tools: persistedValue.tools,
+                model,
+                reasoningEffort,
+                latencyMode,
+                ...submission.extras,
+              },
+              {
+                targetSandboxId: submission.options.targetSandboxId,
+                workingDir: submission.options.workingDir,
+                omitWorkspaceResources: submission.omitWorkspaceResources,
+                expectedNewSessionDraftRevision: flushed.revision,
+              },
+            );
+            if (!created) return null;
+            return {
+              sessionId: created.id,
+              settleDraft: async () => {
+                const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+                if (acknowledged?.kind === "consumed") {
+                  setMessage("");
+                  setDraft(emptySessionDraft());
+                  attachments.removeReadyFiles(
+                    submittedResources.flatMap((resource) =>
+                      resource.kind === "file" ? [resource.fileId] : [],
+                    ),
+                  );
+                } else if (
+                  !acknowledged ||
+                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                ) {
+                  const preserved = await newSessionDraft.flush();
+                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                    return false;
+                  }
                 }
-              }
-              return true;
-            },
-          };
-        },
-        navigate: async (sessionId) => {
-          await navigate({
-            to: "/workspaces/$workspaceId/sessions/$sessionId",
-            params: { workspaceId, sessionId },
-            search: realtimeModel ? { realtime: realtimeModel } : {},
-          });
-        },
+                return true;
+              },
+            };
+          },
+          navigate: async (sessionId) => {
+            const search: ComposerLaunchSearch = {
+              ...(model ? { model } : {}),
+              ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+              ...(latencyMode ? { latency: latencyMode } : {}),
+              ...(realtimeModel ? { realtime: realtimeModel } : {}),
+            };
+            await navigate({
+              to: "/workspaces/$workspaceId/sessions/$sessionId",
+              params: { workspaceId, sessionId },
+              search,
+            });
+          },
+        });
+      } finally {
+        setSubmitting(false);
+      }
+    },
+  );
+
+  // URL launch: ?model=&effort=&latency= prefill the composer; +?realtime= also
+  // creates a realtime-first session and autostarts voice on the session page.
+  // Wait for the durable new-session draft so remote hydrate cannot stomp the
+  // URL policy after we apply it.
+  const launchModel = launch.model;
+  const launchEffort = launch.effort;
+  const launchLatency = launch.latency;
+  const launchRealtime = launch.realtime;
+  const launchKey = composerLaunchSearchKey(launch);
+  const handledLaunchKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!launchKey || handledLaunchKeyRef.current === launchKey) return;
+    if (newSessionDraft.loading || newSessionDraft.conflict !== null) return;
+    if (launchModel) setModel(launchModel);
+    if (launchEffort) setReasoningEffort(launchEffort);
+    if (launchLatency) setLatencyMode(launchLatency);
+    if (!launchRealtime) {
+      handledLaunchKeyRef.current = launchKey;
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId },
+        search: {},
+        replace: true,
       });
-    } finally {
-      setSubmitting(false);
+      return;
     }
-  };
+    if (busy || !computeReady || !context.workspaceMcpCatalogReady || attachments.hasUnresolved) {
+      return;
+    }
+    handledLaunchKeyRef.current = launchKey;
+    void submitNewSession(launchRealtime, {
+      model: launchModel,
+      effort: launchEffort,
+      latency: launchLatency,
+    }).then((ok) => {
+      if (!ok) handledLaunchKeyRef.current = null;
+    });
+  }, [
+    attachments.hasUnresolved,
+    busy,
+    computeReady,
+    context.workspaceMcpCatalogReady,
+    launchEffort,
+    launchLatency,
+    launchModel,
+    launchRealtime,
+    launchKey,
+    navigate,
+    newSessionDraft.conflict,
+    newSessionDraft.loading,
+    setLatencyMode,
+    setModel,
+    setReasoningEffort,
+    submitNewSession,
+    workspaceId,
+  ]);
 
   // The session does not exist yet, so this surface cannot use `useComposer`
   // (that hook sends to a session). It still renders the package ChatComposer
