@@ -29,8 +29,6 @@ function account(
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
-    connectorNamespaces: null,
-    connectorsCheckedAt: null,
     activeLeaseCount: 0,
     selectionCount: 0,
     lastSelectedAt: null,

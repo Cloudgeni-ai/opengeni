@@ -12,7 +12,7 @@ page exists so you pick the right one in one read.
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Default-on download-materialization surface selected through the `files` server ref; an explicit API policy may omit it | Caller's bearer with `files:read` | An agent needs a short-lived download URL for a ready file, including an original file identified by document search |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Admin-supplied headers, encrypted, write-only | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Encrypted write-only headers or a non-secret opaque `connectionRef` resolved by the standalone/host broker | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
-| **Codex Apps MCP** | Deployment enables the registry; workspace-default or explicit session policy selects it | Workspace-default sessions receive it as an optional MCP; explicit/fixed sessions see it only when selected | Workspace's Codex tokens, resolved independently from visibility | A Codex-backed session should use connected ChatGPT apps without silently widening an exact tool allowlist |
+| **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
 
 First-party OpenGeni MCP memory tools:
 
@@ -50,11 +50,50 @@ includes Files, but an explicit API/embedding policy may omit it.
 
 Codex Apps follows that same separation. Enabling
 `OPENGENI_CODEX_CONNECTED_APPS_ENABLED` registers `codex_apps` as a selectable
-runtime MCP; it does not bypass the durable session tool policy. Omitted
-session tools use the workspace default and include it as optional. Explicit
-and inherited-fixed policies remain exact. A usable Codex credential is
-still required at call time, but authentication never changes which tools the
-model is allowed to see.
+runtime MCP only for workspaces with one explicit, currently authorized Apps
+credential designation; the flag alone exposes no executable tools. Omitted
+session tools use the workspace default and include it as optional. Explicit and
+inherited-fixed policies remain exact. A null designation means no Apps server
+and there is no active-credential, pinned-credential, allocator, or static-header
+fallback.
+
+Inference and Apps authority are deliberately unrelated. The designated Apps
+credential works with compatible Codex or non-Codex inference and remains usable
+when every inference subscription is quota-exhausted, cooled down, allocator-
+disabled, unpinned, or leased elsewhere. Only the current human owner of an
+active connected credential may designate it, and that human must currently
+hold `connections:write` (workspace-admin scope satisfies it). Any managed human
+with that scope may clear the designation without owning the credential. Bearer,
+agent, scheduled, and service identities cannot perform either mutation. Every
+Apps request rechecks the exact designation, connection status, owner membership,
+and owner permission immediately before resolving/sending credentials. Reconnect
+never changes a credential's owner; disconnect clears the designation and audit
+event atomically. Visibility still obeys the session tool policy independently.
+Codex Apps is not proxied into Toolspace: its per-request designated-owner check
+and connector-wire sanitizer remain on the direct model MCP path, so sandbox code
+cannot accidentally receive a static or weaker version of the same authority.
+
+### Codex Apps designation parity verdict
+
+- **Pelle/MCP:** the designated credential powers the direct model MCP. There is
+  deliberately no Pelle mutation tool for choosing or clearing a human-owned
+  credential; those actions require a same-origin managed-human browser session.
+- **Search and command navigation:** this workspace setting is not indexed domain
+  content. The existing Workspace settings route is its navigation surface; no
+  separate command-palette action is warranted.
+- **Event spine:** designation, clear, and disconnect-clear write secret-free audit
+  events in the same transaction. They do not create session-history events or
+  notifications because they are workspace configuration, not conversation work.
+- **Mobile:** there is no native OpenGeni administration surface. The responsive
+  Workspace settings card is the supported mobile web surface.
+- **Permissions and SDK:** REST and SDK mutations enforce the same
+  `connections:write` managed-human boundary; enable additionally requires exact
+  credential ownership, while disable does not.
+- **Export and public links:** neither plane exposes credential selection or token
+  material. Workspace state export remains unchanged.
+- **Legal/processing scope:** this reuses the existing user-authorized ChatGPT
+  connection and existing Apps destination. It adds no personal-data category,
+  purpose, recipient, retention behavior, or additional owner field.
 
 Docs MCP also has a `memory_search`, but it is the curated documents surface, not
 the first-party turn tool. It now reads both `active` and `approved` memory records

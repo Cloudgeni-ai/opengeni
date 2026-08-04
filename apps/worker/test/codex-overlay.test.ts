@@ -128,11 +128,11 @@ describe("withCodexProvider", () => {
 });
 
 describe("withCodexAppsMcpServer", () => {
-  // Registration is deployment-controlled. Session policy controls visibility,
-  // while credentials independently control whether calls authenticate.
+  // Registration requires both deployment enablement and an active workspace
+  // designation. Session policy independently controls visibility.
   test("appends exactly one codex_apps entry with the right metadata and NO headers", () => {
     const settings = testSettings({ codexConnectedAppsEnabled: true, mcpServers: [] });
-    const result = settingsWithCodexAppsMcpServer(settings);
+    const result = settingsWithCodexAppsMcpServer(settings, true);
     const apps = result.mcpServers.filter((s) => s.id === "codex_apps");
     expect(apps).toHaveLength(1);
     const entry = apps[0]!;
@@ -146,8 +146,9 @@ describe("withCodexAppsMcpServer", () => {
   test("is idempotent — a second call does not double-inject", () => {
     const once = settingsWithCodexAppsMcpServer(
       testSettings({ codexConnectedAppsEnabled: true, mcpServers: [] }),
+      true,
     );
-    const twice = settingsWithCodexAppsMcpServer(once);
+    const twice = settingsWithCodexAppsMcpServer(once, true);
     expect(twice).toBe(once); // same reference, no change
     expect(twice.mcpServers.filter((s) => s.id === "codex_apps")).toHaveLength(1);
   });
@@ -159,7 +160,7 @@ describe("withCodexAppsMcpServer", () => {
         { id: "opengeni", name: "OpenGeni", url: "http://x/mcp", cacheToolsList: false },
       ],
     });
-    const result = settingsWithCodexAppsMcpServer(settings);
+    const result = settingsWithCodexAppsMcpServer(settings, true);
     const ids = result.mcpServers.map((s) => s.id);
     expect(ids).toContain("opengeni");
     expect(ids).toContain("codex_apps");
@@ -167,7 +168,12 @@ describe("withCodexAppsMcpServer", () => {
 
   test("is a no-op when connected apps are disabled", () => {
     const settings = testSettings({ codexConnectedAppsEnabled: false, mcpServers: [] });
-    expect(settingsWithCodexAppsMcpServer(settings)).toBe(settings);
+    expect(settingsWithCodexAppsMcpServer(settings, true)).toBe(settings);
+  });
+
+  test("is a no-op without a workspace-designated Apps credential", () => {
+    const settings = testSettings({ codexConnectedAppsEnabled: true, mcpServers: [] });
+    expect(settingsWithCodexAppsMcpServer(settings, false)).toBe(settings);
   });
 
   test("uses workspace defaults without widening explicit session policies", () => {
@@ -188,7 +194,7 @@ describe("withCodexAppsMcpServer", () => {
         },
       ],
     });
-    const runtimeSettings = settingsWithCodexAppsMcpServer(settings);
+    const runtimeSettings = settingsWithCodexAppsMcpServer(settings, true);
     const defaultRefs = enabledCapabilityMcpToolRefs(settings, runtimeSettings);
     expect(defaultRefs).toEqual([{ kind: "mcp", id: "codex_apps", optional: true }]);
 

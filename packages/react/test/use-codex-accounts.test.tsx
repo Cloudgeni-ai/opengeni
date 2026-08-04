@@ -34,6 +34,8 @@ function account(id: string, over: Partial<CodexAccount> = {}): CodexAccount {
     active: id === "a",
     allocatorEnabled: true,
     allocatorVersion: 1,
+    appsDesignated: false,
+    canEnableApps: false,
     ...over,
   };
 }
@@ -42,9 +44,16 @@ function response(accounts: CodexAccount[]): CodexAccountsResponse {
   return {
     accounts,
     activeAccountId: "a",
+    apps: {
+      available: true,
+      credentialId: null,
+      version: 0,
+      designatedAt: null,
+      canDisable: false,
+    },
     settings: {
       rotationEnabled: false,
-      rotationStrategy: "most_remaining",
+      rotationStrategy: "sharded",
       activeCredentialId: "a",
     },
   };

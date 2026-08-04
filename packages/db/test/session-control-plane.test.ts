@@ -287,7 +287,6 @@ describe("clean session control plane", () => {
         turnId: turn!.id,
         expectedExecutionGeneration: turn!.executionGeneration,
         expectedAttemptId: attemptId,
-        producerCodexCredentialId: "11111111-1111-4111-8111-111111111111",
         items: [
           {
             position: nextPosition,
@@ -318,6 +317,14 @@ describe("clean session control plane", () => {
       }),
     ).toBe(true);
 
+    const written = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).filter((row) => row.position >= nextPosition);
+    const opaqueIds = written
+      .filter((row) => row.item.type === "reasoning" || row.item.type === "compaction")
+      .map((row) => row.id);
+    expect(opaqueIds).toHaveLength(2);
+
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -325,7 +332,7 @@ describe("clean session control plane", () => {
       attemptId,
       reason: "encrypted_content_rejected",
       providerArtifactInvalidation: {
-        codexCredentialId: "11111111-1111-4111-8111-111111111111",
+        historyItemIds: opaqueIds,
         reason: "encrypted_content_rejected",
       },
     });
@@ -371,6 +378,27 @@ describe("clean session control plane", () => {
       { attemptId },
     );
     expect(turn).not.toBeNull();
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const nextPosition = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          {
+            position: nextPosition,
+            item: { type: "reasoning", summary: [{ type: "summary_text", text: "plain" }] },
+          },
+        ],
+      }),
+    ).toBe(true);
+    const nonOpaqueId = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).find((row) => row.position === nextPosition)!.id;
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -378,7 +406,7 @@ describe("clean session control plane", () => {
       attemptId,
       reason: "encrypted_content_rejected",
       providerArtifactInvalidation: {
-        codexCredentialId: "11111111-1111-4111-8111-111111111111",
+        historyItemIds: [nonOpaqueId],
         reason: "encrypted_content_rejected",
       },
     });
@@ -418,11 +446,19 @@ describe("clean session control plane", () => {
         turnId: turn!.id,
         expectedExecutionGeneration: turn!.executionGeneration,
         expectedAttemptId: attemptId,
-        serializedRunState: JSON.stringify({ history: [{ type: "reasoning" }] }),
+        serializedRunState: JSON.stringify({
+          originalInput: [
+            {
+              type: "reasoning",
+              providerData: { encrypted_content: "opaque-run-state" },
+            },
+          ],
+        }),
         pendingApprovals: [],
-        frozenCodexCredentialId: "11111111-1111-4111-8111-111111111111",
       }),
     ).toBe(true);
+    const frozen = await getLatestRunState(client.db, grant.workspaceId!, session.id);
+    expect(frozen).not.toBeNull();
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -431,7 +467,8 @@ describe("clean session control plane", () => {
       attemptId,
       reason: "encrypted_content_rejected",
       providerArtifactInvalidation: {
-        codexCredentialId: "11111111-1111-4111-8111-111111111111",
+        historyItemIds: [],
+        runStateId: frozen!.id,
         reason: "encrypted_content_rejected",
       },
     });

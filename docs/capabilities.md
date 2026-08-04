@@ -29,10 +29,15 @@ a separate function-tool output event.
 MCP tool refs are strict by default. A newly submitted bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails the turn. A client or pack can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning. Persisted refs have a separate turn-time safety rule: if a previously valid server is later disconnected, disabled, or removed from the runtime registry, OpenGeni preserves that selection in the session's effective-policy audit projection but omits it from executable tools for the turn. The model receives a bounded system notice naming the unavailable server and must not claim to have read or updated it, so one disappearing integration cannot trap every later chat turn in an `Unknown MCP server id` failure loop.
 
 The deployment-provided `codex_apps` registry follows the same durable policy
-when connected apps are enabled. Workspace-default sessions receive it as an
-optional MCP. Explicit and inherited fixed policies include it only when
-selected. Codex authentication is resolved separately and never widens the
-model-visible tool policy.
+only when connected apps are enabled and the workspace has one explicit,
+currently authorized Apps credential designation. Workspace-default sessions
+receive it as an optional MCP. Explicit and inherited fixed policies include it
+only when selected. No designation means no Apps server and no credential
+fallback. Apps authentication is independent of the inference model,
+subscription, quota, allocator, rotation, pin, lease, and cooldown, and it never
+widens the model-visible tool policy. Runtime authorization is rechecked before
+each Apps request; ownership and mutation rules are detailed in
+[`mcp-surfaces.md`](mcp-surfaces.md).
 
 ### Credential headers
 
