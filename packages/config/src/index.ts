@@ -368,7 +368,7 @@ const SettingsSchema = z.object({
     .number()
     .int()
     .positive()
-    .max(100 * 1024 * 1024)
+    .max(25 * 1024 * 1024)
     .default(25 * 1024 * 1024),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Codex subscription STT is preferred by default when subscription routing is

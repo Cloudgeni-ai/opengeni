@@ -49,12 +49,41 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
-export { useVoiceInput } from "./hooks/use-voice-input";
+export {
+  VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
+  VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS,
+  VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
+  VOICE_RECORDING_TIMESLICE_MILLISECONDS,
+  useVoiceInput,
+} from "./hooks/use-voice-input";
 export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
   VoiceInputStatus,
 } from "./hooks/use-voice-input";
+export {
+  IndexedDbVoiceRecordingStore,
+  VoiceRecordingChunkConflictError,
+  VoiceRecordingChunkSequenceError,
+  VoiceRecordingNotFoundError,
+  VoiceRecordingOwnedError,
+  VoiceRecordingStorageUnavailableError,
+  createVoiceRecordingManifest,
+  planVoiceRecordingChunkCommit,
+  prepareVoiceRecordingChunk,
+} from "./voice-recording-store";
+export type {
+  PersistVoiceRecordingChunkInput,
+  PersistVoiceRecordingChunkResult,
+  VoiceRecordingCaptureState,
+  VoiceRecordingChunk,
+  VoiceRecordingChunkUploadState,
+  VoiceRecordingFinalizationState,
+  VoiceRecordingManifest,
+  VoiceRecordingStore,
+  VoiceRecordingTranscriptionState,
+  VoiceRecordingUploadState,
+} from "./voice-recording-store";
 export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,

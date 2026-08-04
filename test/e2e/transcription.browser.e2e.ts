@@ -159,7 +159,40 @@ describe("native composer voice-input browser acceptance", () => {
     await context.close();
   });
 
-  test("permission denial preserves the draft and Escape cancels a hanging upload", async () => {
+  test("reload recovers a timesliced recording without reopening the microphone", async () => {
+    const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/transcription.html?theme=dark`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Start voice input" }).click();
+    await page.waitForFunction(
+      () => document.documentElement.dataset.transcriptionChunkEmitted === "true",
+    );
+    expect(await page.evaluate(() => document.documentElement.dataset.transcriptionTimeslice)).toBe(
+      "5000",
+    );
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.transcriptionMicRequests),
+    ).toBe("1");
+
+    await page.reload({ waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Retry voice input" }).waitFor();
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.transcriptionMicRequests),
+    ).toBeUndefined();
+    await page.getByRole("button", { name: "Retry voice input" }).click();
+    await page.waitForFunction(
+      () => document.documentElement.dataset.transcriptionUpload === "completed",
+    );
+    expect(await page.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
+      "Existing editable draft fixture transcript",
+    );
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.transcriptionMicRequests),
+    ).toBeUndefined();
+    await context.close();
+  });
+
+  test("permission denial preserves the draft and Escape retains a hanging upload", async () => {
     const context = await browser.newContext({
       viewport: { width: 375, height: 812 },
       hasTouch: true,
@@ -188,7 +221,8 @@ describe("native composer voice-input browser acceptance", () => {
       () => document.documentElement.dataset.transcriptionUpload === "started",
     );
     await hanging.keyboard.press("Escape");
-    await hanging.getByRole("button", { name: "Start voice input" }).waitFor();
+    await hanging.getByRole("button", { name: "Retry voice input" }).waitFor();
+    expect(await hanging.getByRole("button", { name: "Discard saved recording" }).count()).toBe(1);
     expect(await hanging.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft",
     );
