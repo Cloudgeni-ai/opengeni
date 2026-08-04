@@ -17117,6 +17117,18 @@ async function lockSessionCreateIdempotencyKey(
   );
 }
 
+async function lockAgentSessionCreate(tx: Database, input: SessionCreateInput): Promise<void> {
+  const actorSessionId = input.createdByActor?.sessionId;
+  if (!actorSessionId) return;
+  // Agent-originated child creation first reads the parent under FOR SHARE,
+  // then verifies the live attempt under FOR UPDATE. Serialize creates from
+  // the same parent session so concurrent tool calls cannot deadlock while
+  // upgrading that row lock. Unrelated sessions retain full concurrency.
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`agent-session-create:${input.workspaceId}:${actorSessionId}`}, 0))`,
+  );
+}
+
 async function existingSpawnDenialForKey(
   tx: Database,
   workspaceId: string,
@@ -17221,6 +17233,8 @@ async function createSessionInTransaction(
       };
     }
   }
+
+  await lockAgentSessionCreate(tx, input);
 
   const decision = await resolveSessionDepthDecision(tx, input, id, workspace, deploymentPolicy);
   if (decision.denied) {

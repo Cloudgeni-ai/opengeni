@@ -2,10 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   createSessionWithIdempotencyKeyResult,
   getSessionSpawnDenialByIdempotencyKey,
+  initializeSessionStartAtomically,
   type DbClient,
   type Database,
   type SessionCreateResult,
@@ -107,6 +109,53 @@ describe("nested-agent depth database admission", () => {
       nestedAgentDepthPolicySource: "default",
       nestedAgentDepthPolicySessionId: null,
     });
+  }, 60_000);
+
+  test("serializes parallel agent child creation without a parent lock upgrade deadlock", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("db parallel agent child creation");
+    const parent = await createSession(db, sessionInput(workspace, "parent"));
+    const started = await initializeSessionStartAtomically(db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      sessionId: parent.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    if (!started.turn) throw new Error("missing parent turn");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspace.workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("parent turn was not claimed");
+    const createdByActor = {
+      type: "agent_attempt" as const,
+      sessionId: parent.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    };
+
+    const children = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        createSession(
+          db,
+          sessionInput(workspace, `child ${index}`, {
+            parentSessionId: parent.id,
+            createdByActor,
+          }),
+        ),
+      ),
+    );
+
+    expect(new Set(children.map((child) => child.id)).size).toBe(12);
+    expect(children.every((child) => child.parentSessionId === parent.id)).toBe(true);
+    expect(children.every((child) => child.nestedAgentDepth === 1)).toBe(true);
   }, 60_000);
 
   test("records one keyed denial without creating a session or child artifacts", async () => {
