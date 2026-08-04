@@ -9,8 +9,17 @@ import {
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { DropdownMenu } from "radix-ui";
-import { useEffect, useMemo, useState, type ReactNode, type SVGProps } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+  type SVGProps,
+} from "react";
 import { cn } from "../lib/cn";
+import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
   coerceReasoningEffortForModel,
   effortOptionsForModel,
@@ -72,12 +81,21 @@ export type ModelPolicyPickerProps = {
   disabled?: boolean | undefined;
   loading?: boolean | undefined;
   error?: string | null | undefined;
+  /** Controlled menu state. Omit for the built-in uncontrolled behavior. */
+  open?: boolean | undefined;
+  /** Initial menu state when `open` is uncontrolled. */
+  defaultOpen?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
   /** Non-Codex models stay visible but cannot be selected. */
   codexOnly?: boolean | undefined;
   /** Resets drill-down navigation when the session scope changes. */
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */
   menuSide?: "top" | "bottom" | undefined;
+  /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */
+  contentClassName?: string | undefined;
+  /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
+  contentStyle?: CSSProperties | undefined;
   className?: string | undefined;
   messages?: Partial<ModelPolicyPickerMessages> | undefined;
   onModelChange: (modelId: string) => void;
@@ -225,17 +243,19 @@ export function PickerNavRow(props: {
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-2.5 py-2 text-left text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
       {props.icon}
       <span className="min-w-0 flex-1">
-        <span className={cn("block truncate text-sm", props.active && "font-medium")}>
+        <span className={cn("block truncate text-og-menu", props.active && "font-medium")}>
           {props.label}
         </span>
         {props.hint ? (
-          <span className="mt-0.5 block truncate text-xs text-og-fg-subtle">{props.hint}</span>
+          <span className="mt-0.5 block truncate text-og-control text-og-fg-subtle">
+            {props.hint}
+          </span>
         ) : null}
       </span>
       {props.trailing ? <span className="ml-auto shrink-0">{props.trailing}</span> : null}
@@ -262,7 +282,7 @@ export function PickerBackHeader(props: {
       >
         <ChevronLeftIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
         {props.icon}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{props.label}</span>
+        <span className="min-w-0 flex-1 truncate text-og-menu font-medium">{props.label}</span>
       </button>
       {props.trailing ? <div className="relative z-10 shrink-0">{props.trailing}</div> : null}
     </div>
@@ -352,9 +372,9 @@ export function ModelPolicyPickerMenu(
 
   let body: ReactNode;
   if (props.loading) {
-    body = <p className="px-2 py-3 text-xs text-og-fg-subtle">{messages.loading}</p>;
+    body = <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.loading}</p>;
   } else if (groups.length === 0) {
-    body = <p className="px-2 py-3 text-xs text-og-fg-subtle">{messages.noModels}</p>;
+    body = <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.noModels}</p>;
   } else if (effectiveNav.level === "providers") {
     body = (
       <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
@@ -449,11 +469,11 @@ export function ModelPolicyPickerMenu(
             ) : null
           }
         />
-        <p className="px-2.5 pt-1 pb-1 text-xs font-medium tracking-wide text-og-fg-subtle uppercase">
+        <p className="px-2.5 pt-1 pb-1 text-og-control font-medium tracking-wide text-og-fg-subtle uppercase">
           {messages.thinking}
         </p>
         {focusModel.catalog.capabilities?.inputModalities.includes("image") === false ? (
-          <p className="px-2.5 pb-1.5 text-xs leading-relaxed text-og-fg-subtle">
+          <p className="px-2.5 pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
             Unsupported attachments stay in the session but are hidden from this model.
           </p>
         ) : null}
@@ -467,7 +487,7 @@ export function ModelPolicyPickerMenu(
                 disabled={!focusModel.selectable}
                 onClick={() => selectEffort(focusModel, effort)}
                 className={cn(
-                  "flex h-8 w-full cursor-pointer items-center rounded-og-sm px-2.5 text-left text-sm text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+                  "flex h-[var(--og-model-picker-effort-height)] w-full cursor-pointer items-center rounded-og-sm px-[var(--og-model-picker-row-padding-x)] text-left text-og-menu text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
                   selected && "bg-og-surface-2",
                 )}
               >
@@ -504,7 +524,7 @@ export function ModelPolicyPickerMenu(
   return (
     <div data-testid="model-picker-menu" className="relative overflow-hidden">
       {props.error ? (
-        <p className="px-2 py-1 text-xs text-og-status-failed" role="alert">
+        <p className="px-2 py-1 text-og-control text-og-status-failed" role="alert">
           {props.error}
         </p>
       ) : null}
@@ -516,7 +536,14 @@ export function ModelPolicyPickerMenu(
 }
 
 export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(props.defaultOpen ?? false);
+  const open = props.open ?? uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    if (props.open === undefined) setUncontrolledOpen(next);
+    props.onOpenChange?.(next);
+  };
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const portalStyle = usePortalTokenStyle(triggerRef);
   const messages = useMemo(
     () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
     [props.messages],
@@ -541,11 +568,12 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>
       <DropdownMenu.Trigger asChild>
         <button
+          ref={triggerRef}
           type="button"
           disabled={props.disabled}
           aria-label={messages.label}
           className={cn(
-            "inline-flex h-8 min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-xs text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-7 max-sm:max-w-[7.5rem] max-sm:px-2",
+            "og-root inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-[var(--og-model-picker-trigger-height-mobile)] max-sm:max-w-[7.5rem] max-sm:px-2",
             props.className,
           )}
         >
@@ -580,7 +608,12 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           sideOffset={8}
           collisionPadding={12}
           onCloseAutoFocus={(event) => event.preventDefault()}
-          className="z-50 flex max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] w-72 max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-1.5 text-og-fg shadow-og-lg"
+          className={cn(
+            "og-root z-50 flex max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] w-[var(--og-model-picker-menu-width)] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-[var(--og-model-picker-menu-padding)] text-og-fg shadow-og-lg",
+            props.contentClassName,
+          )}
+          style={{ ...portalStyle, ...props.contentStyle }}
+          data-testid="model-picker-content"
         >
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
             <ModelPolicyPickerMenu {...props} nav={nav} onNavChange={setNav} />

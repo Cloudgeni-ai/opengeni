@@ -1183,7 +1183,7 @@ export function MessageTimeline({
                     <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
                       {groups.length === 0
                         ? (emptyState ?? (
-                            <p className="py-10 text-center text-sm text-og-fg-subtle">
+                            <p className="py-10 text-center text-og-menu text-og-fg-subtle">
                               No activity yet.
                             </p>
                           ))
@@ -1270,7 +1270,7 @@ export function MessageTimeline({
                         className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
                       >
                         {loadingOlder || loadingOldest ? (
-                          <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                          <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
                             <span className="og-shimmer-text">
                               {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
                             </span>
@@ -1317,7 +1317,7 @@ export function MessageTimeline({
                             }}
                             className={cn(
                               "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                              "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                              "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                               "hover:border-og-border-strong disabled:opacity-60",
                             )}
                           >
@@ -1339,7 +1339,7 @@ export function MessageTimeline({
                         aria-live="polite"
                         className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
                       >
-                        <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                        <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
                           <span className="og-shimmer-text">Loading later activity…</span>
                         </span>
                       </motion.div>
@@ -1397,7 +1397,7 @@ export function MessageTimeline({
                         className={cn(
                           "absolute bottom-4 left-1/2 -translate-x-1/2",
                           "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                          "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                          "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                           "hover:border-og-border-strong",
                         )}
                       >
@@ -1541,7 +1541,7 @@ class TimelineGroupRenderBoundary extends Component<
         <div
           data-testid="timeline-group-render-error"
           role="status"
-          className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-sm text-og-fg-muted"
+          className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
         >
           <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
           <div>
@@ -2505,12 +2505,12 @@ function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][
     <div className="flex min-w-0 items-start gap-2.5">
       <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
       <div className="min-w-0 flex-1">
-        <span className="text-xs font-medium text-og-fg-muted">
+        <span className="text-og-control font-medium text-og-fg-muted">
           {MACHINE_INPUT_META[member.kind]}
         </span>
-        {source && <span className="ml-1.5 text-xs text-og-fg-subtle">from {source}</span>}
+        {source && <span className="ml-1.5 text-og-control text-og-fg-subtle">from {source}</span>}
         {summary ? (
-          <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-og-fg">
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-og-menu leading-5 text-og-fg">
             {truncate(summary, 320)}
           </p>
         ) : null}
@@ -2531,7 +2531,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
     <div
       className={cn(
         enter && "animate-og-enter",
-        "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-sm",
+        "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-og-menu",
         tone,
       )}
       role="status"
@@ -2542,7 +2542,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       <div className="min-w-0 flex-1">
         <span className="whitespace-pre-wrap break-words">{item.text}</span>
         {item.details ? (
-          <details className="mt-2 text-xs">
+          <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
               {JSON.stringify(item.details.value, null, 2)}
@@ -2552,7 +2552,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       </div>
       {item.action ? (
         <a
-          className="shrink-0 rounded-og-sm border border-current/25 px-2 py-1 text-xs font-medium hover:bg-current/10"
+          className="shrink-0 rounded-og-sm border border-current/25 px-2 py-1 text-og-control font-medium hover:bg-current/10"
           href={item.action.url}
           rel="noreferrer"
           target="_blank"
@@ -2631,7 +2631,7 @@ function AuthNeededRow({
             onClick={() => void start()}
             disabled={busy}
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
               "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
             )}
           >
@@ -2644,7 +2644,7 @@ function AuthNeededRow({
             rel="noreferrer"
             target="_blank"
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
               "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
             )}
           >
@@ -2683,7 +2683,7 @@ function AuthProviderLogo({ src, label }: { src: string | null; label: string })
   const showImage = src && !failed;
   return (
     <span
-      className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-sm font-semibold text-og-fg-muted"
+      className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-og-menu font-semibold text-og-fg-muted"
       aria-hidden
     >
       {showImage ? (

@@ -72,11 +72,6 @@ body {
   gap: 14px;
 }
 
-.northstar-agent-copy {
-  font-size: 13px;
-  line-height: 1.6;
-}
-
 .northstar-agent-copy p,
 .northstar-agent-copy li {
   line-height: 1.6;

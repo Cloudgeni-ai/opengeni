@@ -22,6 +22,10 @@ integration as a clear before/after:
 8. The session composer also includes the provider-neutral realtime voice control
    from `@opengeni/react/realtime`; this workspace exposes Codex Live as the
    available voice model.
+9. The panel uses the SDK's `data-og-density="compact"` preset. Typography,
+   composer sizing, picker geometry, and the portalled picker/voice menus all
+   come from public `--og-*` tokens; the demo only supplies Northstar colors and
+   product-specific layout.
 
 The demo deliberately exposes four tools over the selected ticket: `get_ticket`,
 `get_customer`, `update_ticket`, and `add_internal_note`. Mutations are

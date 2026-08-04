@@ -837,7 +837,7 @@ export const Surface = forwardRef<HTMLDivElement, ComposerSurfaceProps>(function
           aria-hidden
           className={cn(
             "pointer-events-none absolute inset-0 z-10 flex items-center justify-center",
-            "rounded-og-lg bg-og-surface-1/85 text-sm font-medium text-og-accent backdrop-blur-[1px]",
+            "rounded-og-lg bg-og-surface-1/85 text-og-menu font-medium text-og-accent backdrop-blur-[1px]",
           )}
         >
           <span className="inline-flex items-center gap-2">
@@ -957,7 +957,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
         paletteOpen ? `${controller.listboxId}-option-${controller.palette.highlight}` : undefined
       }
       className={cn(
-        "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-base leading-6 md:px-4 md:text-og-md",
+        "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-og-composer md:px-4 md:text-og-composer-wide",
         "text-og-fg placeholder:text-og-fg-subtle focus:outline-none focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-60",
         className,
@@ -1262,7 +1262,7 @@ export function Status() {
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             className={cn(
-              "overflow-hidden px-1 pt-1.5 text-xs",
+              "overflow-hidden px-1 pt-1.5 text-og-control",
               controller.activeNotice.tone === "ok" ? "text-og-fg-muted" : "text-og-status-failed",
             )}
           >
