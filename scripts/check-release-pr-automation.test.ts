@@ -1415,6 +1415,42 @@ describe("release head retention recovery", () => {
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
+  test("accepts successful exact retention projections from one check suite", async () => {
+    const fixture = recoverySealFixture();
+    const options = {
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+    await recoverReleaseHeadEvidence(options);
+    const retentionCheck = fixture.checks.find(
+      (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    );
+    expect(retentionCheck).toBeDefined();
+    Object.assign(retentionCheck!, { check_suite: { id: 123 } });
+    fixture.checks.push({
+      ...retentionCheck,
+      id: Number(retentionCheck?.id) + 1,
+      check_suite: { id: 123 },
+    });
+    fixture.requests.length = 0;
+
+    await expect(recoverReleaseHeadEvidence(options)).resolves.toBeDefined();
+    expect(
+      fixture.checks.filter(
+        (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+      ),
+    ).toHaveLength(2);
+    expect(
+      fixture.requests.filter(
+        (request) =>
+          request.method === "PATCH" &&
+          request.body?.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+      ),
+    ).toHaveLength(0);
+  });
+
   test("rejects duplicate exact retention checks for an exact retained pair before mutation", async () => {
     const fixture = recoverySealFixture();
     const options = {
