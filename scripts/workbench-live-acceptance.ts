@@ -2100,7 +2100,33 @@ export async function selectTreeFile(page: Page, directory: string, file: string
   if ((await directoryItem.getAttribute("aria-expanded")) !== "true") {
     await directoryButton.click();
   }
-  await page.getByRole("treeitem").filter({ hasText: file }).first().getByRole("button").click();
+
+  // The Files tree is virtualized: an expanded directory can truthfully contain
+  // a file whose row is not mounted until keyboard navigation scrolls it into
+  // view. Prefer the direct click when the row is already visible, then exercise
+  // the tree's public composite-keyboard contract instead of assuming every
+  // logical row permanently exists in the DOM.
+  const fileItem = page.getByRole("treeitem").filter({ hasText: file }).first();
+  if (await fileItem.isVisible()) {
+    await fileItem.getByRole("button").click();
+    return;
+  }
+
+  const tree = page.getByRole("tree").first();
+  await tree.focus();
+  await tree.press("Home");
+  for (let index = 0; index < 4_096; index += 1) {
+    const activeId = await tree.getAttribute("aria-activedescendant");
+    if (!activeId) throw new Error("file tree has no active descendant");
+    const activeItem = page.locator(`[id=${JSON.stringify(activeId)}]`);
+    await activeItem.waitFor({ state: "visible", timeout: 2_000 });
+    if ((await activeItem.getByText(file, { exact: true }).count()) > 0) {
+      await tree.press("Enter");
+      return;
+    }
+    await tree.press("ArrowDown");
+  }
+  throw new Error(`file tree did not expose ${directory}/${file}`);
 }
 
 async function assertColdReview(page: Page, marker: string): Promise<void> {
