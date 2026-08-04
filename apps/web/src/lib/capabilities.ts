@@ -5,6 +5,7 @@ import type {
   ConnectionMetadata,
   ConnectionOwnership,
   CreateCapabilityInput,
+  SocialConnection,
 } from "@/types";
 
 export type CapabilityFilter = "all" | CapabilityKind;
@@ -199,10 +200,17 @@ export type RequiredHeaderField = {
 
 export type CapabilityConnectPlan =
   | { mode: "enable" }
+  | { mode: "social_oauth"; provider: "x" | "reddit" }
   | { mode: "oauth"; providerDomain: string; mcpUrl: string | null }
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
+  if (item.surfaceType === "first_party_social") {
+    const provider = stringValue(item.metadata.provider);
+    if (provider === "x" || provider === "reddit") {
+      return { mode: "social_oauth", provider };
+    }
+  }
   // Non-runtime kinds and MCPs with no auth just enable directly.
   if (item.kind !== "mcp") {
     return { mode: "enable" };
@@ -230,9 +238,27 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
 /** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */
 export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
   const plan = capabilityConnectPlan(item);
-  if (plan.mode === "oauth") return "OAuth";
+  if (plan.mode === "oauth" || plan.mode === "social_oauth") return "OAuth";
   if (plan.mode === "api_key") return "API key";
   return null;
+}
+
+export function preferredSocialConnection(
+  connections: SocialConnection[],
+  provider: "x" | "reddit",
+): SocialConnection | null {
+  const statusRank = (status: SocialConnection["status"]): number =>
+    status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
+  return (
+    connections
+      .filter((connection) => connection.provider === provider)
+      .sort(
+        (left, right) =>
+          statusRank(left.status) - statusRank(right.status) ||
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          left.id.localeCompare(right.id),
+      )[0] ?? null
+  );
 }
 
 function headerField(name: string): RequiredHeaderField {

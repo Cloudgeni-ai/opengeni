@@ -4,6 +4,7 @@ import {
   isNonPublicAddress,
   pinnedFetch,
   readResponseBodyBounded,
+  readResponseJsonBounded,
   resolvePinnedDestination,
   ResponseBodyLimitError,
   validateHttpUrl,
@@ -258,13 +259,129 @@ describe("DNS-pinned outbound transport", () => {
     }
   });
 
+  test("reads a chunked response through the pinned Undici request adapter", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"resource":'));
+              controller.enqueue(new TextEncoder().encode('"https://example.test/mcp"}'));
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    });
+    try {
+      const response = await pinnedFetch(
+        `http://chunked.example.test:${server.port}/metadata`,
+        undefined,
+        testEscape,
+        {
+          dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        },
+      );
+      expect(await readResponseJsonBounded(response, 1024, "chunked metadata")).toEqual({
+        resource: "https://example.test/mcp",
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("preserves method, headers, and body through the pinned request adapter", async () => {
+    let received: { method: string; contentType: string | null; body: string } | null = null;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        received = {
+          method: request.method,
+          contentType: request.headers.get("content-type"),
+          body: await request.text(),
+        };
+        return Response.json({ registered: true });
+      },
+    });
+    try {
+      const response = await pinnedFetch(
+        `http://registration.example.test:${server.port}/clients`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: '{"client_name":"OpenGeni"}',
+        },
+        testEscape,
+        {
+          dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        },
+      );
+      expect(await readResponseJsonBounded(response, 1024, "registration response")).toEqual({
+        registered: true,
+      });
+      expect(received).toEqual({
+        method: "POST",
+        contentType: "application/json",
+        body: '{"client_name":"OpenGeni"}',
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("serializes URLSearchParams with Fetch-compatible form semantics", async () => {
+    let received: { contentType: string | null; body: string } | null = null;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        received = {
+          contentType: request.headers.get("content-type"),
+          body: await request.text(),
+        };
+        return Response.json({ exchanged: true });
+      },
+    });
+    try {
+      const response = await pinnedFetch(
+        `http://token.example.test:${server.port}/oauth/token`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code: "abc 123",
+            grant_type: "authorization_code",
+          }),
+        },
+        testEscape,
+        {
+          dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        },
+      );
+      expect(await readResponseJsonBounded(response, 1024, "token response")).toEqual({
+        exchanged: true,
+      });
+      expect(received).toEqual({
+        contentType: "application/x-www-form-urlencoded",
+        body: "code=abc+123&grant_type=authorization_code",
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("closes after body completion and destroys after cancel or stream error", async () => {
     const completed = lifecycle();
+    const sourceResponse = new Response("complete");
     const completedResponse = await pinnedFetch("https://1.1.1.1/complete", undefined, production, {
       agentFactory: () => completed.dispatcher,
-      fetchImpl: async () => new Response("complete"),
+      fetchImpl: async () => sourceResponse,
     });
     expect(await completedResponse.text()).toBe("complete");
+    expect(sourceResponse.body?.locked).toBe(false);
     expect(completed.closed).toBe(1);
     expect(completed.destroyed).toBe(0);
 
@@ -311,6 +428,25 @@ describe("DNS-pinned outbound transport", () => {
     ).rejects.toThrow("request failed");
     expect(fetchFailed.closed).toBe(0);
     expect(fetchFailed.destroyed).toBe(1);
+  });
+
+  test("body completion bounds a stalled graceful close and destroys the dispatcher", async () => {
+    let destroyed = 0;
+    const response = await pinnedFetch("https://1.1.1.1/oauth-metadata", undefined, production, {
+      agentFactory: () => ({
+        close: () => new Promise<void>(() => undefined),
+        destroy: () => {
+          destroyed += 1;
+        },
+      }),
+      fetchImpl: async () =>
+        new Response('{"issuer":"https://issuer.example.test"}', {
+          headers: { "content-type": "application/json" },
+        }),
+    });
+
+    expect(await response.json()).toEqual({ issuer: "https://issuer.example.test" });
+    expect(destroyed).toBe(1);
   });
 });
 

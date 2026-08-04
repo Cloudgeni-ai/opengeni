@@ -26,6 +26,10 @@ used only host-side; agents never see credentials, only normalized posts.
 
 ## Connecting an account
 
+In the web app, open **Capabilities → X** and choose **Connect X for workspace**.
+The catalog item uses this first-party OAuth flow and remains visibly enabled
+when the account needs reconnection, so the repair action does not disappear.
+
 `POST /v1/workspaces/:id/social/oauth/start` (workspace:admin) with
 `{"provider": "x"}` or `{"provider": "reddit"}` returns an `authorizationUrl`;
 open it in a browser and approve. The callback upserts a `social_connections`
