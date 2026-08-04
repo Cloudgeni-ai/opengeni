@@ -1,4 +1,5 @@
 export {
+  createPrivateAgentRedactor,
   createSecretRedactor,
   identityRedactor,
   isCredentialHeaderName,

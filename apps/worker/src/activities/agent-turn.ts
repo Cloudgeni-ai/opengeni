@@ -267,6 +267,7 @@ import {
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
 import {
+  createPrivateAgentRedactor,
   createSecretRedactor,
   isCredentialHeaderName,
   redactSensitiveText,
@@ -3045,7 +3046,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             persistedHistoryCount,
             nextHistoryPosition,
             modelRunSettings.modelToolOutputTruncationTokens,
-            (value) => redact(value),
+            (value) => redactPrivateAgentState(value),
           );
           const hasModelOrToolProgress = rows.some((row) =>
             isModelOrToolProgressHistoryItem(row.item),
@@ -3098,19 +3099,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     };
     // Reassigned after the variable set loads; the publish closure is
     // created (and used for turn.started) before the variableSet is available.
-    // Generic auth/cookie/signed-URL/token classification is active before any
-    // exact run-secret provenance is available. Registered values strengthen
-    // this boundary as credentials are resolved and renewed during the turn.
+    // Strict public/diagnostic redaction starts with generic credential-shape
+    // classification. Private agent state starts exact-only and gains the same
+    // registered provenance as credentials are resolved and renewed.
     let redact: (payload: unknown) => unknown = createSecretRedactor([]);
+    let redactPrivateAgentState: (payload: unknown) => unknown = createPrivateAgentRedactor([]);
     const secretRedactions = new Map<string, string>();
     const publishedRunCredentialNotices = new Set<string>();
     const registerSecretRedactions = (secrets: SecretForRedaction[]): void => {
       for (const secret of secrets) {
         if (!secretRedactions.has(secret.value)) secretRedactions.set(secret.value, secret.name);
       }
-      redact = createSecretRedactor(
-        [...secretRedactions].map(([value, name]) => ({ name, value })),
-      );
+      const registeredSecrets = [...secretRedactions].map(([value, name]) => ({ name, value }));
+      redact = createSecretRedactor(registeredSecrets);
+      redactPrivateAgentState = createPrivateAgentRedactor(registeredSecrets);
     };
     let variableSetId = "";
     // Rig telemetry (M3): set once the session loads; empty string for a rig-less
@@ -3370,7 +3372,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerSeq: ++producerSeq,
         }));
         const redactedRunState = inputSettlement.runState
-          ? (redact(inputSettlement.runState) as typeof inputSettlement.runState)
+          ? (redactPrivateAgentState(inputSettlement.runState) as typeof inputSettlement.runState)
           : undefined;
         const result = await applySessionTurnSettlement(db, input.workspaceId, {
           sessionId: input.sessionId,
@@ -6620,7 +6622,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             contextCompactionSignal: () => modelResponseUsageContextSignal(modelResponseUsageState),
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
-            callModelInputFilter: secretRedactionModelInputFilter((value) => redact(value)),
+            callModelInputFilter: secretRedactionModelInputFilter((value) =>
+              redactPrivateAgentState(value),
+            ),
             ...(toolCancellationFenceRef.current
               ? { turnToolCancellationFence: toolCancellationFenceRef.current }
               : {}),
@@ -6710,7 +6714,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // conversation context preserved for the post-top-up resume.
                 let serializedRunState: string | null = null;
                 try {
-                  serializedRunState = String(redact(stream.state.toString()));
+                  serializedRunState = String(redactPrivateAgentState(stream.state.toString()));
                 } catch {
                   serializedRunState = null;
                 }
@@ -6732,7 +6736,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 callId: pendingToolCall.callId,
                 callType: pendingToolCall.callType,
-                callItem: redact(pendingToolCall.callItem) as Record<string, unknown>,
+                callItem: redactPrivateAgentState(pendingToolCall.callItem) as Record<
+                  string,
+                  unknown
+                >,
               });
               if (!registered.accepted) {
                 throw new TurnAttemptFencedError(
@@ -6757,7 +6764,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 attemptId: input.attemptId,
                 callId: completedToolCall.callId,
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-                resultItem: redact(completedToolCall.resultItem) as Record<string, unknown>,
+                resultItem: redactPrivateAgentState(completedToolCall.resultItem) as Record<
+                  string,
+                  unknown
+                >,
               });
               if (!recorded.accepted) {
                 throw new TurnAttemptFencedError(

@@ -735,10 +735,12 @@ A session's content lives in three places. Keep them straight; reaching for the
 wrong one is the classic mistake.
 
 1. **`session_history_items` — conversation truth (the model-facing store).**
-   Ordered, protocol-preserving SDK `AgentInputItem` JSON, secret-redacted and
-   RLS-scoped. Known runtime credential provenance and recognized
-   credential-bearing shapes are redacted before model calls, persistence, and
-   replay; this is a safety boundary, not general-purpose DLP. A new turn's
+   Ordered, protocol-preserving SDK `AgentInputItem` JSON and RLS-scoped.
+   Private-agent redaction removes exact registered host-known secrets before
+   model calls, persistence, and replay while preserving intentionally returned
+   temporary capabilities such as signed upload URLs. Strict credential-shape
+   heuristics are reserved for public/audit surfaces; see
+   [`private-agent-state.md`](private-agent-state.md). A new turn's
    input is built from this store. It is dual-written as the agent streams
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
@@ -750,7 +752,9 @@ wrong one is the classic mistake.
    job is resuming a turn that paused mid-flight for a human approval or
    structured-input tool call (`requires_action`); neither a half-finished tool
    approval nor an unanswered tool call can be represented as plain history
-   items. The blob is written only for those cases.
+   items. The blob is written only for those cases and uses the same private-agent
+   redaction profile: exact registered host secrets are removed, while temporary
+   capabilities needed to resume remain intact.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and

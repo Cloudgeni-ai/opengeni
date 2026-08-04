@@ -94,7 +94,7 @@ Practically: attaching a variable set shapes what a managed sandbox sees; it doe
 
 Values never enter the events pipeline by construction — injection is server-side and the API is write-only. As defense-in-depth against an agent echoing values (for example running `env`), the worker replaces exact occurrences of every attached value (length >= 6) with `[redacted:<NAME>]` in all session events it publishes for that turn. Known residual exposure, stated honestly:
 
-- `agent_run_states.serialized_run_state` may contain echoed values inside tool transcripts. It is RLS-protected and never returned by any API route, and it must stay intact for session resume, so it is not redacted.
+- `agent_run_states.serialized_run_state` is RLS-protected and never returned by any API route. Its private-agent redaction removes exact registered variable-set and other host-known secret values while preserving intentionally tool-returned temporary capabilities required for resume; see [`private-agent-state.md`](private-agent-state.md).
 - A sandboxed agent with network access can exfiltrate any secret it is given. Attaching a variable set **is** granting those secrets to that run. Attach the smallest variable set that does the job.
 - Worker telemetry carries ids only (`opengeni.variable_set_id` on the run span); heartbeats and logs never carry the value map.
 

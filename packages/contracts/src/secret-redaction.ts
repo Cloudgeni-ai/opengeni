@@ -9,6 +9,8 @@ export type SecretForRedaction = {
   value: string;
 };
 
+type RedactionProfile = "strict" | "private-agent";
+
 type PreparedSecret = {
   marker: string;
   value: string;
@@ -188,18 +190,37 @@ export function redactSensitiveData<T>(
   value: T,
   knownSecrets: readonly SecretForRedaction[] = [],
 ): T {
-  return redactSensitiveDataDeep(value, knownSecrets, new WeakSet<object>(), 0);
+  return redactSensitiveDataDeep(value, knownSecrets, new WeakSet<object>(), 0, "strict");
 }
 
-/** Build the worker-friendly single-argument redactor used at turn boundaries. */
+/** Build the strict redactor for public, audit, and diagnostic boundaries. */
 export function createSecretRedactor(
   knownSecrets: readonly SecretForRedaction[],
+): (value: unknown) => unknown {
+  return createDataRedactor(knownSecrets, "strict");
+}
+
+/**
+ * Build the redactor for private model input, conversation history, tool
+ * receipts, and resumable run state. Intentional tool-returned capabilities
+ * remain usable here; exact host-known secrets are still removed by provenance.
+ */
+export function createPrivateAgentRedactor(
+  knownSecrets: readonly SecretForRedaction[],
+): (value: unknown) => unknown {
+  return createDataRedactor(knownSecrets, "private-agent");
+}
+
+function createDataRedactor(
+  knownSecrets: readonly SecretForRedaction[],
+  profile: RedactionProfile,
 ): (value: unknown) => unknown {
   const prepared = prepareSecrets(knownSecrets).map(({ marker, value }) => ({
     name: marker.slice("[redacted:".length, -1),
     value,
   }));
-  return (value: unknown) => redactSensitiveData(value, prepared);
+  return (value: unknown) =>
+    redactSensitiveDataDeep(value, prepared, new WeakSet<object>(), 0, profile);
 }
 
 /**
@@ -227,9 +248,14 @@ function redactSensitiveDataDeep<T>(
   knownSecrets: readonly SecretForRedaction[],
   seen: WeakSet<object>,
   depth: number,
+  profile: RedactionProfile,
 ): T {
   if (typeof value === "string") {
-    return redactSensitiveText(value, knownSecrets) as T;
+    return (
+      profile === "strict"
+        ? redactSensitiveText(value, knownSecrets)
+        : replacePreparedSecrets(value, prepareSecrets(knownSecrets))
+    ) as T;
   }
   if (!value || typeof value !== "object" || value instanceof Date) {
     return value;
@@ -243,7 +269,9 @@ function redactSensitiveDataDeep<T>(
   seen.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.map((item) => redactSensitiveDataDeep(item, knownSecrets, seen, depth + 1)) as T;
+      return value.map((item) =>
+        redactSensitiveDataDeep(item, knownSecrets, seen, depth + 1, profile),
+      ) as T;
     }
     if (!isPlainObject(value)) {
       return value;
@@ -252,13 +280,16 @@ function redactSensitiveDataDeep<T>(
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => {
         const safeKey = nextUniqueKey(redactSensitiveKey(key, knownSecrets), usedKeys);
-        if (isSensitiveFieldName(key)) {
+        if (profile === "strict" && isSensitiveFieldName(key)) {
           return [safeKey, REDACTED] as const;
         }
         if (normalizeFieldName(key) === "headers") {
-          return [safeKey, redactHeaderMap(child, knownSecrets, seen, depth + 1)] as const;
+          return [safeKey, redactHeaderMap(child, knownSecrets, seen, depth + 1, profile)] as const;
         }
-        return [safeKey, redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1)] as const;
+        return [
+          safeKey,
+          redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1, profile),
+        ] as const;
       }),
     ) as T;
   } finally {
@@ -271,9 +302,10 @@ function redactHeaderMap(
   knownSecrets: readonly SecretForRedaction[],
   seen: WeakSet<object>,
   depth: number,
+  profile: RedactionProfile,
 ): unknown {
   if (!isPlainObject(value)) {
-    return redactSensitiveDataDeep(value, knownSecrets, seen, depth);
+    return redactSensitiveDataDeep(value, knownSecrets, seen, depth, profile);
   }
   if (depth >= MAX_REDACTION_DEPTH) return DEPTH_MARKER;
   if (seen.has(value)) return CYCLE_MARKER;
@@ -285,9 +317,9 @@ function redactHeaderMap(
         const safeKey = nextUniqueKey(redactSensitiveKey(key, knownSecrets), usedKeys);
         return [
           safeKey,
-          isCredentialHeaderName(key)
+          profile === "strict" && isCredentialHeaderName(key)
             ? REDACTED
-            : redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1),
+            : redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1, profile),
         ];
       }),
     );

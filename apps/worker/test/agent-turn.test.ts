@@ -86,7 +86,7 @@ import {
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
-import { createSecretRedactor } from "../src/activities/redaction";
+import { createPrivateAgentRedactor, createSecretRedactor } from "../src/activities/redaction";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
@@ -318,6 +318,44 @@ describe("turn secret-redaction boundaries", () => {
 
     expect(JSON.stringify(result.rows)).not.toContain(syntheticSecret);
     expect(JSON.stringify(result.rows)).toContain("[redacted:TURN_SECRET]");
+  });
+
+  test("keeps temporary upload capabilities usable in durable history and model input", async () => {
+    const uploadUrl =
+      "https://objects.example/uploads/image.png?X-Amz-Credential=temporary-scope&X-Amz-Signature=temporary-signature";
+    const privateRedact = createPrivateAgentRedactor([
+      { name: "TURN_SECRET", value: syntheticSecret },
+    ]);
+    const result = historyRowsToAppend(
+      [userMessage(`upload=${uploadUrl}&hostSecret=${syntheticSecret}`)],
+      0,
+      0,
+      undefined,
+      privateRedact,
+    );
+    const durable = JSON.stringify(result.rows);
+
+    expect(durable).toContain(uploadUrl);
+    expect(durable).not.toContain(syntheticSecret);
+    expect(durable).toContain("[redacted:TURN_SECRET]");
+
+    const filter = secretRedactionModelInputFilter(privateRedact);
+    const output = await filter({
+      modelData: {
+        input: [
+          {
+            type: "function_call_result",
+            callId: "call_upload",
+            output: { uploadUrl, hostSecret: syntheticSecret },
+          },
+        ],
+      },
+    } as never);
+    const modelInput = JSON.stringify(output);
+
+    expect(modelInput).toContain(uploadUrl);
+    expect(modelInput).not.toContain(syntheticSecret);
+    expect(modelInput).toContain("[redacted:TURN_SECRET]");
   });
 
   test("preserves provider citations in the structured durable assistant item", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createPrivateAgentRedactor,
   createSecretRedactor,
   redactSensitiveData,
   redactSensitiveText,
@@ -147,6 +148,33 @@ describe("secret redaction boundary", () => {
     expect(cleaned).toBe(
       "download https://objects.example/report.csv?version=7&X-Amz-Signature=[redacted]&view=inline",
     );
+  });
+
+  test("private agent state preserves temporary capabilities and removes registered secrets", () => {
+    const hostSecret = "host-known-secret-123456";
+    const uploadUrl =
+      "https://objects.example/uploads/image.png?X-Amz-Credential=temporary-scope&X-Amz-Signature=temporary-signature";
+    const value = {
+      uploadUrl: `${uploadUrl}&hostSecret=${hostSecret}`,
+      credential: "tool-returned-capability",
+      headers: {
+        authorization: "Bearer tool-returned-authorization",
+        "x-amz-security-token": "tool-returned-session-token",
+        "x-host-secret": hostSecret,
+      },
+    };
+
+    const cleaned = createPrivateAgentRedactor([{ name: "HOST_SECRET", value: hostSecret }])(value);
+
+    expect(cleaned).toEqual({
+      uploadUrl: `${uploadUrl}&hostSecret=[redacted:HOST_SECRET]`,
+      credential: "tool-returned-capability",
+      headers: {
+        authorization: "Bearer tool-returned-authorization",
+        "x-amz-security-token": "tool-returned-session-token",
+        "x-host-secret": "[redacted:HOST_SECRET]",
+      },
+    });
   });
 
   test("redacts secret-like environment and serialized assignments", () => {
