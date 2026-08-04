@@ -148,19 +148,59 @@ function sanitizeEventPayloadDeep<T>(
   return payload;
 }
 
+type ModelPayloadSanitizationProfile = "strict" | "private-agent";
+
+const PRIVATE_AGENT_DURABLE_PAYLOAD = Symbol("OpenGeni private agent durable payload");
+
 /**
- * Make model-facing conversation data safe for Postgres and secret-redacted.
- *
- * Conversation history is the replay source for the model, so this boundary
- * retains protocol structure and non-sensitive diagnostics while removing
- * credential-bearing fields and text before durable storage. It also performs
- * the database-safety repair (NUL removal and UTF-16 repair).
+ * Opaque trusted context for the private model-history/run-state stores. A
+ * producer-controlled JSON field cannot opt into this policy; only a DB writer
+ * that explicitly constructs this envelope can select it.
+ */
+export type PrivateAgentDurablePayload<T> = Readonly<{
+  payload: T;
+  [PRIVATE_AGENT_DURABLE_PAYLOAD]: true;
+}>;
+
+export function privateAgentDurablePayload<T>(payload: T): PrivateAgentDurablePayload<T> {
+  return Object.freeze({ payload, [PRIVATE_AGENT_DURABLE_PAYLOAD]: true });
+}
+
+/**
+ * Make general or untrusted model-shaped data safe for Postgres and strictly
+ * secret-redacted. This remains the default for unrelated payloads and for any
+ * caller that has not selected the opaque private durable-state context.
  */
 export function sanitizeModelPayload<T>(
   payload: T,
   knownSecrets: readonly SecretForRedaction[] = [],
 ): T {
-  return sanitizeModelPayloadDeep(payload, new WeakSet<object>(), 0, knownSecrets);
+  return sanitizeModelPayloadDeep(payload, new WeakSet<object>(), 0, knownSecrets, "strict");
+}
+
+/**
+ * Apply database-safety normalization plus exact known-secret replacement to a
+ * trusted private-agent envelope. Credential-shaped temporary capabilities are
+ * intentionally preserved for durable replay/resume.
+ */
+export function sanitizePrivateAgentDurablePayload<T>(
+  envelope: PrivateAgentDurablePayload<T>,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): T {
+  if (
+    !envelope ||
+    typeof envelope !== "object" ||
+    envelope[PRIVATE_AGENT_DURABLE_PAYLOAD] !== true
+  ) {
+    throw new TypeError("Private agent payload requires the trusted durable-state envelope");
+  }
+  return sanitizeModelPayloadDeep(
+    envelope.payload,
+    new WeakSet<object>(),
+    0,
+    knownSecrets,
+    "private-agent",
+  );
 }
 
 const MODEL_PAYLOAD_SANITIZE_MAX_DEPTH = 64;
@@ -172,9 +212,14 @@ function sanitizeModelPayloadDeep<T>(
   seen: WeakSet<object>,
   depth: number,
   knownSecrets: readonly SecretForRedaction[] = [],
+  profile: ModelPayloadSanitizationProfile,
 ): T {
   if (typeof payload === "string") {
-    return sanitizeEventString(redactSensitiveText(payload, knownSecrets)) as unknown as T;
+    const redacted =
+      profile === "strict"
+        ? redactSensitiveText(payload, knownSecrets)
+        : redactSensitiveKey(payload, knownSecrets);
+    return sanitizeEventString(redacted) as unknown as T;
   }
   if (!payload || typeof payload !== "object") return payload;
   if (payload instanceof Date) {
@@ -188,7 +233,7 @@ function sanitizeModelPayloadDeep<T>(
   try {
     if (Array.isArray(payload)) {
       return payload.map((item) =>
-        sanitizeModelPayloadDeep(item, seen, depth + 1, knownSecrets),
+        sanitizeModelPayloadDeep(item, seen, depth + 1, knownSecrets, profile),
       ) as unknown as T;
     }
     const usedKeys = new Set<string>();
@@ -198,13 +243,16 @@ function sanitizeModelPayloadDeep<T>(
           sanitizeEventString(redactSensitiveKey(key, knownSecrets)),
           usedKeys,
         );
-        if (isSensitiveFieldName(key)) {
+        if (profile === "strict" && isSensitiveFieldName(key)) {
           return [safeKey, REDACTED] as const;
         }
-        if (normalizeFieldName(key) === "headers") {
+        if (profile === "strict" && normalizeFieldName(key) === "headers") {
           return [safeKey, sanitizeModelHeaders(value, seen, depth + 1, knownSecrets)] as const;
         }
-        return [safeKey, sanitizeModelPayloadDeep(value, seen, depth + 1, knownSecrets)] as const;
+        return [
+          safeKey,
+          sanitizeModelPayloadDeep(value, seen, depth + 1, knownSecrets, profile),
+        ] as const;
       }),
     ) as unknown as T;
   } finally {
@@ -270,7 +318,7 @@ function sanitizeModelHeaders(
   knownSecrets: readonly SecretForRedaction[],
 ): unknown {
   if (!isPlainObject(value)) {
-    return sanitizeModelPayloadDeep(value, seen, depth, knownSecrets);
+    return sanitizeModelPayloadDeep(value, seen, depth, knownSecrets, "strict");
   }
   if (depth >= MODEL_PAYLOAD_SANITIZE_MAX_DEPTH) {
     return MODEL_PAYLOAD_DEPTH_MARKER;
@@ -289,7 +337,7 @@ function sanitizeModelHeaders(
           safeKey,
           isCredentialHeaderName(key)
             ? REDACTED
-            : sanitizeModelPayloadDeep(child, seen, depth + 1, knownSecrets),
+            : sanitizeModelPayloadDeep(child, seen, depth + 1, knownSecrets, "strict"),
         ];
       }),
     );

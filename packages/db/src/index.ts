@@ -191,7 +191,12 @@ import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
-import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
+import {
+  privateAgentDurablePayload,
+  sanitizeEventPayload,
+  sanitizeModelPayload,
+  sanitizePrivateAgentDurablePayload,
+} from "./event-payload-sanitizer";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import {
   runIdempotentPersistenceTransaction,
@@ -4002,12 +4007,14 @@ export function durableUserHistoryItem(
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
   );
-  return sanitizeModelPayload({
-    type: "message",
-    role: "user",
-    content: prompt,
-    ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
-  });
+  return sanitizePrivateAgentDurablePayload(
+    privateAgentDurablePayload({
+      type: "message",
+      role: "user",
+      content: prompt,
+      ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
+    }),
+  );
 }
 
 export type RetainedFileArtifact = {
@@ -21343,8 +21350,10 @@ export async function appendSessionHistoryItems(
               // This is the canonical model-memory boundary. The pending-call
               // ledger and audit event may retain their separate raw/preview
               // forms, but conversation truth is always the bounded Codex form.
-              item: sanitizeModelPayload(
-                boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
+              item: sanitizePrivateAgentDurablePayload(
+                privateAgentDurablePayload(
+                  boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
+                ),
               ),
             })),
           )
@@ -21421,7 +21430,9 @@ export async function registerPendingSessionToolCall(
             attemptId: input.attemptId,
             callId: input.callId,
             callType: input.callType,
-            callItem: sanitizeModelPayload(input.callItem),
+            callItem: sanitizePrivateAgentDurablePayload(
+              privateAgentDurablePayload(input.callItem),
+            ),
             modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
           })
           .onConflictDoNothing({
@@ -21581,7 +21592,9 @@ export async function recordPendingSessionToolCallResult(
         const recorded = await tx
           .update(schema.sessionPendingToolCalls)
           .set({
-            resultItem: sanitizeModelPayload(input.resultItem),
+            resultItem: sanitizePrivateAgentDurablePayload(
+              privateAgentDurablePayload(input.resultItem),
+            ),
             resultRecordedAt: new Date(),
           })
           .where(
@@ -21975,7 +21988,7 @@ export async function applyContextCompaction(
               sessionId: input.sessionId,
               turnId: null,
               position: supersededFrom + index,
-              item: sanitizeModelPayload(item),
+              item: sanitizePrivateAgentDurablePayload(privateAgentDurablePayload(item)),
               active: true,
               ...(input.producerCodexCredentialId
                 ? { producerCodexCredentialId: input.producerCodexCredentialId }
@@ -21990,7 +22003,7 @@ export async function applyContextCompaction(
           sessionId: input.sessionId,
           turnId: input.turnId,
           position: summaryPosition,
-          item: sanitizeModelPayload(input.summaryItem),
+          item: sanitizePrivateAgentDurablePayload(privateAgentDurablePayload(input.summaryItem)),
           active: true,
           ...(input.producerCodexCredentialId
             ? { producerCodexCredentialId: input.producerCodexCredentialId }
@@ -34727,8 +34740,12 @@ export async function saveRunState(
           sessionId: input.sessionId,
           turnId: input.turnId,
           stateVersion: Number(maxVersion) + 1,
-          serializedRunState: input.serializedRunState,
-          pendingApprovals: input.pendingApprovals,
+          serializedRunState: sanitizePrivateAgentDurablePayload(
+            privateAgentDurablePayload(input.serializedRunState),
+          ),
+          pendingApprovals: sanitizePrivateAgentDurablePayload(
+            privateAgentDurablePayload(input.pendingApprovals),
+          ),
           frozenCodexCredentialId: input.frozenCodexCredentialId ?? null,
         });
         return true;
@@ -37438,7 +37455,9 @@ export async function claimSessionWorkForAttempt(
             sessionId,
             turnId,
             position: Number(position),
-            item: sanitizeModelPayload(delivered.historyItem),
+            item: sanitizePrivateAgentDurablePayload(
+              privateAgentDurablePayload(delivered.historyItem),
+            ),
             producerCodexCredentialId: null,
           });
         };
@@ -40278,8 +40297,12 @@ export async function applySessionTurnSettlement(
           sessionId: input.sessionId,
           turnId: input.turnId,
           stateVersion: Number(maxVersion) + 1,
-          serializedRunState: input.runState.serializedRunState,
-          pendingApprovals: input.runState.pendingApprovals,
+          serializedRunState: sanitizePrivateAgentDurablePayload(
+            privateAgentDurablePayload(input.runState.serializedRunState),
+          ),
+          pendingApprovals: sanitizePrivateAgentDurablePayload(
+            privateAgentDurablePayload(input.runState.pendingApprovals),
+          ),
           frozenCodexCredentialId: input.runState.frozenCodexCredentialId ?? null,
         });
         if (humanInputRequests.length > 0) {

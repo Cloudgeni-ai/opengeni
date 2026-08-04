@@ -20,6 +20,7 @@ Split redaction by surface:
 - Private model input, conversation history, pending tool receipts, and resumable run state preserve intentionally returned temporary capabilities.
 - Exact host-known secrets remain redacted there using registered provenance.
 - Human/audit events, logs, diagnostics, errors, and final public projections retain strict heuristic redaction.
+- The DB strict sanitizer remains the default. Only canonical private-state writers may construct an opaque typed durable-payload envelope to request capability-preserving database-safety normalization; producer payload fields cannot opt in.
 
 Temporary capability material is acceptable in private model history. A signed URL or upload header is not removed from private state merely because its name or shape resembles a credential.
 
@@ -29,6 +30,7 @@ Temporary capability material is acceptable in private model history. A signed U
 - Private history may contain short-lived tool-returned capabilities and must continue to be protected by its existing tenant authorization, RLS, and retention controls.
 - Tool authors must keep capability lifetimes and scopes narrow and must not mirror them into public events or logs.
 - Exact credential provenance registration remains load-bearing; a host-resolved secret echoed by a tool is still removed.
+- An unrelated caller or malicious payload cannot weaken `sanitizeModelPayload` by naming a field after the private policy.
 - Regression tests must assert capability preservation and exact-secret removal together.
 
 ## Rejected alternatives

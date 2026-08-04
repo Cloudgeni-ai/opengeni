@@ -6,9 +6,11 @@ import {
   sessionEventPayloadTruncation,
 } from "@opengeni/contracts";
 import {
+  privateAgentDurablePayload,
   sanitizeEventPayload,
   sanitizeEventString,
   sanitizeModelPayload,
+  sanitizePrivateAgentDurablePayload,
 } from "../src/event-payload-sanitizer";
 
 const NUL = String.fromCharCode(0);
@@ -341,6 +343,63 @@ describe("sanitizeEventPayload (deep walk)", () => {
 });
 
 describe("session_history_items jsonb safety (durable SDK item)", () => {
+  test("private durable context preserves capabilities without making payload fields authoritative", () => {
+    const hostSecret = "host-secret-must-not-survive";
+    const uploadSignature = "temporary-upload-signature";
+    const uploadAuthorization = "Bearer temporary-upload-authorization";
+    const uploadUrl =
+      `https://objects.example/uploads/image.png?X-Amz-Algorithm=AWS4-HMAC-SHA256` +
+      `&X-Amz-Signature=${uploadSignature}`;
+    const payload = {
+      capability: {
+        uploadUrl,
+        headers: { authorization: uploadAuthorization },
+      },
+      adjacent: {
+        accessToken: hostSecret,
+        requestedContext: "private-agent-durable-state",
+      },
+      invalidText: `before${NUL}${LONE_HIGH}after`,
+    };
+    const knownSecrets = [{ name: "HOST_SECRET", value: hostSecret }];
+
+    const privateCleaned = sanitizePrivateAgentDurablePayload(
+      privateAgentDurablePayload(payload),
+      knownSecrets,
+    );
+    expect(privateCleaned).toEqual({
+      capability: {
+        uploadUrl,
+        headers: { authorization: uploadAuthorization },
+      },
+      adjacent: {
+        accessToken: "[redacted:HOST_SECRET]",
+        requestedContext: "private-agent-durable-state",
+      },
+      invalidText: `before${REPLACEMENT}after`,
+    });
+
+    const forgedEnvelope = {
+      context: "private-agent-durable-state",
+      payload,
+    };
+    const strictCleaned = sanitizeModelPayload(forgedEnvelope, knownSecrets) as {
+      payload: {
+        capability: { uploadUrl: string; headers: { authorization: string } };
+        adjacent: { accessToken: string };
+      };
+    };
+    expect(strictCleaned.payload.capability.uploadUrl).toContain("X-Amz-Signature=[redacted]");
+    expect(strictCleaned.payload.capability.headers.authorization).toBe("[redacted]");
+    expect(strictCleaned.payload.adjacent.accessToken).toBe("[redacted]");
+    expect(JSON.stringify(strictCleaned)).not.toContain(uploadSignature);
+    expect(JSON.stringify(strictCleaned)).not.toContain(uploadAuthorization);
+    expect(JSON.stringify(strictCleaned)).not.toContain(hostSecret);
+    expect(() => sanitizePrivateAgentDurablePayload(forgedEnvelope as never, knownSecrets)).toThrow(
+      "trusted durable-state envelope",
+    );
+  });
+
   test("FAILURE-SENSITIVE: a function_call_result item with binary tool output round-trips as valid jsonb", () => {
     // The agent-SDK durable history `item` jsonb carries raw tool/command
     // output. A NUL byte or lone surrogate in that output 400s the INSERT and

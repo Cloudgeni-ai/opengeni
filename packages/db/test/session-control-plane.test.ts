@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  createPrivateAgentRedactor,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   sessionEventJsonBytes,
@@ -1466,6 +1467,220 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessionPendingToolCalls.sessionId, session.id)),
       ),
     ).toEqual([]);
+  });
+
+  test("private capabilities survive canonical persistence and recovery while audit projections stay strict", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "prepare and recover a temporary upload capability");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("temporary-capability turn was not claimed");
+
+    const hostSecret = `host-secret-${crypto.randomUUID()}`;
+    const uploadSignature = `upload-signature-${crypto.randomUUID()}`;
+    const uploadAuthorization = `Bearer upload-authorization-${crypto.randomUUID()}`;
+    const uploadUrl =
+      `https://objects.example/uploads/image.png?X-Amz-Algorithm=AWS4-HMAC-SHA256` +
+      `&X-Amz-Signature=${uploadSignature}`;
+    const privateRedact = createPrivateAgentRedactor([{ name: "HOST_SECRET", value: hostSecret }]);
+    const privateItem = <T>(value: T): T => privateRedact(value) as T;
+    const capabilityOutput = (callId: string) => ({
+      type: "function_call_result",
+      callId,
+      output: {
+        uploadUrl,
+        headers: {
+          authorization: uploadAuthorization,
+          "x-host-secret": hostSecret,
+        },
+        adjacent: {
+          accessToken: hostSecret,
+          requestedContext: "private-agent-durable-state",
+        },
+      },
+    });
+    const initialCallId = `initial-capability-${crypto.randomUUID()}`;
+    const pendingCallId = `pending-capability-${crypto.randomUUID()}`;
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const nextPosition = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    const initialCallItem = privateItem({
+      type: "function_call",
+      callId: initialCallId,
+      name: "prepare_upload",
+      arguments: {
+        uploadUrl,
+        headers: { authorization: uploadAuthorization, "x-host-secret": hostSecret },
+      },
+    });
+    const initialResultItem = privateItem(capabilityOutput(initialCallId));
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          { position: nextPosition, item: initialCallItem },
+          { position: nextPosition + 1, item: initialResultItem },
+        ],
+      }),
+    ).toBe(true);
+
+    const initiallyPersisted = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    const initialSerialized = JSON.stringify(
+      initiallyPersisted.filter((row) => row.position >= nextPosition).map((row) => row.item),
+    );
+    expect(initialSerialized).toContain(uploadUrl);
+    expect(initialSerialized).toContain(uploadAuthorization);
+    expect(initialSerialized).not.toContain(hostSecret);
+    expect(initialSerialized).toContain("[redacted:HOST_SECRET]");
+
+    const serializedRunState = String(
+      privateRedact(
+        JSON.stringify({
+          history: [capabilityOutput(initialCallId)],
+          adjacent: { accessToken: hostSecret },
+        }),
+      ),
+    );
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        serializedRunState,
+        pendingApprovals: privateItem([
+          {
+            id: "approval-private-capability",
+            uploadUrl,
+            headers: { authorization: uploadAuthorization, "x-host-secret": hostSecret },
+          },
+        ]),
+      }),
+    ).toBe(true);
+    const runState = await getLatestRunState(client.db, grant.workspaceId!, session.id);
+    const runStateSerialized = JSON.stringify(runState);
+    expect(runStateSerialized).toContain(uploadUrl);
+    expect(runStateSerialized).toContain(uploadAuthorization);
+    expect(runStateSerialized).not.toContain(hostSecret);
+    expect(runStateSerialized).toContain("[redacted:HOST_SECRET]");
+
+    const pendingCallItem = privateItem({
+      type: "function_call",
+      callId: pendingCallId,
+      name: "complete_upload",
+      arguments: {
+        uploadUrl,
+        headers: { authorization: uploadAuthorization, "x-host-secret": hostSecret },
+      },
+    });
+    const pendingResultItem = privateItem(capabilityOutput(pendingCallId));
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        callId: pendingCallId,
+        callType: "function_call",
+        callItem: pendingCallItem,
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        callId: pendingCallId,
+        resultItem: pendingResultItem,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+
+    const [pending] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          callItem: schema.sessionPendingToolCalls.callItem,
+          resultItem: schema.sessionPendingToolCalls.resultItem,
+        })
+        .from(schema.sessionPendingToolCalls)
+        .where(eq(schema.sessionPendingToolCalls.callId, pendingCallId)),
+    );
+    const pendingSerialized = JSON.stringify(pending);
+    expect(pendingSerialized).toContain(uploadUrl);
+    expect(pendingSerialized).toContain(uploadAuthorization);
+    expect(pendingSerialized).not.toContain(hostSecret);
+    expect(pendingSerialized).toContain("[redacted:HOST_SECRET]");
+
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    expect(recovery).toMatchObject({ action: "recovering" });
+    const publicOutput =
+      recovery.action === "recovering"
+        ? recovery.events.find(
+            (event) =>
+              event.type === "agent.toolCall.output" &&
+              (event.payload as { id?: unknown }).id === pendingCallId,
+          )
+        : undefined;
+    expect(publicOutput).toBeDefined();
+    const publicSerialized = JSON.stringify(publicOutput!);
+    expect(publicSerialized).toContain(pendingCallId);
+    expect(publicSerialized).toContain("[redacted]");
+    expect(publicSerialized).not.toContain(uploadSignature);
+    expect(publicSerialized).not.toContain(uploadAuthorization);
+    expect(publicSerialized).not.toContain(hostSecret);
+
+    const resumedAttemptId = crypto.randomUUID();
+    const resumedTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: resumedAttemptId },
+    );
+    expect(resumedTurn?.id).toBe(turn.id);
+    const replayedHistory = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    const replayedPendingResult = replayedHistory
+      .map((row) => row.item)
+      .find(
+        (item) =>
+          item.type === "function_call_result" &&
+          (item as { callId?: unknown }).callId === pendingCallId,
+      );
+    const replayedSerialized = JSON.stringify(replayedPendingResult);
+    expect(replayedSerialized).toContain(uploadUrl);
+    expect(replayedSerialized).toContain(uploadAuthorization);
+    expect(replayedSerialized).not.toContain(hostSecret);
+    expect(replayedSerialized).toContain("[redacted:HOST_SECRET]");
   });
 
   test("pending recovery policy fills rolling nulls and rejects conflicting retries", async () => {

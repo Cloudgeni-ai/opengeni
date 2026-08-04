@@ -19,6 +19,13 @@ Do not classify a value as secret at the private boundary only because its field
 
 Private does not mean unbounded. Existing item normalization, tool-output truncation, protocol validation, RLS, and access controls still apply.
 
+The canonical DB sanitizer remains strict by default. Private history, pending
+receipts, and RunState writers must explicitly construct the opaque
+private-agent durable-payload envelope before applying database-safety
+normalization. A field inside producer-controlled JSON cannot select this
+policy, so adding `private`, `context`, or similarly named metadata to a payload
+does not bypass strict sanitization on any unrelated or public path.
+
 ## Invariants
 
 1. A successful tool result must remain executable by the same private agent turn and by a legitimate resumed turn.
@@ -26,12 +33,15 @@ Private does not mean unbounded. Existing item normalization, tool-output trunca
 3. Public/audit surfaces must not inherit the more permissive private profile.
 4. A capability returned by a tool must not be copied into public logs or audit events merely because private history retains it.
 5. New private-state persistence paths must use `createPrivateAgentRedactor`; public or diagnostic paths use `createSecretRedactor` or their existing strict sanitizer.
+6. DB writers may select capability-preserving normalization only through the typed private durable-payload envelope; `sanitizeModelPayload` stays strict.
 
 ## Canonical implementation and tests
 
 - Shared profiles: `packages/contracts/src/secret-redaction.ts`
 - Worker registration and boundary selection: `apps/worker/src/activities/agent-turn.ts`
+- Typed DB persistence policy: `packages/db/src/event-payload-sanitizer.ts`
 - Contract regression tests: `packages/contracts/test/secret-redaction.test.ts`
 - Turn-boundary regression tests: `apps/worker/test/agent-turn.test.ts`
+- Real persistence/recovery regressions: `packages/db/test/session-control-plane.test.ts`
 
 The private-profile tests must cover both halves of the contract: a signed upload capability survives unchanged, while an exact registered host secret embedded beside it is redacted.
