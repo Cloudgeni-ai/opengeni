@@ -182,14 +182,21 @@ describe("release schema contract", () => {
         (migrations.has("0165_document_authority_foundation.sql") ? 1 : 0) +
         (migrations.has("0166_connection_disconnect_idempotency.sql") ? 1 : 0) +
         (migrations.has("0167_document_index_replay_authority.sql") ? 1 : 0) +
-        (migrations.has("0168_workspace_instruction_policy_operation_receipts.sql") ? 1 : 0),
+        (migrations.has("0168_workspace_instruction_policy_operation_receipts.sql") ? 1 : 0) +
+        (migrations.has("0169_workspace_instruction_policy_onboarding_proposals.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "c8ef7d9a94637d87531c92d2ccc232068d1914ef6d65e274c75845a3f9cc1ac8",
+      "0d2d3632d05556a71569181bc6e38955de6396dbeeb3bd6d0ebb111803ac5337",
     );
     expect(contract.latestMigration).toBe(
-      "0168_workspace_instruction_policy_operation_receipts.sql",
+      "0169_workspace_instruction_policy_onboarding_proposals.sql",
     );
+    expect(
+      migrations.get("0169_workspace_instruction_policy_onboarding_proposals.sql"),
+    ).toMatchObject({
+      sha256: "71d36ab95a1711c78ab36a09af9a14ddbf6ee84a3bac5ec5fdb460c768c54ef8",
+      deploymentMode: "rolling",
+    });
     expect(
       migrations.get("0168_workspace_instruction_policy_operation_receipts.sql"),
     ).toMatchObject({

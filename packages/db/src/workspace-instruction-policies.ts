@@ -15,6 +15,9 @@ import type {
   WorkspaceInstructionPolicyKind,
   WorkspaceInstructionPolicyListQuery,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOnboardingProposal,
+  WorkspaceInstructionPolicyOnboardingProposalListQuery,
+  WorkspaceInstructionPolicyOnboardingProposalListResponse,
   WorkspaceInstructionPolicyProvenanceSource,
   WorkspaceInstructionPolicyRevision,
   WorkspaceInstructionPolicyScope,
@@ -67,6 +70,23 @@ type ActiveRevisionInput = {
   type: WorkspaceInstructionPolicyActivationType;
 };
 
+type OnboardingProposalRequestInput = WorkspaceInstructionPolicyTarget & {
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  content: string;
+  sourceId: string;
+  sourceVersion: string;
+  confidenceBps: number;
+  expectedCurrentRevisionId: string | null;
+  expectedActivationVersion: number;
+  createdBySubjectId: string;
+};
+
+type OnboardingProposalInput = OnboardingProposalRequestInput & {
+  requestFingerprint: string;
+};
+
 export class WorkspaceInstructionPolicyConflictError extends Error {
   readonly name = "WorkspaceInstructionPolicyConflictError";
   readonly code = "WORKSPACE_INSTRUCTION_POLICY_CONFLICT";
@@ -102,6 +122,43 @@ export class WorkspaceInstructionPolicyLegacyUnavailableError extends Error {
 
   constructor() {
     super("This workspace has no legacy agent instructions to import");
+  }
+}
+
+export class WorkspaceInstructionPolicyOnboardingProposalContentError extends Error {
+  readonly name = "WorkspaceInstructionPolicyOnboardingProposalContentError";
+
+  constructor(
+    readonly code:
+      | "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_EMPTY"
+      | "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED",
+  ) {
+    super(
+      code === "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_EMPTY"
+        ? "An onboarding proposal must contain non-blank instruction-policy content"
+        : `An onboarding proposal must not exceed ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
+    );
+  }
+}
+
+export class WorkspaceInstructionPolicyOnboardingProposalStaleError extends Error {
+  readonly name = "WorkspaceInstructionPolicyOnboardingProposalStaleError";
+  readonly code = "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE";
+
+  constructor(readonly currentHead: WorkspaceInstructionPolicyHead | null) {
+    super("The onboarding proposal was prepared against a stale active policy baseline");
+  }
+}
+
+export class WorkspaceInstructionPolicyOnboardingProposalConflictError extends Error {
+  readonly name = "WorkspaceInstructionPolicyOnboardingProposalConflictError";
+  readonly code = "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT";
+
+  constructor(
+    readonly existingProposalId: string,
+    readonly existingDraftRevisionId: string,
+  ) {
+    super("This onboarding source version already proposed a draft for the policy target");
   }
 }
 
@@ -208,6 +265,23 @@ function activeRevisionRequestFingerprint(input: ActiveRevisionInput): string {
     ],
     ["actorSubjectId", true, input.actorSubjectId],
     ["reason", true, input.reason],
+  ]);
+}
+
+function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestInput): string {
+  return operationRequestFingerprint("create_onboarding_proposal", [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["kind", true, input.kind],
+    ["scope", true, input.scope],
+    ["roleKey", true, input.roleKey],
+    ["content", true, input.content],
+    ["sourceId", true, input.sourceId],
+    ["sourceVersion", true, input.sourceVersion],
+    ["confidenceBps", true, input.confidenceBps],
+    ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
+    ["expectedActivationVersion", true, input.expectedActivationVersion],
+    ["createdBySubjectId", true, input.createdBySubjectId],
   ]);
 }
 
@@ -346,6 +420,8 @@ export async function getWorkspaceStateAcceptedAttemptGovernance(
 type RevisionRow = typeof schema.workspaceInstructionPolicyRevisions.$inferSelect;
 type HeadRow = typeof schema.workspaceInstructionPolicyHeads.$inferSelect;
 type EventRow = typeof schema.workspaceInstructionPolicyActivationEvents.$inferSelect;
+type OnboardingProposalRow =
+  typeof schema.workspaceInstructionPolicyOnboardingProposals.$inferSelect;
 
 function revisionFromRow(row: RevisionRow): WorkspaceInstructionPolicyRevision {
   return {
@@ -409,6 +485,44 @@ function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent 
     },
     actorSubjectId: row.actorSubjectId,
     reason: row.reason,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+function onboardingProposalFromRow(
+  row: OnboardingProposalRow,
+  draftRow: RevisionRow,
+): WorkspaceInstructionPolicyOnboardingProposal {
+  return {
+    id: row.id,
+    operationId: row.operationId,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    kind: row.kind as WorkspaceInstructionPolicyKind,
+    scope: row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: row.roleKey,
+    source: {
+      id: row.sourceId,
+      version: row.sourceVersion,
+      confidenceBps: row.confidenceBps,
+    },
+    baseline:
+      row.baselineRevisionId === null
+        ? null
+        : {
+            workspaceId: row.workspaceId,
+            kind: row.kind as WorkspaceInstructionPolicyKind,
+            scope: row.scope as WorkspaceInstructionPolicyScope,
+            roleKey: row.roleKey,
+            revisionId: row.baselineRevisionId,
+            revision: row.baselineRevision!,
+            contentHash: row.baselineContentHash!,
+            activationVersion: row.baselineActivationVersion,
+            activatedAt: iso(row.baselineActivatedAt!),
+          },
+    draft: revisionFromRow(draftRow),
+    status: "proposed",
+    createdBySubjectId: row.createdBySubjectId,
     createdAt: iso(row.createdAt),
   };
 }
@@ -542,6 +656,61 @@ async function getEventByOperationInTransaction(
   return row ?? null;
 }
 
+async function getOnboardingProposalByOperationInTransaction(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<OnboardingProposalRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceInstructionPolicyOnboardingProposals)
+    .where(
+      and(
+        eq(schema.workspaceInstructionPolicyOnboardingProposals.workspaceId, workspaceId),
+        eq(schema.workspaceInstructionPolicyOnboardingProposals.operationId, operationId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+async function getOnboardingProposalBySourceVersionInTransaction(
+  db: Database,
+  input: Pick<
+    OnboardingProposalRequestInput,
+    "workspaceId" | "kind" | "scope" | "roleKey" | "sourceId" | "sourceVersion"
+  >,
+): Promise<OnboardingProposalRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceInstructionPolicyOnboardingProposals)
+    .where(
+      and(
+        eq(schema.workspaceInstructionPolicyOnboardingProposals.workspaceId, input.workspaceId),
+        eq(schema.workspaceInstructionPolicyOnboardingProposals.kind, input.kind),
+        eq(schema.workspaceInstructionPolicyOnboardingProposals.scope, input.scope),
+        input.roleKey === null
+          ? isNull(schema.workspaceInstructionPolicyOnboardingProposals.roleKey)
+          : eq(schema.workspaceInstructionPolicyOnboardingProposals.roleKey, input.roleKey),
+        eq(schema.workspaceInstructionPolicyOnboardingProposals.sourceId, input.sourceId),
+        eq(schema.workspaceInstructionPolicyOnboardingProposals.sourceVersion, input.sourceVersion),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+async function resolveOnboardingProposalInTransaction(
+  db: Database,
+  row: OnboardingProposalRow,
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  const draftRow = await getRevisionInTransaction(db, row.workspaceId, row.draftRevisionId);
+  if (!draftRow) {
+    throw new Error("Workspace instruction-policy onboarding proposal lost its draft revision");
+  }
+  return onboardingProposalFromRow(row, draftRow);
+}
+
 async function getHeadInTransaction(
   db: Database,
   workspaceId: string,
@@ -627,8 +796,19 @@ async function createDraftInTransaction(
       supersedesRevisionId: input.supersedesRevisionId,
       createdBySubjectId: input.createdBySubjectId,
     })
+    .onConflictDoNothing()
     .returning();
-  if (!created) throw new Error("Workspace instruction-policy draft was not created");
+  if (!created) {
+    const concurrent = await getRevisionByOperationInTransaction(
+      db,
+      input.workspaceId,
+      input.operationId,
+    );
+    if (!concurrent || concurrent.requestFingerprint !== input.requestFingerprint) {
+      throw new WorkspaceInstructionPolicyOperationReuseError();
+    }
+    return revisionFromRow(concurrent);
+  }
   return revisionFromRow(created);
 }
 
@@ -711,6 +891,206 @@ export async function importLegacyWorkspaceInstructionPolicyDraft(
       });
     },
   );
+}
+
+export async function createWorkspaceInstructionPolicyOnboardingProposal(
+  db: Database,
+  input: Omit<OnboardingProposalRequestInput, "operationId"> & { operationId?: string },
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  if (input.content.trim().length === 0) {
+    throw new WorkspaceInstructionPolicyOnboardingProposalContentError(
+      "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_EMPTY",
+    );
+  }
+  if (input.content.length > WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS) {
+    throw new WorkspaceInstructionPolicyOnboardingProposalContentError(
+      "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED",
+    );
+  }
+  const request: OnboardingProposalRequestInput = {
+    ...input,
+    operationId: input.operationId ?? randomUUID(),
+    sourceId: input.sourceId.trim(),
+    sourceVersion: input.sourceVersion.trim(),
+  };
+  const normalized: OnboardingProposalInput = {
+    ...request,
+    requestFingerprint: onboardingProposalRequestFingerprint(request),
+  };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await lockWorkspace(scopedDb, input);
+      const existing = await getOnboardingProposalByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        normalized.operationId,
+      );
+      if (existing) {
+        if (existing.requestFingerprint !== normalized.requestFingerprint) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return await resolveOnboardingProposalInTransaction(scopedDb, existing);
+      }
+      if (
+        (await getEventByOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          normalized.operationId,
+        )) ||
+        (await getRevisionByOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          normalized.operationId,
+        ))
+      ) {
+        throw new WorkspaceInstructionPolicyOperationReuseError();
+      }
+
+      const target: WorkspaceInstructionPolicyTarget = {
+        kind: normalized.kind,
+        scope: normalized.scope,
+        roleKey: normalized.roleKey,
+      };
+      const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, target);
+      const currentHead = currentRow ? headFromRow(currentRow) : null;
+      if (
+        (currentHead?.revisionId ?? null) !== normalized.expectedCurrentRevisionId ||
+        (currentHead?.activationVersion ?? 0) !== normalized.expectedActivationVersion
+      ) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalStaleError(currentHead);
+      }
+
+      const sourceConflict = await getOnboardingProposalBySourceVersionInTransaction(
+        scopedDb,
+        normalized,
+      );
+      if (sourceConflict) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
+          sourceConflict.id,
+          sourceConflict.draftRevisionId,
+        );
+      }
+
+      const proposalId = randomUUID();
+      const draft = await createDraftInTransaction(scopedDb, {
+        operationId: normalized.operationId,
+        requestFingerprint: normalized.requestFingerprint,
+        accountId: normalized.accountId,
+        workspaceId: normalized.workspaceId,
+        kind: normalized.kind,
+        scope: normalized.scope,
+        roleKey: normalized.roleKey,
+        content: normalized.content,
+        provenanceSource: "onboarding",
+        provenanceSourceId: proposalId,
+        supersedesRevisionId: currentHead?.revisionId ?? null,
+        createdBySubjectId: normalized.createdBySubjectId,
+      });
+      const createdAt = new Date();
+      const [created] = await scopedDb
+        .insert(schema.workspaceInstructionPolicyOnboardingProposals)
+        .values({
+          id: proposalId,
+          operationId: normalized.operationId,
+          requestFingerprint: normalized.requestFingerprint,
+          accountId: normalized.accountId,
+          workspaceId: normalized.workspaceId,
+          kind: normalized.kind,
+          scope: normalized.scope,
+          roleKey: normalized.roleKey,
+          sourceId: normalized.sourceId,
+          sourceVersion: normalized.sourceVersion,
+          confidenceBps: normalized.confidenceBps,
+          baselineRevisionId: currentHead?.revisionId ?? null,
+          baselineRevision: currentHead?.revision ?? null,
+          baselineContentHash: currentHead?.contentHash ?? null,
+          baselineActivationVersion: currentHead?.activationVersion ?? 0,
+          baselineActivatedAt: currentHead ? new Date(currentHead.activatedAt) : null,
+          draftRevisionId: draft.id,
+          draftRevision: draft.revision,
+          draftContentHash: draft.contentHash,
+          status: "proposed",
+          createdBySubjectId: normalized.createdBySubjectId,
+          createdAt,
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (created) {
+        const draftRow = await getRevisionInTransaction(scopedDb, input.workspaceId, draft.id);
+        if (!draftRow) throw new Error("Onboarding proposal draft was not recorded");
+        return onboardingProposalFromRow(created, draftRow);
+      }
+
+      const concurrentOperation = await getOnboardingProposalByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        normalized.operationId,
+      );
+      if (concurrentOperation) {
+        if (concurrentOperation.requestFingerprint !== normalized.requestFingerprint) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return await resolveOnboardingProposalInTransaction(scopedDb, concurrentOperation);
+      }
+      const concurrentSource = await getOnboardingProposalBySourceVersionInTransaction(
+        scopedDb,
+        normalized,
+      );
+      if (concurrentSource) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
+          concurrentSource.id,
+          concurrentSource.draftRevisionId,
+        );
+      }
+      throw new Error("Workspace instruction-policy onboarding proposal was not created");
+    },
+  );
+}
+
+export async function listWorkspaceInstructionPolicyOnboardingProposals(
+  db: Database,
+  workspaceId: string,
+  query: WorkspaceInstructionPolicyOnboardingProposalListQuery,
+): Promise<WorkspaceInstructionPolicyOnboardingProposalListResponse> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.workspaceInstructionPolicyOnboardingProposals)
+      .where(eq(schema.workspaceInstructionPolicyOnboardingProposals.workspaceId, workspaceId))
+      .orderBy(
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.createdAt),
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.id),
+      )
+      .limit(query.limit + 1);
+    const truncated = rows.length > query.limit;
+    const page = rows.slice(0, query.limit);
+    if (page.length === 0) return { proposals: [], truncated };
+    const revisions = await scopedDb
+      .select()
+      .from(schema.workspaceInstructionPolicyRevisions)
+      .where(
+        and(
+          eq(schema.workspaceInstructionPolicyRevisions.workspaceId, workspaceId),
+          inArray(
+            schema.workspaceInstructionPolicyRevisions.id,
+            page.map((proposal) => proposal.draftRevisionId),
+          ),
+        ),
+      );
+    const revisionsById = new Map(revisions.map((revision) => [revision.id, revision]));
+    return {
+      proposals: page.map((proposal) => {
+        const draft = revisionsById.get(proposal.draftRevisionId);
+        if (!draft) {
+          throw new Error("Workspace instruction-policy onboarding proposal lost its draft");
+        }
+        return onboardingProposalFromRow(proposal, draft);
+      }),
+      truncated,
+    };
+  });
 }
 
 function listFilterConditions(

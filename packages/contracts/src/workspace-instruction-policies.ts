@@ -5,6 +5,7 @@ export const WORKSPACE_INSTRUCTION_POLICY_PROMPT_MAX_UTF8_BYTES = 131_072;
 export const WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS = 4_096;
 export const WORKSPACE_INSTRUCTION_POLICY_ROLE_KEY_MAX_CHARS = 64;
 export const WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS = 512;
+export const WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS = 256;
 
 export const WorkspaceInstructionPolicyKind = z.enum(["charter", "policy"]);
 export type WorkspaceInstructionPolicyKind = z.infer<typeof WorkspaceInstructionPolicyKind>;
@@ -352,4 +353,101 @@ export const WorkspaceInstructionPolicyOperationReuseResponse = z.object({
 });
 export type WorkspaceInstructionPolicyOperationReuseResponse = z.infer<
   typeof WorkspaceInstructionPolicyOperationReuseResponse
+>;
+
+export const WorkspaceInstructionPolicyOnboardingProposalSource = z.object({
+  id: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS),
+  version: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS),
+  confidenceBps: z.number().int().min(0).max(10_000),
+});
+export type WorkspaceInstructionPolicyOnboardingProposalSource = z.infer<
+  typeof WorkspaceInstructionPolicyOnboardingProposalSource
+>;
+
+export const CreateWorkspaceInstructionPolicyOnboardingProposalRequest = z
+  .object({
+    operationId: z.string().uuid().optional(),
+    kind: WorkspaceInstructionPolicyKind,
+    scope: WorkspaceInstructionPolicyScope,
+    roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
+    // Content bounds are enforced by the domain layer so empty and oversized
+    // proposals retain their typed API outcomes instead of collapsing into a
+    // generic request-shape error.
+    content: z.string(),
+    sourceId: z.string().trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS),
+    sourceVersion: z
+      .string()
+      .trim()
+      .min(1)
+      .max(WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS),
+    confidenceBps: z.number().int().min(0).max(10_000),
+    expectedCurrentRevisionId: z.string().uuid().nullable(),
+    expectedActivationVersion: z.number().int().nonnegative(),
+  })
+  .superRefine(validateTarget);
+export type CreateWorkspaceInstructionPolicyOnboardingProposalRequest = z.infer<
+  typeof CreateWorkspaceInstructionPolicyOnboardingProposalRequest
+>;
+
+export const WorkspaceInstructionPolicyOnboardingProposal = z.object({
+  id: z.string().uuid(),
+  operationId: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  ...targetShape,
+  source: WorkspaceInstructionPolicyOnboardingProposalSource,
+  baseline: WorkspaceInstructionPolicyHead.nullable(),
+  draft: WorkspaceInstructionPolicyRevision,
+  status: z.literal("proposed"),
+  createdBySubjectId: z.string().min(1),
+  createdAt: z.string().datetime(),
+});
+export type WorkspaceInstructionPolicyOnboardingProposal = z.infer<
+  typeof WorkspaceInstructionPolicyOnboardingProposal
+>;
+
+export const WorkspaceInstructionPolicyOnboardingProposalListQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+export type WorkspaceInstructionPolicyOnboardingProposalListQuery = z.infer<
+  typeof WorkspaceInstructionPolicyOnboardingProposalListQuery
+>;
+
+export const WorkspaceInstructionPolicyOnboardingProposalListResponse = z.object({
+  proposals: z.array(WorkspaceInstructionPolicyOnboardingProposal),
+  truncated: z.boolean(),
+});
+export type WorkspaceInstructionPolicyOnboardingProposalListResponse = z.infer<
+  typeof WorkspaceInstructionPolicyOnboardingProposalListResponse
+>;
+
+export const WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse = z.object({
+  code: z.enum([
+    "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_EMPTY",
+    "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED",
+  ]),
+  message: z.string(),
+  maxChars: z.number().int().positive(),
+});
+export type WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse = z.infer<
+  typeof WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse
+>;
+
+export const WorkspaceInstructionPolicyOnboardingProposalStaleResponse = z.object({
+  code: z.literal("WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE"),
+  message: z.string(),
+  currentHead: WorkspaceInstructionPolicyHead.nullable(),
+});
+export type WorkspaceInstructionPolicyOnboardingProposalStaleResponse = z.infer<
+  typeof WorkspaceInstructionPolicyOnboardingProposalStaleResponse
+>;
+
+export const WorkspaceInstructionPolicyOnboardingProposalConflictResponse = z.object({
+  code: z.literal("WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT"),
+  message: z.string(),
+  existingProposalId: z.string().uuid(),
+  existingDraftRevisionId: z.string().uuid(),
+});
+export type WorkspaceInstructionPolicyOnboardingProposalConflictResponse = z.infer<
+  typeof WorkspaceInstructionPolicyOnboardingProposalConflictResponse
 >;

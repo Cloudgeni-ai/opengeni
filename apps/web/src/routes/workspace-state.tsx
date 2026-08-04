@@ -1,7 +1,13 @@
-import type {
-  WorkspaceStateGapCode,
-  WorkspaceStateGovernanceDriftStatus,
-  WorkspaceStateResponse,
+import {
+  OpenGeniApiError,
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  normalizeWorkspaceInstructionPolicyRoleKey,
+  type WorkspaceInstructionPolicyKind,
+  type WorkspaceInstructionPolicyOnboardingProposal,
+  type WorkspaceInstructionPolicyScope,
+  type WorkspaceStateGapCode,
+  type WorkspaceStateGovernanceDriftStatus,
+  type WorkspaceStateResponse,
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import {
@@ -23,8 +29,12 @@ import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 
-import { useWorkspaceStateInventory } from "./workspace-state-loader";
+import {
+  useWorkspaceInstructionPolicyOnboardingProposals,
+  useWorkspaceStateInventory,
+} from "./workspace-state-loader";
 
 const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
   no_document_bases: "No document bases are configured.",
@@ -165,6 +175,326 @@ function PolicyInventory({ state }: { state: WorkspaceStateResponse }) {
           Only the first 32 active heads are shown.
         </p>
       ) : null}
+    </StateCard>
+  );
+}
+
+function onboardingProposalTargetLabel(
+  target: Pick<WorkspaceInstructionPolicyOnboardingProposal, "kind" | "scope" | "roleKey">,
+): string {
+  if (target.kind === "charter") return "Workspace charter";
+  return target.scope === "role" ? `Role policy · ${target.roleKey}` : "Global policy";
+}
+
+function onboardingProposalErrorMessage(error: unknown): string {
+  if (error instanceof OpenGeniApiError) {
+    switch (error.code) {
+      case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_EMPTY":
+        return "Enter proposal content before creating the draft.";
+      case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED":
+        return "The proposal is larger than the instruction-policy draft limit.";
+      case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE":
+        return "The active policy changed. Refresh Workspace State and review the new baseline.";
+      case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT":
+        return "That source version already proposed a draft for this policy target.";
+      case "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED":
+        return "The proposal operation was already used with different input.";
+    }
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function OnboardingProposalInventory({
+  state,
+  workspaceId,
+  onWorkspaceStateReload,
+}: {
+  state: WorkspaceStateResponse;
+  workspaceId: string;
+  onWorkspaceStateReload: () => Promise<void>;
+}) {
+  const context = useAppContext();
+  const { client } = context;
+  const canCreate = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const proposals = useWorkspaceInstructionPolicyOnboardingProposals(client, workspaceId);
+  const [kind, setKind] = useState<WorkspaceInstructionPolicyKind>("charter");
+  const [scope, setScope] = useState<WorkspaceInstructionPolicyScope>("global");
+  const [roleKey, setRoleKey] = useState("");
+  const [sourceId, setSourceId] = useState("guided-onboarding");
+  const [sourceVersion, setSourceVersion] = useState("v1");
+  const [confidencePercent, setConfidencePercent] = useState("90");
+  const [content, setContent] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [createdProposalId, setCreatedProposalId] = useState<string | null>(null);
+
+  const effectiveScope: WorkspaceInstructionPolicyScope = kind === "charter" ? "global" : scope;
+  const normalizedRoleKey =
+    effectiveScope === "role" && roleKey.trim()
+      ? normalizeWorkspaceInstructionPolicyRoleKey(roleKey)
+      : null;
+  const baseline = state.policy.activeHeads.find(
+    (head) =>
+      head.kind === kind && head.scope === effectiveScope && head.roleKey === normalizedRoleKey,
+  );
+
+  const createProposal = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!canCreate || submitting) return;
+    if (effectiveScope === "role" && !normalizedRoleKey) {
+      setSubmitError("Enter a role key for a role policy proposal.");
+      return;
+    }
+    const confidence = Number(confidencePercent);
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) {
+      setSubmitError("Confidence must be between 0 and 100 percent.");
+      return;
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+    setCreatedProposalId(null);
+    try {
+      const created = await client.createWorkspaceInstructionPolicyOnboardingProposal(workspaceId, {
+        operationId: crypto.randomUUID(),
+        kind,
+        scope: effectiveScope,
+        roleKey: normalizedRoleKey,
+        content,
+        sourceId,
+        sourceVersion,
+        confidenceBps: Math.round(confidence * 100),
+        expectedCurrentRevisionId: baseline?.revisionId ?? null,
+        expectedActivationVersion: baseline?.activationVersion ?? 0,
+      });
+      setContent("");
+      setCreatedProposalId(created.id);
+      await Promise.all([proposals.reload(), onWorkspaceStateReload()]);
+    } catch (error) {
+      setSubmitError(onboardingProposalErrorMessage(error));
+      if (
+        error instanceof OpenGeniApiError &&
+        error.code === "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE"
+      ) {
+        await onWorkspaceStateReload().catch(() => undefined);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <StateCard
+      title="Onboarding proposals"
+      description="Create provenance-linked instruction-policy drafts only. Proposals never activate themselves and do not promote Documents or Memory into prompt authority."
+    >
+      {canCreate ? (
+        <form
+          aria-label="Create onboarding proposal"
+          className="grid gap-3 rounded-md border border-border bg-surface-2/30 p-3"
+          onSubmit={(event) => void createProposal(event)}
+        >
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Target kind
+              <select
+                className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                value={kind}
+                onChange={(event) => {
+                  const nextKind = event.target.value as WorkspaceInstructionPolicyKind;
+                  setKind(nextKind);
+                  if (nextKind === "charter") setScope("global");
+                }}
+              >
+                <option value="charter">Workspace charter</option>
+                <option value="policy">Policy</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Policy scope
+              <select
+                className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg disabled:opacity-60"
+                value={effectiveScope}
+                disabled={kind === "charter"}
+                onChange={(event) =>
+                  setScope(event.target.value as WorkspaceInstructionPolicyScope)
+                }
+              >
+                <option value="global">Global</option>
+                <option value="role">Role</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Source ID
+              <input
+                className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                value={sourceId}
+                maxLength={512}
+                required
+                onChange={(event) => setSourceId(event.target.value)}
+              />
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Source version
+              <input
+                className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                value={sourceVersion}
+                maxLength={256}
+                required
+                onChange={(event) => setSourceVersion(event.target.value)}
+              />
+            </label>
+          </div>
+          {effectiveScope === "role" ? (
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Role key
+              <input
+                className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                placeholder="incident-responder"
+                value={roleKey}
+                maxLength={64}
+                required
+                onChange={(event) => setRoleKey(event.target.value)}
+              />
+            </label>
+          ) : null}
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_12rem]">
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Draft content
+              <textarea
+                className="min-h-36 rounded-md border border-border bg-surface px-3 py-2 text-sm leading-6 text-fg"
+                value={content}
+                maxLength={WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS}
+                required
+                onChange={(event) => setContent(event.target.value)}
+              />
+            </label>
+            <div className="grid content-start gap-3">
+              <label className="grid gap-1 text-xs font-medium text-fg-muted">
+                Confidence (%)
+                <input
+                  className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.01"
+                  value={confidencePercent}
+                  required
+                  onChange={(event) => setConfidencePercent(event.target.value)}
+                />
+              </label>
+              <div className="rounded-md border border-border bg-surface p-3 text-xs leading-5 text-fg-muted">
+                <div className="font-medium text-fg">Exact baseline</div>
+                {baseline ? (
+                  <>
+                    <div>Revision r{baseline.revision}</div>
+                    <div>Activation v{baseline.activationVersion}</div>
+                  </>
+                ) : (
+                  <div>No active target</div>
+                )}
+              </div>
+            </div>
+          </div>
+          {state.policy.activeHeadsTruncated && !baseline ? (
+            <p className="text-xs text-status-waiting">
+              Active heads are truncated. The server will reject this proposal as stale if the
+              selected target has an undisplayed active head.
+            </p>
+          ) : null}
+          {submitError ? (
+            <div role="alert" className="text-xs text-status-error">
+              {submitError}
+            </div>
+          ) : null}
+          {createdProposalId ? (
+            <div role="status" className="text-xs text-status-success">
+              Draft-only proposal created. No policy activation occurred.
+            </div>
+          ) : null}
+          <div>
+            <button
+              type="submit"
+              className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={submitting}
+            >
+              {submitting ? "Creating draft…" : "Create draft proposal"}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="rounded-md border border-border bg-surface-2/30 p-3 text-xs leading-5 text-fg-muted">
+          Workspace admin permission is required to create onboarding proposals. Existing proposal
+          evidence remains readable with workspace access.
+        </div>
+      )}
+
+      <div className="mt-4">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+            Recent proposal evidence
+          </h3>
+          <button
+            type="button"
+            className="text-xs font-medium text-brand hover:underline disabled:opacity-60"
+            disabled={proposals.loading}
+            onClick={() => void proposals.reload()}
+          >
+            Refresh
+          </button>
+        </div>
+        {proposals.loading && !proposals.response ? (
+          <Skeleton aria-label="Loading onboarding proposals" className="h-24 w-full" />
+        ) : null}
+        {proposals.error && !proposals.response ? (
+          <LoadErrorState
+            title="Couldn't load onboarding proposals"
+            error={proposals.error}
+            onRetry={() => void proposals.reload()}
+          />
+        ) : null}
+        {proposals.response?.proposals.length === 0 ? (
+          <EmptyState>No onboarding proposals exist yet.</EmptyState>
+        ) : null}
+        {proposals.response?.proposals.length ? (
+          <div className="divide-y divide-border rounded-md border border-border">
+            {proposals.response.proposals.map((proposal) => (
+              <div key={proposal.id} className="grid gap-2 p-3 text-xs text-fg-muted">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="font-medium text-fg">
+                    {onboardingProposalTargetLabel(proposal)} · draft r{proposal.draft.revision}
+                  </div>
+                  <span className="rounded-full border border-status-waiting/50 px-2 py-1 text-status-waiting">
+                    Inactive proposal
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  <span>
+                    Source {proposal.source.id}@{proposal.source.version}
+                  </span>
+                  <span>Confidence {(proposal.source.confidenceBps / 100).toFixed(2)}%</span>
+                  <span>
+                    Baseline {proposal.baseline ? `r${proposal.baseline.revision}` : "none"}
+                  </span>
+                  <span>Created {formatDate(proposal.createdAt)}</span>
+                </div>
+                <p className="whitespace-pre-wrap break-words leading-5 text-fg">
+                  {proposal.draft.content}
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {proposals.error && proposals.response ? (
+          <p className="mt-2 text-xs text-status-error">
+            Refresh failed: {proposals.error.message}
+          </p>
+        ) : null}
+        {proposals.response?.truncated ? (
+          <p className="mt-2 text-xs text-status-waiting">
+            Only the newest 50 onboarding proposals are shown.
+          </p>
+        ) : null}
+      </div>
     </StateCard>
   );
 }
@@ -571,7 +901,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<MapIcon className="size-4" />}
         title="Workspace State"
-        description="Read-only policy, knowledge, freshness, and coverage inventory from existing workspace authorities."
+        description="Inspect policy and knowledge authorities, compare accepted-attempt governance, and create inactive onboarding draft proposals."
       />
       {loading && !state ? <WorkspaceStateLoading /> : null}
       {error && !state ? (
@@ -592,10 +922,15 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-2/30 px-3 py-2 text-xs text-fg-muted">
             <NetworkIcon className="size-3.5 text-brand" />
-            Generated {formatDate(state.generatedAt)} from a read-time projection. No background
-            sweep or policy mutation ran.
+            Generated {formatDate(state.generatedAt)} from a read-time projection. Onboarding
+            proposals use an explicit admin action and never activate policy automatically.
           </div>
           <PolicyInventory state={state} />
+          <OnboardingProposalInventory
+            state={state}
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={reload}
+          />
           <AttemptGovernanceInventory
             state={state}
             attemptInput={attemptInput}

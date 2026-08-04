@@ -4,7 +4,7 @@ async function source(path: string): Promise<string> {
   return Bun.file(`${import.meta.dir}/${path}`).text();
 }
 
-describe("read-only Workspace State surface", () => {
+describe("Workspace State authority surface", () => {
   test("registers a first-class workspace route and rail destination", async () => {
     const [app, navigation] = await Promise.all([
       source("App.tsx"),
@@ -16,7 +16,7 @@ describe("read-only Workspace State surface", () => {
     expect(navigation).toContain('label: "Workspace State"');
   });
 
-  test("keeps the page read-only and explicit about loading, errors, bounds, and snapshot truth", async () => {
+  test("keeps inventory read-only while bounding admin onboarding proposals", async () => {
     const [route, loader] = await Promise.all([
       source("routes/workspace-state.tsx"),
       source("routes/workspace-state-loader.ts"),
@@ -36,12 +36,17 @@ describe("read-only Workspace State surface", () => {
       "Open Documents",
       "Skills & capabilities",
       "Sessions & agents",
+      "Create draft proposal",
+      "Proposals never activate themselves",
+      "Inactive proposal",
     ]) {
       expect(route).toContain(required);
     }
     expect(loader).toContain("getWorkspaceState");
+    expect(loader).toContain("listWorkspaceInstructionPolicyOnboardingProposals");
+    expect(route).toContain("createWorkspaceInstructionPolicyOnboardingProposal");
     expect(`${route}\n${loader}`).not.toMatch(
-      /createWorkspaceInstruction|activateWorkspaceInstruction|updateKnowledgeMemory/,
+      /activateWorkspaceInstruction|updateKnowledgeMemory|createKnowledgeMemory/,
     );
     expect(route).not.toMatch(/method:\s*["'](?:POST|PATCH|PUT|DELETE)/);
     expect(route).not.toContain("policy snapshots are not implemented");

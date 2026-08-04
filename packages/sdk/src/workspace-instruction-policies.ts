@@ -1,3 +1,5 @@
+export const WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS = 262_144;
+
 export type WorkspaceInstructionPolicyKind = "charter" | "policy";
 export type WorkspaceInstructionPolicyScope = "global" | "role";
 export type WorkspaceInstructionPolicyProvenanceSource =
@@ -134,4 +136,64 @@ export type WorkspaceInstructionPolicyConflictResponse = {
 export type WorkspaceInstructionPolicyOperationReuseResponse = {
   code: "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED";
   message: string;
+};
+
+export type WorkspaceInstructionPolicyOnboardingProposalSource = {
+  id: string;
+  version: string;
+  confidenceBps: number;
+};
+
+export type CreateWorkspaceInstructionPolicyOnboardingProposalRequest =
+  WorkspaceInstructionPolicyTarget & {
+    operationId?: string;
+    content: string;
+    sourceId: string;
+    sourceVersion: string;
+    confidenceBps: number;
+    expectedCurrentRevisionId: string | null;
+    expectedActivationVersion: number;
+  };
+
+export type WorkspaceInstructionPolicyOnboardingProposal = WorkspaceInstructionPolicyTarget & {
+  id: string;
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  source: WorkspaceInstructionPolicyOnboardingProposalSource;
+  baseline: WorkspaceInstructionPolicyHead | null;
+  draft: WorkspaceInstructionPolicyRevision;
+  status: "proposed";
+  createdBySubjectId: string;
+  createdAt: string;
+};
+
+export type WorkspaceInstructionPolicyOnboardingProposalListOptions = {
+  limit?: number;
+};
+
+export type WorkspaceInstructionPolicyOnboardingProposalListResponse = {
+  proposals: WorkspaceInstructionPolicyOnboardingProposal[];
+  truncated: boolean;
+};
+
+export type WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse = {
+  code:
+    | "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_EMPTY"
+    | "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED";
+  message: string;
+  maxChars: number;
+};
+
+export type WorkspaceInstructionPolicyOnboardingProposalStaleResponse = {
+  code: "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE";
+  message: string;
+  currentHead: WorkspaceInstructionPolicyHead | null;
+};
+
+export type WorkspaceInstructionPolicyOnboardingProposalConflictResponse = {
+  code: "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT";
+  message: string;
+  existingProposalId: string;
+  existingDraftRevisionId: string;
 };
