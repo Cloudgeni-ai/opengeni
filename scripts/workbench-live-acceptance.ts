@@ -60,6 +60,43 @@ export type LiveAcceptanceArgs = {
   repetitions: number;
   sessionTimeoutMs: number;
   coldTimeoutMs: number;
+  captureApiRegionProbeCommand: string;
+  captureApiRegion: string;
+  captureApiImage: string;
+};
+
+export type CaptureApiRegionalProbeRequest = {
+  schemaVersion: "opengeni/workbench-capture-api-regional-probe-request/v1";
+  apiUrl: string;
+  environment: "staging" | "production";
+  sourceSha: string;
+  runId: string;
+  workspaceId: string;
+  sessionId: string;
+  captureRevision: number;
+  captureTurnId: string;
+  repetitions: number;
+  region: string;
+  apiImage: string;
+  cookieHeader: string;
+};
+
+export type CaptureApiRegionalProbeResult = {
+  schemaVersion: "opengeni/workbench-capture-api-regional-probe/v1";
+  apiOrigin: string;
+  environment: "staging" | "production";
+  sourceSha: string;
+  runId: string;
+  workspaceId: string;
+  sessionId: string;
+  captureRevision: number;
+  captureTurnId: string;
+  sampleCount: number;
+  region: string;
+  apiImage: string;
+  decodedBytes: number;
+  contentEncoding: "gzip";
+  samplesMs: number[];
 };
 
 type Check = {
@@ -100,6 +137,10 @@ type LiveReceipt = {
   sessionId: string;
   captureRevision: number;
   captureStats: WorkspaceCaptureManifest["stats"];
+  captureApiRegionProbe: Omit<
+    CaptureApiRegionalProbeResult,
+    "workspaceId" | "sessionId" | "captureRevision" | "samplesMs"
+  >;
   checks: Check[];
   measurements: {
     captureApiResponse: Measurement;
@@ -137,6 +178,9 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
     "--repetitions",
     "--session-timeout-ms",
     "--cold-timeout-ms",
+    "--capture-api-region-probe-command",
+    "--capture-api-region",
+    "--capture-api-image",
   ]);
   for (const flag of values.keys()) if (!allowed.has(flag)) throw new Error(`unknown flag ${flag}`);
 
@@ -155,6 +199,18 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
   const backend = values.get("--backend") ?? "modal";
   if (backend !== "modal") throw new Error("live workbench acceptance requires --backend modal");
   const repetitions = integer(values.get("--repetitions") ?? "100", "--repetitions", 100);
+  const captureApiRegionProbeCommand = required(values, "--capture-api-region-probe-command");
+  if (/\0|[\r\n]/.test(captureApiRegionProbeCommand)) {
+    throw new Error("--capture-api-region-probe-command is invalid");
+  }
+  const captureApiRegion = required(values, "--capture-api-region");
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(captureApiRegion)) {
+    throw new Error("--capture-api-region must be a lowercase deployment region");
+  }
+  const captureApiImage = required(values, "--capture-api-image");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$/.test(captureApiImage)) {
+    throw new Error("--capture-api-image must be a digest-pinned image reference");
+  }
   return {
     apiUrl,
     webUrl,
@@ -176,6 +232,9 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
       "--cold-timeout-ms",
       60_000,
     ),
+    captureApiRegionProbeCommand: resolve(captureApiRegionProbeCommand),
+    captureApiRegion,
+    captureApiImage,
   };
 }
 
@@ -335,12 +394,25 @@ async function main(): Promise<void> {
   await waitForCold(cookieClient, workspaceId, session.id, args.coldTimeoutMs);
   pass(checks, "functional.real-cold-lease", "The real Modal lease reached cold before UI review.");
 
-  const captureApiSamples = await measureCaptureApi(
-    cookieClient,
-    workspaceId,
-    session.id,
-    args.repetitions,
+  const captureApiRegionProbe = await runCaptureApiRegionalProbe(
+    args.captureApiRegionProbeCommand,
+    {
+      schemaVersion: "opengeni/workbench-capture-api-regional-probe-request/v1",
+      apiUrl: args.apiUrl,
+      environment: args.environment,
+      sourceSha: args.sourceSha,
+      runId: args.runId,
+      workspaceId,
+      sessionId: session.id,
+      captureRevision: manifest.revision,
+      captureTurnId: manifest.turnId,
+      repetitions: args.repetitions,
+      region: args.captureApiRegion,
+      apiImage: args.captureApiImage,
+      cookieHeader,
+    },
   );
+  const captureApiSamples = captureApiRegionProbe.samplesMs;
   const captureApiResponse = measurement(captureApiSamples);
   if (captureApiResponse.p95 > CAPTURE_API_P95_MS) {
     throw new Error(`capture API p95 ${captureApiResponse.p95}ms exceeds ${CAPTURE_API_P95_MS}ms`);
@@ -459,6 +531,19 @@ async function main(): Promise<void> {
     sessionId: session.id,
     captureRevision: manifest.revision,
     captureStats: manifest.stats,
+    captureApiRegionProbe: {
+      schemaVersion: captureApiRegionProbe.schemaVersion,
+      apiOrigin: captureApiRegionProbe.apiOrigin,
+      environment: captureApiRegionProbe.environment,
+      sourceSha: captureApiRegionProbe.sourceSha,
+      runId: captureApiRegionProbe.runId,
+      captureTurnId: captureApiRegionProbe.captureTurnId,
+      sampleCount: captureApiRegionProbe.sampleCount,
+      region: captureApiRegionProbe.region,
+      apiImage: captureApiRegionProbe.apiImage,
+      decodedBytes: captureApiRegionProbe.decodedBytes,
+      contentEncoding: captureApiRegionProbe.contentEncoding,
+    },
     checks,
     measurements: { captureApiResponse, captureUsableWorkbench, controlCancellation },
     artifacts,
@@ -1738,20 +1823,149 @@ async function waitForCaptureTurn(
   throw new Error("replacement turn capture did not become authoritative before timeout");
 }
 
-async function measureCaptureApi(
-  client: OpenGeniClient,
-  workspaceId: string,
-  sessionId: string,
-  repetitions: number,
-): Promise<number[]> {
-  const samples: number[] = [];
-  for (let index = 0; index < repetitions; index += 1) {
-    const started = performance.now();
-    const response = await client.getWorkspaceCapture(workspaceId, sessionId);
-    samples.push(performance.now() - started);
-    if (!response.available) throw new Error(`capture disappeared during repetition ${index}`);
+export async function runCaptureApiRegionalProbe(
+  command: string,
+  request: CaptureApiRegionalProbeRequest,
+): Promise<CaptureApiRegionalProbeResult> {
+  const child = Bun.spawn([process.execPath, command], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: captureApiRegionalProbeEnvironment(process.env),
+  });
+  const timeout = setTimeout(() => child.kill(), 300_000);
+  timeout.unref();
+  child.stdin.write(JSON.stringify(request));
+  child.stdin.end();
+  let stdout: string;
+  let stderr: string;
+  let exitCode: number;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      readBoundedText(child.stdout, 256 * 1024, "capture API regional probe output"),
+      readBoundedText(child.stderr, 256 * 1024, "capture API regional probe diagnostics"),
+      child.exited,
+    ]);
+  } catch (error) {
+    child.kill();
+    await child.exited.catch(() => undefined);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return samples;
+  if (exitCode !== 0) {
+    const safe = sanitizeDiagnostic(stderr.replaceAll(request.cookieHeader, "[redacted]")).slice(
+      0,
+      512,
+    );
+    throw new Error(
+      `capture API regional probe failed with exit code ${exitCode}${safe ? `: ${safe}` : ""}`,
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    throw new Error("capture API regional probe did not return one JSON object");
+  }
+  return validateCaptureApiRegionalProbeResult(value, request);
+}
+
+export function captureApiRegionalProbeEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && !entry[0].startsWith("OPENGENI_ACCEPTANCE_"),
+    ),
+  );
+}
+
+async function readBoundedText(
+  stream: ReadableStream<Uint8Array>,
+  maximumBytes: number,
+  label: string,
+): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > maximumBytes) throw new Error(`${label} exceeded 256 KiB`);
+      text += decoder.decode(next.value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export function validateCaptureApiRegionalProbeResult(
+  value: unknown,
+  request: CaptureApiRegionalProbeRequest,
+): CaptureApiRegionalProbeResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("capture API regional probe result is not an object");
+  }
+  const result = value as Record<string, unknown>;
+  const expectedKeys = [
+    "apiImage",
+    "apiOrigin",
+    "captureRevision",
+    "captureTurnId",
+    "contentEncoding",
+    "decodedBytes",
+    "environment",
+    "region",
+    "runId",
+    "sampleCount",
+    "samplesMs",
+    "schemaVersion",
+    "sessionId",
+    "sourceSha",
+    "workspaceId",
+  ];
+  if (JSON.stringify(Object.keys(result).sort()) !== JSON.stringify(expectedKeys)) {
+    throw new Error("capture API regional probe result fields are invalid");
+  }
+  const exact: Array<[keyof CaptureApiRegionalProbeResult, unknown]> = [
+    ["schemaVersion", "opengeni/workbench-capture-api-regional-probe/v1"],
+    ["apiOrigin", new URL(request.apiUrl).origin],
+    ["environment", request.environment],
+    ["sourceSha", request.sourceSha],
+    ["runId", request.runId],
+    ["workspaceId", request.workspaceId],
+    ["sessionId", request.sessionId],
+    ["captureRevision", request.captureRevision],
+    ["captureTurnId", request.captureTurnId],
+    ["sampleCount", request.repetitions],
+    ["region", request.region],
+    ["apiImage", request.apiImage],
+    ["contentEncoding", "gzip"],
+  ];
+  for (const [key, expected] of exact) {
+    if (result[key] !== expected) throw new Error(`capture API regional probe ${key} mismatch`);
+  }
+  if (!Number.isSafeInteger(result.decodedBytes) || Number(result.decodedBytes) < 1) {
+    throw new Error("capture API regional probe decoded byte count is invalid");
+  }
+  if (!Array.isArray(result.samplesMs) || result.samplesMs.length !== request.repetitions) {
+    throw new Error("capture API regional probe sample count mismatch");
+  }
+  if (
+    result.samplesMs.some(
+      (sample) =>
+        typeof sample !== "number" || !Number.isFinite(sample) || sample <= 0 || sample > 60_000,
+    )
+  ) {
+    throw new Error("capture API regional probe samples are invalid");
+  }
+  return result as CaptureApiRegionalProbeResult;
 }
 
 async function expectApiRejection(
