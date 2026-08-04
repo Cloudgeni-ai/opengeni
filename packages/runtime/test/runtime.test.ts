@@ -4209,7 +4209,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("retries brokered MCP requests once after 401 with a forced credential refresh", async () => {
+  test("retries replay-safe brokered MCP requests once after 401 with a forced refresh", async () => {
     const connectionId = "33333333-3333-4333-8333-333333333333";
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer fresh-token" },
@@ -4248,11 +4248,71 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const result = await prepared.mcpServers[0]!.callTool("cap-refresh__search_documents", {
-        query: "refresh",
-      });
-      expect(JSON.stringify(result)).toContain("found document for refresh");
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toContain("cap-refresh__search_documents");
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("never replays brokered tools/call after 401 and reports an uncertain outcome", async () => {
+    const connectionId = "34343434-3434-4434-8434-343434343434";
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer fresh-token" },
+    });
+    const resolved: ResolveConnectionCredentialInput[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-uncertain",
+            name: "Uncertain capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-uncertain" }],
+      {
+        workspaceId: "45454545-4545-4545-8545-454545454545",
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+          resolved.push(input);
+          return {
+            status: "ok",
+            connectionId,
+            headers: {
+              authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
+            },
+          };
+        },
+      },
+    );
+    try {
+      const result = await prepared.mcpServers[0]!.callTool("cap-uncertain__search_documents", {
+        query: "do not duplicate",
+      });
+      expect(result).toMatchObject({ isError: true });
+      const text = JSON.stringify(result);
+      expect(text).toMatch(/outcome uncertain/i);
+      expect(text).toMatch(/did not replay/i);
+      expect(text).toMatch(/do not retry automatically/i);
+      expect(text).toMatch(/verify provider state/i);
+      expect(text).not.toContain("unauthorized");
+      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
+        1,
+      );
+      expect(mcp.calls).toHaveLength(0);
+      expect(
+        resolved.some((input) => input.toolName === "search_documents" && input.forceRefresh),
+      ).toBe(true);
     } finally {
       await prepared.close();
       mcp.close();

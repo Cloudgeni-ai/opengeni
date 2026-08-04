@@ -28,6 +28,154 @@ export const MCP_MAX_TOOL_SEARCH_SOURCES = 64;
 export const MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH = 120;
 export const MCP_MAX_TOOL_SEARCH_DESCRIPTION_BYTES = 16 * 1024;
 
+export const MCP_REPLAY_SAFE_METHODS = [
+  "initialize",
+  "notifications/initialized",
+  "tools/list",
+] as const;
+
+export type McpJsonRpcId = string | number | null;
+
+export type McpRequestReplayInfo = {
+  replaySafeAfter401: boolean;
+  batch: boolean;
+  responseIds: readonly McpJsonRpcId[];
+  method?: string;
+  id?: McpJsonRpcId;
+  toolName?: string;
+};
+
+type ClassifiedMcpJsonRpcRequest = {
+  valid: boolean;
+  method?: string;
+  id?: McpJsonRpcId;
+  toolName?: string;
+};
+
+const MCP_REPLAY_SAFE_METHOD_SET = new Set<string>(MCP_REPLAY_SAFE_METHODS);
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function classifyMcpJsonRpcRequest(value: unknown): ClassifiedMcpJsonRpcRequest {
+  if (!isJsonObject(value)) {
+    return { valid: false };
+  }
+  const hasId = Object.prototype.hasOwnProperty.call(value, "id");
+  const id =
+    typeof value.id === "string" || typeof value.id === "number" || value.id === null
+      ? value.id
+      : undefined;
+  const validId = !hasId || id !== undefined;
+  const method =
+    typeof value.method === "string" && value.method.length > 0 ? value.method : undefined;
+  const valid = value.jsonrpc === "2.0" && method !== undefined && validId;
+  const params = isJsonObject(value.params) ? value.params : undefined;
+  const toolName =
+    valid && method === "tools/call" && typeof params?.name === "string" ? params.name : undefined;
+  return {
+    valid,
+    ...(valid && method ? { method } : {}),
+    ...(hasId && id !== undefined ? { id } : {}),
+    ...(toolName ? { toolName } : {}),
+  };
+}
+
+function invalidMcpRequestReplayInfo(batch = false): McpRequestReplayInfo {
+  return {
+    replaySafeAfter401: false,
+    batch,
+    responseIds: [],
+  };
+}
+
+/**
+ * Classify one outbound MCP JSON-RPC body for post-401 replay. The policy is
+ * deliberately fail-closed: only the exact reviewed handshake/list allowlist
+ * may be resent. Unknown extensions, malformed requests, non-list methods, and
+ * batches containing any unsafe or invalid entry are outcome-uncertain.
+ */
+export async function mcpRequestReplayInfo(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<McpRequestReplayInfo> {
+  let body: string | null = null;
+  if (typeof init?.body === "string") {
+    body = init.body;
+  } else if (init?.body !== undefined && init.body !== null) {
+    return invalidMcpRequestReplayInfo();
+  } else if (input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST") {
+    body = await input
+      .clone()
+      .text()
+      .catch(() => null);
+  }
+  if (!body) {
+    return invalidMcpRequestReplayInfo();
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return invalidMcpRequestReplayInfo();
+  }
+
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) {
+      return invalidMcpRequestReplayInfo(true);
+    }
+    const requests = parsed.map(classifyMcpJsonRpcRequest);
+    const valid = requests.every((request) => request.valid);
+    const responseIds = requests.flatMap((request) =>
+      request.id !== undefined ? [request.id] : [],
+    );
+    const toolName = requests.find((request) => request.toolName)?.toolName;
+    return {
+      replaySafeAfter401:
+        valid &&
+        requests.every(
+          (request) =>
+            request.method !== undefined && MCP_REPLAY_SAFE_METHOD_SET.has(request.method),
+        ),
+      batch: true,
+      responseIds,
+      ...(toolName ? { toolName } : {}),
+    };
+  }
+
+  const request = classifyMcpJsonRpcRequest(parsed);
+  if (!request.valid || request.method === undefined) {
+    return {
+      ...invalidMcpRequestReplayInfo(),
+      ...(request.id !== undefined ? { responseIds: [request.id] } : {}),
+    };
+  }
+  return {
+    replaySafeAfter401: MCP_REPLAY_SAFE_METHOD_SET.has(request.method),
+    batch: false,
+    responseIds: request.id !== undefined ? [request.id] : [],
+    method: request.method,
+    ...(request.id !== undefined ? { id: request.id } : {}),
+    ...(request.toolName ? { toolName: request.toolName } : {}),
+  };
+}
+
+export function mcpJsonRpcErrorPayloadForRequest(
+  request: McpRequestReplayInfo,
+  error: { code: number; message: string },
+):
+  | { jsonrpc: "2.0"; id: McpJsonRpcId; error: { code: number; message: string } }
+  | Array<{ jsonrpc: "2.0"; id: McpJsonRpcId; error: { code: number; message: string } }> {
+  const payload = (id: McpJsonRpcId) => ({ jsonrpc: "2.0" as const, id, error });
+  if (request.batch) {
+    const ids = request.responseIds.length > 0 ? request.responseIds : [null];
+    return ids.map(payload);
+  }
+  return payload(request.id ?? null);
+}
+
 export class McpPayloadTooLargeError extends Error {
   constructor(
     readonly label: string,
