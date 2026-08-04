@@ -31,6 +31,7 @@ export type {
   OAuthStartResponse,
   CreateWorkspaceRequest,
   Document as IndexedDocument,
+  DocumentAuthorityKind,
   DocumentBase,
   DocumentCurationStatus,
   DocumentSearchMode,
