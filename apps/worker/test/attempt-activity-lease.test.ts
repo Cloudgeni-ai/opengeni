@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { temporalActivityLeaseSettled } from "../src/index";
+import { temporalActivityLeaseSettled, temporalWorkflowExecutionNotFound } from "../src/index";
 
 describe("Temporal attempt activity lease", () => {
   test("keeps a live heartbeat lease pending", () => {
@@ -31,5 +31,28 @@ describe("Temporal attempt activity lease", () => {
 
   test("treats an absent exact activity as settled", () => {
     expect(temporalActivityLeaseSettled(undefined)).toBe(true);
+  });
+
+  test("only a typed Temporal gRPC NOT_FOUND proves the exact run absent", () => {
+    const temporalNotFound = Object.assign(new Error("workflow execution not found"), {
+      code: 5,
+      details: "workflow execution not found",
+      metadata: {},
+    });
+    expect(temporalWorkflowExecutionNotFound(temporalNotFound)).toBe(true);
+    expect(
+      temporalWorkflowExecutionNotFound(
+        Object.assign(new Error("ordinary HTTP 404"), { code: 5, status: 404 }),
+      ),
+    ).toBe(false);
+    expect(
+      temporalWorkflowExecutionNotFound(
+        Object.assign(new Error("Temporal unavailable"), {
+          code: 14,
+          details: "unavailable",
+          metadata: {},
+        }),
+      ),
+    ).toBe(false);
   });
 });

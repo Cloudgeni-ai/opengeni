@@ -1079,6 +1079,26 @@ describe("contracts", () => {
     ).toThrow();
   });
 
+  test("accepts an optional curated shortLabel on ClientModel", () => {
+    const withShort = ClientModel.parse({
+      id: "deepseek-v4-flash-0731",
+      label: "DeepSeek V4 Flash 0731",
+      shortLabel: "V4 Flash",
+      provider: "opengeni-gateway",
+      providerLabel: "OpenGeni Gateway",
+      api: "responses",
+    });
+    expect(withShort.shortLabel).toBe("V4 Flash");
+    const without = ClientModel.parse({
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      api: "responses",
+    });
+    expect(without.shortLabel).toBeUndefined();
+  });
+
   test("accepts additive normalized model definitions and authenticated availability", () => {
     const normalized = ClientModel.parse({
       id: "xai/grok-4.5",

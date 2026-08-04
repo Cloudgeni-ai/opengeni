@@ -56,7 +56,8 @@ descriptor root (`/`) for the user's home.
   pointer at creation**, so the very first turn lands on that machine.
 - **`workingDir`** (host path) — the directory the agent runs the session under
   (its cwd base for exec, terminal, and the file dock). A launch-root-relative
-  subdir or an absolute machine path both work.
+  subdir, an absolute machine path, or the current agent user's `~` / `~/...`
+  path both work. Other shell/environment expansion is intentionally not applied.
 
 ```ts
 import { OpenGeniClient } from "@opengeni/sdk";
@@ -82,6 +83,9 @@ Rules to keep in mind:
   resolve it against.
 - Omit `workingDir` and the session runs under the machine's **default workspace
   root** (the agent's launch dir).
+- Session detail responses echo the resolved configuration as `workingDir`
+  (`null` when the launch root is in use), so operators can diagnose placement
+  without querying storage directly.
 - **Repos are not cloned** onto a machine target. `resources` you attach are
   available for context, but the platform never `git clone`s onto the user's
   real filesystem — the machine uses its own git auth.

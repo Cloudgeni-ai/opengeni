@@ -2627,8 +2627,9 @@ describe("workflow contracts", () => {
     );
     expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
     expect(ci.jobs["service-images"].if).toBe(ci.jobs.deployment.if);
+    expect(ci.jobs["relay-image"].if).toBe(ci.jobs.deployment.if);
     expect(ci.jobs["sandbox-image"].if).toBe(ci.jobs.deployment.if);
-    const imageSteps = ["service-images", "sandbox-image"].flatMap((jobName) =>
+    const imageSteps = ["service-images", "relay-image", "sandbox-image"].flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
     );
     expect(imageSteps).toHaveLength(5);
@@ -2657,6 +2658,7 @@ describe("workflow contracts", () => {
       "package-contracts",
       "deployment",
       "service-images",
+      "relay-image",
       "sandbox-image",
       "images",
     ])
@@ -2816,6 +2818,23 @@ describe("workflow contracts", () => {
     expect(safetyStep.run).toBe("bun run test:unit");
 
     const browser = ci.jobs["browser-acceptance"];
+    const browserInstall = browser.steps.find(
+      (step: any) => step.name === "Install pinned Playwright Chromium runtime",
+    );
+    expect(browserInstall).toEqual({
+      name: "Install pinned Playwright Chromium runtime",
+      run: "bunx playwright install --with-deps --only-shell chromium",
+    });
+    expect(
+      browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),
+    ).toEqual([browserInstall]);
+    expect(
+      browser.steps.some(
+        (step: any) =>
+          String(step.uses ?? "").startsWith("actions/cache@") &&
+          JSON.stringify(step.with ?? {}).includes("ms-playwright"),
+      ),
+    ).toBe(false);
     expect(
       browser.steps.find(
         (step: any) => step.name === "Codex quota Codex quota and entitlement browser acceptance",

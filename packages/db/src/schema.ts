@@ -3246,6 +3246,7 @@ export const sessionWorkflowWakeOutbox = pgTable(
     temporalWorkflowId: text("temporal_workflow_id").notNull(),
     wakeRevision: bigint("wake_revision", { mode: "number" }).notNull().default(1),
     deliveredRevision: bigint("delivered_revision", { mode: "number" }).notNull().default(0),
+    controlRevision: bigint("control_revision", { mode: "number" }).notNull().default(0),
     reason: text("reason").notNull(),
     attempts: integer("attempts").notNull().default(0),
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3261,6 +3262,10 @@ export const sessionWorkflowWakeOutbox = pgTable(
     revisionSafe: check(
       "session_workflow_wake_outbox_revision_safe_check",
       sql`${table.wakeRevision} <= 9007199254740991 and ${table.deliveredRevision} <= 9007199254740991`,
+    ),
+    controlRevisionValid: check(
+      "session_workflow_wake_outbox_control_revision_check",
+      sql`${table.controlRevision} >= 0 and ${table.controlRevision} <= ${table.wakeRevision} and ${table.controlRevision} <= 9007199254740991`,
     ),
     workspaceAccount: foreignKey({
       name: "session_workflow_wake_outbox_workspace_account_fk",

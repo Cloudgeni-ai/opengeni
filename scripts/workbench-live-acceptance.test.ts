@@ -105,6 +105,7 @@ describe("workbench live acceptance preflight", () => {
       getByRole: () => ({ first: () => directoryButton }),
     };
     const fileItem = {
+      isVisible: async () => true,
       getByRole: () => fileButton,
     };
     const page = {
@@ -121,6 +122,56 @@ describe("workbench live acceptance preflight", () => {
     await selectTreeFile(page, "api", "base.txt");
 
     expect(clicks).toEqual(["file"]);
+  });
+
+  test("selects an off-screen virtualized file through the tree keyboard contract", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    const rows = ["api", "base.txt", "notes.txt", "server.ts"];
+    const directoryItem = {
+      getAttribute: async () => "true",
+      getByRole: () => ({ first: () => ({ click: async () => {} }) }),
+    };
+    const fileItem = {
+      isVisible: async () => false,
+    };
+    const tree = {
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter({ hasText }: { hasText: string }) {
+            return { first: () => (hasText === "api" ? directoryItem : fileItem) };
+          },
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(presses).toEqual(["Home", "ArrowDown", "ArrowDown", "ArrowDown", "Enter"]);
   });
 
   test("accepts repository evidence from the compact changed-file picker", async () => {

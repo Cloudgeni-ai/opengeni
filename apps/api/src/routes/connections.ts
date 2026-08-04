@@ -24,6 +24,7 @@ import {
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
 } from "@opengeni/core";
 import {
@@ -338,12 +339,25 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:write",
+      );
+      const { grant } = authorization;
       const connection = await saveGoogleDriveSource(deps, {
+        accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
         connectionId: c.req.param("connectionId"),
         payload: await c.req.json(),
+        canManageOrganizationDestination:
+          authorization.accountGrant?.permissions.includes("account:admin") === true,
+        canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+        canManagePersonalDestination:
+          authorization.contextIntegrity &&
+          authorization.authenticatedSubjectId === grant.subjectId,
       });
       return c.json(ConnectionResponse.parse({ connection }));
     },
@@ -503,7 +517,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const payload = parsed.data;
     const result = await startMcpOAuth(
-      { db, settings, observability },
+      { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
         accountId: grant.accountId,
         workspaceId,
@@ -518,7 +532,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     const result = await completeMcpOAuthCallback(
-      { db, settings, observability },
+      { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
       {
         code: c.req.query("code"),
         state: c.req.query("state"),

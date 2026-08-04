@@ -445,6 +445,135 @@ describe("clean session control plane", () => {
     ).toBeInstanceOf(Date);
   });
 
+  test("an accepted Steer outranks retryable recovery for the exact live attempt", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the predecessor");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId },
+    );
+    expect(predecessor).not.toBeNull();
+    const replacement = await send(grant, session.id, "use this direction", "steer");
+
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: predecessor!.id,
+        triggerEventId: predecessor!.triggerEventId,
+        attemptId,
+        reason: "provider_unavailable",
+        detail: { code: "provider_unavailable", retryable: true, continueDelayMs: 2_000 },
+      }),
+    ).toMatchObject({ action: "stale", events: [] });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id))?.status).toBe(
+      "running",
+    );
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId!, session.id)).some(
+        (event) => event.type === "turn.recovery.requested",
+      ),
+    ).toBe(false);
+
+    const settled = await settleSessionAttemptInterruptions(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    expect(settled).toMatchObject({ outcome: "superseded" });
+    const repairWake = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [row] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+        .limit(1);
+      return row;
+    });
+    expect(repairWake).toMatchObject({
+      controlRevision: repairWake?.wakeRevision,
+    });
+    expect(repairWake!.wakeRevision).toBeGreaterThan(replacement.wakeRevision);
+
+    // Presentation metadata is intentionally tolerant and must never own the
+    // admission fence. The interruption ledger still blocks this claim.
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const current = await getSessionTurn(client.db, grant.workspaceId!, replacement.turn.id);
+      await db
+        .update(schema.sessionTurns)
+        .set({
+          metadata: {
+            ...(current?.metadata ?? {}),
+            delivery: "steer",
+            replacedAttemptId: "malformed",
+            interruptionCount: "malformed",
+          },
+        })
+        .where(eq(schema.sessionTurns.id, replacement.turn.id));
+    });
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
+    await markSessionAttemptQuiesced(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+    });
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+    );
+    expect(claimed?.id).toBe(replacement.turn.id);
+  });
+
+  test("Steer immediately supersedes an ownerless turn during its recovery wait", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the predecessor");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId },
+    );
+    expect(predecessor).not.toBeNull();
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: predecessor!.id,
+        triggerEventId: predecessor!.triggerEventId,
+        attemptId,
+        reason: "provider_unavailable",
+        detail: { code: "provider_unavailable", retryable: true, continueDelayMs: 2_000 },
+      }),
+    ).toMatchObject({ action: "recovering" });
+
+    const replacement = await send(grant, session.id, "change direction now", "steer");
+    expect(replacement.interruptionCount).toBe(0);
+    expect((await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id))?.status).toBe(
+      "superseded",
+    );
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "runnable",
+    });
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+    );
+    expect(claimed?.id).toBe(replacement.turn.id);
+  });
+
   test("session discovery is compact-by-query and cursor-stable", async () => {
     const { grant, session: first } = await fixture();
     const hugeTitle = "界😀".repeat(100_000);
@@ -3605,6 +3734,96 @@ describe("clean session control plane", () => {
         activitySettled: true,
       }),
     ).toEqual({ action: "quiesced", events: [] });
+  });
+
+  test("quiescence reconciliation finds an older rejected-stale predecessor", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the predecessor");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+    const replacement = await send(grant, session.id, "replace it", "steer");
+    await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
+    // Temporarily open admission without manufacturing the receipt event that
+    // the historical race never wrote. This lets a newer attempt exist before
+    // the missing predecessor receipt is reconstructed below.
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurnAttempts)
+        .set({ quiescedAt: new Date() })
+        .where(eq(schema.sessionTurnAttempts.id, attemptId));
+    });
+
+    const replacementAttemptId = crypto.randomUUID();
+    const claimedReplacement = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId: replacementAttemptId },
+    );
+    expect(claimedReplacement?.id).toBe(replacement.turn.id);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: claimedReplacement!.id,
+      triggerEventId: claimedReplacement!.triggerEventId,
+      attemptId: replacementAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+
+    // Recreate the durable shape left by the historical recovery race after a
+    // newer attempt exists. Reconciliation must not inspect only that newest
+    // generation and overlook this exact predecessor.
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurnAttempts)
+        .set({ quiescedAt: null })
+        .where(eq(schema.sessionTurnAttempts.id, attemptId));
+      await db
+        .update(schema.sessionAttemptInterruptions)
+        .set({ state: "rejected_stale" })
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId));
+      await db
+        .update(schema.sessionTurns)
+        .set({ status: "queued", activeAttemptId: null, finishedAt: null })
+        .where(eq(schema.sessionTurns.id, replacement.turn.id));
+      await db
+        .update(schema.sessions)
+        .set({ status: "queued", activeTurnId: null })
+        .where(eq(schema.sessions.id, session.id));
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))
+        ?.stoppingPreviousAttempt,
+    ).toBe(true);
+    expect(
+      await reconcileSessionAttemptQuiescence(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        activitySettled: true,
+      }),
+    ).toMatchObject({ action: "quiesced" });
   });
 
   test("worker death recovers the same compaction execution without entering the queue", async () => {

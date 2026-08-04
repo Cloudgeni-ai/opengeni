@@ -238,7 +238,11 @@ import type {
   WorkspaceInstructionPolicyOnboardingProposalListResponse,
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
-import type { WorkspaceStateGetOptions, WorkspaceStateResponse } from "./workspace-state";
+import type {
+  WorkspaceStateExportResponse,
+  WorkspaceStateGetOptions,
+  WorkspaceStateResponse,
+} from "./workspace-state";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -2080,6 +2084,20 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceStateResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/workspace-state${query}`,
+    );
+  }
+
+  /** Download the canonical, explicitly sanitized Workspace State export. */
+  async exportWorkspaceState(
+    workspaceId: string,
+    options: WorkspaceStateGetOptions = {},
+  ): Promise<WorkspaceStateExportResponse> {
+    const params = new URLSearchParams();
+    if (options.attemptId) params.set("attemptId", options.attemptId);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<WorkspaceStateExportResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/workspace-state/export${query}`,
     );
   }
 

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -9,6 +9,7 @@ import {
   createDb,
   createSession,
   enqueueSessionWorkflowWake,
+  getSessionTurn,
   initializeSessionStartAtomically,
   listSessionEvents,
   listSessionTurns,
@@ -16,6 +17,7 @@ import {
   markSessionWorkflowWakeFailed,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
+  requestSessionTurnRecovery,
   setSessionGoalStatus,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
@@ -64,7 +66,12 @@ async function fixture() {
 
 type WakeFixture = Awaited<ReturnType<typeof fixture>>;
 
-async function send(wakeFixture: WakeFixture, text: string, clientEventId = crypto.randomUUID()) {
+async function send(
+  wakeFixture: WakeFixture,
+  text: string,
+  delivery: "send" | "steer" = "send",
+  clientEventId = crypto.randomUUID(),
+) {
   return await withWorkspaceSubjectRls(
     client.db,
     wakeFixture.grant.workspaceId!,
@@ -78,7 +85,7 @@ async function send(wakeFixture: WakeFixture, text: string, clientEventId = cryp
           subjectId: wakeFixture.grant.subjectId,
           actor: { type: "human", subjectId: wakeFixture.grant.subjectId },
           operationKey: clientEventId,
-          delivery: "send",
+          delivery,
           text,
           resources: [],
           reasoningEffortFallback: "low",
@@ -500,5 +507,108 @@ describe("transactional session workflow wake outbox", () => {
     expect(claimed).toMatchObject({
       interruptionRequested: true,
     });
+  });
+
+  test("an ownerless Steer keeps control priority when a later Send coalesces", async () => {
+    const ctx = await fixture();
+    const queued = await send(ctx, "run");
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: queued.wakeRevision,
+    });
+    const attemptId = crypto.randomUUID();
+    const predecessor = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(predecessor.action).toBe("claimed");
+    if (predecessor.action !== "claimed") throw new Error("predecessor was not claimed");
+    expect(
+      await requestSessionTurnRecovery(client.db, ctx.grant.workspaceId!, {
+        sessionId: ctx.session.id,
+        turnId: predecessor.turn.id,
+        triggerEventId: predecessor.turn.triggerEventId,
+        attemptId,
+        reason: "provider_unavailable",
+        providerRecoveryCount: 1,
+        detail: { continueDelayMs: 2_000 },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    expect(
+      (await getSessionTurn(client.db, ctx.grant.workspaceId!, predecessor.turn.id))?.metadata,
+    ).toMatchObject({ providerRecoveryCount: 1 });
+
+    const steered = await send(ctx, "change direction", "steer");
+    expect(steered.interruptionCount).toBe(0);
+    const laterSend = await send(ctx, "also remember this");
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: laterSend.wakeRevision,
+      controlRevision: steered.wakeRevision,
+    });
+    const claimed = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(claimed).toMatchObject({
+      wakeRevision: laterSend.wakeRevision,
+      interruptionRequested: true,
+    });
+
+    await markSessionWorkflowWakeDelivered(client.db, claimed!);
+    const ordinary = await send(ctx, "ordinary follow-up");
+    const ordinaryClaim = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(ordinaryClaim).toMatchObject({
+      wakeRevision: ordinary.wakeRevision,
+      interruptionRequested: false,
+    });
+  });
+
+  test("the rolling trigger preserves control priority for old writers", async () => {
+    const ctx = await fixture();
+    await withWorkspaceRls(client.db, ctx.grant.workspaceId!, async (db) => {
+      await db.execute(sql`
+        insert into ${schema.sessionWorkflowWakeOutbox} (
+          session_id, account_id, workspace_id, temporal_workflow_id, reason
+        ) values (
+          ${ctx.session.id}, ${ctx.grant.accountId}, ${ctx.grant.workspaceId!},
+          ${`session-${ctx.session.id}`}, 'prompt_steer'
+        )
+        on conflict (session_id) do update set
+          wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+          reason = excluded.reason,
+          updated_at = now()
+      `);
+      await db.execute(sql`
+        insert into ${schema.sessionWorkflowWakeOutbox} (
+          session_id, account_id, workspace_id, temporal_workflow_id, reason
+        ) values (
+          ${ctx.session.id}, ${ctx.grant.accountId}, ${ctx.grant.workspaceId!},
+          ${`session-${ctx.session.id}`}, 'prompt_send'
+        )
+        on conflict (session_id) do update set
+          wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+          reason = excluded.reason,
+          updated_at = now()
+      `);
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: 2,
+      deliveredRevision: 0,
+      controlRevision: 1,
+      reason: "prompt_send",
+    });
+    expect(
+      (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+        (entry) => entry.sessionId === ctx.session.id,
+      ),
+    ).toMatchObject({ interruptionRequested: true });
   });
 });

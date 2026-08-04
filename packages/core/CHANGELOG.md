@@ -1,5 +1,89 @@
 # @opengeni/core
 
+## 0.20.11
+
+### Patch Changes
+
+- dfa3aef: Preserve Steer priority through provider recovery and repair interrupted attempts durably.
+- Updated dependencies [dfa3aef]
+  - @opengeni/db@0.27.8
+  - @opengeni/documents@0.5.4
+  - @opengeni/events@0.3.74
+
+## 0.20.10
+
+### Patch Changes
+
+- c29fd4c: Bound MCP OAuth callbacks through token exchange and persistence, return safe stage-specific failures to the capabilities UI, and replace incompatible dynamic client registrations with a compare-and-swap update.
+- Updated dependencies [c29fd4c]
+  - @opengeni/db@0.27.7
+  - @opengeni/documents@0.5.3
+  - @opengeni/events@0.3.73
+
+## 0.20.9
+
+### Patch Changes
+
+- 664c1d8: Bound MCP OAuth setup with an absolute server deadline, abort stalled response streams, and preserve safe stage-specific API error details in SDK clients.
+  - @opengeni/db@0.27.6
+  - @opengeni/runtime@0.18.10
+  - @opengeni/documents@0.5.2
+  - @opengeni/events@0.3.72
+
+## 0.20.8
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+  - @opengeni/config@0.10.11
+  - @opengeni/documents@0.5.1
+  - @opengeni/events@0.3.71
+  - @opengeni/observability@0.4.14
+  - @opengeni/runtime@0.18.9
+  - @opengeni/storage@0.2.64
+
+## 0.20.7
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+  - @opengeni/documents@0.5.0
+  - @opengeni/events@0.3.70
+  - @opengeni/runtime@0.18.8
+  - @opengeni/storage@0.2.63
+  - @opengeni/observability@0.4.13
+
+## 0.20.6
+
+### Patch Changes
+
+- 4976e1c: Fix DNS-pinned OAuth response streaming under Bun and expose X as a built-in workspace social capability.
+- Updated dependencies [d5df927]
+  - @opengeni/documents@0.4.1
+  - @opengeni/db@0.27.3
+  - @opengeni/runtime@0.18.7
+  - @opengeni/events@0.3.69
+
+## 0.20.5
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/documents@0.4.0
+  - @opengeni/config@0.10.9
+  - @opengeni/db@0.27.2
+  - @opengeni/events@0.3.68
+  - @opengeni/observability@0.4.12
+  - @opengeni/runtime@0.18.6
+  - @opengeni/storage@0.2.62
+
 ## 0.20.4
 
 ### Patch Changes

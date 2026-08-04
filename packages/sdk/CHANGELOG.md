@@ -1,5 +1,42 @@
 # @opengeni/sdk
 
+## 0.44.0
+
+### Minor Changes
+
+- 664c1d8: Bound MCP OAuth setup with an absolute server deadline, abort stalled response streams, and preserve safe stage-specific API error details in SDK clients.
+
+## 0.43.1
+
+### Patch Changes
+
+- c9d8b69: Make Connected Machine project paths portable and diagnosable: session responses now expose `workingDir`, and the native agent consistently supports the service user's `~` path across exec, filesystem, git, and terminal operations while reporting missing working directories accurately.
+
+## 0.43.0
+
+### Minor Changes
+
+- bef5920: Add subject-scoped Workspace State preference and document-authority inventory
+  metadata plus a canonical, explicitly sanitized export API and SDK method.
+
+### Patch Changes
+
+- b6e39fc: Polish session chrome and apply_patch rendering; clarify realtime voice-end handoff.
+
+  SessionChrome gets denser selected-chip UX and Codex function-tool apply_patch shapes render in the specialized diff UI. Solo goal_continuation machine-input rows are suppressed in favor of the GoalRow landmark. The realtime transcript-tail instruction now keeps in-flight work going after voice ends.
+
+## 0.42.1
+
+### Patch Changes
+
+- 4976e1c: Fix DNS-pinned OAuth response streaming under Bun and expose X as a built-in workspace social capability.
+
+## 0.42.0
+
+### Minor Changes
+
+- fd13ba9: Add one immutable organization, workspace, or personal document destination contract for connector configuration, and make Google Drive persist and consume that authority independently from optional collections.
+
 ## 0.41.1
 
 ### Patch Changes

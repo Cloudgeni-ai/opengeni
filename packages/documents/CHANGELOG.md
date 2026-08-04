@@ -1,5 +1,72 @@
 # @opengeni/documents
 
+## 0.5.4
+
+### Patch Changes
+
+- Updated dependencies [dfa3aef]
+  - @opengeni/db@0.27.8
+
+## 0.5.3
+
+### Patch Changes
+
+- Updated dependencies [c29fd4c]
+  - @opengeni/db@0.27.7
+
+## 0.5.2
+
+### Patch Changes
+
+- @opengeni/db@0.27.6
+
+## 0.5.1
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+  - @opengeni/config@0.10.11
+  - @opengeni/storage@0.2.64
+
+## 0.5.0
+
+### Minor Changes
+
+- bef5920: Add subject-scoped Workspace State preference and document-authority inventory
+  metadata plus a canonical, explicitly sanitized export API and SDK method.
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+  - @opengeni/storage@0.2.63
+
+## 0.4.1
+
+### Patch Changes
+
+- d5df927: Keep legacy personal document checks anchored to their originating workspace and fail closed for incomplete, non-canonical, overlong, or unknown authority tuples.
+  - @opengeni/db@0.27.3
+
+## 0.4.0
+
+### Minor Changes
+
+- fd13ba9: Add one immutable organization, workspace, or personal document destination contract for connector configuration, and make Google Drive persist and consume that authority independently from optional collections.
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/config@0.10.9
+  - @opengeni/db@0.27.2
+  - @opengeni/storage@0.2.62
+
 ## 0.3.4
 
 ### Patch Changes

@@ -101,6 +101,8 @@ export type ComposerTranscriptionControlProps = {
   createRecordingStore?: (() => VoiceRecordingStore) | undefined;
   /** Test/embed seam. Production acquires a coordinated browser-document owner lease. */
   createOwnerId?: (() => string) | undefined;
+  /** Hide while realtime voice owns the mic — collapses with a layout-friendly exit. */
+  suppressed?: boolean | undefined;
 };
 
 const WAVEFORM_BARS = 18;
@@ -119,6 +121,7 @@ export function ComposerTranscriptionControl({
   className,
   createRecordingStore,
   createOwnerId,
+  suppressed = false,
 }: ComposerTranscriptionControlProps) {
   const composer = useChatComposer();
   const messages = { ...defaultMessages, ...overrides };
@@ -126,7 +129,7 @@ export function ComposerTranscriptionControl({
     client,
     workspaceId,
     capability,
-    enabled: workspaceEnabled,
+    enabled: workspaceEnabled && !suppressed,
     value: composer.value,
     setValue: composer.setValue,
     focusInput: composer.focusInput,
@@ -135,6 +138,14 @@ export function ComposerTranscriptionControl({
     createOwnerId,
   });
   const { status } = transcription;
+
+  const cancelTranscription = transcription.cancel;
+  useEffect(() => {
+    if (!suppressed) return;
+    if (status === "recording" || status === "requesting-permission") {
+      cancelTranscription();
+    }
+  }, [cancelTranscription, status, suppressed]);
   const active =
     status === "requesting-permission" ||
     status === "recording" ||
@@ -181,179 +192,197 @@ export function ComposerTranscriptionControl({
   }
 
   return (
-    <span
-      className={cn("inline-flex min-w-0 items-center gap-1.5", className)}
-      data-transcription-status={status}
-    >
-      <AnimatePresence mode="popLayout" initial={false}>
-        {recoverable ? (
-          <motion.span
-            key="recovered"
-            initial={{ opacity: 0, scale: 0.96 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.96 }}
-            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-            className={cn(
-              "inline-flex h-8 min-w-0 items-center gap-1 rounded-og-md border border-og-border/80",
-              "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
-            )}
-          >
-            <span className="max-w-44 truncate text-og-xs text-og-fg-muted max-sm:max-w-28">
-              {savedTranscript
-                ? (errorMessage ?? messages.recoveredTranscript)
-                : status === "error"
-                  ? (errorMessage ?? messages.errorRetryable)
-                  : messages.recovered}
-            </span>
-            <Tip tip={savedTranscript ? messages.insertRecoveredTranscript : messages.retry}>
-              <button
-                type="button"
-                onClick={() =>
-                  savedTranscript
-                    ? void transcription.insertSavedTranscript()
-                    : transcription.retry()
-                }
-                aria-label={savedTranscript ? messages.insertRecoveredTranscript : messages.retry}
-                className={cn(
-                  "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                  "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
-                  "hover:bg-og-fg-muted pointer-coarse:size-11",
-                )}
-              >
-                {savedTranscript ? (
-                  <ClipboardPasteIcon className="size-3.5" />
-                ) : (
-                  <RefreshCwIcon className="size-3.5" />
-                )}
-              </button>
-            </Tip>
-            <Tip tip={messages.discardRecovered}>
-              <button
-                type="button"
-                onClick={() => void transcription.discard()}
-                aria-label={messages.discardRecovered}
-                className={cn(
-                  "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                  "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
-                  "hover:bg-og-surface-3 hover:text-og-status-failed pointer-coarse:size-11",
-                )}
-              >
-                <Trash2Icon className="size-3.5" />
-              </button>
-            </Tip>
-          </motion.span>
-        ) : active ? (
-          <motion.span
-            key={status === "transcribing" || status === "saving" ? "processing" : "capture"}
-            initial={{ opacity: 0, scale: 0.96 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.96 }}
-            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-            className={cn(
-              "inline-flex h-8 items-center gap-1 rounded-og-md border border-og-border/80",
-              "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
-            )}
-          >
-            {status === "requesting-permission" ? (
-              <LoaderCircleIcon
-                className="size-3.5 shrink-0 text-og-fg-muted animate-og-spin motion-reduce:animate-none"
-                aria-hidden
-              />
-            ) : (
-              <span className="flex items-center gap-1.5">
-                {status === "recording" ? (
-                  <span
-                    aria-hidden
-                    className="size-1.5 shrink-0 rounded-full bg-og-status-failed animate-og-pulse motion-reduce:animate-none"
-                  />
-                ) : null}
-                <VoiceWaveform
-                  stream={status === "recording" ? transcription.stream : null}
-                  mode={status === "recording" ? "recording" : "transcribing"}
-                />
-              </span>
-            )}
-            {status === "recording" ? (
-              <>
-                <Tip tip={messages.cancel}>
-                  <button
+    <AnimatePresence initial={false}>
+      {suppressed ? null : (
+        <motion.span
+          key="composer-dictate"
+          initial={{ opacity: 0, width: 0 }}
+          animate={{ opacity: 1, width: "auto" }}
+          exit={{ opacity: 0, width: 0 }}
+          transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
+          className={cn("inline-flex min-w-0 overflow-hidden", className)}
+          data-transcription-status={status}
+        >
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <AnimatePresence mode="popLayout" initial={false}>
+              {recoverable ? (
+                <motion.span
+                  key="recovered"
+                  initial={{ opacity: 0, scale: 0.96 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.96 }}
+                  transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                  className={cn(
+                    "inline-flex h-8 min-w-0 items-center gap-1 rounded-og-md border border-og-border/80",
+                    "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
+                  )}
+                >
+                  <span className="max-w-44 truncate text-og-xs text-og-fg-muted max-sm:max-w-28">
+                    {savedTranscript
+                      ? (errorMessage ?? messages.recoveredTranscript)
+                      : status === "error"
+                        ? (errorMessage ?? messages.errorRetryable)
+                        : messages.recovered}
+                  </span>
+                  <Tip tip={savedTranscript ? messages.insertRecoveredTranscript : messages.retry}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        savedTranscript
+                          ? void transcription.insertSavedTranscript()
+                          : transcription.retry()
+                      }
+                      aria-label={
+                        savedTranscript ? messages.insertRecoveredTranscript : messages.retry
+                      }
+                      className={cn(
+                        "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                        "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
+                        "hover:bg-og-fg-muted pointer-coarse:size-11",
+                      )}
+                    >
+                      {savedTranscript ? (
+                        <ClipboardPasteIcon className="size-3.5" />
+                      ) : (
+                        <RefreshCwIcon className="size-3.5" />
+                      )}
+                    </button>
+                  </Tip>
+                  <Tip tip={messages.discardRecovered}>
+                    <button
+                      type="button"
+                      onClick={() => void transcription.discard()}
+                      aria-label={messages.discardRecovered}
+                      className={cn(
+                        "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                        "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
+                        "hover:bg-og-surface-3 hover:text-og-status-failed pointer-coarse:size-11",
+                      )}
+                    >
+                      <Trash2Icon className="size-3.5" />
+                    </button>
+                  </Tip>
+                </motion.span>
+              ) : active ? (
+                <motion.span
+                  key={status === "transcribing" || status === "saving" ? "processing" : "capture"}
+                  initial={{ opacity: 0, scale: 0.96 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.96 }}
+                  transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                  className={cn(
+                    "inline-flex h-8 items-center gap-1 rounded-og-md border border-og-border/80",
+                    "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
+                  )}
+                >
+                  {status === "requesting-permission" ? (
+                    <LoaderCircleIcon
+                      className="size-3.5 shrink-0 text-og-fg-muted animate-og-spin motion-reduce:animate-none"
+                      aria-hidden
+                    />
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      {status === "recording" ? (
+                        <span
+                          aria-hidden
+                          className="size-1.5 shrink-0 rounded-full bg-og-status-failed animate-og-pulse motion-reduce:animate-none"
+                        />
+                      ) : null}
+                      <VoiceWaveform
+                        stream={status === "recording" ? transcription.stream : null}
+                        mode={status === "recording" ? "recording" : "transcribing"}
+                      />
+                    </span>
+                  )}
+                  {status === "recording" ? (
+                    <>
+                      <Tip tip={messages.cancel}>
+                        <button
+                          type="button"
+                          onClick={() => transcription.cancel()}
+                          aria-label={messages.cancel}
+                          aria-keyshortcuts="Escape"
+                          className={cn(
+                            "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                            "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
+                            "hover:bg-og-surface-3 hover:text-og-fg pointer-coarse:size-11",
+                          )}
+                        >
+                          <XIcon className="size-3.5" />
+                        </button>
+                      </Tip>
+                      <Tip tip={messages.stop}>
+                        <button
+                          type="button"
+                          onClick={() => transcription.stop()}
+                          aria-label={messages.stop}
+                          className={cn(
+                            "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                            "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
+                            "hover:bg-og-fg-muted pointer-coarse:size-11",
+                          )}
+                        >
+                          <SquareIcon className="size-2.5 fill-current" />
+                        </button>
+                      </Tip>
+                    </>
+                  ) : status === "transcribing" || status === "saving" ? (
+                    <span className="og-shimmer-text px-1.5 text-og-xs font-medium whitespace-nowrap">
+                      {status === "saving" ? messages.saving : messages.transcribing}
+                    </span>
+                  ) : (
+                    <span className="px-1.5 text-og-xs text-og-fg-muted whitespace-nowrap">
+                      {messages.requestingPermission}
+                    </span>
+                  )}
+                </motion.span>
+              ) : (
+                <Tip key="idle" tip={idleLabel}>
+                  <motion.button
                     type="button"
-                    onClick={() => transcription.cancel()}
-                    aria-label={messages.cancel}
-                    aria-keyshortcuts="Escape"
+                    data-og-composer-dictate
+                    initial={{ opacity: 0, scale: 0.96 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.96 }}
+                    transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+                    onClick={start}
+                    aria-label={idleLabel}
+                    aria-pressed={false}
+                    aria-disabled={unavailableMessage !== null}
                     className={cn(
-                      "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                      "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
                       "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
-                      "hover:bg-og-surface-3 hover:text-og-fg pointer-coarse:size-11",
+                      unavailableMessage
+                        ? "cursor-not-allowed opacity-45"
+                        : "hover:bg-og-surface-2 hover:text-og-fg",
                     )}
                   >
-                    <XIcon className="size-3.5" />
-                  </button>
+                    <MicIcon className="size-4" />
+                  </motion.button>
                 </Tip>
-                <Tip tip={messages.stop}>
-                  <button
-                    type="button"
-                    onClick={() => transcription.stop()}
-                    aria-label={messages.stop}
-                    className={cn(
-                      "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                      "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
-                      "hover:bg-og-fg-muted pointer-coarse:size-11",
-                    )}
-                  >
-                    <SquareIcon className="size-2.5 fill-current" />
-                  </button>
-                </Tip>
-              </>
-            ) : status === "transcribing" || status === "saving" ? (
-              <span className="og-shimmer-text px-1.5 text-og-xs font-medium whitespace-nowrap">
-                {status === "saving" ? messages.saving : messages.transcribing}
-              </span>
-            ) : (
-              <span className="px-1.5 text-og-xs text-og-fg-muted whitespace-nowrap">
-                {messages.requestingPermission}
-              </span>
-            )}
-          </motion.span>
-        ) : (
-          <Tip key="idle" tip={idleLabel}>
-            <motion.button
-              type="button"
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.96 }}
-              transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
-              onClick={start}
-              aria-label={idleLabel}
-              aria-pressed={false}
-              aria-disabled={unavailableMessage !== null}
-              className={cn(
-                "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
-                "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
-                unavailableMessage
-                  ? "cursor-not-allowed opacity-45"
-                  : "hover:bg-og-surface-2 hover:text-og-fg",
               )}
+            </AnimatePresence>
+            {status === "error" && errorMessage && !recoverable ? (
+              <Tip tip={errorMessage}>
+                <span
+                  aria-hidden="true"
+                  className="max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
+                >
+                  {errorMessage}
+                </span>
+              </Tip>
+            ) : null}
+            <span
+              className="sr-only"
+              role={status === "error" ? "alert" : "status"}
+              aria-live="polite"
             >
-              <MicIcon className="size-4" />
-            </motion.button>
-          </Tip>
-        )}
-      </AnimatePresence>
-      {status === "error" && errorMessage && !recoverable ? (
-        <Tip tip={errorMessage}>
-          <span
-            aria-hidden="true"
-            className="max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
-          >
-            {errorMessage}
+              {announcement}
+            </span>
           </span>
-        </Tip>
-      ) : null}
-      <span className="sr-only" role={status === "error" ? "alert" : "status"} aria-live="polite">
-        {announcement}
-      </span>
-    </span>
+        </motion.span>
+      )}
+    </AnimatePresence>
   );
 }
 

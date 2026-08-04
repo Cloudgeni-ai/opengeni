@@ -1,5 +1,44 @@
 # @opengeni/runtime
 
+## 0.18.10
+
+### Patch Changes
+
+- Updated dependencies [664c1d8]
+  - @opengeni/network@0.2.0
+
+## 0.18.9
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/config@0.10.11
+
+## 0.18.8
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+
+## 0.18.7
+
+### Patch Changes
+
+- Updated dependencies [4976e1c]
+  - @opengeni/network@0.1.2
+
+## 0.18.6
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/config@0.10.9
+
 ## 0.18.5
 
 ### Patch Changes

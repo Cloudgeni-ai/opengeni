@@ -9,6 +9,7 @@ import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 
 export * from "./slack-bot-scopes";
+export * from "./connector-destinations";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -6213,6 +6214,9 @@ export const Session = z.object({
   // stale in-flight op and retry against the new active sandbox.
   activeSandboxId: z.string().uuid().nullable(),
   activeEpoch: z.number().int().nonnegative(),
+  // The explicit connected-machine project root selected for this session.
+  // Null means the enrolled agent's launch workspace root.
+  workingDir: z.string().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
@@ -9776,6 +9780,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     id: z.string(),
     label: z.string(),
+    /** Optional curated compact label for dense UI (e.g. mobile composer). */
+    shortLabel: z.string().min(1).max(64).optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),

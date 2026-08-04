@@ -1,5 +1,98 @@
 # @opengeni/worker-bundle
 
+## 0.16.12
+
+### Patch Changes
+
+- dfa3aef: Preserve Steer priority through provider recovery and repair interrupted attempts durably.
+- Updated dependencies [dfa3aef]
+  - @opengeni/core@0.20.11
+  - @opengeni/db@0.27.8
+  - @opengeni/documents@0.5.4
+  - @opengeni/events@0.3.74
+
+## 0.16.11
+
+### Patch Changes
+
+- Updated dependencies [c29fd4c]
+  - @opengeni/core@0.20.10
+  - @opengeni/db@0.27.7
+  - @opengeni/documents@0.5.3
+  - @opengeni/events@0.3.73
+
+## 0.16.10
+
+### Patch Changes
+
+- Updated dependencies [664c1d8]
+  - @opengeni/core@0.20.9
+  - @opengeni/db@0.27.6
+  - @opengeni/runtime@0.18.10
+  - @opengeni/documents@0.5.2
+  - @opengeni/events@0.3.72
+
+## 0.16.9
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+  - @opengeni/config@0.10.11
+  - @opengeni/core@0.20.8
+  - @opengeni/documents@0.5.1
+  - @opengeni/events@0.3.71
+  - @opengeni/github@0.4.27
+  - @opengeni/observability@0.4.14
+  - @opengeni/runtime@0.18.9
+  - @opengeni/storage@0.2.64
+
+## 0.16.8
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+  - @opengeni/documents@0.5.0
+  - @opengeni/core@0.20.7
+  - @opengeni/events@0.3.70
+  - @opengeni/github@0.4.26
+  - @opengeni/runtime@0.18.8
+  - @opengeni/storage@0.2.63
+  - @opengeni/observability@0.4.13
+
+## 0.16.7
+
+### Patch Changes
+
+- Updated dependencies [d5df927]
+- Updated dependencies [4976e1c]
+  - @opengeni/documents@0.4.1
+  - @opengeni/core@0.20.6
+  - @opengeni/db@0.27.3
+  - @opengeni/runtime@0.18.7
+  - @opengeni/events@0.3.69
+
+## 0.16.6
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/documents@0.4.0
+  - @opengeni/config@0.10.9
+  - @opengeni/core@0.20.5
+  - @opengeni/db@0.27.2
+  - @opengeni/events@0.3.68
+  - @opengeni/github@0.4.25
+  - @opengeni/observability@0.4.12
+  - @opengeni/runtime@0.18.6
+  - @opengeni/storage@0.2.62
+
 ## 0.16.5
 
 ### Patch Changes

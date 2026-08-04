@@ -14,6 +14,7 @@ import {
   getSessionRealtimeContinuityEntries,
   renderSessionRealtimeTail,
   SESSION_REALTIME_CONTEXT_MAX_BYTES,
+  SESSION_REALTIME_TAIL_INSTRUCTION,
   SESSION_REALTIME_TAIL_SOURCE,
   syncSessionRealtimeLedgerInTransaction,
   withWorkspaceRls,
@@ -215,6 +216,9 @@ describe("session realtime transcript tail and continuity", () => {
       sourceEntry("user", "x".repeat(SESSION_REALTIME_CONTEXT_MAX_BYTES * 2)),
     ]);
     expect(rendered.context).toContain(`<source>${SESSION_REALTIME_TAIL_SOURCE}</source>`);
+    expect(rendered.context).toContain(SESSION_REALTIME_TAIL_INSTRUCTION);
+    expect(rendered.context).toContain("continue it from the current state");
+    expect(rendered.context).not.toContain("You probably do not have to do anything");
     expect(rendered.context).toContain("[2 older transcript turns omitted]");
     expect(Buffer.byteLength(rendered.context!, "utf8")).toBeLessThanOrEqual(
       SESSION_REALTIME_CONTEXT_MAX_BYTES,

@@ -247,18 +247,27 @@ symptoms, never by counts**: the no-progress detector and budget exhaustion are
 the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
-Recoverable conditions end a turn gracefully (idle the session, keep the
-context) instead of failing it, so a long run survives them: hitting the
-model-call cap (if one is configured), provider rate-limit backpressure,
-escaped MCP request timeouts, and budget/credit exhaustion. With an active
-goal, provider/MCP backpressure resumes after a pacing delay; without one, the
-session idles until the next user message (a long-lived session between goals
-must not go terminal because an external service had a bad minute). For an MCP
+Recoverable conditions preserve context instead of failing the session, so a
+long run survives them. Retryable provider connectivity and 5xx failures resume
+the same accepted turn after a pacing delay. Hitting an explicitly configured
+model-call cap, escaped MCP request timeouts, and budget/credit exhaustion end
+the current turn gracefully; an active goal may create a later continuation,
+while an otherwise idle session waits for the next user message. For an MCP
 timeout that escapes after a successful tool output, conversation truth is
 checkpointed before the turn settles and the continuation is a new follow-up —
 the completed tool call/full turn is never blindly replayed. Budget/credit
 exhaustion likewise idles the turn rather than failing the session, so a top-up
 lets the same session continue.
+
+Retryable provider connectivity and 5xx failures recover the same accepted turn
+after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
+turn's durable provider-recovery count rather than unrelated execution attempts.
+An explicit provider retry hint is a lower bound. Rate limits use the provider's
+`Retry-After` when present and otherwise wait 60 s; other retryable classes keep
+their existing pacing. Every Steer commits a control wake revision, including
+when the recovering turn has no live attempt. A later coalesced Send cannot
+downgrade it to an ordinary queue signal, so the workflow interrupts the hold
+and processes the new direction immediately.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. With workspace-local leasing enabled, the worker atomically selects and
@@ -424,6 +433,11 @@ logical turn `recovering`; Steer closes it as `superseded`, makes the steered
 human prompt first, and does not revive the old turn. A missing or already
 closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
+If provider failure races with an accepted exact-attempt Pause or Steer, that
+control request owns the attempt: recovery returns stale and the normal
+settlement/quiescence path completes the transition. The workspace-control lock
+also orders the opposite race safely—if recovery commits first, the subsequent
+Steer immediately supersedes the now-ownerless recovering turn.
 Terminal Cancel uses the same exact-attempt interruption fence but settles the
 live turn as `cancelled`, marks the selected session and every existing
 descendant terminal, and drains their queued/non-running work in the same
@@ -505,19 +519,28 @@ admission authority. NATS publish happens only after the transaction and is
 best-effort live fanout; a NATS failure cannot trigger proof recovery or undo a
 committed receipt.
 
-While a settled interruption lacks that receipt, `peekSessionWork` returns a
-durable `cancellation-wait` and every claim path remains `control-pending`. The
-workflow waits up to five seconds for a wake and may then close without running
-another turn activity; a proof accepted at that timeout boundary is persisted
-before close. Once the receipt commits, its coalescing outbox wake uses
+Settling or stale-rejecting an interruption atomically commits its own durable
+control wake. While the receipt is absent, wake acknowledgement remains pending,
+`peekSessionWork` returns `cancellation-wait`, and every claim path remains
+`control-pending` from the interruption ledger alone—queue presentation metadata
+is never admission authority. The workflow waits up to five seconds for a wake
+and may then close without running another turn activity; the outbox continues
+bounded redelivery until the exact activity disappears or supplies its proof. A
+proof accepted at that timeout boundary is persisted before close. Once the
+receipt commits, its coalescing outbox wake uses
 `signalWithStart` on the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no
 quiescence scanner, inferred timeout, polling loop, synthetic user message,
-prompt/history/effect replay, or duplicate visible queue row. Queue telemetry
-follows the latest session attempt only: `stoppingPreviousAttempt` can
-truthfully be `true` with an empty human/API queue (internal Agent Steer),
-ignores replacement metadata corruption/withdrawal, and is not contaminated by
-an older attempt after a newer one exists.
+prompt/history/effect replay, or duplicate visible queue row. Admission searches
+all closed attempts for a settled or stale-rejected interruption that still
+lacks its receipt; a newer recovery generation cannot hide the exact predecessor
+that a queued Steer is waiting for. Reconciliation still requires the bound
+Temporal activity to be absent, heartbeat-expired, or attached to an exact
+workflow run that Temporal reports as missing, plus no open workspace writers
+or retained processes—elapsed time alone is never proof. Queue telemetry follows
+the latest live interruption and any exact predecessor referenced by a queued
+human/API Steer, so `stoppingPreviousAttempt` remains truthful without allowing
+unrelated historical attempts to contaminate current UI.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is

@@ -32,6 +32,7 @@ import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "./http/api-error";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
@@ -255,7 +256,11 @@ export function createAppComposition(deps: AppDependencies): {
     ],
     exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
   };
-  const publicApiCors = cors({ ...corsHeaders, credentials: false, origin: "*" });
+  const publicApiCors = cors({
+    ...corsHeaders,
+    credentials: false,
+    origin: "*",
+  });
   const credentialedCors = cors({
     ...corsHeaders,
     credentials: true,
@@ -599,8 +604,11 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.onError((error, c) => {
     const compactionLock = codexCompactionV2ProviderLockedError(error);
+    const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
-    const code: ErrorCode = compactionLock ? compactionLock.code : errorCodeForStatus(status);
+    const code: ErrorCode = compactionLock
+      ? compactionLock.code
+      : (apiError?.code ?? errorCodeForStatus(status));
     const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
@@ -612,9 +620,12 @@ export function createAppComposition(deps: AppDependencies): {
         code,
         message: compactionLock
           ? (boundedPublicMessage(compactionLock.message) ?? "Request failed.")
-          : publicErrorMessage(error, status),
-        retryable: retryableHttpStatus(status),
+          : apiError
+            ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
+            : publicErrorMessage(error, status),
+        retryable: apiError?.retryable ?? retryableHttpStatus(status),
         requestId,
+        ...(apiError?.details ? { details: apiError.details } : {}),
       },
     });
     return c.json(envelope, status as ContentfulStatusCode);

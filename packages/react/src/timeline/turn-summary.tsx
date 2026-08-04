@@ -16,7 +16,12 @@ import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useEntranceAnimation } from "./entrance";
 import { useFoldMemory, type FoldRestingState } from "./fold-memory";
-import { applyPatchOps, isApplyPatch, mediaPreviewFact, screenshotDataUrl } from "./parsers";
+import {
+  applyPatchOpsFromToolItem,
+  isApplyPatch,
+  mediaPreviewFact,
+  screenshotDataUrl,
+} from "./parsers";
 import { rawTypeOf } from "./registry";
 import type { ActivityItem, ToolCallItem, TurnOutcome } from "./types";
 export type { TurnOutcome } from "./types";
@@ -571,7 +576,7 @@ const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze(
       let files = 0;
       for (const item of toolCalls) {
         if (isApplyPatch(item)) {
-          files += applyPatchOps(item.raw).length;
+          files += applyPatchOpsFromToolItem(item).length;
         }
       }
       return files ? { content: `${files} ${files === 1 ? "file" : "files"} edited` } : null;

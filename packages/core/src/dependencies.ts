@@ -117,6 +117,10 @@ export type AppDependencies = {
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
   googleDriveFetch?: typeof fetch;
+  /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
+  oauthStartDeadlineMs?: number;
+  /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
+  oauthCallbackDeadlineMs?: number;
   /** Optional host-owned voice-input transcription service. */
   transcription?: TranscriptionService | null;
   /** Optional host-owned long-form audio normalization/segmentation service. */

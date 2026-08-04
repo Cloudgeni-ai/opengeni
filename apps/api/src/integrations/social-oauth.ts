@@ -22,6 +22,7 @@ import { OAUTH_MAX_RESPONSE_BYTES, pinnedFetch, readResponseJsonBounded } from "
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 import {
   integrationBaseUrl,
   oauthStateTtlMs,
@@ -154,8 +155,12 @@ export function socialOAuthClientFor(
 ): { clientId: string; clientSecret?: string | undefined } {
   const configured = parseSocialOauthClientsJson(settings.socialOauthClientsJson)[provider];
   if (!configured) {
-    throw new HTTPException(503, {
-      message: `social provider ${provider} requires an operator OAuth app in OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON`,
+    const providerLabel = provider === "x" ? "X" : "Reddit";
+    throw new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: `${providerLabel} connection is not configured. An operator must add ${providerLabel} OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON.`,
+      retryable: false,
+      details: { oauthReason: "operator_oauth_app_missing", provider },
     });
   }
   return configured;

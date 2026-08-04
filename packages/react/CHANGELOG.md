@@ -1,5 +1,59 @@
 # @opengeni/react
 
+## 0.44.2
+
+### Patch Changes
+
+- 2542ae0: Recover stale composer-draft OCC after tab sleep by recognizing DRAFT_CHANGED, soft-reloading on wake, and retrying autosave with the server revision while keeping local text.
+- 2542ae0: Give progressive `tool_search` its own timeline card: capability query, disclosed tool leaves with source prefixes, and quiet no-match / failure states instead of the generic Done dump.
+
+## 0.44.1
+
+### Patch Changes
+
+- e051404: Measure composer textarea height off-DOM so multi-line typing no longer collapses the live box and yanks tip-follow.
+- 99e9b48: Give the realtime voice controls an accessible named group role.
+
+## 0.44.0
+
+### Patch Changes
+
+- Updated dependencies [664c1d8]
+  - @opengeni/sdk@0.44.0
+
+## 0.43.1
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/sdk@0.43.1
+
+## 0.43.0
+
+### Patch Changes
+
+- b6e39fc: Polish session chrome and apply_patch rendering; clarify realtime voice-end handoff.
+
+  SessionChrome gets denser selected-chip UX and Codex function-tool apply_patch shapes render in the specialized diff UI. Solo goal_continuation machine-input rows are suppressed in favor of the GoalRow landmark. The realtime transcript-tail instruction now keeps in-flight work going after voice ends.
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/sdk@0.43.0
+
+## 0.42.1
+
+### Patch Changes
+
+- Updated dependencies [4976e1c]
+  - @opengeni/sdk@0.42.1
+
+## 0.42.0
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/sdk@0.42.0
+
 ## 0.41.1
 
 ### Patch Changes

@@ -178,6 +178,13 @@ describe("accepted-attempt governance comparison", () => {
         },
         runtimeComposition: { status: "not_implemented" },
       },
+      preferences: {
+        authority: "preference_registry_preferences",
+        activeDescriptorCount: 2,
+        activeDescriptorHash: "f".repeat(64),
+        scopeCounts: { organization: 0, workspace: 1, user: 1 },
+        truncated: false,
+      },
       knowledge: {
         availability: "unavailable",
         reason: "missing_permission",

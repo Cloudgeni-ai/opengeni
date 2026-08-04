@@ -35,6 +35,7 @@ const MODELS: ClientModel[] = [
   {
     id: "codex/gpt-5.6-sol",
     label: "GPT-5.6 Sol",
+    shortLabel: "5.6 Sol",
     provider: "codex",
     providerLabel: "Codex",
     source: "codex",
@@ -131,6 +132,15 @@ describe("ModelPolicyPicker", () => {
     expect(trigger?.textContent).toContain("Medium");
     expect(container.querySelector('[data-testid="model-picker-fast-icon"]')).toBeTruthy();
     expect(container.querySelector("select")).toBeNull();
+    // Mobile span prefers curated shortLabel; desktop keeps the full label.
+    const labelSpans = [...(trigger?.querySelectorAll("span.truncate") ?? [])];
+    const mobileLabel = labelSpans.find((span) => /(?:^|\s)sm:hidden(?:\s|$)/.test(span.className));
+    const desktopLabel = labelSpans.find((span) =>
+      /(?:^|\s)max-sm:hidden(?:\s|$)/.test(span.className),
+    );
+    expect(mobileLabel?.textContent).toBe("5.6 Sol");
+    expect(desktopLabel?.textContent).toBe("GPT-5.6 Sol");
+    expect(trigger?.className).toContain("max-sm:max-w-[7.5rem]");
   });
 
   test("changes model policy only when an effort is chosen", async () => {

@@ -58,6 +58,7 @@ import {
   oauthConnectionRef,
   oauthConnectionOwnership,
   oauthResumeAction,
+  preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
   type CapabilityFilter,
@@ -66,7 +67,7 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
-import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import {
   personalSlackAccountState,
   personalSlackCapability,
@@ -92,6 +93,7 @@ import type {
   CapabilityPack,
   ConnectionMetadata,
   ConnectionOwnership,
+  SocialConnection,
 } from "@/types";
 
 const PAGE_SIZE = 48;
@@ -214,6 +216,7 @@ export function CapabilitiesRoute({
   // connections:read); an array = loaded, even when empty. Health must not treat a
   // failed load as "every connection was deleted".
   const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
+  const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -289,6 +292,15 @@ export function CapabilitiesRoute({
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
+  const selectedSocialConnection = selectedItem
+    ? (() => {
+        const plan = capabilityConnectPlan(selectedItem);
+        return plan.mode === "social_oauth"
+          ? preferredSocialConnection(socialConnections, plan.provider)
+          : null;
+      })()
+    : null;
+  const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
   useEffect(() => {
     void refresh();
@@ -367,16 +379,18 @@ export function CapabilitiesRoute({
     if (!workspaceId) return;
     setLoading(true);
     try {
-      const [catalog, conns] = await Promise.all([
+      const [catalog, conns, socials] = await Promise.all([
         client.listCapabilities(workspaceId),
         // null (not []) on failure so health can tell "didn't load" from "loaded empty".
         client.listConnections(workspaceId).catch(() => null),
+        client.listSocialConnections(workspaceId).catch(() => null),
       ]);
       setItems(catalog.items);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload); a
       // first-load failure leaves the prior null = "not loaded", which is correct.
       if (conns !== null) setConnections(conns);
+      if (socials !== null) setSocialConnections(socials);
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error : new Error(String(error)));
@@ -517,6 +531,27 @@ export function CapabilitiesRoute({
         return;
       }
 
+      if (action.type === "social_oauth" && plan.mode === "social_oauth") {
+        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
+        const response = await client.startSocialOAuth(workspaceId, {
+          provider: action.provider,
+          returnPath,
+        });
+        if (!response.authorizationUrl) {
+          throw new Error("The provider did not return an authorization link.");
+        }
+        window.location.assign(response.authorizationUrl);
+        return;
+      }
+
+      if (action.type === "disconnect_social") {
+        await client.disconnectSocialConnection(workspaceId, action.connectionId);
+        await refresh();
+        toast.success(`Disconnected ${item.name}`);
+        setSelected(null);
+        return;
+      }
+
       // Reconnect an already-enabled item whose credential lapsed. When the
       // connection row survives, OAuth reuses it (pass connectionId) and the
       // return handler just refreshes; when it was deleted (null id), OAuth
@@ -563,9 +598,9 @@ export function CapabilitiesRoute({
           // installation against it (enable upserts the installation config). Domain
           // comes from the plan, or the installation's ref when the catalog drifted.
           const providerDomain =
-            plan.mode === "enable"
-              ? (item.connectionRef?.providerDomain ?? "")
-              : plan.providerDomain;
+            plan.mode === "api_key"
+              ? plan.providerDomain
+              : (item.connectionRef?.providerDomain ?? "");
           const connection = await client.createConnection(workspaceId, {
             providerDomain,
             kind: "api_key",
@@ -664,6 +699,35 @@ export function CapabilitiesRoute({
     }
   }
 
+  const socialOAuthHandled = useRef(false);
+  useEffect(() => {
+    if (socialOAuthHandled.current || loading) return;
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("social_oauth");
+    if (!outcome) return;
+    socialOAuthHandled.current = true;
+    const itemId = params.get("connect_item");
+    const accountHandle = params.get("accountHandle");
+    window.history.replaceState(null, "", window.location.pathname);
+    if (outcome === "success") {
+      void refresh();
+      toast.success(accountHandle ? `Connected @${accountHandle}` : "Social account connected");
+      setSelected(null);
+      return;
+    }
+    const reason = params.get("reason");
+    const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
+    if (item) {
+      setSheetError(
+        reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
+      );
+      setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+    } else {
+      toast.error("Connection failed", { description: reason ?? undefined });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, items]);
+
   // Resume an OAuth round-trip. The callback lands back on this path with
   // ?integration_oauth=success|error; we read it once, strip it from the URL,
   // and either auto-enable with the fresh connection or reopen the sheet with a
@@ -689,14 +753,13 @@ export function CapabilitiesRoute({
       );
     } else {
       const reason = params.get("reason");
+      const message = mcpOAuthCallbackFailureMessage(params.get("stage"), reason);
       const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
       if (item) {
-        setSheetError(
-          reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
-        );
+        setSheetError(message);
         setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
       } else {
-        toast.error("Connection failed", { description: reason ?? undefined });
+        toast.error("Connection failed", { description: message });
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1324,6 +1387,8 @@ export function CapabilitiesRoute({
         }}
         busy={busyId === selectedItem?.id}
         errorMessage={sheetError}
+        socialConnection={selectedSocialConnection}
+        canManageSocial={canManageSocial}
         onAction={handleAction}
       />
 

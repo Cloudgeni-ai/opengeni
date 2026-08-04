@@ -367,12 +367,14 @@ export type {
 // Pure provider-shape parsers (exec banner, V4A diff, secret redaction, …)
 export {
   applyPatchOps,
+  applyPatchOpsFromToolItem,
   controlCaret,
   execTruncated,
   isApplyPatch,
   isExecSessionLostBanner,
   looksBinary,
   parseExecBannerSessionId,
+  parseFreeformApplyPatch,
   parseToolArgs,
   redactSecrets,
   sandboxCommandExitCode,

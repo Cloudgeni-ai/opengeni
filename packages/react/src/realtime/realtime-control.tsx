@@ -23,7 +23,15 @@ import {
   VolumeXIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   BillingClassMark,
@@ -287,6 +295,8 @@ export function SessionRealtimeControl(props: {
   codexConnected: boolean;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed?: (() => void) | undefined;
+  /** Host hides dictate (and can choreograph layout) while realtime voice is live. */
+  onVoiceActiveChange?: ((active: boolean) => void) | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -310,6 +320,12 @@ export function SessionRealtimeControl(props: {
   const { models, selectedModel: selectedRealtimeModel, selectModel } = selection;
   const { canStart, start } = realtime;
   const onRealtimeAutostartConsumed = props.onRealtimeAutostartConsumed;
+  const onVoiceActiveChange = props.onVoiceActiveChange;
+  const voiceActive = realtime.snapshot.mode?.state === "active";
+
+  useEffect(() => {
+    onVoiceActiveChange?.(voiceActive);
+  }, [onVoiceActiveChange, voiceActive]);
 
   useEffect(() => {
     const pending = autostartModelRef.current;
@@ -452,12 +468,30 @@ export function NewSessionRealtimeControl(props: {
   disabled?: boolean | undefined;
   disabledReason?: string | null | undefined;
   onStart: (model: SessionRealtimeModel) => Promise<boolean>;
+  /** Parent-owned selection (e.g. shared with the mobile “+” voice-model panel). */
+  models?: readonly RealtimeModelOption[] | undefined;
+  selectedModel?: RealtimeModelOption | undefined;
+  onSelectModel?: ((modelId: string) => void) | undefined;
+  /**
+   * `split` attaches the model chevron at every breakpoint (public default).
+   * `split-desktop` hides it below `sm` when the host owns mobile selection (e.g. “+”).
+   * `none` never attaches a model menu to the bar button.
+   */
+  modelMenu?: "split" | "split-desktop" | "none" | undefined;
 }) {
-  const selection = useRealtimeModelSelection({
+  const internalSelection = useRealtimeModelSelection({
     client: props.client,
     workspaceId: props.workspaceId,
     codexConnected: props.codexConnected,
   });
+  const selection =
+    props.models && props.selectedModel && props.onSelectModel
+      ? {
+          models: props.models,
+          selectedModel: props.selectedModel,
+          selectModel: props.onSelectModel,
+        }
+      : internalSelection;
   const audioRef = useRef<HTMLAudioElement>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -495,6 +529,7 @@ export function NewSessionRealtimeControl(props: {
       modelAvailable={selection.selectedModel.available}
       selectionDisabled={starting}
       menuSide="bottom"
+      modelMenu={props.modelMenu ?? "split"}
       showDiagnostics={false}
       audioRef={audioRef}
       selectedModel={selection.selectedModel}
@@ -518,7 +553,15 @@ export function RealtimeVoiceControl(props: {
   selectionDisabled?: boolean | undefined;
   /** Prefer `bottom` on home/new-session; `top` for the docked session composer. */
   menuSide?: "top" | "bottom" | undefined;
+  /**
+   * `split` = start + model chevron at every breakpoint (public SDK default).
+   * `split-desktop` = chevron from `sm` up; below that the host owns selection.
+   * `none` = start button only.
+   */
+  modelMenu?: "split" | "split-desktop" | "none" | undefined;
   showDiagnostics?: boolean;
+  /** Extra classes on the in-bar mute cluster (e.g. `max-sm:hidden` when mutes live in “+”). */
+  muteControlsClassName?: string | undefined;
   audioRef: RefObject<HTMLAudioElement | null>;
   selectedModel?: RealtimeModelOption | undefined;
   models?: readonly RealtimeModelOption[] | undefined;
@@ -571,6 +614,9 @@ export function RealtimeVoiceControl(props: {
         ? props.onStop
         : props.onStart;
   const diagnosticsVisible = props.showDiagnostics ?? import.meta.env.DEV;
+  const modelMenu = props.modelMenu ?? "split";
+  const showAttachedModelMenu = modelMenu === "split" || modelMenu === "split-desktop";
+  const desktopOnlyModelMenu = modelMenu === "split-desktop";
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerProvider, setPickerProvider] = useState<RealtimeModelProvider | null>(
     selectedModel.provider,
@@ -583,6 +629,7 @@ export function RealtimeVoiceControl(props: {
 
   return (
     <div
+      role="group"
       aria-label="Realtime voice"
       data-picker-side={props.menuSide ?? "top"}
       className="inline-flex shrink-0 items-center"
@@ -594,143 +641,202 @@ export function RealtimeVoiceControl(props: {
           <motion.div
             key="realtime-mute-controls"
             data-testid="realtime-mute-controls"
-            initial={reduceMotion ? false : { opacity: 0, width: 0, marginRight: 0 }}
-            animate={{ opacity: 1, width: "auto", marginRight: 4 }}
-            {...(reduceMotion ? {} : { exit: { opacity: 0, width: 0, marginRight: 0 } })}
-            transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.2, 0.8, 0.2, 1] }}
-            className="inline-flex shrink-0 items-center gap-0.5 overflow-hidden"
+            // After dictate collapses and the model slides left, bloom mutes
+            // out from the primary voice control. Exit is immediate (no delay).
+            initial={reduceMotion ? false : { opacity: 0, width: 0 }}
+            animate={{
+              opacity: 1,
+              width: "auto",
+              transition: reduceMotion
+                ? { duration: 0 }
+                : { delay: 0.3, duration: 0.48, ease: [0.22, 1, 0.36, 1] },
+            }}
+            {...(reduceMotion
+              ? {}
+              : {
+                  exit: {
+                    opacity: 0,
+                    width: 0,
+                    transition: { duration: 0.28, ease: [0.4, 0, 1, 1] },
+                  },
+                })}
+            className={cn(
+              "inline-flex shrink-0 items-center overflow-hidden",
+              props.muteControlsClassName,
+            )}
           >
-            <RealtimeMuteButton
-              muted={props.snapshot.inputMuted}
-              kind="microphone"
-              reduceMotion={reduceMotion === true}
-              onToggle={() => props.onSetInputMuted(!props.snapshot.inputMuted)}
-            />
-            <RealtimeMuteButton
-              muted={props.snapshot.outputMuted}
-              kind="output"
-              reduceMotion={reduceMotion === true}
-              onToggle={() => props.onSetOutputMuted(!props.snapshot.outputMuted)}
-            />
+            <motion.div
+              className="inline-flex items-center gap-0.5 pr-1"
+              initial={reduceMotion ? false : { x: 18, opacity: 0 }}
+              animate={{
+                x: 0,
+                opacity: 1,
+                transition: reduceMotion
+                  ? { duration: 0 }
+                  : { delay: 0.32, type: "spring", stiffness: 320, damping: 30, mass: 0.8 },
+              }}
+              {...(reduceMotion
+                ? {}
+                : {
+                    exit: {
+                      x: 14,
+                      opacity: 0,
+                      transition: { duration: 0.22, ease: [0.4, 0, 1, 1] },
+                    },
+                  })}
+            >
+              <RealtimeMuteButton
+                muted={props.snapshot.inputMuted}
+                kind="microphone"
+                reduceMotion={reduceMotion === true}
+                enterDelay={reduceMotion ? 0 : 0.34}
+                onToggle={() => props.onSetInputMuted(!props.snapshot.inputMuted)}
+              />
+              <RealtimeMuteButton
+                muted={props.snapshot.outputMuted}
+                kind="output"
+                reduceMotion={reduceMotion === true}
+                enterDelay={reduceMotion ? 0 : 0.4}
+                onToggle={() => props.onSetOutputMuted(!props.snapshot.outputMuted)}
+              />
+            </motion.div>
           </motion.div>
         ) : null}
       </AnimatePresence>
-      <motion.button
-        type="button"
-        data-testid="realtime-primary-action"
-        data-phase={status.phase}
-        aria-label={mainLabel}
-        aria-pressed={modeOwned}
-        title={mainLabel}
-        disabled={mainDisabled}
-        {...(reduceMotion ? {} : { whileTap: { scale: 0.92 } })}
-        transition={{ type: "spring", stiffness: 520, damping: 30 }}
-        onClick={() => void runMainAction().catch(() => undefined)}
-        className={cn(
-          "relative inline-flex size-8 items-center justify-center rounded-l-og-md border outline-none",
-          "transition-[background-color,border-color,color,box-shadow] duration-200 ease-og-out",
-          "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
-          "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-11",
-          voiceButtonTone(status.phase),
-        )}
-      >
-        <RealtimeActionGlyph
-          phase={status.phase}
-          audioBlocked={audioBlocked}
-          reduceMotion={reduceMotion === true}
-        />
-      </motion.button>
-
-      <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            aria-label="Choose voice model and options"
-            title={`Voice model: ${selectedModel.label}`}
-            disabled={props.selectionDisabled}
-            className={cn(
-              "inline-flex h-8 w-6 items-center justify-center rounded-r-og-md border border-l-0 outline-none",
-              "transition-[background-color,border-color,color] duration-200 ease-og-out",
-              "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
-              "pointer-coarse:h-11 pointer-coarse:w-7",
-              voiceButtonTone(status.phase),
-            )}
-          >
-            <ChevronDownIcon className="size-3" aria-hidden />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          side={props.menuSide ?? "top"}
-          align="end"
-          sideOffset={8}
-          collisionPadding={12}
-          className="flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-1.5 shadow-xl"
-          onCloseAutoFocus={(event) => event.preventDefault()}
+      <div className="inline-flex shrink-0 items-center">
+        <motion.button
+          type="button"
+          data-testid="realtime-primary-action"
+          data-phase={status.phase}
+          aria-label={mainLabel}
+          aria-pressed={modeOwned}
+          title={mainLabel}
+          disabled={mainDisabled}
+          {...(reduceMotion ? {} : { whileTap: { scale: 0.92 } })}
+          transition={{ type: "spring", stiffness: 520, damping: 30 }}
+          onClick={() => void runMainAction().catch(() => undefined)}
+          className={cn(
+            // Match transcription mic: ghost icon when idle; filled only when live.
+            // Public contract: coarse pointers keep a 44px target; split menu uses
+            // left-only rounding at `sm+` where the chevron attaches.
+            "relative inline-flex size-8 items-center justify-center outline-none",
+            "rounded-og-md transition-[background-color,border-color,color,box-shadow] duration-200 ease-og-out",
+            "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
+            "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-11",
+            showAttachedModelMenu &&
+              (desktopOnlyModelMenu
+                ? "sm:rounded-l-og-md sm:rounded-r-none"
+                : "rounded-l-og-md rounded-r-none"),
+            voiceButtonTone(status.phase),
+          )}
         >
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <RealtimeModelPickerMenu
-              models={models}
-              selectedModel={selectedModel}
-              provider={pickerProvider}
-              direction={pickerDirection}
-              disabled={props.selectionDisabled === true || props.snapshot.mode?.state === "active"}
-              onProviderChange={(provider, direction) => {
-                setPickerDirection(direction);
-                setPickerProvider(provider);
-              }}
-              onSelect={(modelId) => {
-                props.onSelectModel?.(modelId);
-                setPickerOpen(false);
-              }}
-            />
-          </div>
+          <RealtimeActionGlyph
+            phase={status.phase}
+            audioBlocked={audioBlocked}
+            reduceMotion={reduceMotion === true}
+          />
+        </motion.button>
 
-          {status.phase !== "idle" ? (
-            <>
-              <DropdownMenuSeparator className="mx-1 bg-og-border" />
-              <div className="px-2.5 py-2" role="status" aria-live="polite">
-                <div className="flex items-center gap-2 text-og-sm font-medium text-og-fg">
-                  <RealtimeStatusDot phase={status.phase} reduceMotion={reduceMotion === true} />
-                  {status.label}
-                </div>
-                <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+        {showAttachedModelMenu ? (
+          <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label="Choose voice model and options"
+                title={`Voice model: ${selectedModel.label}`}
+                disabled={props.selectionDisabled}
+                className={cn(
+                  // ≥24px wide so WCAG 2.2 target-size passes when the chevron is shown.
+                  "inline-flex h-8 w-6 items-center justify-center rounded-r-og-md outline-none",
+                  "transition-[background-color,border-color,color] duration-200 ease-og-out",
+                  "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
+                  "pointer-coarse:h-11 pointer-coarse:w-7",
+                  desktopOnlyModelMenu && "hidden sm:inline-flex",
+                  voiceChevronTone(status.phase),
+                )}
+              >
+                <ChevronDownIcon className="size-3" aria-hidden />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              side={props.menuSide ?? "top"}
+              align="end"
+              sideOffset={8}
+              collisionPadding={12}
+              className="flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-1.5 shadow-xl"
+              onCloseAutoFocus={(event) => event.preventDefault()}
+            >
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                <RealtimeModelPickerMenu
+                  models={models}
+                  selectedModel={selectedModel}
+                  provider={pickerProvider}
+                  direction={pickerDirection}
+                  disabled={
+                    props.selectionDisabled === true || props.snapshot.mode?.state === "active"
+                  }
+                  onProviderChange={(provider, direction) => {
+                    setPickerDirection(direction);
+                    setPickerProvider(provider);
+                  }}
+                  onSelect={(modelId) => {
+                    props.onSelectModel?.(modelId);
+                    setPickerOpen(false);
+                  }}
+                />
               </div>
-            </>
-          ) : null}
 
-          {audioBlocked ? (
-            <DropdownMenuItem
-              className="rounded-og-md"
-              onSelect={() => void props.onRetryAudibleOutput().catch(() => undefined)}
-            >
-              <Volume2Icon />
-              Resume audio
-            </DropdownMenuItem>
-          ) : null}
-          {retryConnection ? (
-            <DropdownMenuItem
-              className="rounded-og-md"
-              onSelect={() => void props.onRetry().catch(() => undefined)}
-            >
-              <RotateCcwIcon />
-              Retry connection
-            </DropdownMenuItem>
-          ) : null}
-          {modeOwned && props.snapshot.status !== "lost_owner" ? (
-            <DropdownMenuItem
-              variant="destructive"
-              className="rounded-og-md"
-              disabled={props.snapshot.status === "stopping"}
-              onSelect={() => void props.onStop().catch(() => undefined)}
-            >
-              <SquareIcon />
-              End voice conversation
-            </DropdownMenuItem>
-          ) : null}
+              {status.phase !== "idle" ? (
+                <>
+                  <DropdownMenuSeparator className="mx-1 bg-og-border" />
+                  <div className="px-2.5 py-2" role="status" aria-live="polite">
+                    <div className="flex items-center gap-2 text-og-sm font-medium text-og-fg">
+                      <RealtimeStatusDot
+                        phase={status.phase}
+                        reduceMotion={reduceMotion === true}
+                      />
+                      {status.label}
+                    </div>
+                    <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+                  </div>
+                </>
+              ) : null}
 
-          {diagnosticsVisible ? <RealtimeDiagnosticsMenu snapshot={props.snapshot} /> : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
+              {audioBlocked ? (
+                <DropdownMenuItem
+                  className="rounded-og-md"
+                  onSelect={() => void props.onRetryAudibleOutput().catch(() => undefined)}
+                >
+                  <Volume2Icon />
+                  Resume audio
+                </DropdownMenuItem>
+              ) : null}
+              {retryConnection ? (
+                <DropdownMenuItem
+                  className="rounded-og-md"
+                  onSelect={() => void props.onRetry().catch(() => undefined)}
+                >
+                  <RotateCcwIcon />
+                  Retry connection
+                </DropdownMenuItem>
+              ) : null}
+              {modeOwned && props.snapshot.status !== "lost_owner" ? (
+                <DropdownMenuItem
+                  variant="destructive"
+                  className="rounded-og-md"
+                  disabled={props.snapshot.status === "stopping"}
+                  onSelect={() => void props.onStop().catch(() => undefined)}
+                >
+                  <SquareIcon />
+                  End voice conversation
+                </DropdownMenuItem>
+              ) : null}
+
+              {diagnosticsVisible ? <RealtimeDiagnosticsMenu snapshot={props.snapshot} /> : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+      </div>
 
       <span className="sr-only" role="status" aria-live="polite">
         {status.label}. {status.detail}
@@ -744,10 +850,51 @@ export function RealtimeVoiceControl(props: {
   );
 }
 
+/** Drill-in body for the mobile composer “+” menu — same catalog as the desktop chevron. */
+export function RealtimeVoiceModelPanel(props: {
+  models: readonly RealtimeModelOption[];
+  selectedModel: RealtimeModelOption;
+  disabled?: boolean | undefined;
+  leading?: ReactNode | undefined;
+  onSelect: (modelId: SessionRealtimeModel) => void;
+}) {
+  const [provider, setProvider] = useState<RealtimeModelProvider | null>(null);
+  const [direction, setDirection] = useState<1 | -1>(1);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="realtime-voice-model-panel">
+      <div className="flex shrink-0 items-start gap-1 px-2 pt-1 pb-1.5">
+        {props.leading}
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-og-fg">Voice model</div>
+          <p className="mt-0.5 text-xs text-og-fg-subtle">
+            Used when you start a voice conversation.
+          </p>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-1.5">
+        <RealtimeModelPickerMenu
+          models={props.models}
+          selectedModel={props.selectedModel}
+          provider={provider}
+          direction={direction}
+          disabled={props.disabled === true}
+          onProviderChange={(next, nextDirection) => {
+            setDirection(nextDirection);
+            setProvider(next);
+          }}
+          onSelect={props.onSelect}
+        />
+      </div>
+    </div>
+  );
+}
+
 function RealtimeMuteButton(props: {
   muted: boolean;
   kind: "microphone" | "output";
   reduceMotion: boolean;
+  enterDelay?: number | undefined;
   onToggle(): void;
 }) {
   const microphone = props.kind === "microphone";
@@ -772,15 +919,24 @@ function RealtimeMuteButton(props: {
       aria-label={label}
       aria-pressed={props.muted}
       title={label}
+      initial={props.reduceMotion ? false : { scale: 0.72, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{
+        delay: props.enterDelay ?? 0,
+        type: "spring",
+        stiffness: 420,
+        damping: 26,
+        mass: 0.7,
+      }}
       {...(props.reduceMotion ? {} : { whileTap: { scale: 0.92 } })}
       onClick={props.onToggle}
       className={cn(
-        "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md border outline-none",
+        "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md outline-none",
         "transition-[background-color,border-color,color] duration-150 ease-og-out",
         "focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:size-11",
         props.muted
-          ? "border-og-accent/35 bg-og-accent-soft text-og-accent"
-          : "border-og-border bg-og-surface-2 text-og-fg-muted hover:border-og-accent/35 hover:text-og-fg",
+          ? "border border-og-accent/35 bg-og-accent-soft text-og-accent"
+          : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg",
       )}
     >
       <Icon className="size-3.5" aria-hidden />
@@ -1122,15 +1278,29 @@ function RealtimeStatusDot(props: { phase: RealtimeVisualPhase; reduceMotion: bo
 
 function voiceButtonTone(phase: RealtimeVisualPhase): string {
   if (phase === "listening" || phase === "speaking") {
-    return "border-og-accent/45 bg-og-accent text-og-accent-fg shadow-og-sm hover:bg-og-accent-strong";
+    return "border border-og-accent/45 bg-og-accent text-og-accent-fg shadow-og-sm hover:bg-og-accent-strong";
   }
   if (phase === "blocked" || phase === "error") {
-    return "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting hover:bg-og-status-waiting/15";
+    return "border border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting hover:bg-og-status-waiting/15";
   }
   if (phase === "connecting" || phase === "reconnecting" || phase === "stopping") {
-    return "border-og-accent/35 bg-og-accent-soft text-og-accent";
+    return "border border-og-accent/35 bg-og-accent-soft text-og-accent";
   }
-  return "border-og-border bg-og-surface-2 text-og-fg-muted hover:border-og-accent/35 hover:bg-og-accent-soft hover:text-og-accent";
+  // Idle: same ghost treatment as the composer transcription mic — no box.
+  return "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg";
+}
+
+function voiceChevronTone(phase: RealtimeVisualPhase): string {
+  if (phase === "listening" || phase === "speaking") {
+    return "border border-l-0 border-og-accent/45 bg-og-accent text-og-accent-fg hover:bg-og-accent-strong";
+  }
+  if (phase === "blocked" || phase === "error") {
+    return "border border-l-0 border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting hover:bg-og-status-waiting/15";
+  }
+  if (phase === "connecting" || phase === "reconnecting" || phase === "stopping") {
+    return "border border-l-0 border-og-accent/35 bg-og-accent-soft text-og-accent";
+  }
+  return "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg";
 }
 
 function toRealtimeModelOption(model: WorkspaceRealtimeModelCatalogItem): RealtimeModelOption {

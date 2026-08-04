@@ -1,5 +1,17 @@
 # @opengeni/network
 
+## 0.2.0
+
+### Minor Changes
+
+- 664c1d8: Bound MCP OAuth setup with an absolute server deadline, abort stalled response streams, and preserve safe stage-specific API error details in SDK clients.
+
+## 0.1.2
+
+### Patch Changes
+
+- 4976e1c: Fix DNS-pinned OAuth response streaming under Bun and expose X as a built-in workspace social capability.
+
 ## 0.1.1
 
 ### Patch Changes

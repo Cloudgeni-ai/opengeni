@@ -10,6 +10,7 @@ export {
   NewSessionRealtimeControl,
   RealtimeModelPickerMenu,
   RealtimeVoiceControl,
+  RealtimeVoiceModelPanel,
   SessionCodexRealtimeControl,
   SessionRealtimeControl,
   codexRealtimeAdmissionAllowed,

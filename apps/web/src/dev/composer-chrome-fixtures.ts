@@ -70,6 +70,7 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     sandboxGroupId: GALLERY_SESSION_ID,
     activeSandboxId: null,
     activeEpoch: 0,
+    workingDir: null,
     variableSetId: null,
     environmentId: null,
     rigId: null,
@@ -352,8 +353,8 @@ function catalogModel(
 }
 
 export const galleryModelRows: PickerModelRow[] = projectPickerRows([
-  catalogModel({ id: "gpt-5.6-sol", label: "gpt-5.6-sol" }),
-  catalogModel({ id: "gpt-5.4", label: "gpt-5.4" }),
+  catalogModel({ id: "gpt-5.6-sol", label: "GPT-5.6 Sol", shortLabel: "5.6 Sol" }),
+  catalogModel({ id: "gpt-5.6-luna", label: "GPT-5.6 Luna", shortLabel: "5.6 Luna" }),
 ]);
 
 /** 52 first-party + 1 MCP = 53; leave two off → Tools · 51/53. */
@@ -392,14 +393,19 @@ export const screenshotIncomingInputs: SessionPendingInputPreview[] = [
 ];
 
 export type ChromeScenarioId =
+  | "crowded-mobile"
   | "screenshot"
   | "queued-only"
   | "incoming-and-queued"
+  | "steering"
+  | "voice-queued"
   | "goal-running"
   | "goal-paused"
   | "goal-blocked"
   | "goal-held"
+  | "goal-completed"
   | "agents-many"
+  | "agents-only"
   | "agents-none"
   | "composer-only";
 
@@ -411,6 +417,8 @@ export type ChromeScenario = {
   queue: UseTurnQueueResult;
   goal: UseGoalResult;
   agentNodes: LineageNode[];
+  /** Open this segment when the phone mounts (matches production uncontrolled default). */
+  defaultActive?: "incoming" | "steering" | "queue" | "goal" | "agents" | null;
 };
 
 export function chromeScenarios(): ChromeScenario[] {
@@ -444,15 +452,54 @@ export function chromeScenarios(): ChromeScenario[] {
     }),
   ];
 
+  const fifteenIdleAgents = Array.from({ length: 15 }, (_, index) =>
+    galleryAgentNode(index, {
+      title: index === 0 ? "Primary worker" : `Worker ${index + 1}`,
+      metadata: { title: index === 0 ? "Primary worker" : `Worker ${index + 1}` },
+      status: "idle",
+    }),
+  );
+
   return [
     {
+      id: "crowded-mobile",
+      title: "Crowded mobile (reference)",
+      description:
+        "Queue open + blocked goal (~3d 16h) + 15 idle agents — the dense stack from the phone screenshot.",
+      session,
+      queue: galleryQueue({
+        queue: [
+          galleryTurn(
+            0,
+            "Wtf are you talking about? The x mcp credential readiness flow still needs the five secrets in SOPS before enable.",
+          ),
+        ],
+      }),
+      goal: galleryGoal({
+        text: "Implement and harden the X XMCP credential readiness path end-to-end on jorgebot",
+        createdAt: isoMinutesAgo(3 * 24 * 60 + 16 * 60),
+        updatedAt: new Date(FIXED_NOW).toISOString(),
+        continuation: {
+          state: "blocked",
+          reason: "human_work_pending",
+          wakeRevision: 8,
+          observedRevision: 7,
+          nextAttemptAt: null,
+          lastError: "Waiting for a human follow-up before the next goal turn.",
+        },
+      }),
+      agentNodes: fifteenIdleAgents,
+      defaultActive: "queue",
+    },
+    {
       id: "screenshot",
-      title: "Screenshot stack",
-      description: "Incoming updates + continuation blocked + 2 agents — closest to the reference.",
+      title: "Incoming + blocked + agents",
+      description: "Incoming updates + continuation blocked + 2 agents.",
       session,
       queue: galleryQueue({ pendingInputs: screenshotIncomingInputs }),
       goal: galleryGoal({}),
       agentNodes: twoAgents,
+      defaultActive: "incoming",
     },
     {
       id: "queued-only",
@@ -463,15 +510,20 @@ export function chromeScenarios(): ChromeScenario[] {
         queue: [
           galleryTurn(0, "Please retry the Linear webhook after the deploy finishes."),
           galleryTurn(1, "Then paste the activation evidence into the runbook."),
+          galleryTurn(
+            2,
+            "Finally verify the production callback URL still matches the workspace setting.",
+          ),
         ],
       }),
       goal: galleryGoal(null),
       agentNodes: [],
+      defaultActive: "queue",
     },
     {
       id: "incoming-and-queued",
       title: "Incoming + queued",
-      description: "Collapsed queue shows both counts and a preview.",
+      description: "Collapsed chips show both counts; open either segment.",
       session,
       queue: galleryQueue({
         queue: [galleryTurn(0, "Follow up once the child session is inspected.")],
@@ -479,6 +531,56 @@ export function chromeScenarios(): ChromeScenario[] {
       }),
       goal: galleryGoal(null),
       agentNodes: [galleryAgentNode(0)],
+    },
+    {
+      id: "steering",
+      title: "Steering in flight",
+      description: "Steer delivery chip while a direction is accepted at the queue head.",
+      session: gallerySession({ status: "running" }),
+      queue: galleryQueue({
+        queue: [
+          galleryTurn(0, "Keep Linear project keys aligned with production and continue."),
+        ].map((turn) => ({
+          ...turn,
+          metadata: { ...turn.metadata, delivery: "steer" },
+        })),
+      }),
+      goal: galleryGoal({
+        continuation: {
+          state: "running",
+          reason: "goal_turn_running",
+          wakeRevision: 3,
+          observedRevision: 3,
+          nextAttemptAt: null,
+          lastError: null,
+        },
+        updatedAt: new Date(FIXED_NOW).toISOString(),
+      }),
+      agentNodes: twoAgents,
+      defaultActive: "steering",
+    },
+    {
+      id: "voice-queued",
+      title: "Voice request queued",
+      description: "Realtime voice transcript waiting as a queued turn.",
+      session,
+      queue: galleryQueue({
+        queue: [
+          {
+            ...galleryTurn(0, ""),
+            prompt: "",
+            metadata: {
+              realtimeDelegation: {
+                inputTranscript:
+                  "Hey — when you wake up, finish the credential readiness checklist and ping me.",
+              },
+            },
+          },
+        ],
+      }),
+      goal: galleryGoal(null),
+      agentNodes: [],
+      defaultActive: "queue",
     },
     {
       id: "goal-running",
@@ -498,6 +600,7 @@ export function chromeScenarios(): ChromeScenario[] {
         updatedAt: new Date(FIXED_NOW).toISOString(),
       }),
       agentNodes: twoAgents,
+      defaultActive: "goal",
     },
     {
       id: "goal-paused",
@@ -518,6 +621,7 @@ export function chromeScenarios(): ChromeScenario[] {
         },
       }),
       agentNodes: [],
+      defaultActive: "goal",
     },
     {
       id: "goal-blocked",
@@ -544,6 +648,7 @@ export function chromeScenarios(): ChromeScenario[] {
         },
       }),
       agentNodes: twoAgents,
+      defaultActive: "goal",
     },
     {
       id: "goal-held",
@@ -562,6 +667,27 @@ export function chromeScenarios(): ChromeScenario[] {
         },
       }),
       agentNodes: [],
+      defaultActive: "goal",
+    },
+    {
+      id: "goal-completed",
+      title: "Goal completed",
+      description: "Done pill — chrome still visible until cleared.",
+      session,
+      queue: galleryQueue(),
+      goal: galleryGoal({
+        status: "completed",
+        continuation: {
+          state: "inactive",
+          reason: "goal_inactive",
+          wakeRevision: 9,
+          observedRevision: 9,
+          nextAttemptAt: null,
+          lastError: null,
+        },
+      }),
+      agentNodes: [],
+      defaultActive: "goal",
     },
     {
       id: "agents-many",
@@ -580,6 +706,18 @@ export function chromeScenarios(): ChromeScenario[] {
         },
       }),
       agentNodes: manyAgents,
+      defaultActive: "agents",
+    },
+    {
+      id: "agents-only",
+      title: "Agents only",
+      description:
+        "Just the agents chip — no queue, incoming, or goal. Open by default to check close-on-chip + highlight.",
+      session,
+      queue: galleryQueue(),
+      goal: galleryGoal(null),
+      agentNodes: fifteenIdleAgents,
+      defaultActive: "agents",
     },
     {
       id: "agents-none",
@@ -600,6 +738,7 @@ export function chromeScenarios(): ChromeScenario[] {
         updatedAt: new Date(FIXED_NOW).toISOString(),
       }),
       agentNodes: [],
+      defaultActive: "goal",
     },
     {
       id: "composer-only",
@@ -609,6 +748,7 @@ export function chromeScenarios(): ChromeScenario[] {
       queue: galleryQueue(),
       goal: galleryGoal(null),
       agentNodes: [],
+      defaultActive: null,
     },
   ];
 }

@@ -1,6 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 
-import { applyAnalyticsConsent, syncAnalytics } from "./analytics";
+import {
+  applyAnalyticsConsent,
+  captureAnalyticsEvent,
+  syncAnalytics,
+  syncAnalyticsIdentity,
+} from "./analytics";
 import {
   analyticsHasProviders,
   analyticsPreferencesAvailable,
@@ -180,6 +185,74 @@ describe("analytics providers", () => {
       persistAnalyticsConsent("denied", fakeWindow.localStorage);
       applyAnalyticsConsent("denied");
       expect(unloadCalls).toBe(1);
+    } finally {
+      restoreGlobal("window", originalWindow);
+      restoreGlobal("document", originalDocument);
+    }
+  });
+
+  test("identifies only by internal IDs and delivers lifecycle events after PostHog loads", async () => {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+    const calls: Array<[string, ...unknown[]]> = [];
+    const posthog = {
+      capture: (...args: unknown[]) => calls.push(["capture", ...args]),
+      group: (...args: unknown[]) => calls.push(["group", ...args]),
+      identify: (...args: unknown[]) => calls.push(["identify", ...args]),
+      init: (...args: unknown[]) => calls.push(["init", ...args]),
+      opt_in_capturing: () => calls.push(["opt_in_capturing"]),
+      opt_out_capturing: () => calls.push(["opt_out_capturing"]),
+      reset: () => calls.push(["reset"]),
+    };
+    mock.module("posthog-js", () => ({ default: posthog }));
+    const fakeWindow = {
+      localStorage: {
+        getItem: () => "granted",
+        setItem: () => undefined,
+      },
+      location: { origin: "https://app.opengeni.ai" },
+    };
+
+    Object.defineProperty(globalThis, "window", { configurable: true, value: fakeWindow });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        getElementById: () => null,
+        createElement: () => ({ id: "", async: false, src: "" }),
+        head: { append: () => undefined },
+      },
+    });
+
+    try {
+      syncAnalytics(
+        {
+          consentRequired: true,
+          providers: {
+            posthog: { projectKey: "phc_test", host: "https://eu.i.posthog.com" },
+          },
+        },
+        "/workspaces",
+      );
+      syncAnalyticsIdentity({ userId: "user-1", accountId: "account-1" });
+      captureAnalyticsEvent("workspace_created", { workspace_id: "workspace-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(calls).toContainEqual(["identify", "user-1"]);
+      expect(calls).toContainEqual(["group", "account", "account-1"]);
+      expect(calls).toContainEqual([
+        "capture",
+        "$pageview",
+        { $current_url: "https://app.opengeni.ai/workspaces" },
+      ]);
+      expect(calls).toContainEqual([
+        "capture",
+        "workspace_created",
+        { workspace_id: "workspace-1" },
+      ]);
+
+      syncAnalyticsIdentity(null);
+      expect(calls).toContainEqual(["reset"]);
+      applyAnalyticsConsent("denied");
     } finally {
       restoreGlobal("window", originalWindow);
       restoreGlobal("document", originalDocument);

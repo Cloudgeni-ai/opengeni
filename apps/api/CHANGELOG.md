@@ -1,5 +1,106 @@
 # @opengeni/api-router
 
+## 0.21.9
+
+### Patch Changes
+
+- Updated dependencies [dfa3aef]
+  - @opengeni/core@0.20.11
+  - @opengeni/db@0.27.8
+  - @opengeni/documents@0.5.4
+  - @opengeni/events@0.3.74
+
+## 0.21.8
+
+### Patch Changes
+
+- 8c9b9a7: Return actionable operator configuration guidance when social OAuth credentials are missing.
+
+## 0.21.7
+
+### Patch Changes
+
+- c29fd4c: Bound MCP OAuth callbacks through token exchange and persistence, return safe stage-specific failures to the capabilities UI, and replace incompatible dynamic client registrations with a compare-and-swap update.
+- Updated dependencies [c29fd4c]
+  - @opengeni/core@0.20.10
+  - @opengeni/db@0.27.7
+  - @opengeni/documents@0.5.3
+  - @opengeni/events@0.3.73
+
+## 0.21.6
+
+### Patch Changes
+
+- Updated dependencies [664c1d8]
+  - @opengeni/network@0.2.0
+  - @opengeni/core@0.20.9
+  - @opengeni/db@0.27.6
+  - @opengeni/runtime@0.18.10
+  - @opengeni/documents@0.5.2
+  - @opengeni/events@0.3.72
+
+## 0.21.5
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+  - @opengeni/config@0.10.11
+  - @opengeni/core@0.20.8
+  - @opengeni/documents@0.5.1
+  - @opengeni/events@0.3.71
+  - @opengeni/github@0.4.27
+  - @opengeni/observability@0.4.14
+  - @opengeni/runtime@0.18.9
+  - @opengeni/storage@0.2.64
+
+## 0.21.4
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+  - @opengeni/documents@0.5.0
+  - @opengeni/core@0.20.7
+  - @opengeni/events@0.3.70
+  - @opengeni/github@0.4.26
+  - @opengeni/runtime@0.18.8
+  - @opengeni/storage@0.2.63
+  - @opengeni/observability@0.4.13
+
+## 0.21.3
+
+### Patch Changes
+
+- Updated dependencies [d5df927]
+- Updated dependencies [4976e1c]
+  - @opengeni/documents@0.4.1
+  - @opengeni/core@0.20.6
+  - @opengeni/network@0.1.2
+  - @opengeni/db@0.27.3
+  - @opengeni/runtime@0.18.7
+  - @opengeni/events@0.3.69
+
+## 0.21.2
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/documents@0.4.0
+  - @opengeni/config@0.10.9
+  - @opengeni/core@0.20.5
+  - @opengeni/db@0.27.2
+  - @opengeni/events@0.3.68
+  - @opengeni/github@0.4.25
+  - @opengeni/observability@0.4.12
+  - @opengeni/runtime@0.18.6
+  - @opengeni/storage@0.2.62
+
 ## 0.21.1
 
 ### Patch Changes

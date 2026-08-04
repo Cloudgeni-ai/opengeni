@@ -184,12 +184,17 @@ describe("release schema contract", () => {
         (migrations.has("0167_document_index_replay_authority.sql") ? 1 : 0) +
         (migrations.has("0168_workspace_instruction_policy_operation_receipts.sql") ? 1 : 0) +
         (migrations.has("0169_workspace_instruction_policy_onboarding_proposals.sql") ? 1 : 0) +
-        (migrations.has("0170_resumable_transcription_recordings.sql") ? 1 : 0),
+        (migrations.has("0170_resumable_transcription_recordings.sql") ? 1 : 0) +
+        (migrations.has("0170_session_control_wake_revision.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "62b25169a2ed6c4a0786254de727da85ae7e863e30a9839e2a2f11283da64a1d",
+      "01c23fbcb38f82ef290ad5d3de61e84a8aa89cc425ff1e7b236b2496a8b3f4dd",
     );
-    expect(contract.latestMigration).toBe("0170_resumable_transcription_recordings.sql");
+    expect(contract.latestMigration).toBe("0170_session_control_wake_revision.sql");
+    expect(migrations.get("0170_session_control_wake_revision.sql")).toMatchObject({
+      sha256: "cec3593e377f1cdc6aac3441b89d57e7c19d7377ff31991f340e14af1e64453d",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0170_resumable_transcription_recordings.sql")).toMatchObject({
       sha256: "b75688206e0f2d7c431fdfc7a465d4680fde59a129a090b2e532dd5b1c896bbd",
       deploymentMode: "rolling",

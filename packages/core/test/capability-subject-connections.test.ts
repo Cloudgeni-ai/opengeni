@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { AccessGrant } from "@opengeni/contracts";
+import { CapabilityCatalogItem, type AccessGrant } from "@opengeni/contracts";
 import {
   createConnection,
   createDb,
+  createSocialConnection,
   encryptEnvironmentValue,
   getCapabilityInstallation,
   listEnabledMcpCapabilityServers,
@@ -17,7 +18,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { buildCapabilityCatalog, enableCapability } from "../src";
+import { applyCapabilityEnablement, buildCapabilityCatalog, enableCapability } from "../src";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -96,6 +97,59 @@ describe("subject-owned capability connection references", () => {
     const source = await Bun.file(new URL("../src/domain/capabilities.ts", import.meta.url)).text();
     expect(source).not.toContain('id: "mcp:personal-slack"');
     expect(source).not.toContain("personalSlackMcpCatalogItem");
+  });
+
+  test("does not mistake a browseable first-party social connector for a connection", () => {
+    const item = CapabilityCatalogItem.parse({
+      id: "api:x",
+      kind: "api",
+      source: "built_in",
+      name: "X",
+      category: "social-media",
+      surfaceType: "first_party_social",
+      enabled: false,
+      enabledReason: null,
+      metadata: { provider: "x", ownership: "workspace" },
+    });
+    expect(applyCapabilityEnablement(item, undefined, new Set())).toMatchObject({
+      enabled: false,
+      enabledReason: null,
+      connectionRef: null,
+    });
+  });
+
+  test("publishes X as a workspace-shared first-party connector with truthful state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const disconnectedCatalog = await buildCapabilityCatalog({
+      db,
+      workspaceId: workspace.workspaceId,
+      settings,
+    });
+    expect(disconnectedCatalog.items.find((item) => item.id === "api:x")).toMatchObject({
+      kind: "api",
+      surfaceType: "first_party_social",
+      enabled: false,
+      metadata: { provider: "x", ownership: "workspace" },
+      tools: [{ kind: "mcp", id: "opengeni" }],
+    });
+
+    await createSocialConnection(db, {
+      ...workspace,
+      provider: "x",
+      accountHandle: "opengeni",
+      status: "connected",
+      scopes: ["tweet.read", "users.read"],
+    });
+    const connectedCatalog = await buildCapabilityCatalog({
+      db,
+      workspaceId: workspace.workspaceId,
+      settings,
+    });
+    expect(connectedCatalog.items.find((item) => item.id === "api:x")).toMatchObject({
+      enabled: true,
+      enabledReason: "workspace social account connected",
+    });
   });
 
   test("resolves Alice's generic ref and never persists or projects a personal UUID", async () => {

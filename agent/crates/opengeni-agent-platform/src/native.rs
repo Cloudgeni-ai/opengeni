@@ -30,6 +30,10 @@ pub struct NativePlatform {
     /// The working root reported to the control plane (the sandbox cwd). Defaults
     /// to the process's current directory at construction time.
     workspace_root: PathBuf,
+    /// The operating-system user's home directory, captured once at startup.
+    /// Used only for exact `~` / `~/...` path expansion; arbitrary shell or
+    /// environment expansion is deliberately unsupported.
+    home_dir: Option<PathBuf>,
     /// The host desktop backend (X11 on Linux, structured native on macOS/Windows,
     /// [`NoDesktop`](crate::NoDesktop) when headless). Resolved once at construction.
     desktop: Arc<dyn DesktopBackend>,
@@ -48,6 +52,7 @@ impl std::fmt::Debug for NativePlatform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativePlatform")
             .field("workspace_root", &self.workspace_root)
+            .field("home_dir", &self.home_dir)
             .field("has_display", &self.desktop.probe().is_some())
             .field("has_stream_registry", &self.stream_registry.is_some())
             .field("has_oom_isolation", &self.cgroups.is_some())
@@ -70,6 +75,7 @@ impl NativePlatform {
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self {
             workspace_root,
+            home_dir: user_home_dir(),
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
             cgroups: None,
@@ -82,6 +88,7 @@ impl NativePlatform {
     pub fn with_root(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
+            home_dir: user_home_dir(),
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
             cgroups: None,
@@ -115,21 +122,64 @@ impl NativePlatform {
         self
     }
 
-    /// Resolves a request-supplied `cwd` against the workspace root: an empty
-    /// `cwd` falls back to the root; a relative `cwd` is joined onto it; an
-    /// absolute `cwd` is used as-is.
-    fn resolve_cwd(&self, cwd: &str) -> PathBuf {
-        if cwd.is_empty() {
-            self.workspace_root.clone()
-        } else {
-            let p = Path::new(cwd);
-            if p.is_absolute() {
-                p.to_path_buf()
+    /// Resolves a request-supplied machine path. Empty falls back to the agent
+    /// root, exact `~` / `~/...` expands against the agent user's home, ordinary
+    /// relative paths join the root, and absolute paths pass through unchanged.
+    fn resolve_path(&self, path: &str) -> PlatformResult<PathBuf> {
+        if path.is_empty() {
+            Ok(self.workspace_root.clone())
+        } else if path == "~" || path.starts_with("~/") {
+            let home = self.home_dir.as_ref().ok_or_else(|| {
+                PlatformError::os(
+                    "cannot resolve '~': the agent service has no HOME or USERPROFILE",
+                )
+            })?;
+            if path == "~" {
+                Ok(home.clone())
             } else {
-                self.workspace_root.join(p)
+                Ok(home.join(&path[2..]))
+            }
+        } else {
+            let p = Path::new(path);
+            if p.is_absolute() {
+                Ok(p.to_path_buf())
+            } else {
+                Ok(self.workspace_root.join(p))
             }
         }
     }
+
+    /// Resolves and validates a process working directory before spawn. Tokio's
+    /// spawn error otherwise reports `ENOENT` against the executable even when
+    /// the missing object is actually `current_dir`, which is actively misleading.
+    fn resolve_process_cwd(&self, cwd: &str, operation: &str) -> PlatformResult<PathBuf> {
+        let path = self.resolve_path(cwd)?;
+        let metadata = std::fs::metadata(&path).map_err(|error| {
+            PlatformError::from_io(
+                &format!("{operation} working directory {}", path.display()),
+                &error,
+            )
+        })?;
+        if !metadata.is_dir() {
+            let mut detail = BTreeMap::new();
+            detail.insert("path".to_string(), path.to_string_lossy().into_owned());
+            return Err(PlatformError::Os {
+                message: format!(
+                    "{operation} working directory is not a directory: {}",
+                    path.display()
+                ),
+                detail,
+            });
+        }
+        Ok(path)
+    }
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// A zero-CPU Unix process-group leader that remains stopped until the group is
@@ -530,6 +580,19 @@ impl Platform for NativePlatform {
         self.stream_registry.clone()
     }
 
+    async fn pty_open(&self, req: &v1::PtyOpenRequest) -> PlatformResult<v1::PtyOpenResponse> {
+        let registry = self.stream_registry.as_ref().ok_or_else(|| {
+            PlatformError::Unsupported("pty_open: no relay stream registrar is wired".to_string())
+        })?;
+        let mut resolved = req.clone();
+        resolved.cwd = self
+            .resolve_process_cwd(&req.cwd, "pty")?
+            .to_string_lossy()
+            .into_owned();
+        let process = crate::pty::spawn_pty(&resolved, &self.default_shell())?;
+        registry.register_pty(process).await
+    }
+
     /// Builds the command (shell vs argv, cwd/env resolution) and spawns it
     /// inside the shared containment primitive — the streaming job path. The
     /// per-op cgroup leaf (#351) rides inside the group: placed at spawn, torn
@@ -550,7 +613,7 @@ impl Platform for NativePlatform {
             command
         };
 
-        cmd.current_dir(self.resolve_cwd(&req.cwd));
+        cmd.current_dir(self.resolve_process_cwd(&req.cwd, "exec")?);
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
@@ -627,7 +690,7 @@ impl Platform for NativePlatform {
     }
 
     async fn fs_read(&self, req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
-        let path = self.resolve_cwd(&req.path);
+        let path = self.resolve_path(&req.path)?;
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))?;
@@ -658,7 +721,7 @@ impl Platform for NativePlatform {
     }
 
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
-        let path = self.resolve_cwd(&req.path);
+        let path = self.resolve_path(&req.path)?;
         if req.create_parents {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -693,14 +756,14 @@ impl Platform for NativePlatform {
     }
 
     async fn fs_list(&self, req: &v1::FsListRequest) -> PlatformResult<v1::FsListResponse> {
-        let root = self.resolve_cwd(&req.path);
+        let root = self.resolve_path(&req.path)?;
         let mut entries = Vec::new();
         list_dir(&root, &root, req.recursive, &mut entries).await?;
         Ok(v1::FsListResponse { entries })
     }
 
     async fn fs_mkdir(&self, req: &v1::FsMkdirRequest) -> PlatformResult<v1::FsMkdirResponse> {
-        let path = self.resolve_cwd(&req.path);
+        let path = self.resolve_path(&req.path)?;
         let result = if req.parents {
             tokio::fs::create_dir_all(&path).await
         } else {
@@ -712,8 +775,8 @@ impl Platform for NativePlatform {
     }
 
     async fn fs_move(&self, req: &v1::FsMoveRequest) -> PlatformResult<v1::FsMoveResponse> {
-        let from = self.resolve_cwd(&req.from);
-        let to = self.resolve_cwd(&req.to);
+        let from = self.resolve_path(&req.from)?;
+        let to = self.resolve_path(&req.to)?;
         if !req.overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
             return Err(PlatformError::Os {
                 message: format!("move: destination exists: {}", to.display()),
@@ -727,7 +790,7 @@ impl Platform for NativePlatform {
     }
 
     async fn fs_stat(&self, req: &v1::FsStatRequest) -> PlatformResult<v1::FsStatResponse> {
-        let path = self.resolve_cwd(&req.path);
+        let path = self.resolve_path(&req.path)?;
         match tokio::fs::symlink_metadata(&path).await {
             Ok(meta) => {
                 let name = path
@@ -751,7 +814,7 @@ impl Platform for NativePlatform {
     }
 
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse> {
-        let path = self.resolve_cwd(&req.path);
+        let path = self.resolve_path(&req.path)?;
         let meta = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
@@ -775,7 +838,7 @@ impl Platform for NativePlatform {
     fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
         let mut cmd = tokio::process::Command::new("git");
         cmd.args(git_args(req.op(), &req.args))
-            .current_dir(self.resolve_cwd(&req.cwd));
+            .current_dir(self.resolve_process_cwd(&req.cwd, "git")?);
         spawn_contained(cmd, self.cgroups.as_deref())
             .map_err(|e| PlatformError::from_io("spawn git", &e))
     }
@@ -1040,6 +1103,14 @@ mod tests {
         (platform, dir)
     }
 
+    fn rooted_with_home() -> (NativePlatform, tempfile::TempDir, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let home = tempfile::tempdir().expect("home tempdir");
+        let mut platform = NativePlatform::with_root(root.path());
+        platform.home_dir = Some(home.path().to_path_buf());
+        (platform, root, home)
+    }
+
     /// TEST-ONLY NixOS-sandbox fork/exec transient-ENOENT mitigation.
     ///
     /// Under the default parallel `cargo test`, this NixOS sandbox intermittently
@@ -1301,6 +1372,78 @@ mod tests {
         let out = String::from_utf8_lossy(&resp.stdout);
         assert!(out.contains("hello"), "stdout was {out:?}");
         assert!(!resp.timed_out);
+    }
+
+    #[test]
+    fn path_resolution_expands_only_the_current_users_tilde() {
+        let (platform, root, home) = rooted_with_home();
+        assert_eq!(platform.resolve_path("").expect("empty"), root.path());
+        assert_eq!(platform.resolve_path("~").expect("home"), home.path());
+        assert_eq!(
+            platform.resolve_path("~/repo/src").expect("home child"),
+            home.path().join("repo/src")
+        );
+        assert_eq!(
+            platform.resolve_path("repo/src").expect("relative"),
+            root.path().join("repo/src")
+        );
+        assert_eq!(
+            platform.resolve_path("~someone/repo").expect("named tilde"),
+            root.path().join("~someone/repo")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_and_filesystem_share_the_tilde_working_frame() {
+        let (platform, _root, home) = rooted_with_home();
+        let repo = home.path().join("repos/project");
+        std::fs::create_dir_all(&repo).expect("create project");
+
+        platform
+            .fs_write(&FsWriteRequest {
+                path: "~/repos/project/probe.txt".to_string(),
+                content: prost::bytes::Bytes::from_static(b"ok"),
+                create_parents: true,
+                ..Default::default()
+            })
+            .await
+            .expect("tilde fs write");
+        assert_eq!(
+            std::fs::read(repo.join("probe.txt")).expect("read probe"),
+            b"ok"
+        );
+
+        let request = ExecRequest {
+            command: vec!["pwd".to_string()],
+            shell: true,
+            cwd: "~/repos/project".to_string(),
+            ..Default::default()
+        };
+        let response = retry_transient_spawn(|| platform.exec(&request))
+            .await
+            .expect("tilde cwd exec");
+        let reported = std::fs::canonicalize(String::from_utf8_lossy(&response.stdout).trim())
+            .expect("canonicalize reported cwd");
+        let expected = std::fs::canonicalize(&repo).expect("canonicalize expected cwd");
+        assert_eq!(reported, expected);
+    }
+
+    #[tokio::test]
+    async fn missing_exec_cwd_is_attributed_to_the_working_directory() {
+        let (platform, _root, _home) = rooted_with_home();
+        let error = platform
+            .exec(&ExecRequest {
+                command: vec!["pwd".to_string()],
+                shell: true,
+                cwd: "~/missing-project".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("missing cwd must fail before spawn");
+        let message = error.to_string();
+        assert!(message.contains("exec working directory"), "got {message}");
+        assert!(!message.contains("spawn pwd"), "got {message}");
     }
 
     #[tokio::test]

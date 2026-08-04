@@ -450,6 +450,29 @@ describe("SessionChrome", () => {
     expect(queueChip?.getAttribute("data-slot")).not.toBe("tooltip-trigger");
   });
 
+  test("puts the close affordance on the expanded chip", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({
+          queue: [fakeTurn({ prompt: "Queued prompt that should wrap on a narrow rail" })],
+        })}
+        composer={composer()}
+        goal={goal()}
+        agentsSignal={{ count: 15, detail: "Idle" }}
+        defaultActive="agents"
+      />,
+    );
+    const agentsChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="agents"]',
+    );
+    const close = agentsChip?.querySelector('[data-testid="session-chrome-close"]');
+    expect(close).not.toBeNull();
+    expect(agentsChip?.getAttribute("aria-label")).toBe("Close 15 agents");
+    // Other chips stay free of a close glyph.
+    const queueChip = mounted.container.querySelector('[data-og-session-chrome-signal="queue"]');
+    expect(queueChip?.querySelector('[data-testid="session-chrome-close"]')).toBeNull();
+  });
+
   test("caps expanded panel height so long agents/queue lists scroll inside", async () => {
     mounted = await renderComponent(
       <SessionChrome

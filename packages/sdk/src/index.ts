@@ -156,7 +156,10 @@ export type {
 } from "./workspace-instruction-policies";
 export type {
   WorkspaceStateDocumentStatusCounts,
+  WorkspaceStateDocumentAuthorityKindCounts,
   WorkspaceStateAttemptGovernance,
+  WorkspaceStateExportOmission,
+  WorkspaceStateExportResponse,
   WorkspaceStateGapCode,
   WorkspaceStateGetOptions,
   WorkspaceStateGovernanceDriftStatus,
@@ -339,6 +342,12 @@ export type {
   ConnectionOwnership,
   ConnectionResponse,
   ConnectionStatus,
+  ConnectorDocumentDestination,
+  ConnectorDocumentDestinationAuthority,
+  ConnectorDocumentDestinationSelection,
+  SocialConnection,
+  SocialConnectionStatus,
+  SocialOAuthStartRequest,
   AddDocumentRequest,
   CreateApiKeyRequest,
   CreateApiKeyResponse,

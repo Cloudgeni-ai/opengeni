@@ -11,7 +11,7 @@
  * | --- | --- |
  * | `--og-session-chrome-surface` / `-open` | Dock fill (collapsed / expanded) |
  * | `--og-session-chrome-border` / `-open` | Dock edge |
- * | `--og-session-chrome-highlight` | Sliding chip selection pill |
+ * | `--og-session-chrome-highlight` / `-ring` | Sliding chip selection fill + edge |
  * | `--og-session-chrome-shadow` / `-open` | Elevation |
  * | `--og-session-chrome-radius` | Dock corner radius |
  * | `--og-session-chrome-chip-min-height` | Signal chip height |
@@ -394,7 +394,7 @@ export function SessionChrome({
   const chipRefs = useRef<Partial<Record<SessionChromeSignalId, HTMLButtonElement | null>>>({});
   const railRef = useRef<HTMLDivElement | null>(null);
   const panelBodyRef = useRef<HTMLDivElement | null>(null);
-  const [pill, setPill] = useState({ left: 0, width: 0, opacity: 0 });
+  const [pill, setPill] = useState({ left: 0, top: 0, width: 0, height: 0, opacity: 0 });
   const [panelHeight, setPanelHeight] = useState(0);
 
   const signalIds = signals.map((signal) => signal.id).join(",");
@@ -421,11 +421,15 @@ export function SessionChrome({
       }
       const chip = chipRefs.current[active];
       if (!chip) return;
+      // Measure against the chip's own box so a wrapped multi-row rail never
+      // stretches the highlight into a tall stripe across every signal.
       const railBox = rail.getBoundingClientRect();
       const chipBox = chip.getBoundingClientRect();
       setPill({
         left: chipBox.left - railBox.left,
+        top: chipBox.top - railBox.top,
         width: chipBox.width,
+        height: chipBox.height,
         opacity: 1,
       });
     };
@@ -433,6 +437,9 @@ export function SessionChrome({
     if (!rail) return;
     const observer = new ResizeObserver(measure);
     observer.observe(rail);
+    for (const chip of Object.values(chipRefs.current)) {
+      if (chip) observer.observe(chip);
+    }
     window.addEventListener("resize", measure);
     return () => {
       observer.disconnect();
@@ -568,88 +575,92 @@ export function SessionChrome({
           }}
         >
           <div
-            ref={railRef}
-            className="relative flex flex-wrap items-stretch"
+            className="relative"
             style={{
-              gap: "var(--og-session-chrome-chip-gap)",
-              padding: "var(--og-session-chrome-rail-pad)",
+              paddingTop: "var(--og-session-chrome-rail-pad)",
+              paddingBottom: "var(--og-session-chrome-rail-pad)",
+              paddingLeft: "var(--og-session-chrome-rail-pad)",
+              paddingRight: "var(--og-session-chrome-rail-pad)",
             }}
           >
-            <motion.div
-              aria-hidden
-              className="pointer-events-none absolute rounded-og-md ring-1 ring-og-border/50"
+            <div
+              ref={railRef}
+              className="relative flex flex-wrap items-center"
               style={{
-                top: "var(--og-session-chrome-rail-pad)",
-                bottom: "var(--og-session-chrome-rail-pad)",
-                background: "var(--og-session-chrome-highlight)",
+                gap: "var(--og-session-chrome-chip-gap)",
               }}
-              initial={false}
-              animate={{
-                x: pill.left,
-                width: pill.width,
-                opacity: pill.opacity,
-              }}
-              transition={{ duration: shellDuration, ease }}
-            />
-            {signals.map((signal) => {
-              const selected = active === signal.id;
-              return (
-                <button
-                  key={signal.id}
-                  type="button"
-                  ref={(node) => {
-                    chipRefs.current[signal.id] = node;
-                  }}
-                  aria-expanded={selected}
-                  aria-controls={panelId}
-                  data-testid={`session-chrome-${signal.id}`}
-                  data-og-session-chrome-signal={signal.id}
-                  onClick={() => setActive(selected ? null : signal.id)}
-                  className={cn(
-                    "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md text-left text-og-xs outline-none",
-                    "transition-colors duration-150 motion-reduce:transition-none",
-                    "hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40",
-                    "pointer-coarse:min-h-11",
-                    selected ? "text-og-fg" : "text-og-fg-muted",
-                  )}
-                  style={{
-                    paddingInline: "var(--og-session-chrome-chip-pad-x)",
-                  }}
-                >
-                  <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
-                    {signal.icon}
-                  </span>
-                  <span className="shrink-0 font-medium text-og-fg">{signal.label}</span>
-                  {signal.detail ? (
-                    <>
-                      <span aria-hidden className="shrink-0 text-og-fg-subtle/60">
-                        ·
+            >
+              <motion.div
+                aria-hidden
+                className="pointer-events-none absolute left-0 top-0 rounded-og-md"
+                style={{
+                  background: "var(--og-session-chrome-highlight)",
+                  boxShadow: "inset 0 0 0 1px var(--og-session-chrome-highlight-ring)",
+                }}
+                initial={false}
+                animate={{
+                  x: pill.left,
+                  y: pill.top,
+                  width: pill.width,
+                  height: pill.height,
+                  opacity: pill.opacity,
+                }}
+                transition={{ duration: shellDuration, ease }}
+              />
+              {signals.map((signal) => {
+                const selected = active === signal.id;
+                return (
+                  <button
+                    key={signal.id}
+                    type="button"
+                    ref={(node) => {
+                      chipRefs.current[signal.id] = node;
+                    }}
+                    aria-expanded={selected}
+                    aria-controls={panelId}
+                    aria-label={selected ? `Close ${signal.label}` : undefined}
+                    data-testid={`session-chrome-${signal.id}`}
+                    data-og-session-chrome-signal={signal.id}
+                    onClick={() => setActive(selected ? null : signal.id)}
+                    className={cn(
+                      "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-none",
+                      // Coarse pointers keep a 44px target (session-pins acceptance).
+                      "pointer-coarse:min-h-11",
+                      "transition-colors duration-150 motion-reduce:transition-none",
+                      "hover:text-og-fg focus-visible:bg-og-surface-3/50",
+                      selected ? "text-og-fg" : "text-og-fg-muted",
+                    )}
+                    style={{
+                      paddingInline: "var(--og-session-chrome-chip-pad-x)",
+                    }}
+                  >
+                    <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
+                      {signal.icon}
+                    </span>
+                    <span className="shrink-0 font-medium text-og-fg">{signal.label}</span>
+                    {signal.detail ? (
+                      <>
+                        <span aria-hidden className="shrink-0 text-og-fg-subtle/60">
+                          ·
+                        </span>
+                        <span className="min-w-0 max-w-[8.5rem] truncate text-og-fg sm:max-w-[12rem]">
+                          {signal.detail}
+                        </span>
+                      </>
+                    ) : null}
+                    {selected ? (
+                      <span
+                        data-testid="session-chrome-close"
+                        className="ml-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-colors group-hover:text-og-fg pointer-coarse:size-5"
+                        aria-hidden
+                      >
+                        <XIcon className="size-3" />
                       </span>
-                      <span className="min-w-0 max-w-[8.5rem] truncate text-og-fg sm:max-w-[12rem]">
-                        {signal.detail}
-                      </span>
-                    </>
-                  ) : null}
-                </button>
-              );
-            })}
-            <AnimatePresence initial={false}>
-              {open ? (
-                <motion.button
-                  key="close"
-                  type="button"
-                  aria-label="Close session chrome panel"
-                  onClick={() => setActive(null)}
-                  initial={reduceMotion ? false : { opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={reduceMotion ? { opacity: 1 } : { opacity: 0 }}
-                  transition={{ duration: crossfadeDuration, ease }}
-                  className="relative z-[1] ml-auto inline-flex size-7 shrink-0 items-center justify-center rounded-og-md text-og-fg-subtle outline-none transition-colors hover:bg-og-surface-3/60 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 pointer-coarse:size-11"
-                >
-                  <XIcon className="size-3" />
-                </motion.button>
-              ) : null}
-            </AnimatePresence>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <motion.div
