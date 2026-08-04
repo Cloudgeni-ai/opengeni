@@ -4,6 +4,7 @@ import {
   ConnectorDocumentDestination,
   bindConnectorDocumentDestination,
   connectorDestinationDocumentAuthority,
+  connectorDocumentDestinationCollectionId,
   resolveConnectorDocumentDestination,
 } from "../src/connector-destinations";
 
@@ -73,6 +74,37 @@ describe("connector document destinations", () => {
       authoritySubjectId: null,
       collectionId: null,
     });
+  });
+
+  test("keeps optional collection organization separate from document authority", () => {
+    const collectionId = "00000000-0000-4000-8000-000000000158";
+    const destination = bindConnectorDocumentDestination(
+      { authorityKind: "personal", collectionId },
+      { accountId, workspaceId, initiatingSubjectId: subjectId },
+    );
+    expect(destination.collectionId).toBe(collectionId);
+    expect(
+      connectorDocumentDestinationCollectionId(
+        destination,
+        "00000000-0000-4000-8000-000000000999",
+      ),
+    ).toBe(collectionId);
+    expect(connectorDestinationDocumentAuthority(destination)).toEqual({
+      authorityKind: "personal",
+      authorityWorkspaceId: workspaceId,
+      authoritySubjectId: subjectId,
+    });
+  });
+
+  test("resolves the internal Default collection when no optional collection is selected", () => {
+    const defaultCollectionId = "00000000-0000-4000-8000-000000000160";
+    const destination = bindConnectorDocumentDestination(
+      { authorityKind: "workspace", collectionId: null },
+      { accountId, workspaceId, initiatingSubjectId: subjectId },
+    );
+    expect(connectorDocumentDestinationCollectionId(destination, defaultCollectionId)).toBe(
+      defaultCollectionId,
+    );
   });
 
   test("rejects partial authority tuples", () => {

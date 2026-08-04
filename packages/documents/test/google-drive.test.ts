@@ -107,6 +107,46 @@ describe("Google Drive scoped source identity", () => {
       scope: { kind: "workspace", workspaceId, subjectId: null },
     });
   });
+
+  test("uses saved destination authority, ignores collection organization, and rejects actor drift", () => {
+    const personalSource: GoogleDriveSelectedSource = {
+      ...source,
+      destination: {
+        authorityKind: "personal",
+        authorityAccountId: workspaceId,
+        authorityWorkspaceId: workspaceId,
+        authoritySubjectId: subjectId,
+        collectionId: "00000000-0000-4000-8000-000000000159",
+      },
+    };
+    expect(
+      googleDriveKnowledgeSourceIdentity({
+        googlePermissionId: "permission-123",
+        source: personalSource,
+        workspaceId,
+        connectionSubjectId: subjectId,
+      }).scope,
+    ).toEqual({ kind: "personal", workspaceId, subjectId });
+    expect(() =>
+      googleDriveKnowledgeSourceIdentity({
+        googlePermissionId: "permission-123",
+        source: personalSource,
+        workspaceId,
+        connectionSubjectId: "user:other",
+      }),
+    ).toThrow("personal authority mismatch");
+  });
+
+  test("keeps every legacy target scope inside the current workspace", () => {
+    expect(
+      googleDriveKnowledgeSourceIdentity({
+        googlePermissionId: "permission-123",
+        source: { ...source, destination: undefined, targetScope: "organization" },
+        workspaceId,
+        initiatingSubjectId: subjectId,
+      }).scope,
+    ).toEqual({ kind: "workspace", workspaceId, subjectId: null });
+  });
 });
 
 describe("Google Drive transfer planning", () => {

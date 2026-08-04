@@ -277,7 +277,10 @@ export function googleDriveKnowledgeSourceIdentity(input: {
   const destination = resolveConnectorDocumentDestination(input.source.destination, {
     accountId: input.accountId ?? input.workspaceId,
     workspaceId: input.workspaceId,
-    connectionSubjectId: input.connectionSubjectId ?? input.initiatingSubjectId ?? null,
+    connectionSubjectId:
+      input.connectionSubjectId !== undefined
+        ? input.connectionSubjectId
+        : (input.initiatingSubjectId ?? null),
   });
   return {
     providerKey: GOOGLE_DRIVE_PROVIDER_KEY,

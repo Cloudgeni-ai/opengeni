@@ -486,7 +486,9 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <span className="text-fg-subtle">Import defaults</span>
               <div className="mt-0.5 truncate text-fg">
                 {savedDefaults
-                  ? `${scopeLabel(savedDefaults.authorityKind)} · ${cadenceLabel(savedDefaults.syncCadence)} · ${readPolicyLabel(savedDefaults.readPolicy)}`
+                  ? `${scopeLabel(savedDefaults.authorityKind)} · ${cadenceLabel(
+                      savedDefaults.syncCadence,
+                    )} · ${readPolicyLabel(savedDefaults.readPolicy)}`
                   : "Not configured"}
               </div>
             </div>
@@ -710,10 +712,24 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                 }
               >
                 <option value="personal">Only me</option>
-                <option value="workspace" disabled={!canManageWorkspaceDestination}>
+                <option
+                  value="workspace"
+                  disabled={googleDriveDestinationOptionDisabled(
+                    "workspace",
+                    canManageWorkspaceDestination,
+                    canManageOrganizationDestination,
+                  )}
+                >
                   This workspace
                 </option>
-                <option value="organization" disabled={!canManageOrganizationDestination}>
+                <option
+                  value="organization"
+                  disabled={googleDriveDestinationOptionDisabled(
+                    "organization",
+                    canManageWorkspaceDestination,
+                    canManageOrganizationDestination,
+                  )}
+                >
                   Company
                 </option>
               </Select>
@@ -786,7 +802,7 @@ function googleDriveBoundaryLabel(source: {
   return source.name.trim();
 }
 
-function configuredGoogleDriveSources(
+export function configuredGoogleDriveSources(
   metadata: GoogleDriveMetadata | undefined,
 ): ConfiguredGoogleDriveSource[] {
   const sources =
@@ -807,6 +823,16 @@ function configuredGoogleDriveSources(
     syncCadence: source.syncCadence,
     readPolicy: source.readPolicy,
   }));
+}
+
+export function googleDriveDestinationOptionDisabled(
+  authorityKind: ConnectorDocumentDestinationAuthority,
+  canManageWorkspaceDestination: boolean,
+  canManageOrganizationDestination: boolean,
+): boolean {
+  if (authorityKind === "organization") return !canManageOrganizationDestination;
+  if (authorityKind === "workspace") return !canManageWorkspaceDestination;
+  return false;
 }
 
 function scopeLabel(scope: ConnectorDocumentDestinationAuthority): string {

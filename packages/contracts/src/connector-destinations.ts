@@ -81,10 +81,13 @@ export function legacyWorkspaceConnectorDocumentDestination(context: {
   accountId: string;
   workspaceId: string;
 }): ConnectorDocumentDestination {
-  return bindConnectorDocumentDestination(
-    { authorityKind: "workspace", collectionId: null },
-    { ...context, initiatingSubjectId: "legacy-workspace-fallback" },
-  );
+  return ConnectorDocumentDestination.parse({
+    authorityKind: "workspace",
+    authorityAccountId: context.accountId,
+    authorityWorkspaceId: context.workspaceId,
+    authoritySubjectId: null,
+    collectionId: null,
+  });
 }
 
 export function resolveConnectorDocumentDestination(
@@ -129,4 +132,11 @@ export function connectorDestinationDocumentAuthority(
     authorityWorkspaceId: destination.authorityWorkspaceId,
     authoritySubjectId: destination.authoritySubjectId,
   };
+}
+
+export function connectorDocumentDestinationCollectionId(
+  destination: ConnectorDocumentDestination,
+  defaultCollectionId: string,
+): string {
+  return destination.collectionId ?? z.string().uuid().parse(defaultCollectionId);
 }
