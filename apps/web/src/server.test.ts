@@ -202,6 +202,42 @@ describe("production web handler", () => {
     expect(await head.text()).toBe("");
   });
 
+  test("ignores malformed connection options while stripping valid hop-by-hop names", async () => {
+    const root = await fixture();
+    let upstreamRequestHeaders = new Headers();
+    const handler = createWebHandler(root, {
+      demoApiProxy: {
+        targetBaseUrl: "http://api.internal:8000",
+        fetch: async (_input, init) => {
+          upstreamRequestHeaders = new Headers(init?.headers);
+          return new Response('{"ok":true}', {
+            headers: {
+              connection: "keep-alive, bad name, x-upstream-hop",
+              "content-type": "application/json",
+              "x-upstream-hop": "must-not-be-forwarded",
+            },
+          });
+        },
+      },
+    });
+
+    const response = await handler(
+      new Request("https://example.test/demo-api/v1/workspaces", {
+        headers: {
+          connection: "keep-alive, bad name, x-browser-hop",
+          "x-browser-hop": "must-not-be-forwarded",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamRequestHeaders.get("connection")).toBeNull();
+    expect(upstreamRequestHeaders.get("x-browser-hop")).toBeNull();
+    expect(response.headers.get("connection")).toBeNull();
+    expect(response.headers.get("x-upstream-hop")).toBeNull();
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
   test("derives optional authority headers from environment names", () => {
     expect(demoApiProxyFromEnvironment({})).toBeUndefined();
     expect(() =>

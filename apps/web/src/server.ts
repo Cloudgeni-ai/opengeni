@@ -17,6 +17,7 @@ const HOP_BY_HOP_HEADERS = [
   "transfer-encoding",
   "upgrade",
 ] as const;
+const HTTP_FIELD_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 export type DemoApiProxyOptions = {
   targetBaseUrl: string;
@@ -159,7 +160,7 @@ async function proxyDemoApi(
 function stripHopByHopHeaders(headers: Headers): void {
   for (const name of headers.get("connection")?.split(",") ?? []) {
     const normalized = name.trim();
-    if (normalized) headers.delete(normalized);
+    if (HTTP_FIELD_NAME_PATTERN.test(normalized)) headers.delete(normalized);
   }
   for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
 }
