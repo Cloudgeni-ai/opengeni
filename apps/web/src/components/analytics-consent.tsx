@@ -18,11 +18,15 @@ export function AnalyticsManager({
   hasSearchParameters,
   isPublicAuthRoute,
   pathname,
+  analyticsAccountId,
+  analyticsUserId,
 }: {
   config: ClientConfig["analytics"];
   hasSearchParameters: boolean;
   isPublicAuthRoute: boolean;
   pathname: string;
+  analyticsAccountId: string | null;
+  analyticsUserId: string | null;
 }) {
   const [choice, setChoice] = useState<AnalyticsConsent | null>(() => storedAnalyticsConsent());
   const [editing, setEditing] = useState(choice === null);
@@ -41,6 +45,14 @@ export function AnalyticsManager({
       cancelled = true;
     };
   }, [config, hasSearchParameters, isPublicAuthRoute, pathname]);
+
+  useEffect(() => {
+    void import("@/lib/analytics").then(({ syncAnalyticsIdentity }) => {
+      syncAnalyticsIdentity(
+        analyticsUserId ? { userId: analyticsUserId, accountId: analyticsAccountId } : null,
+      );
+    });
+  }, [analyticsAccountId, analyticsUserId]);
 
   useEffect(() => {
     const open = () => {
@@ -73,8 +85,9 @@ export function AnalyticsManager({
       <p className="text-sm font-medium text-fg">Help us improve OpenGeni</p>
       <p className="mt-1 text-sm text-fg-muted">
         We use optional performance analytics, including first-party cookies, to understand
-        adoption. Copy tracking is disabled; we do not send prompts, source code, repository
-        content, tool arguments, or secrets.
+        adoption. When you sign in, consented events use internal user and account IDs. Copy
+        tracking is disabled; we do not send names, email addresses, prompts, source code,
+        repository content, tool arguments, or secrets.
       </p>
       <div className="mt-3 flex justify-end gap-2">
         {choice !== null ? (
