@@ -623,9 +623,9 @@ export function SessionChrome({
                     data-og-session-chrome-signal={signal.id}
                     onClick={() => setActive(selected ? null : signal.id)}
                     className={cn(
-                      // Keep chrome chips compact — do not inflate to 44px touch targets
-                      // (that made the open dock look oddly tall vs the composer).
                       "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-none",
+                      // Coarse pointers keep a 44px target (session-pins acceptance).
+                      "pointer-coarse:min-h-11",
                       "transition-colors duration-150 motion-reduce:transition-none",
                       "hover:text-og-fg focus-visible:bg-og-surface-3/50",
                       selected ? "text-og-fg" : "text-og-fg-muted",
