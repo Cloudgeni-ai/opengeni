@@ -185,6 +185,15 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
   posthog.init(projectKey, {
     api_host: host,
     autocapture: false,
+    // PostHog can derive GeoIP properties before its project-level IP discard runs.
+    // Disable that enrichment at the event boundary as well.
+    before_send: (event) =>
+      event
+        ? {
+            ...event,
+            properties: { ...event.properties, $geoip_disable: true },
+          }
+        : null,
     capture_pageview: false,
     capture_pageleave: false,
     disable_session_recording: true,

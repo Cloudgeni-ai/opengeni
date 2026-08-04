@@ -237,6 +237,34 @@ describe("analytics providers", () => {
       captureAnalyticsEvent("workspace_created", { workspace_id: "workspace-1" });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
+      const initCall = calls.find(([method]) => method === "init");
+      const beforeSend = (
+        initCall?.[2] as {
+          before_send?: (
+            event: {
+              uuid: string;
+              event: string;
+              properties: Record<string, unknown>;
+            } | null,
+          ) => {
+            uuid: string;
+            event: string;
+            properties: Record<string, unknown>;
+          } | null;
+        }
+      )?.before_send;
+      expect(
+        beforeSend?.({
+          uuid: "event-1",
+          event: "session_started",
+          properties: { session_id: "session-1" },
+        }),
+      ).toEqual({
+        uuid: "event-1",
+        event: "session_started",
+        properties: { session_id: "session-1", $geoip_disable: true },
+      });
+      expect(beforeSend?.(null)).toBeNull();
       expect(calls).toContainEqual(["identify", "user-1"]);
       expect(calls).toContainEqual(["group", "account", "account-1"]);
       expect(calls).toContainEqual([
