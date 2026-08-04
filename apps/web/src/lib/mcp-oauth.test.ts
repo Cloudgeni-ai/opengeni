@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { startMcpOAuthWithTimeout } from "./mcp-oauth";
+import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "./mcp-oauth";
 
 const request = {
   mcpUrl: "https://mcp.linear.app/mcp",
@@ -70,5 +70,23 @@ describe("startMcpOAuthWithTimeout", () => {
         50,
       ),
     ).rejects.toBe(failure);
+  });
+});
+
+describe("mcpOAuthCallbackFailureMessage", () => {
+  test("explains the exact timed-out stage without exposing raw provider text", () => {
+    expect(mcpOAuthCallbackFailureMessage("token_exchange", "timeout")).toBe(
+      "Connection timed out while finishing provider authorization. Try again.",
+    );
+  });
+
+  test("makes rollback-safe persistence failures explicit", () => {
+    expect(mcpOAuthCallbackFailureMessage("persist", "timeout")).toContain("Nothing was committed");
+  });
+
+  test("turns an invalid client response into administrator-actionable guidance", () => {
+    const message = mcpOAuthCallbackFailureMessage("token_exchange", "invalid_client");
+    expect(message).toContain("provider rejected the OAuth client registration");
+    expect(message).toContain("provider configuration needs attention");
   });
 });

@@ -1106,6 +1106,31 @@ export async function withRlsContext<T>(
   }, transactionConfig);
 }
 
+/**
+ * Run one bounded database operation on a transaction-pinned backend.
+ *
+ * Callers that also have an application deadline should check their abort
+ * signal before returning from `fn`; throwing there rolls the transaction back
+ * even when the application deadline won a surrounding Promise race.
+ */
+export async function withDatabaseStatementTimeout<T>(
+  db: Database,
+  timeoutMs: number,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("withDatabaseStatementTimeout requires a positive timeout");
+  }
+  const boundedTimeoutMs = Math.max(1, Math.floor(timeoutMs));
+  return await db.transaction(async (tx) => {
+    const scoped = tx as unknown as Database;
+    await scoped.execute(
+      sql`select set_config('statement_timeout', ${`${boundedTimeoutMs}ms`}, true)`,
+    );
+    return await fn(scoped);
+  });
+}
+
 export async function rlsContextForWorkspace(
   db: Database,
   workspaceId: string,
@@ -3697,6 +3722,10 @@ export type StoreIntegrationOAuthClientInput = {
 };
 
 export type ReplaceIntegrationOAuthClientInput = StoreIntegrationOAuthClientInput;
+
+export type ReplaceIntegrationOAuthClientIfCurrentInput = ReplaceIntegrationOAuthClientInput & {
+  expectedClientId: string;
+};
 
 export type ConsumeOAuthStateNonceInput = {
   accountId: string;
@@ -7928,6 +7957,30 @@ export async function replaceIntegrationOAuthClient(
     throw new Error(`OAuth client registration replacement failed for issuer ${input.issuer}`);
   }
   return mapStoredIntegrationOAuthClient(row);
+}
+
+export async function replaceIntegrationOAuthClientIfCurrent(
+  db: Database,
+  input: ReplaceIntegrationOAuthClientIfCurrentInput,
+): Promise<StoredIntegrationOAuthClient | null> {
+  const [row] = await db
+    .update(schema.integrationOauthClients)
+    .set({
+      authorizationServer: input.authorizationServer,
+      clientId: input.clientId,
+      clientSecretEncrypted: input.clientSecretEncrypted ?? null,
+      tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
+      metadata: input.metadata ?? {},
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.integrationOauthClients.issuer, input.issuer),
+        eq(schema.integrationOauthClients.clientId, input.expectedClientId),
+      ),
+    )
+    .returning();
+  return row ? mapStoredIntegrationOAuthClient(row) : null;
 }
 
 function mapStoredIntegrationOAuthClient(

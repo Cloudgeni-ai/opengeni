@@ -2,6 +2,14 @@ import type { OAuthStartRequest, OAuthStartResponse } from "@/types";
 
 export const MCP_OAUTH_START_TIMEOUT_MS = 20_000;
 
+const CALLBACK_STAGE_LABELS: Record<string, string> = {
+  state_verify: "validating the connection attempt",
+  client_lookup: "loading the OAuth client",
+  token_exchange: "finishing provider authorization",
+  tools_list: "verifying the MCP server",
+  persist: "saving the connection",
+};
+
 type OAuthStartClient = {
   startConnectionOAuth: (
     workspaceId: string,
@@ -37,4 +45,34 @@ export async function startMcpOAuthWithTimeout(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export function mcpOAuthCallbackFailureMessage(
+  stage: string | null,
+  reason: string | null,
+): string {
+  if (stage === "state_verify") {
+    return "This connection attempt expired or was already used. Try connecting again.";
+  }
+  if (stage === "client_lookup") {
+    return "The OAuth client registration changed while connecting. Try again.";
+  }
+  if (stage === "token_exchange" && reason === "invalid_client") {
+    return "The provider rejected the OAuth client registration. Try again; if it continues, the provider configuration needs attention.";
+  }
+  if (stage === "persist") {
+    return reason === "timeout"
+      ? "Authorization succeeded, but saving the connection timed out. Nothing was committed; try again."
+      : "Authorization succeeded, but OpenGeni couldn't save the connection. Try again.";
+  }
+  if (reason === "timeout") {
+    const label = stage ? CALLBACK_STAGE_LABELS[stage] : null;
+    return label
+      ? `Connection timed out while ${label}. Try again.`
+      : "Connection timed out. Try again.";
+  }
+  const label = stage ? CALLBACK_STAGE_LABELS[stage] : null;
+  return label
+    ? `Connection failed while ${label}. Try again.`
+    : "Couldn't connect. Please try again.";
 }

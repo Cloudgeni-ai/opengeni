@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { sql } from "drizzle-orm";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -29,10 +30,12 @@ import {
   recordConnectionTokenRefresh,
   recordConnectionUsed,
   refreshOAuthConnectionCredential,
+  replaceIntegrationOAuthClientIfCurrent,
   revokeConnection,
   setConnectionStatus,
   storeIntegrationOAuthClient,
   transitionConnectionState,
+  withDatabaseStatementTimeout,
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type Database,
@@ -710,6 +713,53 @@ describe("connections table and helpers", () => {
       tokenEndpointAuthMethod: "client_secret_post",
       metadata: { registrationEndpoint: "https://as.example.com/register-1" },
     });
+  });
+
+  test("DCR OAuth client replacement is compare-and-swap on the current client", async () => {
+    if (!available) return;
+    const issuer = `https://issuer-${randomBytes(8).toString("hex")}.example.com`;
+    await storeIntegrationOAuthClient(db, {
+      issuer,
+      authorizationServer: issuer,
+      clientId: "client-1",
+      metadata: { registrationEndpoint: `${issuer}/register-1` },
+    });
+    expect(
+      await replaceIntegrationOAuthClientIfCurrent(db, {
+        issuer,
+        authorizationServer: issuer,
+        expectedClientId: "already-replaced",
+        clientId: "client-2",
+        metadata: { registrationEndpoint: `${issuer}/register-2` },
+      }),
+    ).toBeNull();
+    expect(
+      await replaceIntegrationOAuthClientIfCurrent(db, {
+        issuer,
+        authorizationServer: issuer,
+        expectedClientId: "client-1",
+        clientId: "client-2",
+        metadata: { registrationEndpoint: `${issuer}/register-2` },
+      }),
+    ).toMatchObject({
+      clientId: "client-2",
+      metadata: { registrationEndpoint: `${issuer}/register-2` },
+    });
+  });
+
+  test("database statement timeout cancels a stalled operation natively", async () => {
+    if (!available) return;
+    const startedAt = performance.now();
+    let caught: unknown;
+    try {
+      await withDatabaseStatementTimeout(db, 25, async (scopedDb) => {
+        await scopedDb.execute(sql`select pg_sleep(1)`);
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(caught).toMatchObject({ cause: { code: "57014" } });
   });
 
   test("OAuth state nonce consumption is single-use and TTL-cleaned per workspace", async () => {
