@@ -704,9 +704,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <Select
                 value={authorityKind}
                 onChange={(event) =>
-                  setAuthorityKind(
-                    event.target.value as ConnectorDocumentDestinationAuthority,
-                  )
+                  setAuthorityKind(event.target.value as ConnectorDocumentDestinationAuthority)
                 }
               >
                 <option value="personal">Only me</option>

@@ -68,9 +68,7 @@ describe("connector document destinations", () => {
   });
 
   test("defaults missing legacy config to the current workspace without collection authority", () => {
-    expect(
-      resolveConnectorDocumentDestination(undefined, { accountId, workspaceId }),
-    ).toEqual({
+    expect(resolveConnectorDocumentDestination(undefined, { accountId, workspaceId })).toEqual({
       authorityKind: "workspace",
       authorityAccountId: accountId,
       authorityWorkspaceId: workspaceId,
@@ -87,10 +85,7 @@ describe("connector document destinations", () => {
     );
     expect(destination.collectionId).toBe(collectionId);
     expect(
-      connectorDocumentDestinationCollectionId(
-        destination,
-        "00000000-0000-4000-8000-000000000999",
-      ),
+      connectorDocumentDestinationCollectionId(destination, "00000000-0000-4000-8000-000000000999"),
     ).toBe(collectionId);
     expect(connectorDestinationDocumentAuthority(destination)).toEqual({
       authorityKind: "personal",

@@ -541,16 +541,10 @@ export async function saveGoogleDriveSource(
   ) {
     throw new HTTPException(403, { message: "missing permission: account:admin" });
   }
-  if (
-    destinationSelection.authorityKind === "workspace" &&
-    !input.canManageWorkspaceDestination
-  ) {
+  if (destinationSelection.authorityKind === "workspace" && !input.canManageWorkspaceDestination) {
     throw new HTTPException(403, { message: "missing permission: workspace:admin" });
   }
-  if (
-    destinationSelection.authorityKind === "personal" &&
-    !input.canManagePersonalDestination
-  ) {
+  if (destinationSelection.authorityKind === "personal" && !input.canManagePersonalDestination) {
     throw new HTTPException(403, { message: "personal destination requires the exact actor" });
   }
   const documentDestination = bindConnectorDocumentDestination(destinationSelection, {

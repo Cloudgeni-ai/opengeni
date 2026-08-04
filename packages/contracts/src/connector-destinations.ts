@@ -41,19 +41,13 @@ export const ConnectorDocumentDestination = z
         message: "workspace and personal connector destinations require workspace authority",
       });
     }
-    if (
-      destination.authorityKind === "workspace" &&
-      destination.authoritySubjectId !== null
-    ) {
+    if (destination.authorityKind === "workspace" && destination.authoritySubjectId !== null) {
       context.addIssue({
         code: "custom",
         message: "workspace connector destinations cannot bind subject authority",
       });
     }
-    if (
-      destination.authorityKind === "personal" &&
-      destination.authoritySubjectId === null
-    ) {
+    if (destination.authorityKind === "personal" && destination.authoritySubjectId === null) {
       context.addIssue({
         code: "custom",
         message: "personal connector destinations require immutable subject authority",
@@ -69,10 +63,8 @@ export function bindConnectorDocumentDestination(
   return ConnectorDocumentDestination.parse({
     authorityKind: selection.authorityKind,
     authorityAccountId: context.accountId,
-    authorityWorkspaceId:
-      selection.authorityKind === "organization" ? null : context.workspaceId,
-    authoritySubjectId:
-      selection.authorityKind === "personal" ? context.initiatingSubjectId : null,
+    authorityWorkspaceId: selection.authorityKind === "organization" ? null : context.workspaceId,
+    authoritySubjectId: selection.authorityKind === "personal" ? context.initiatingSubjectId : null,
     collectionId: selection.collectionId,
   });
 }
@@ -120,9 +112,7 @@ export function resolveConnectorDocumentDestination(
   return destination;
 }
 
-export function connectorDestinationDocumentAuthority(
-  destination: ConnectorDocumentDestination,
-): {
+export function connectorDestinationDocumentAuthority(destination: ConnectorDocumentDestination): {
   authorityKind: ConnectorDocumentDestinationAuthority;
   authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;
