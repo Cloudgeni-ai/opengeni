@@ -812,6 +812,7 @@ export type SocialConnection = {
   accountHandle: string;
   accountName: string | null;
   externalAccountId: string | null;
+  ownership: "workspace" | "personal";
   status: SocialConnectionStatus;
   scopes: string[];
   credentialRef: string | null;
@@ -823,6 +824,7 @@ export type SocialConnection = {
 
 export type SocialOAuthStartRequest = {
   provider: "x" | "reddit";
+  ownership?: "workspace" | "personal" | undefined;
   scopes?: string[] | undefined;
   returnPath?: string | undefined;
 };

@@ -692,6 +692,35 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("preserves an actionable canonical 503 message instead of masking it as retryable", async () => {
+    const body = JSON.stringify({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message:
+          "X connection is not configured. An operator must add X OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON.",
+        retryable: false,
+        requestId: "social-oauth-config-missing",
+        details: { oauthReason: "operator_oauth_app_missing", provider: "x" },
+      },
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 503, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: false,
+      correlationId: "social-oauth-config-missing",
+      outcomeUnknown: false,
+      details: { oauthReason: "operator_oauth_app_missing", provider: "x" },
+      message:
+        "X connection is not configured. An operator must add X OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON. Reference: social-oauth-config-missing.",
+    });
+  });
+
   test("raw nginx 502/503/504 responses stay bounded across composer request classes", async () => {
     const draft: ComposerDraft = {
       revision: 3,

@@ -72,6 +72,7 @@ export async function buildCapabilityCatalog(input: {
   db: Database;
   workspaceId: string;
   settings: Settings;
+  subjectId?: string | null;
 }): Promise<CapabilityCatalogResponse> {
   const [
     persistedItems,
@@ -86,7 +87,7 @@ export async function buildCapabilityCatalog(input: {
     listCapabilityInstallations(input.db, input.workspaceId),
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
-    listSocialConnections(input.db, input.workspaceId, 500),
+    listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
     discoverBundledSkills(),
     discoverCuratedSkillLibraryItems(),
   ]);
@@ -998,13 +999,13 @@ function platformApiCatalogItems(socialConnections: SocialConnection[]): Capabil
     enabled: xEnabled,
     enabledReason: xEnabled
       ? xConnection.status === "connected"
-        ? "workspace social account connected"
-        : "workspace social account needs reconnection"
+        ? `${xConnection.ownership} social account connected`
+        : `${xConnection.ownership} social account needs reconnection`
       : null,
     metadata: {
       connectorMode: "first_party_social",
       provider: "x",
-      ownership: "workspace",
+      ownership: xConnection?.ownership ?? "workspace",
       firstPartyMcpTools: [
         "social_connections_list",
         "social_posts_recent",

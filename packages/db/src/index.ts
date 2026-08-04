@@ -3499,6 +3499,7 @@ export type WorkspaceStateMemoryRecord = {
 export type CreateSocialConnectionInput = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string | null;
   provider: SocialProvider;
   accountHandle: string;
   accountName?: string | null;
@@ -3514,6 +3515,7 @@ export type CreateSocialConnectionInput = {
 export type UpsertSocialOAuthConnectionInput = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string | null;
   provider: SocialProvider;
   accountHandle: string;
   accountName?: string | null;
@@ -3526,6 +3528,7 @@ export type UpsertSocialOAuthConnectionInput = {
 export type UpdateSocialConnectionCredentialInput = {
   workspaceId: string;
   connectionId: string;
+  subjectId?: string | null;
   credentialEncrypted?: string | null;
   status?: SocialConnectionStatus;
   tokenMetadata?: Record<string, unknown>;
@@ -3534,6 +3537,7 @@ export type UpdateSocialConnectionCredentialInput = {
 export type CreateSocialPostInput = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string | null;
   connectionId: string;
   externalPostId?: string | null;
   url?: string | null;
@@ -9262,11 +9266,13 @@ export async function createSocialConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const [row] = await scopedDb
         .insert(schema.socialConnections)
         .values({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
           provider: input.provider,
           accountHandle: input.accountHandle,
           accountName: input.accountName ?? null,
@@ -9300,11 +9306,13 @@ export async function upsertSocialOAuthConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const [row] = await scopedDb
         .insert(schema.socialConnections)
         .values({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
           provider: input.provider,
           accountHandle: input.accountHandle,
           accountName: input.accountName ?? null,
@@ -9315,12 +9323,21 @@ export async function upsertSocialOAuthConnection(
           tokenMetadata: input.tokenMetadata ?? {},
         })
         .onConflictDoUpdate({
-          target: [
-            schema.socialConnections.workspaceId,
-            schema.socialConnections.provider,
-            schema.socialConnections.accountHandle,
-          ],
+          target: input.subjectId
+            ? [
+                schema.socialConnections.workspaceId,
+                schema.socialConnections.subjectId,
+                schema.socialConnections.provider,
+              ]
+            : [
+                schema.socialConnections.workspaceId,
+                schema.socialConnections.provider,
+                schema.socialConnections.accountHandle,
+              ],
+          targetWhere: input.subjectId ? sql`subject_id is not null` : sql`subject_id is null`,
           set: {
+            accountId: input.accountId,
+            accountHandle: input.accountHandle,
             accountName: input.accountName ?? null,
             externalAccountId: input.externalAccountId ?? null,
             status: "connected",
@@ -9348,8 +9365,9 @@ export async function loadSocialConnectionCredential(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<{ connection: SocialConnection; credentialEncrypted: string | null } | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withSocialConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
       .from(schema.socialConnections)
@@ -9357,6 +9375,7 @@ export async function loadSocialConnectionCredential(
         and(
           eq(schema.socialConnections.workspaceId, workspaceId),
           eq(schema.socialConnections.id, connectionId),
+          socialConnectionSubjectVisibility(subjectId),
         ),
       )
       .limit(1);
@@ -9371,26 +9390,32 @@ export async function updateSocialConnectionCredential(
   db: Database,
   input: UpdateSocialConnectionCredentialInput,
 ): Promise<SocialConnection | null> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.socialConnections)
-      .set({
-        ...(input.credentialEncrypted !== undefined
-          ? { credentialEncrypted: input.credentialEncrypted }
-          : {}),
-        ...(input.status !== undefined ? { status: input.status } : {}),
-        ...(input.tokenMetadata !== undefined ? { tokenMetadata: input.tokenMetadata } : {}),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.socialConnections.workspaceId, input.workspaceId),
-          eq(schema.socialConnections.id, input.connectionId),
-        ),
-      )
-      .returning();
-    return row ? mapSocialConnection(row) : null;
-  });
+  return await withSocialConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .update(schema.socialConnections)
+        .set({
+          ...(input.credentialEncrypted !== undefined
+            ? { credentialEncrypted: input.credentialEncrypted }
+            : {}),
+          ...(input.status !== undefined ? { status: input.status } : {}),
+          ...(input.tokenMetadata !== undefined ? { tokenMetadata: input.tokenMetadata } : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.socialConnections.workspaceId, input.workspaceId),
+            eq(schema.socialConnections.id, input.connectionId),
+            socialConnectionSubjectVisibility(input.subjectId),
+          ),
+        )
+        .returning();
+      return row ? mapSocialConnection(row) : null;
+    },
+  );
 }
 
 // List/get never select credential_encrypted (same posture as the broker
@@ -9403,12 +9428,18 @@ export async function listSocialConnections(
   db: Database,
   workspaceId: string,
   limit = 100,
+  subjectId?: string | null,
 ): Promise<SocialConnection[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withSocialConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const rows = await scopedDb
       .select(socialConnectionPublicColumns)
       .from(schema.socialConnections)
-      .where(eq(schema.socialConnections.workspaceId, workspaceId))
+      .where(
+        and(
+          eq(schema.socialConnections.workspaceId, workspaceId),
+          socialConnectionSubjectVisibility(subjectId),
+        ),
+      )
       .orderBy(desc(schema.socialConnections.createdAt))
       .limit(limit);
     return rows.map(mapSocialConnection);
@@ -9419,8 +9450,9 @@ export async function getSocialConnection(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<SocialConnection | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withSocialConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select(socialConnectionPublicColumns)
       .from(schema.socialConnections)
@@ -9428,6 +9460,7 @@ export async function getSocialConnection(
         and(
           eq(schema.socialConnections.workspaceId, workspaceId),
           eq(schema.socialConnections.id, connectionId),
+          socialConnectionSubjectVisibility(subjectId),
         ),
       )
       .limit(1);
@@ -9439,8 +9472,9 @@ export async function requireSocialConnection(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<SocialConnection> {
-  const connection = await getSocialConnection(db, workspaceId, connectionId);
+  const connection = await getSocialConnection(db, workspaceId, connectionId, subjectId);
   if (!connection) {
     throw new Error(`Social connection not found: ${connectionId}`);
   }
@@ -9455,10 +9489,12 @@ export async function createSocialPost(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const connection = await requireSocialConnection(
         scopedDb,
         input.workspaceId,
         input.connectionId,
+        input.subjectId,
       );
       const [row] = await scopedDb
         .insert(schema.socialPosts)
@@ -9495,6 +9531,7 @@ export async function recordSyncedSocialPosts(
     accountId: string;
     workspaceId: string;
     connectionId: string;
+    subjectId?: string | null;
     posts: Array<{
       externalPostId: string;
       url?: string | null;
@@ -9513,10 +9550,12 @@ export async function recordSyncedSocialPosts(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       const connection = await requireSocialConnection(
         scopedDb,
         input.workspaceId,
         input.connectionId,
+        input.subjectId,
       );
       const rows = await scopedDb
         .insert(schema.socialPosts)
@@ -9552,6 +9591,7 @@ export async function listSocialPosts(
   db: Database,
   options: {
     workspaceId: string;
+    subjectId?: string | null;
     connectionIds?: string[];
     since?: Date;
     limit?: number;
@@ -9565,15 +9605,20 @@ export async function listSocialPosts(
     conditions.push(gte(schema.socialPosts.publishedAt, options.since));
   }
   const limit = options.limit ?? 100;
-  return await withWorkspaceRls(db, options.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.socialPosts)
-      .where(and(...conditions))
-      .orderBy(desc(schema.socialPosts.publishedAt))
-      .limit(limit);
-    return rows.map(mapSocialPost);
-  });
+  return await withSocialConnectionSubjectRls(
+    db,
+    options.workspaceId,
+    options.subjectId,
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select()
+        .from(schema.socialPosts)
+        .where(and(...conditions))
+        .orderBy(desc(schema.socialPosts.publishedAt))
+        .limit(limit);
+      return rows.map(mapSocialPost);
+    },
+  );
 }
 
 export async function createScheduledTask(
@@ -44809,6 +44854,7 @@ function mapSocialConnection(
     accountHandle: row.accountHandle,
     accountName: row.accountName,
     externalAccountId: row.externalAccountId,
+    ownership: row.subjectId ? "personal" : "workspace",
     status: row.status as SocialConnectionStatus,
     scopes: row.scopes,
     credentialRef: row.credentialRef,
@@ -44817,6 +44863,25 @@ function mapSocialConnection(
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+function socialConnectionSubjectVisibility(subjectId?: string | null): SQL {
+  return subjectId
+    ? or(
+        isNull(schema.socialConnections.subjectId),
+        eq(schema.socialConnections.subjectId, subjectId),
+      )!
+    : isNull(schema.socialConnections.subjectId);
+}
+async function withSocialConnectionSubjectRls<T>(
+  db: Database,
+  workspaceId: string,
+  subjectId: string | null | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
+    : await withWorkspaceRls(db, workspaceId, fn);
 }
 
 function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
