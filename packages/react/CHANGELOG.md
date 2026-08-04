@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.44.5
+
+### Patch Changes
+
+- 4e39d4d: Keep the Northstar demo's host font reset contained to embedded OpenGeni surfaces.
+
 ## 0.44.4
 
 ### Patch Changes
