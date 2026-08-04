@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.38.1
+
+### Patch Changes
+
+- c9d8b69: Make Connected Machine project paths portable and diagnosable: session responses now expose `workingDir`, and the native agent consistently supports the service user's `~` path across exec, filesystem, git, and terminal operations while reporting missing working directories accurately.
+
 ## 0.38.0
 
 ### Minor Changes
