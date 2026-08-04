@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { AccessGrant } from "@opengeni/contracts";
+import { CapabilityCatalogItem, type AccessGrant } from "@opengeni/contracts";
 import {
   createConnection,
   createDb,
@@ -18,7 +18,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { buildCapabilityCatalog, enableCapability } from "../src";
+import { applyCapabilityEnablement, buildCapabilityCatalog, enableCapability } from "../src";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -97,6 +97,25 @@ describe("subject-owned capability connection references", () => {
     const source = await Bun.file(new URL("../src/domain/capabilities.ts", import.meta.url)).text();
     expect(source).not.toContain('id: "mcp:personal-slack"');
     expect(source).not.toContain("personalSlackMcpCatalogItem");
+  });
+
+  test("does not mistake a browseable first-party social connector for a connection", () => {
+    const item = CapabilityCatalogItem.parse({
+      id: "api:x",
+      kind: "api",
+      source: "built_in",
+      name: "X",
+      category: "social-media",
+      surfaceType: "first_party_social",
+      enabled: false,
+      enabledReason: null,
+      metadata: { provider: "x", ownership: "workspace" },
+    });
+    expect(applyCapabilityEnablement(item, undefined, new Set())).toMatchObject({
+      enabled: false,
+      enabledReason: null,
+      connectionRef: null,
+    });
   });
 
   test("publishes X as a workspace-shared first-party connector with truthful state", async () => {

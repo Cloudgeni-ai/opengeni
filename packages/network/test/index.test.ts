@@ -332,6 +332,47 @@ describe("DNS-pinned outbound transport", () => {
     }
   });
 
+  test("serializes URLSearchParams with Fetch-compatible form semantics", async () => {
+    let received: { contentType: string | null; body: string } | null = null;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        received = {
+          contentType: request.headers.get("content-type"),
+          body: await request.text(),
+        };
+        return Response.json({ exchanged: true });
+      },
+    });
+    try {
+      const response = await pinnedFetch(
+        `http://token.example.test:${server.port}/oauth/token`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code: "abc 123",
+            grant_type: "authorization_code",
+          }),
+        },
+        testEscape,
+        {
+          dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        },
+      );
+      expect(await readResponseJsonBounded(response, 1024, "token response")).toEqual({
+        exchanged: true,
+      });
+      expect(received).toEqual({
+        contentType: "application/x-www-form-urlencoded",
+        body: "code=abc+123&grant_type=authorization_code",
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("closes after body completion and destroys after cancel or stream error", async () => {
     const completed = lifecycle();
     const sourceResponse = new Response("complete");

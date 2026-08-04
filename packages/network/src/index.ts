@@ -220,12 +220,13 @@ const pinnedRequestFetch: FetchLike = async (input, init) => {
   // Undici request() deliberately does not auto-decompress. Asking providers
   // for identity encoding keeps the returned web Response body truthful.
   if (!headers.has("accept-encoding")) headers.set("accept-encoding", "identity");
-  const body = init?.body ?? (method !== "GET" && method !== "HEAD" ? source?.body : undefined);
+  const rawBody = init?.body ?? (method !== "GET" && method !== "HEAD" ? source?.body : undefined);
+  const body = await normalizeUndiciRequestBody(rawBody, headers);
   const dispatcher = (init as (RequestInit & { dispatcher?: unknown }) | undefined)?.dispatcher;
   const result = await undiciRequestImpl(url, {
     method: method as never,
     headers,
-    ...(body ? { body: body as never } : {}),
+    ...(body !== undefined && body !== null ? { body: body as never } : {}),
     ...(init?.signal ? { signal: init.signal } : source?.signal ? { signal: source.signal } : {}),
     ...(dispatcher ? { dispatcher: dispatcher as never } : {}),
     maxRedirections: 0,
@@ -266,6 +267,32 @@ const pinnedRequestFetch: FetchLike = async (input, init) => {
   Object.defineProperty(response, "url", { value: url });
   return response;
 };
+
+/**
+ * Preserve Fetch BodyInit semantics for values that Undici request() does not
+ * normalize itself. URLSearchParams is otherwise mistaken for an iterable of
+ * body chunks and each [name, value] tuple reaches the socket as an Array.
+ */
+async function normalizeUndiciRequestBody(
+  body: BodyInit | null | undefined,
+  headers: Headers,
+): Promise<BodyInit | Uint8Array | null | undefined> {
+  if (body instanceof URLSearchParams) {
+    if (!headers.has("content-type")) {
+      headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
+    }
+    return body.toString();
+  }
+  if (body instanceof Blob) {
+    if (body.type && !headers.has("content-type")) headers.set("content-type", body.type);
+    return new Uint8Array(await body.arrayBuffer());
+  }
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (ArrayBuffer.isView(body)) {
+    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  }
+  return body;
+}
 
 /** Undici fetch used by the pinned transport; Bun callers should prefer this over native fetch. */
 export const undiciFetch: FetchLike = defaultFetch;

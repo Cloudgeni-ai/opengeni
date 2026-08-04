@@ -1217,6 +1217,12 @@ export function applyCapabilityEnablement(
       enabledReason: enabled ? "enabled" : null,
     };
   }
+  if (item.surfaceType === "first_party_social") {
+    // Social connector state is derived from the authoritative workspace
+    // connection row while the catalog is built. Being built in means the
+    // connector is browseable, not that an account is already connected.
+    return { ...item, connectionRef: null };
+  }
   if (item.source === "built_in" || item.source === "configured") {
     return {
       ...item,
