@@ -495,7 +495,10 @@ physical receipt remains pending, `effectiveControl.settlement` stays typed as
 Hosted POSIX process cancellation still validates the exact PID, process group,
 and randomized command token before signalling; it reads those facts through
 `ps` when available and Linux `/proc` when a minimal image omits procps. Missing
-or malformed identity remains fail-closed.
+or malformed identity remains fail-closed. An explicit `tty:false` command keeps
+pipe-mode stdin/stdout/stderr and never receives terminal control bytes during
+cancellation; the same marker-bound process-group TERM/KILL proof remains
+authoritative. Omitting `tty` preserves the existing interactive default.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
