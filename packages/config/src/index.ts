@@ -370,6 +370,35 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(25 * 1024 * 1024),
+  // Durable long-form capture uploads bounded chunks to object storage, then
+  // normalizes them into provider-safe segments. It is advertised only when
+  // object storage and the configured ffmpeg executable are both available.
+  voiceInputResumableEnabled: EnvBoolean.default(true),
+  voiceInputResumableMaxDurationSeconds: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(8 * 60 * 60)
+    .default(2 * 60 * 60),
+  voiceInputResumableMaxSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(512 * 1024 * 1024)
+    .default(512 * 1024 * 1024),
+  voiceInputResumableMaxChunkSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(25 * 1024 * 1024)
+    .default(8 * 1024 * 1024),
+  voiceInputResumableRetentionSeconds: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(7 * 24 * 60 * 60)
+    .default(24 * 60 * 60),
+  voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Codex subscription STT is preferred by default when subscription routing is
   // enabled; operators can put openai/azure-openai first explicitly.
@@ -1773,6 +1802,18 @@ export function getSettings(): Settings {
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
+    voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
+    voiceInputResumableMaxDurationSeconds: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_DURATION_SECONDS",
+    ),
+    voiceInputResumableMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_RESUMABLE_MAX_SIZE_BYTES"),
+    voiceInputResumableMaxChunkSizeBytes: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_CHUNK_SIZE_BYTES",
+    ),
+    voiceInputResumableRetentionSeconds: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
+    ),
+    voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),

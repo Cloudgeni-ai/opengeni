@@ -1,58 +1,80 @@
 # Composer voice input
 
 Native voice input turns browser-captured audio into editable composer text. It is
-not a turn-model feature, does not authorize a coding model, and does not send a
+not a turn-model feature, does not authorize a coding model, and never sends a
 message by itself.
 
 ## Product contract
 
-- The ordinary composer presents **one microphone control** (idle) and **one editable
-  draft**. While recording, chrome shows a compact waveform plus separate **Cancel**
-  (discard) and **Stop** (transcribe) actions. Provider, model, credential, and region
-  choices never appear beside the microphone or in Workspace settings for end users.
-- Click microphone → record locally in durable five-second chunks → press stop →
-  **automatically** assemble, upload, and transcribe with no extra click → append the
-  transcript to the editable draft. Cancel (or Escape) while recording discards without
-  uploading.
-- The transcript does **not** auto-submit as an agent message. Ordinary Send still
-  sends the message.
-- Escape during saving or transcription aborts the in-flight work but retains the same
-  locally recoverable recording. Recording stops at the configurable
-  `ClientConfig.voiceInput.maxDurationSeconds` ceiling (60 seconds by default, up to
-  10 minutes) and never uploads audio above the advertised 25 MiB one-shot limit.
-- Audio chunks and their manifest are persisted in browser IndexedDB before the UI marks
-  them locally saved. Stop assembles those persisted chunks for the existing one-shot API
-  upload. A failed or interrupted finalization remains recoverable across reload and Retry
-  reuses the same recording. A reload-stable owner ID is protected by a browser-document Web
-  Lock, with a BroadcastChannel handshake fallback, so opener-created or duplicated tabs
-  cannot reuse the same live owner. Stale captures may be reclaimed, and retained recordings
-  are surfaced oldest-first until each is resolved. The provider result is saved locally before
-  draft mutation. If handoff confirmation is uncertain after a crash or storage failure, the UI
-  exposes an explicit saved-transcript insertion action instead of auto-transcribing or
-  auto-appending again. Audio and locally saved transcript results are removed only after
-  handoff is durably represented; transient cleanup failures are retried and garbage-collected
-  owner-safely. The transcription path does not log audio or write it to server object storage,
-  and does not store transcript text server-side.
-- Controlled error codes map to local UI copy. Provider names, secrets, and raw upstream
-  detail never appear in client config or composer chrome.
+- The ordinary composer presents **one microphone control** and **one editable
+  draft**. Recording chrome exposes separate **Cancel** and **Stop** actions;
+  provider, model, credential, and region choices remain server-private.
+- The browser writes five-second `MediaRecorder` chunks and SHA-256 integrity
+  metadata to IndexedDB before reporting the audio locally saved. Stop waits for
+  pending writes, finalizes automatically, and appends the resulting text to the
+  draft. Ordinary Send remains a separate user action.
+- New servers and SDK clients use the resumable server path advertised by
+  `ClientConfig.voiceInput.resumable`. Older clients or deployments without that
+  capability retain the existing one-shot multipart path and its 25 MiB / 600
+  second client maximum.
+- The resumable default is two hours, 512 MiB total, 8 MiB per browser chunk, and
+  24-hour server retention. Contract hard limits permit at most eight hours,
+  512 MiB, and 1,000 normalized provider segments.
+- Interrupted upload, segmentation, or transcription reuses the same recording
+  UUID. Duplicate chunks are accepted only when sequence, size, SHA-256, and
+  timing metadata match exactly; conflicting retries fail closed.
+- Provider selection occurs once for the whole server recording before its first
+  segment is sent. The private provider id is persisted and every later segment
+  or retry remains pinned to it; a possibly-started recording never falls through
+  to another vendor.
+- Provider results are persisted server-side so another browser carrying the same
+  exact authenticated subject can list and resume an unexpired recording. The
+  local browser still persists the final transcript before mutating the draft.
+  After an uncertain handoff, reload exposes an explicit saved-transcript insert
+  action rather than automatically retranscribing or appending again.
+- Controlled error codes and retryability cross the API. Raw provider detail,
+  object keys, credentials, provider ids, audio bytes, and transcript bodies are
+  excluded from logs and client capability configuration.
 
 ## Trust boundary and data flow
 
 ```text
 Browser MediaRecorder (5s chunks)
-  -> IndexedDB recording manifest + Blob chunks
-  -> assemble persisted chunks
-  -> OpenGeni SDK transcribeAudio (one multipart finalization attempt)
-  -> POST /v1/workspaces/:workspaceId/transcriptions
-  -> server provider registry (select once before send)
-  -> OpenAI gpt-transcribe | Azure deployment transcriptions
-     | experimental Codex /backend-api/transcribe
-  -> { text, languages } appended to editable composer draft
-  -> user edits and invokes ordinary Send
+  -> IndexedDB manifest + Blob chunks + timing + SHA-256
+  -> POST /v1/workspaces/:workspaceId/transcription-recordings
+  -> ordered PUT .../:recordingId/chunks/:chunkNumber
+  -> object storage (tenant-derived opaque keys)
+  -> POST .../:recordingId/finalize
+  -> API ffmpeg: mono 16 kHz PCM WAV segments (bounded to <= 1,000)
+  -> POST .../:recordingId/process-next
+  -> one recording-wide pinned provider
+  -> Postgres segment results + deterministic transcript assembly
+  -> { transcriptText, languages } persisted locally before draft mutation
+  -> editable composer draft
+  -> ordinary user Send
 ```
 
-Deployment credentials and provider selection stay server-private.
-`GET /v1/config/client` projects only:
+Legacy fallback when `voiceInput.resumable` is absent:
+
+```text
+IndexedDB chunks
+  -> one Blob
+  -> OpenGeniClient.transcribeAudio
+  -> POST /v1/workspaces/:workspaceId/transcriptions
+  -> one server-selected provider
+  -> { text, languages }
+```
+
+Every resumable route first resolves the normal `sessions:create` access grant.
+Persistence binds the immutable recording id to the exact
+`(accountId, workspaceId, subjectId)` authority tuple. All four recording tables
+use FORCE RLS for both workspace/account visibility and exact subject equality.
+The collection route returns at most 50 unexpired, non-discarded recordings for
+that subject; possession of a recording UUID alone is not authority.
+
+## Client capability
+
+`GET /v1/config/client` projects only public limits:
 
 ```ts
 voiceInput: {
@@ -60,87 +82,141 @@ voiceInput: {
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
+  resumable?: {
+    maxDurationSeconds: number;
+    maxSizeBytes: number;
+    maxChunkSizeBytes: number;
+    providerSegmentSeconds: number;
+  };
 }
 ```
 
-Workspace settings store only `{ voiceInput: { enabled: boolean } }`. When unset, voice
-input defaults to enabled whenever the deployment has a working provider. Legacy
-`settings.transcription.enabled` maps forward for one compatibility release; new writes
-use `voiceInput`.
+The optional `resumable` member appears only when object storage, ffmpeg, and at
+least one transcription provider are ready. Workspace settings store only
+`{ voiceInput: { enabled: boolean } }`. Legacy
+`settings.transcription.enabled` maps forward for one compatibility release;
+new writes use `voiceInput`.
 
-## Canonical implementation
+## Server lifecycle
 
-| Concern | Canonical source |
+| State | Meaning |
 | --- | --- |
-| Client capability + workspace toggle + response | `packages/contracts/src/index.ts` |
-| Provider registry config | `packages/config/src/index.ts` (`resolveVoiceInputProviderRegistry`) |
-| Service port | `packages/core/src/transcription.ts` |
-| API providers + route | `apps/api/src/transcription/`, `apps/api/src/routes/transcriptions.ts` |
-| SDK binary call | `packages/sdk/src/client.ts` (`transcribeAudio`) |
-| React MediaRecorder lifecycle + recovery | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
-| Microphone control | `packages/react/src/components/composer-transcription-control.tsx` |
-| Workspace toggle UI | `apps/web/src/components/transcription-settings.tsx` |
+| `uploading` | Manifest exists; the next contiguous chunk number is authoritative. |
+| `segmenting` | One generation/owner lease is validating chunks and preparing normalized WAV segments. |
+| `ready` | At least one provider segment is pending and no segment call is active. |
+| `transcribing` | One attempt lease owns the next segment. |
+| `complete` | Every segment completed and transcript/languages were assembled in segment order. |
+| `failed` | A typed retryable or terminal assembly/provider failure is persisted. |
+| `discarded` | The user discarded the recording or retention expired. |
 
-Deprecated host-adapter types remain exported from `packages/sdk/src/transcription.ts`
-for one release and will be removed afterward.
+Finalization verifies the client totals against durable upload truth, reads every
+chunk from object storage, and checks exact byte length and SHA-256 before ffmpeg
+sees it. Segmentation produces mono 16 kHz PCM WAV output. The segment duration
+is the lower of the OpenGeni 50-second target and the selected service's maximum;
+recordings that would require more than 1,000 segments fail before ffmpeg starts.
+Generation and attempt leases become reclaimable after 15 minutes, and stale
+callbacks cannot settle a successor generation or attempt.
+
+Each `process-next` request claims at most one segment. The first claim persists
+the recording-wide provider pin. Retryable `network`, `timeout`, `unavailable`,
+and `provider` failures retain the same segment, pin, object, and recording UUID.
+Successful segment text is stored separately; final assembly sorts by segment
+number, trims empty text, joins nonempty segments with a blank line, and preserves
+the first occurrence of each nonempty language.
+
+## Retention and cleanup
+
+- Chunk and normalized segment objects are registered in a durable object ledger
+  before upload. Object keys include account/workspace/recording lineage and a
+  sequence/hash component, but keys never appear in client responses.
+- Completion, explicit discard, and non-retryable failure make every remaining
+  object immediately cleanup-eligible. The request path attempts deletion and
+  settles each object independently; a partial provider outage never marks an
+  undeleted object cleaned.
+- Abandoned recordings become cleanup-eligible at
+  `OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS` (24 hours by default).
+  The existing Temporal file-upload reaper claims recording rows before object
+  rows with `SKIP LOCKED`, uses reclaimable claim ids/timeouts, deletes one object
+  at a time, and settles only successful provider deletes.
+- After retention plus the reaper grace window, a bounded security-definer purge
+  removes an expired recording only when no uncleaned object remains. That purge
+  deletes chunk/segment metadata, the private provider pin, and persisted
+  transcript/language results. A metadata purge can never hide an object that
+  still requires provider cleanup.
+- Server transcript state is only the resumable recovery/result record. It is not
+  appended to session history, documents, knowledge, memory, or an agent turn;
+  only the user's later ordinary Send can create message truth.
 
 ## Provider paths
 
 | Provider | When selected | Notes |
 | --- | --- | --- |
-| `codex-subscription` | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED=true` and a workspace has an active attached Codex credential | Undocumented ChatGPT `/backend-api/transcribe`; preferred by default when attached; skipped at selection time when no workspace credential |
-| `openai` | usable `OPENGENI_OPENAI_API_KEY` (or voice-specific key; template placeholders like `your-key` are ignored) and OpenAI path enabled | `POST /v1/audio/transcriptions`, default model `gpt-transcribe` |
-| `azure-openai` | Azure endpoint + deployment + key/AD token configured | Deployment-scoped `/openai/deployments/{deployment}/audio/transcriptions` |
+| `codex-subscription` | Subscription routing is enabled and the workspace has an active attached Codex credential. | Undocumented ChatGPT `/backend-api/transcribe`; preferred by default when attached. |
+| `openai` | A usable ordinary or voice-specific OpenAI key is configured. | `POST /v1/audio/transcriptions`, default model `gpt-transcribe`. |
+| `azure-openai` | Azure endpoint, deployment, and key or AD token are configured. | Deployment-scoped `/openai/deployments/{deployment}/audio/transcriptions`. |
 
 Selection uses `OPENGENI_VOICE_INPUT_PROVIDER_ORDER` (default
-`codex-subscription,openai,azure-openai`). The first ready provider wins **before**
-audio is sent. When Codex subscription routing is enabled, Codex is preferred over
-OpenAI/Azure even if API keys exist; workspaces without an attached subscription
-credential fall through to OpenAI/Azure. Operators can put `openai` or
-`azure-openai` first explicitly, or omit `codex-subscription` from the order to
-disable Codex voice while keeping subscription model routing. The same clip is
-never retried across vendors after an upstream request may have started.
+`codex-subscription,openai,azure-openai`). Template placeholder values are
+ignored. The first ready provider wins before any segment is sent, is persisted
+on the recording, and remains authoritative until that recording is complete or
+discarded.
 
 ## Operator configuration
 
 See `.env.example` for:
 
-- `OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS` / `OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES`
-- `OPENGENI_VOICE_INPUT_PROVIDER_ORDER`
-- `OPENGENI_VOICE_INPUT_OPENAI_*` / `OPENGENI_VOICE_INPUT_AZURE_*`
-- `OPENGENI_CODEX_SUBSCRIPTION_ENABLED` (includes Codex in the voice registry)
-- `OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL` (legacy; no longer required for inclusion)
+- one-shot limits:
+  `OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS`,
+  `OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES`;
+- resumable enablement, duration/size/chunk limits, and retention:
+  `OPENGENI_VOICE_INPUT_RESUMABLE_*`;
+- `OPENGENI_VOICE_INPUT_FFMPEG_PATH` (the API image installs ffmpeg; custom
+  deployments must provide a compatible executable);
+- `OPENGENI_VOICE_INPUT_PROVIDER_ORDER` and provider-specific OpenAI/Azure
+  overrides;
+- object-storage backend, bucket/container, and server-side credentials.
 
-Supported paths reuse ordinary OpenAI/Azure turn credentials when voice-specific
-overrides are unset. Codex transcription requires subscription routing enabled and
-an active workspace Codex credential at selection/request time.
+The resumable capability is hidden rather than degraded to memory-only behavior
+when object storage or ffmpeg is unavailable. The one-shot endpoint may remain
+available independently when a provider is ready.
 
-## Lifecycle requirements
+## Browser lifecycle requirements
 
-1. Browser creates a recording manifest before starting microphone capture, negotiates a
-   MIME type (`webm/opus`, then `mp4`, then `ogg/opus`), and asks `MediaRecorder` for a
-   chunk every five seconds.
-2. Each chunk is written to IndexedDB with its sequence, timing, codec, size, and SHA-256
-   integrity metadata before the UI reports that audio as locally saved. A storage failure
-   stops capture and fails closed instead of continuing with memory-only audio.
-3. Stop (user click or the configured duration ceiling) waits for pending chunk writes,
-   marks capture stopped, assembles the persisted chunks in order, and calls
-   `transcribeAudio` through the existing one-shot multipart endpoint.
-4. Upload/provider errors and aborts retain the recording. Mount/reload recovery claims the
-   oldest available manifest, Retry reuses it without reopening the microphone, explicit
-   discard advances to the next retained recording, and a document-held owner lock/handshake
-   plus manifest heartbeats prevents cross-tab retry/discard until the owner releases or becomes
-   stale.
-5. A successful provider result is persisted as `transcript-ready` before draft mutation.
-   Handoff is then marked durably before local cleanup. A reload never auto-retranscribes or
-   auto-appends `transcript-ready` data; it offers an explicit insertion action with copy that
-   tells the user to check the draft first.
-6. React associates an abort controller before every finalization await and fences callbacks
-   before and after recorder-stop persistence, storage enumeration, upload, result persistence,
-   and handoff. Late work after Escape/unmount/workspace replacement cannot restore a stale
-   recording, upload, or append, and every acquired microphone track is stopped when setup or
-   capture exits. A failed post-handoff delete is retried immediately; later mounts owner-safely
-   garbage-collect any handed-off manifest and its audio chunks.
-7. Empty/whitespace transcripts do not change the draft. Workspace disablement and
-   missing deployment configuration hide or block the mic without inventing provider
-   controls in product UI.
+1. Create the local manifest before microphone capture and negotiate MIME type in
+   order: `webm/opus`, `mp4`, then `ogg/opus`.
+2. Persist every chunk, sequence, timing range, size, codec, and SHA-256 before
+   reporting it saved. Storage failure stops capture and fails closed.
+3. Use resumable limits only when both the server capability and all resumable SDK
+   methods exist; otherwise enforce the legacy one-shot limit.
+4. On resumable retry, recreate/reconcile the same server recording, skip only
+   already accepted contiguous chunks, finalize with exact durable totals, and
+   poll/claim until complete or a typed failure is persisted.
+5. Keep a reload-stable owner id behind a document Web Lock or BroadcastChannel
+   handshake plus stale heartbeat. Another live tab cannot retry or discard local
+   work, but any browser with the same authenticated server subject can discover
+   and resume the server manifest through the SDK list/get methods.
+6. Persist a successful transcript locally before draft mutation. A reload never
+   auto-retranscribes or auto-appends an uncertain result.
+7. Fence every permission, recorder-stop, persistence, upload, polling, handoff,
+   and cleanup callback by workspace/generation/owner identity. Escape, unmount,
+   or workspace replacement cannot restore or settle stale work.
+8. Empty or whitespace-only transcripts do not change the draft. Workspace policy
+   disablement and missing deployment readiness hide or block the mic without
+   exposing provider controls.
+
+## Canonical implementation
+
+| Concern | Canonical source |
+| --- | --- |
+| Public contracts and limits | `packages/contracts/src/transcription-recordings.ts`, `packages/contracts/src/index.ts` |
+| Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
+| Service and segmenter ports | `packages/core/src/transcription.ts` |
+| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
+| API routes and ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `apps/api/src/transcription/segmenter.ts` |
+| SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
+| React capture/recovery/handoff | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
+| Global provider-object reaper | `apps/worker/src/activities/file-upload-reaper.ts` |
+| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `apps/web/src/components/transcription-settings.tsx` |
+
+Deprecated host-adapter types remain exported from
+`packages/sdk/src/transcription.ts` for one compatibility release.

@@ -15,6 +15,8 @@ export type TranscriptionRequest = {
   durationSeconds?: number | undefined;
   signal?: AbortSignal | undefined;
   requestId: string;
+  /** Exact provider selected before a resumable segment is first sent upstream. */
+  providerId?: string | undefined;
 };
 
 export type TranscriptionResult = TranscribeAudioResponse & {
@@ -101,7 +103,30 @@ export type TranscriptionService = {
   limits(): TranscriptionLimits;
   /** True when at least one ready provider can serve requests. */
   available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
+  /** Select one provider before a durable segment attempt; retries pin this id. */
+  selectProvider?(
+    context: TranscriptionAvailabilityContext,
+  ): string | null | Promise<string | null>;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
+};
+
+export type PreparedTranscriptionSegment = {
+  segmentNumber: number;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  mimeType: "audio/wav";
+  bytes: Uint8Array;
+};
+
+export type TranscriptionSegmenter = {
+  available(): boolean | Promise<boolean>;
+  segment(input: {
+    sourceMimeType: string;
+    totalDurationMilliseconds: number;
+    providerSegmentSeconds: number;
+    chunks: AsyncIterable<Uint8Array>;
+    signal?: AbortSignal | undefined;
+  }): AsyncIterable<PreparedTranscriptionSegment>;
 };
 
 export function normalizeMimeType(mimeType: string): string {

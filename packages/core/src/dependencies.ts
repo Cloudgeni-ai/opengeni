@@ -15,7 +15,7 @@ import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
-import type { TranscriptionService } from "./transcription";
+import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: {
@@ -119,6 +119,8 @@ export type AppDependencies = {
   googleDriveFetch?: typeof fetch;
   /** Optional host-owned voice-input transcription service. */
   transcription?: TranscriptionService | null;
+  /** Optional host-owned long-form audio normalization/segmentation service. */
+  transcriptionSegmenter?: TranscriptionSegmenter | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes

@@ -58,6 +58,9 @@ export function createTranscriptionService(input: {
         Boolean,
       );
     },
+    async selectProvider(context) {
+      return (await firstAvailable(providers, context))?.id ?? null;
+    },
     async transcribe(request) {
       const mimeType = normalizeMimeType(request.mimeType);
       if (!isAcceptedMimeType(mimeType, limits.acceptedMimeTypes)) {
@@ -83,9 +86,9 @@ export function createTranscriptionService(input: {
           message: "Invalid audio duration.",
         });
       }
-      const provider = await firstAvailable(providers, {
-        workspaceId: request.workspaceId,
-      });
+      const provider = request.providerId
+        ? await exactAvailable(providers, request.providerId, { workspaceId: request.workspaceId })
+        : await firstAvailable(providers, { workspaceId: request.workspaceId });
       if (!provider) {
         throw new TranscriptionServiceError({
           code: "unavailable",
@@ -118,4 +121,13 @@ async function firstAvailable(
     if (await provider.available(context)) return provider;
   }
   return null;
+}
+
+async function exactAvailable(
+  providers: readonly TranscriptionProvider[],
+  providerId: string,
+  context: TranscriptionAvailabilityContext,
+) {
+  const provider = providers.find((candidate) => candidate.id === providerId);
+  return provider && (await provider.available(context)) ? provider : null;
 }

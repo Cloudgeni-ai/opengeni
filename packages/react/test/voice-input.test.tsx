@@ -5,6 +5,7 @@ import { ChatComposer } from "../src/components/chat-composer";
 import { appendFinalTranscript } from "../src/hooks/use-transcription";
 import {
   VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
+  VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS,
   VOICE_RECORDING_TIMESLICE_MILLISECONDS,
   useVoiceInput,
 } from "../src/hooks/use-voice-input";
@@ -979,6 +980,138 @@ describe("useVoiceInput", () => {
     expect(hook.result.current.error).toBe("too_large");
     expect(hook.result.current.hasRecoverableRecording).toBe(true);
     expect(store.manifests.get("recording-size-limit")?.totalBytes).toBe(3);
+    await hook.unmount();
+  });
+
+  test("uses resumable limits and server methods for a 30+ minute recording", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    let draft = "";
+    let oneShotCalls = 0;
+    let nextChunkNumber = 0;
+    let finalizeInput:
+      | { chunkCount: number; totalBytes: number; totalDurationMilliseconds: number }
+      | undefined;
+    const uploaded: Array<{
+      chunkNumber: number;
+      startMilliseconds: number;
+      durationMilliseconds: number;
+    }> = [];
+    const recording = (state: "uploading" | "ready" | "complete" | "discarded") => ({
+      recording: {
+        id: "recording-long-resumable",
+        workspaceId: "ws-1",
+        mimeType: "audio/webm",
+        state,
+        nextChunkNumber,
+        chunkCount: nextChunkNumber,
+        totalBytes: nextChunkNumber,
+        totalDurationMilliseconds: finalizeInput?.totalDurationMilliseconds ?? 0,
+        segmentCount: state === "uploading" ? 0 : 37,
+        completedSegmentCount: state === "complete" ? 37 : 0,
+        transcriptText: state === "complete" ? "long transcript" : null,
+        languages: state === "complete" ? ["en"] : [],
+        errorCode: null,
+        retryable: false,
+        objectsCleaned: state === "discarded",
+        createdAt: "2026-08-04T07:00:00.000Z",
+        updatedAt: "2026-08-04T07:00:00.000Z",
+        expiresAt: "2026-08-05T07:00:00.000Z",
+      },
+      segments: [],
+    });
+    const client = {
+      transcribeAudio: async () => {
+        oneShotCalls += 1;
+        return { text: "wrong path", languages: [] };
+      },
+      createTranscriptionRecording: async () => recording("uploading"),
+      getTranscriptionRecording: async () => recording("ready"),
+      uploadTranscriptionRecordingChunk: async (
+        _workspaceId: string,
+        _recordingId: string,
+        chunkNumber: number,
+        input: { startMilliseconds: number; durationMilliseconds: number },
+      ) => {
+        uploaded.push({
+          chunkNumber,
+          startMilliseconds: input.startMilliseconds,
+          durationMilliseconds: input.durationMilliseconds,
+        });
+        nextChunkNumber = chunkNumber + 1;
+        return {
+          recording: recording("uploading").recording,
+          chunk: {
+            chunkNumber,
+            byteLength: 1,
+            sha256: "a".repeat(64),
+            startMilliseconds: input.startMilliseconds,
+            durationMilliseconds: input.durationMilliseconds,
+            deduplicated: false,
+          },
+        };
+      },
+      finalizeTranscriptionRecording: async (
+        _workspaceId: string,
+        _recordingId: string,
+        input: { chunkCount: number; totalBytes: number; totalDurationMilliseconds: number },
+      ) => {
+        finalizeInput = input;
+        return recording("ready");
+      },
+      processNextTranscriptionRecordingSegment: async () => recording("complete"),
+      discardTranscriptionRecording: async () => recording("discarded"),
+    };
+    const hook = await renderHook(
+      () =>
+        useVoiceInput({
+          client,
+          workspaceId: "ws-1",
+          capability: {
+            ...capability,
+            maxDurationSeconds: 60,
+            maxSizeBytes: 2,
+            resumable: {
+              maxDurationSeconds: 2 * 60 * 60,
+              maxSizeBytes: 512 * 1024 * 1024,
+              maxChunkSizeBytes: 8 * 1024 * 1024,
+              providerSegmentSeconds: 50,
+            },
+          },
+          enabled: true,
+          value: draft,
+          setValue: (value) => {
+            draft = value;
+          },
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createOwnerId: () => "long-resumable-owner",
+          createRecordingId: () => "recording-long-resumable",
+        }),
+      undefined,
+    );
+
+    await act(async () => {
+      await hook.result.current.start();
+      FakeMediaRecorder.instances[0]?.emit(
+        new Blob([new Uint8Array([9])], { type: "audio/webm" }),
+        1_805_000,
+      );
+      hook.result.current.stop();
+      await settle(64);
+    });
+
+    expect(VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS).toBe(600);
+    expect(VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS).toBe(8 * 60 * 60);
+    expect(oneShotCalls).toBe(0);
+    expect(uploaded.map((chunk) => chunk.chunkNumber)).toEqual([0, 1]);
+    expect(uploaded[0]).toMatchObject({ startMilliseconds: 0, durationMilliseconds: 1_805_000 });
+    expect(finalizeInput).toMatchObject({
+      chunkCount: 2,
+      totalDurationMilliseconds: 1_806_000,
+    });
+    expect(draft).toBe("long transcript");
+    expect(hook.result.current.status).toBe("idle");
     await hook.unmount();
   });
 

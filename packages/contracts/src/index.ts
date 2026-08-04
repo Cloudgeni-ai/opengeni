@@ -6,6 +6,7 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
+import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 
 export * from "./slack-bot-scopes";
 
@@ -1155,6 +1156,7 @@ export const ClientVoiceInputConfig = z
       .positive()
       .max(25 * 1024 * 1024),
     acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+    resumable: ClientResumableVoiceInputConfig.optional(),
   })
   .strict();
 export type ClientVoiceInputConfig = z.infer<typeof ClientVoiceInputConfig>;
@@ -1183,6 +1185,8 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
   "audio/mp3",
   "audio/m4a",
 ] as const;
+
+export * from "./transcription-recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
