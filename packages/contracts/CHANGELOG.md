@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 0.38.0
+
+### Minor Changes
+
+- bef5920: Add subject-scoped Workspace State preference and document-authority inventory
+  metadata plus a canonical, explicitly sanitized export API and SDK method.
+
 ## 0.37.0
 
 ### Minor Changes

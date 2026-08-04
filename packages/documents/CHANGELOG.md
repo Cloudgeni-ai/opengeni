@@ -1,5 +1,20 @@
 # @opengeni/documents
 
+## 0.5.0
+
+### Minor Changes
+
+- bef5920: Add subject-scoped Workspace State preference and document-authority inventory
+  metadata plus a canonical, explicitly sanitized export API and SDK method.
+
+### Patch Changes
+
+- Updated dependencies [bef5920]
+  - @opengeni/contracts@0.38.0
+  - @opengeni/config@0.10.10
+  - @opengeni/db@0.27.4
+  - @opengeni/storage@0.2.63
+
 ## 0.4.1
 
 ### Patch Changes
