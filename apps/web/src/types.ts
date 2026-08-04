@@ -90,6 +90,7 @@ export type {
   SessionGoal,
   SessionStatus,
   SessionTurn,
+  SocialConnection,
   ToolRef,
   UpdateKnowledgeMemoryRequest,
   UpdateWorkspaceMemberRequest,

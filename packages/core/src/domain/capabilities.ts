@@ -11,6 +11,7 @@ import {
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
+  type SocialConnection,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -36,6 +37,7 @@ import {
   listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
   listPackInstallations,
+  listSocialConnections,
   mcpServerIdForCapability,
   updatePackInstallationStatus,
   upsertCapabilityCatalogItem,
@@ -76,6 +78,7 @@ export async function buildCapabilityCatalog(input: {
     capabilityInstallations,
     packInstallations,
     workspacePacks,
+    socialConnections,
     bundledSkills,
     curatedLibrarySkills,
   ] = await Promise.all([
@@ -83,6 +86,7 @@ export async function buildCapabilityCatalog(input: {
     listCapabilityInstallations(input.db, input.workspaceId),
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
+    listSocialConnections(input.db, input.workspaceId, 500),
     discoverBundledSkills(),
     discoverCuratedSkillLibraryItems(),
   ]);
@@ -100,7 +104,7 @@ export async function buildCapabilityCatalog(input: {
       packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
     ),
     ...configuredMcpCatalogItems(input.settings),
-    ...platformApiCatalogItems(),
+    ...platformApiCatalogItems(socialConnections),
     ...bundledSkills,
     ...curatedLibrarySkills,
   ];
@@ -968,8 +972,52 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
   );
 }
 
-function platformApiCatalogItems(): CapabilityCatalogItem[] {
-  return [
+function platformApiCatalogItems(socialConnections: SocialConnection[]): CapabilityCatalogItem[] {
+  const xConnection = preferredSocialConnection(socialConnections, "x");
+  const xEnabled = xConnection?.status === "connected" || xConnection?.status === "needs_reauth";
+  const x = CapabilityCatalogItem.parse({
+    id: "api:x",
+    kind: "api",
+    source: "built_in",
+    name: "X",
+    description:
+      "Connect an X account for live search, mentions, thread context, post sync, and permission-controlled replies.",
+    category: "social-media",
+    tags: ["api", "x", "twitter", "social", "marketing"],
+    homepageUrl: "https://x.com",
+    authModel: "oauth2_authorization_code_pkce",
+    providerDomain: "x.com",
+    surfaceType: "first_party_social",
+    authKind: "oauth2",
+    tools: [{ kind: "mcp", id: "opengeni" }],
+    runtime: {
+      available: true,
+      mcpServerId: "opengeni",
+      notes: "Account access is provided through OpenGeni's first-party social tools.",
+    },
+    enabled: xEnabled,
+    enabledReason: xEnabled
+      ? xConnection.status === "connected"
+        ? "workspace social account connected"
+        : "workspace social account needs reconnection"
+      : null,
+    metadata: {
+      connectorMode: "first_party_social",
+      provider: "x",
+      ownership: "workspace",
+      firstPartyMcpTools: [
+        "social_connections_list",
+        "social_posts_recent",
+        "social_daily_analysis_context",
+        "social_search_live",
+        "social_mentions_live",
+        "social_thread_fetch",
+        "social_posts_sync",
+        "social_post_reply",
+      ],
+    },
+  });
+  const platformApis = [
     {
       id: "api:github-app",
       name: "GitHub App",
@@ -1019,6 +1067,25 @@ function platformApiCatalogItems(): CapabilityCatalogItem[] {
         endpointPath: item.endpointPath,
       },
     }),
+  );
+  return [x, ...platformApis];
+}
+
+function preferredSocialConnection(
+  connections: SocialConnection[],
+  provider: "x" | "reddit",
+): SocialConnection | null {
+  const statusRank = (status: SocialConnection["status"]): number =>
+    status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
+  return (
+    connections
+      .filter((connection) => connection.provider === provider)
+      .sort(
+        (left, right) =>
+          statusRank(left.status) - statusRank(right.status) ||
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          left.id.localeCompare(right.id),
+      )[0] ?? null
   );
 }
 
