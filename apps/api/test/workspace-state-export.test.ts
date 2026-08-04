@@ -1,9 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
-import {
-  WorkspaceStateExportResponse,
-  WorkspaceStateResponse,
-} from "@opengeni/contracts";
+import { WorkspaceStateExportResponse, WorkspaceStateResponse } from "@opengeni/contracts";
 
 import {
   canonicalWorkspaceStateJson,
@@ -32,8 +29,7 @@ function state() {
     preferences: {
       authority: "preference_registry_preferences",
       activeDescriptorCount: 0,
-      activeDescriptorHash:
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      activeDescriptorHash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       scopeCounts: { organization: 0, workspace: 0, user: 0 },
       truncated: false,
     },
@@ -57,9 +53,7 @@ describe("sanitized Workspace State export", () => {
 
     const exported = WorkspaceStateExportResponse.parse(JSON.parse(first));
     expect(exported.stateSha256).toBe(
-      createHash("sha256")
-        .update(canonicalWorkspaceStateJson(projected), "utf8")
-        .digest("hex"),
+      createHash("sha256").update(canonicalWorkspaceStateJson(projected), "utf8").digest("hex"),
     );
     expect(exported.generatedAt).toBe(projected.generatedAt);
   });
