@@ -45,7 +45,10 @@ import {
   boundedParallelMap,
   cancelMcpResponseBody,
   guardedMcpFetch,
+  mcpJsonRpcErrorPayloadForRequest,
+  mcpRequestReplayInfo,
   mcpSerializedSizeBytes,
+  type McpRequestReplayInfo,
 } from "@opengeni/runtime/mcp-network";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
@@ -84,6 +87,11 @@ const TOOLSPACE_AUTH_NEEDED_ERROR = {
   // collide with MCP SDK transport errors such as RequestTimeout (-32001).
   code: 40_101,
   message: "Authentication required - a connection link was posted to the session.",
+} as const;
+const TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR = {
+  code: 40_102,
+  message:
+    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 const TOOLSPACE_NO_ACTIVE_TURN_MESSAGE =
   "no active turn - toolspace calls require an in-flight turn";
@@ -754,6 +762,9 @@ async function callRemoteTool(
     if (isToolspaceAuthNeededError(error)) {
       return mcpError(TOOLSPACE_AUTH_NEEDED_ERROR.message);
     }
+    if (isToolspaceOutcomeUncertainError(error)) {
+      return mcpError(TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message);
+    }
     // The raw upstream error can carry provider-specific detail; log it
     // server-side and return only a generic result to the sandbox so no header
     // or credential material can ride the message back out.
@@ -891,12 +902,6 @@ function toolspaceRequestOptions(config: McpServerConfig): {
   return config.timeoutMs ? { timeout: config.timeoutMs, maxTotalTimeout: config.timeoutMs } : {};
 }
 
-type McpRequestInfo = {
-  method?: string;
-  id?: string | number | null;
-  toolName?: string;
-};
-
 function mcpRequestDestinationUrl(input: string | URL | Request): string {
   return new URL(input instanceof Request ? input.url : input.toString()).toString();
 }
@@ -950,7 +955,7 @@ export function connectionBrokerFetch(
     ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
   });
   return async (requestInput, init) => {
-    const request = await mcpRequestInfo(requestInput, init);
+    const request = await mcpRequestReplayInfo(requestInput, init);
     const destinationUrl = mcpRequestDestinationUrl(requestInput);
     const resolverSubjectId =
       connectionRef.subjectScope !== "subject" && hostCredentialPort
@@ -978,9 +983,21 @@ export function connectionBrokerFetch(
     );
     if (response.status === 401) {
       await cancelMcpResponseBody(response);
-      const refreshed = await resolve(true);
+      let refreshed: ResolveConnectionCredentialResult;
+      try {
+        refreshed = await resolve(true);
+      } catch {
+        refreshed = authNeededFromStatus(input.config, first, "refresh_failed");
+      }
       if (refreshed.status === "auth_needed") {
+        if (!request.replaySafeAfter401) {
+          await publishToolspaceAuthNeeded(input, request, refreshed);
+          return toolspaceMcpOutcomeUncertainResponse(request);
+        }
         return await authNeededFetchResponse(input, request, refreshed);
+      }
+      if (!request.replaySafeAfter401) {
+        return toolspaceMcpOutcomeUncertainResponse(request);
       }
       const retry = await baseFetch(
         fetchInputForAttempt(requestInput),
@@ -1044,9 +1061,27 @@ async function authNeededFetchResponse(
     sessionId: string;
     turn: SessionTurn;
   },
-  request: McpRequestInfo,
+  request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
 ): Promise<Response> {
+  await publishToolspaceAuthNeeded(input, request, auth);
+  if (request.method === "tools/call") {
+    return toolspaceMcpErrorResponse(request.id, TOOLSPACE_AUTH_NEEDED_ERROR);
+  }
+  return new Response("Authentication required for MCP server connection", { status: 401 });
+}
+
+async function publishToolspaceAuthNeeded(
+  input: {
+    deps: ApiRouteDeps;
+    grant: AccessGrant;
+    config: McpServerConfig;
+    sessionId: string;
+    turn: SessionTurn;
+  },
+  request: McpRequestReplayInfo,
+  auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+): Promise<void> {
   await appendAndPublishEvents(
     input.deps.db,
     input.deps.bus,
@@ -1072,64 +1107,35 @@ async function authNeededFetchResponse(
       },
     ],
   ).catch(() => undefined);
-  if (request.method === "tools/call") {
-    return new Response(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: request.id ?? null,
-        error: {
-          code: TOOLSPACE_AUTH_NEEDED_ERROR.code,
-          message: TOOLSPACE_AUTH_NEEDED_ERROR.message,
-        },
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    );
-  }
-  return new Response("Authentication required for MCP server connection", { status: 401 });
 }
 
-async function mcpRequestInfo(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<McpRequestInfo> {
-  const body =
-    typeof init?.body === "string"
-      ? init.body
-      : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
-        ? await input
-            .clone()
-            .text()
-            .catch(() => "")
-        : "";
-  if (!body) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(body) as {
-      id?: unknown;
-      method?: unknown;
-      params?: { name?: unknown };
-    };
-    const method = typeof parsed.method === "string" ? parsed.method : undefined;
-    const id =
-      typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null
-        ? parsed.id
-        : undefined;
-    const toolName =
-      method === "tools/call" && typeof parsed.params?.name === "string"
-        ? parsed.params.name
-        : undefined;
-    return {
-      ...(method ? { method } : {}),
-      ...(id !== undefined ? { id } : {}),
-      ...(toolName ? { toolName } : {}),
-    };
-  } catch {
-    return {};
-  }
+function toolspaceMcpErrorResponse(
+  id: string | number | null | undefined,
+  error: { code: number; message: string },
+): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: id ?? null,
+      error,
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+function toolspaceMcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
+  return new Response(
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR),
+    ),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
 }
 
 function withConnectionHeaders(
@@ -1160,5 +1166,18 @@ function isToolspaceAuthNeededError(error: unknown): boolean {
     (error.message === TOOLSPACE_AUTH_NEEDED_ERROR.message ||
       error.message ===
         `MCP error ${TOOLSPACE_AUTH_NEEDED_ERROR.code}: ${TOOLSPACE_AUTH_NEEDED_ERROR.message}`)
+  );
+}
+
+function isToolspaceOutcomeUncertainError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.code &&
+    (error.message === TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message ||
+      error.message ===
+        `MCP error ${TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.code}: ${TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message}`)
   );
 }

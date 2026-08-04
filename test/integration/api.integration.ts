@@ -4929,7 +4929,7 @@ describe("API component integration", () => {
       ...initialWorkspaceGrant!,
       workspaceId: secondWorkspace.id,
     };
-    const tokenMcp = buildOpenGeniMcpServer(
+    const staleTokenMcp = buildOpenGeniMcpServer(
       {
         settings,
         db: dbClient.db,
@@ -4940,7 +4940,7 @@ describe("API component integration", () => {
         githubAppApi,
         documentIndexer: { indexDocument: async () => undefined },
         getDocumentServices: () => {
-          throw new Error("document services are not used by GitHub token tests");
+          throw new Error("document services are not used by the GitHub token retirement test");
         },
         resumeBoxById: fakeResumeBoxById,
       },
@@ -4949,25 +4949,9 @@ describe("API component integration", () => {
         metadata: { sessionId: connected.id, firstPartyMcpTools: ["github_token"] },
       },
     );
-    const originalFetch = globalThis.fetch;
-    let tokenRequestBody: unknown = null;
-    globalThis.fetch = (async (input, init) => {
-      expect(String(input)).toBe(
-        `https://api.github.com/app/installations/${installationId}/access_tokens`,
-      );
-      tokenRequestBody = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ token: "ghs_scoped_test" }), {
-        status: 201,
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
-    try {
-      const token = await callMcpTool<{ token: string }>(tokenMcp, "github_token", {});
-      expect(token.token).toBe("ghs_scoped_test");
-      expect(tokenRequestBody).toEqual({ repository_ids: [adminRepository.id] });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    await expect(callMcpTool(staleTokenMcp, "github_token", {})).rejects.toThrow(
+      "MCP tool not registered: github_token",
+    );
   });
 
   test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {

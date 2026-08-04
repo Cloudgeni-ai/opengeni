@@ -74,6 +74,13 @@ describe("first-party MCP tool-name contract", () => {
   });
 
   test("rejects unknown names at both API and delegated-token boundaries", () => {
+    expect(FIRST_PARTY_MCP_TOOL_NAMES).not.toContain("github_token");
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "work",
+        firstPartyMcpTools: ["github_token"],
+      }).success,
+    ).toBe(false);
     expect(
       CreateSessionRequest.safeParse({
         initialMessage: "work",
