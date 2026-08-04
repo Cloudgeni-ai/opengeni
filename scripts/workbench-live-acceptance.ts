@@ -2096,9 +2096,9 @@ async function selectChangesTab(page: Page): Promise<void> {
 
 export async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
   const directoryItem = page.getByRole("treeitem").filter({ hasText: directory }).first();
-  const directoryButton = directoryItem.getByRole("button").first();
-  if ((await directoryItem.getAttribute("aria-expanded")) !== "true") {
-    await directoryButton.click();
+  const directoryVisible = await directoryItem.isVisible();
+  if (directoryVisible && (await directoryItem.getAttribute("aria-expanded")) !== "true") {
+    await directoryItem.getByRole("button").first().click();
   }
 
   // The Files tree is virtualized: an expanded directory can truthfully contain
@@ -2107,7 +2107,7 @@ export async function selectTreeFile(page: Page, directory: string, file: string
   // the tree's public composite-keyboard contract instead of assuming every
   // logical row permanently exists in the DOM.
   const fileItem = page.getByRole("treeitem").filter({ hasText: file }).first();
-  if (await fileItem.isVisible()) {
+  if (directoryVisible && (await fileItem.isVisible())) {
     await fileItem.getByRole("button").click();
     return;
   }
@@ -2115,11 +2115,43 @@ export async function selectTreeFile(page: Page, directory: string, file: string
   const tree = page.getByRole("tree").first();
   await tree.focus();
   await tree.press("Home");
+
+  let directoryLevel: number | undefined;
   for (let index = 0; index < 4_096; index += 1) {
     const activeId = await tree.getAttribute("aria-activedescendant");
     if (!activeId) throw new Error("file tree has no active descendant");
     const activeItem = page.locator(`[id=${JSON.stringify(activeId)}]`);
     await activeItem.waitFor({ state: "visible", timeout: 2_000 });
+    if ((await activeItem.getByText(directory, { exact: true }).count()) > 0) {
+      const rawLevel = await activeItem.getAttribute("aria-level");
+      directoryLevel = Number(rawLevel);
+      if (!Number.isInteger(directoryLevel) || directoryLevel < 1) {
+        throw new Error(`file tree directory ${directory} has no valid aria-level`);
+      }
+      if ((await activeItem.getAttribute("aria-expanded")) !== "true") {
+        await tree.press("ArrowRight");
+      }
+      await tree.press("ArrowDown");
+      break;
+    }
+    await tree.press("ArrowDown");
+  }
+
+  if (directoryLevel === undefined) {
+    throw new Error(`file tree did not expose directory ${directory}`);
+  }
+
+  for (let index = 0; index < 4_096; index += 1) {
+    const activeId = await tree.getAttribute("aria-activedescendant");
+    if (!activeId) throw new Error("file tree has no active descendant");
+    const activeItem = page.locator(`[id=${JSON.stringify(activeId)}]`);
+    await activeItem.waitFor({ state: "visible", timeout: 2_000 });
+    const rawLevel = await activeItem.getAttribute("aria-level");
+    const activeLevel = Number(rawLevel);
+    if (!Number.isInteger(activeLevel) || activeLevel < 1) {
+      throw new Error("file tree item has no valid aria-level");
+    }
+    if (activeLevel <= directoryLevel) break;
     if ((await activeItem.getByText(file, { exact: true }).count()) > 0) {
       await tree.press("Enter");
       return;
