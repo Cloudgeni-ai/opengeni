@@ -73,6 +73,20 @@ Evidence MUST NOT contain raw credentials, cookies, signed object URLs,
 kubeconfigs, customer data, conversation content outside the deterministic
 fixture, or unredacted provider responses.
 
+The capture API latency row is measured by a protected operator probe running
+in the deployment's exact cloud region rather than by the generic GitHub-hosted
+browser runner. The live harness sends the dedicated canary cookie to that
+operator only over child-process stdin. The operator creates an ephemeral,
+token-free Kubernetes Job from the exact digest-pinned API image, performs the
+100 sequential HTTPS reads through the public ingress, and deletes the Job and
+its temporary Secret. The sanitized result must bind the environment, source
+SHA, acceptance run, region, API image, workspace, session, capture revision,
+turn, decoded byte count, gzip encoding, and exact sample count before the
+public harness will calculate the p95. Browser navigation, interaction,
+accessibility, and screenshots remain on the ordinary release runner and the
+production network path. A runner in an unspecified geography is not valid
+evidence for the deployment-region capture API budget.
+
 The manually dispatched release-candidate workflow derives the complete package
 plan from the exact checkout and npm registry state (which is empty for an
 application-only release), takes the product release version from the
