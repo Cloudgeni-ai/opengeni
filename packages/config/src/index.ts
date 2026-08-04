@@ -249,7 +249,7 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.8"),
+    .default("0.1.9"),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),

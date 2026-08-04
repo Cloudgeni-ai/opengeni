@@ -1237,7 +1237,7 @@ for other OS/arch assets and the self-update channel. Route these paths (and an
 optional `get.<domain>` host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.8`).
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.9`).
 `OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
 back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move
