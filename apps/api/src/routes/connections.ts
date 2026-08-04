@@ -532,7 +532,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     const result = await completeMcpOAuthCallback(
-      { db, settings, observability },
+      { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
       {
         code: c.req.query("code"),
         state: c.req.query("state"),

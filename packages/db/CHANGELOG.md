@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 0.27.7
+
+### Patch Changes
+
+- c29fd4c: Bound MCP OAuth callbacks through token exchange and persistence, return safe stage-specific failures to the capabilities UI, and replace incompatible dynamic client registrations with a compare-and-swap update.
+
+## 0.27.6
+
+### Patch Changes
+
+- Updated dependencies [664c1d8]
+  - @opengeni/network@0.2.0
+
 ## 0.27.5
 
 ### Patch Changes

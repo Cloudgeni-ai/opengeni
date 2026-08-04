@@ -201,7 +201,7 @@ describe("ordinary session Codex realtime control", () => {
         />,
       );
     });
-    const region = container.querySelector('[aria-label="Realtime voice"]');
+    const region = container.querySelector('[role="group"][aria-label="Realtime voice"]');
     const start = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Start voice with Codex Live"]',
     );
@@ -446,7 +446,9 @@ describe("ordinary session Codex realtime control", () => {
     });
 
     expect(
-      container.querySelector('[aria-label="Realtime voice"]')?.getAttribute("data-picker-side"),
+      container
+        .querySelector('[role="group"][aria-label="Realtime voice"]')
+        ?.getAttribute("data-picker-side"),
     ).toBe("bottom");
   });
 
