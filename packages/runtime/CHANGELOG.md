@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.18.11
+
+### Patch Changes
+
+- 1ea5e62: Honor explicit shell and login selections when commands run on Connected Machines instead of substituting the machine service's ambient default shell.
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/config@0.10.12
+
 ## 0.18.10
 
 ### Patch Changes
