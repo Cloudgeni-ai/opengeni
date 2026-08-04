@@ -7,6 +7,7 @@ import {
 import {
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  gitRemoteIdentity,
   signDelegatedAccessToken,
   type ConnectionCredentialsPort,
   type GitCredentialProvider,
@@ -777,7 +778,7 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
       );
     }
     bindingProviders.set(credentialBindingId, provider);
-    const normalizedRemote = normalizedGitRemote(resource.uri);
+    const normalizedRemote = gitRemoteIdentity(resource.uri, provider);
     const claimedBinding = remoteBindings.get(normalizedRemote);
     if (claimedBinding && claimedBinding !== bindingKey) {
       throw new Error(
@@ -833,19 +834,6 @@ function normalizedGitHost(uri: string): string {
     return new URL(uri).host.toLowerCase();
   } catch {
     return "";
-  }
-}
-
-function normalizedGitRemote(uri: string): string {
-  try {
-    const url = new URL(uri);
-    return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, "").replace(/\.git$/, "")}`;
-  } catch {
-    return uri
-      .trim()
-      .replace(/\/+$/, "")
-      .replace(/\.git$/, "")
-      .toLowerCase();
   }
 }
 

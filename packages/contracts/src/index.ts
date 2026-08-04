@@ -2955,6 +2955,93 @@ export function gitCredentialBindingIdForRepository(
   );
 }
 
+type GitRemotePathSemantics = "dot_git_alias" | "exact";
+
+/**
+ * Provider-declared remote-path behavior. Keeping this exhaustive makes a new
+ * provider choose its semantics instead of inheriting GitHub conventions.
+ */
+const GIT_REMOTE_PATH_SEMANTICS = {
+  github: "dot_git_alias",
+  gitlab: "dot_git_alias",
+  azure_devops: "exact",
+} as const satisfies Record<GitCredentialProvider, GitRemotePathSemantics>;
+
+function gitRemotePathSemantics(
+  provider: GitCredentialProvider | null | undefined,
+): GitRemotePathSemantics {
+  return provider ? GIT_REMOTE_PATH_SEMANTICS[provider] : "exact";
+}
+
+export class RepositoryUriError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RepositoryUriError";
+  }
+}
+
+/**
+ * Normalize only the safe, provider-neutral parts of an HTTPS clone URI.
+ *
+ * The provider-defined path is opaque: this helper never adds or removes a
+ * `.git` suffix. Embedded user info, query parameters, and fragments are not
+ * durable resource identity and are omitted, matching the existing secret-free
+ * resource contract.
+ */
+export function normalizeRepositoryTransportUri(uri: string): string {
+  let url: URL;
+  try {
+    url = new URL(uri.trim());
+  } catch {
+    throw new RepositoryUriError(`invalid repository URI: ${uri}`);
+  }
+  if (url.protocol !== "https:" || !url.hostname) {
+    throw new RepositoryUriError("repository resources must use HTTPS Git URLs");
+  }
+  const path = url.pathname.replace(/^\/+|\/+$/g, "");
+  if (path.split("/").filter(Boolean).length < 2) {
+    throw new RepositoryUriError("repository URL must include owner and repo");
+  }
+  return `https://${url.host.toLowerCase()}/${path}`;
+}
+
+/**
+ * Return every URI spelling that a provider explicitly declares equivalent.
+ * Exact-path and unqualified providers return only the normalized input URI.
+ */
+export function gitRemoteUriAliases(
+  uri: string,
+  provider: GitCredentialProvider | null | undefined,
+): string[] {
+  const normalizedUri = normalizeRepositoryTransportUri(uri);
+  if (gitRemotePathSemantics(provider) === "exact") {
+    return [normalizedUri];
+  }
+  const base = normalizedUri.replace(/\.git$/, "");
+  return [...new Set([normalizedUri, base, `${base}.git`])];
+}
+
+/** Stable remote identity for deduplication and credential-binding ownership. */
+export function gitRemoteIdentity(
+  uri: string,
+  provider: GitCredentialProvider | null | undefined,
+): string {
+  const normalizedUri = normalizeRepositoryTransportUri(uri);
+  return gitRemotePathSemantics(provider) === "dot_git_alias"
+    ? normalizedUri.replace(/\.git$/, "")
+    : normalizedUri;
+}
+
+/** Provider-aware Git credential-helper path aliases, without a leading slash. */
+export function gitRemotePathAliases(
+  uri: string,
+  provider: GitCredentialProvider | null | undefined,
+): string[] {
+  return gitRemoteUriAliases(uri, provider).map((alias) =>
+    new URL(alias).pathname.replace(/^\/+|\/+$/g, ""),
+  );
+}
+
 export const FileResourceRef = z.object({
   kind: z.literal("file"),
   fileId: z.string().uuid(),
@@ -3035,7 +3122,10 @@ export function resourceMountPathCollisionKey(path: string): string {
  * GitLab, Azure DevOps, or a custom host do not collide. Encoding the host keeps
  * IPv6/custom-port identities inside one portable path segment.
  */
-export function defaultRepositoryMountPath(uri: string): string {
+export function defaultRepositoryMountPath(
+  uri: string,
+  provider?: GitCredentialProvider | null,
+): string {
   let url: URL;
   try {
     url = new URL(uri);
@@ -3045,7 +3135,11 @@ export function defaultRepositoryMountPath(uri: string): string {
   if (url.protocol !== "https:" || !url.host) {
     throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
   }
-  const repositoryPath = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  const remotePath = url.pathname.replace(/^\/+|\/+$/g, "");
+  const repositoryPath =
+    gitRemotePathSemantics(provider) === "dot_git_alias"
+      ? remotePath.replace(/\.git$/, "")
+      : remotePath;
   const segments = repositoryPath.split("/").filter(Boolean);
   if (segments.length < 2) {
     throw new ResourceMountPathError(`repository URI must include owner and repo: ${uri}`);
@@ -3062,7 +3156,7 @@ export function resourceMountPath(resource: ResourceRef): string {
   if (resource.mountPath) return normalizeResourceMountPath(resource.mountPath);
   return resource.kind === "file"
     ? normalizeResourceMountPath(`${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`)
-    : defaultRepositoryMountPath(resource.uri);
+    : defaultRepositoryMountPath(resource.uri, gitCredentialProviderForRepository(resource));
 }
 
 /** Fail before sandbox execution when two resources share a portable path. */
@@ -3753,7 +3847,10 @@ export function resourceIdentityKey(resource: ResourceRef): string {
   if (resource.kind === "file") {
     return `file:${resource.fileId}`;
   }
-  return `repository:${resource.uri}`;
+  return `repository:${gitRemoteIdentity(
+    resource.uri,
+    gitCredentialProviderForRepository(resource),
+  )}`;
 }
 
 function sortJson(value: unknown): unknown {

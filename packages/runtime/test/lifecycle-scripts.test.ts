@@ -34,7 +34,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     uri: string,
     resource: Parameters<typeof repositoryCloneCommand>[0][number] = {
       kind: "repository",
-      uri,
+      uri: "https://github.com/opengeni/test-fixture.git",
       ref: "main",
       githubInstallationId: 123,
       githubRepositoryId: 456,
@@ -118,6 +118,28 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         },
       ]),
     ).toThrow("claimed by multiple credential bindings");
+  });
+
+  test("keeps exact-path provider remotes distinct when one name ends in .git", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/repo",
+        ref: "main",
+        provider: "azure_devops",
+        credentialBindingId: "azure-one",
+      },
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/repo.git",
+        ref: "main",
+        provider: "azure_devops",
+        credentialBindingId: "azure-two",
+      },
+    ]);
+
+    expect(command).toContain("https://dev.azure.com/acme/project/_git/repo");
+    expect(command).toContain("https://dev.azure.com/acme/project/_git/repo.git");
   });
 
   test("fails closed on an unsupported credential transport", () => {

@@ -19,7 +19,7 @@ import { establishSelfhostedTurnSession } from "../src/sandbox-routing";
 
 const repoResource = (): ResourceRef => ({
   kind: "repository",
-  uri: "github.com/acme/repo",
+  uri: "https://github.com/acme/repo",
   ref: "main",
   githubInstallationId: 123,
   githubRepositoryId: 456,

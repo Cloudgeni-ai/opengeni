@@ -1614,8 +1614,8 @@ describe("GitHub repository resources", () => {
       {},
     );
     expect(resources.map((resource) => resource.mountPath)).toEqual([
-      "repos/github.com/acme/app",
-      "repos/gitlab.com/acme/app",
+      "repos/github.com/acme/app.git",
+      "repos/gitlab.com/acme/app.git",
       "repos/dev.azure.com/acme/project/_git/app",
     ]);
     expect(normalizeRepositoryUrl("https://git.example.com:8443/acme/app.git").host).toBe(
@@ -1639,6 +1639,7 @@ describe("GitHub repository resources", () => {
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
+      provider: "github",
       mountPath: "repos/github.com/example/public",
     });
   });
@@ -1648,6 +1649,7 @@ describe("GitHub repository resources", () => {
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
+      provider: "github",
       mountPath: "repos/github.com/example/public",
       githubInstallationId: 123,
       githubRepositoryId: 456,
