@@ -6,6 +6,7 @@ import {
   mergeResourceRefs as mergeContractResourceRefs,
   mergeToolRefs,
   normalizeRepositorySubpath,
+  normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
   resourceIdentityKey,
   resourceMountPath,
@@ -123,28 +124,17 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
         mountPath,
       };
     } else {
-      const url = parseResourceUrl(resource.uri);
-      if (url.protocol !== "https:" || !url.hostname) {
-        throw new HTTPException(422, { message: "repository resources must use HTTPS Git URLs" });
-      }
       const credentialProvider = gitCredentialProviderForRepository(resource);
-      const path = url.pathname.replace(/^\/+|\/+$/g, "");
-      // Azure DevOps' `_git/<repository>` route treats a trailing `.git` as
-      // part of the repository name. Preserve that provider's exact path;
-      // GitHub, GitLab, and provider-neutral HTTPS remotes retain the existing
-      // canonical `.git` suffix.
-      const canonicalPath =
-        credentialProvider === "azure_devops" ? path : path.replace(/\.git$/, "");
-      const parts = canonicalPath.split("/").filter(Boolean);
-      if (parts.length < 2) {
-        throw new HTTPException(422, { message: "repository URL must include owner and repo" });
+      let normalizedUri: string;
+      try {
+        normalizedUri = normalizeRepositoryTransportUri(resource.uri);
+      } catch (error) {
+        throw new HTTPException(422, {
+          message: error instanceof Error ? error.message : "invalid repository URI",
+        });
       }
-      const repo = parts.join("/");
-      const normalizedUri = `https://${url.host.toLowerCase()}/${repo}${
-        credentialProvider === "azure_devops" ? "" : ".git"
-      }`;
       const mountPath = normalizeMountPath(
-        resource.mountPath ?? defaultRepositoryMountPath(normalizedUri),
+        resource.mountPath ?? defaultRepositoryMountPath(normalizedUri, credentialProvider),
       );
       const credentialBindingId = gitCredentialBindingIdForRepository(resource, credentialProvider);
       if (
@@ -351,14 +341,6 @@ function normalizeMountPath(path: string): string {
   } catch (error) {
     if (!(error instanceof ResourceMountPathError)) throw error;
     throw new HTTPException(422, { message: `invalid resource mount path: ${path}` });
-  }
-}
-
-function parseResourceUrl(uri: string): URL {
-  try {
-    return new URL(uri);
-  } catch {
-    throw new HTTPException(422, { message: "repository resources must use valid URLs" });
   }
 }
 

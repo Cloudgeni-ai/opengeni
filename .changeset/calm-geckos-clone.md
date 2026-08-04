@@ -1,5 +1,9 @@
 ---
+"@opengeni/api-router": patch
+"@opengeni/contracts": patch
 "@opengeni/core": patch
+"@opengeni/runtime": patch
+"@opengeni/worker-bundle": patch
 ---
 
-Preserve Azure DevOps repository clone paths instead of appending a GitHub-style `.git` suffix.
+Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
