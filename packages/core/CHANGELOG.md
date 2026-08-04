@@ -1,5 +1,15 @@
 # @opengeni/core
 
+## 0.20.9
+
+### Patch Changes
+
+- 664c1d8: Bound MCP OAuth setup with an absolute server deadline, abort stalled response streams, and preserve safe stage-specific API error details in SDK clients.
+  - @opengeni/db@0.27.6
+  - @opengeni/runtime@0.18.10
+  - @opengeni/documents@0.5.2
+  - @opengeni/events@0.3.72
+
 ## 0.20.8
 
 ### Patch Changes
