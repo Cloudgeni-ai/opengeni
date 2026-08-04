@@ -1099,7 +1099,11 @@ function parseDisclosedTools(output: unknown): DisclosedTool[] | null {
           if (typeof tool === "string" && tool.trim()) {
             return splitToolWireName(tool.trim());
           }
-          if (tool && typeof tool === "object" && typeof (tool as { name?: unknown }).name === "string") {
+          if (
+            tool &&
+            typeof tool === "object" &&
+            typeof (tool as { name?: unknown }).name === "string"
+          ) {
             const name = (tool as { name: string }).name.trim();
             return name ? splitToolWireName(name) : null;
           }
