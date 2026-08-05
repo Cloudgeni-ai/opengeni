@@ -652,7 +652,7 @@ export type ProviderContextTokenSignal = {
 
 export type CompleteModelInputEstimate = {
   tokens: number;
-  source: "complete_estimate" | "provider_plus_local";
+  source: "provider_plus_local";
   inputTokens: number;
   inputTextTokens: number;
   inputImageTokens: number;
@@ -664,37 +664,22 @@ export type CompleteModelInputEstimate = {
 };
 
 /**
- * Match Codex history accounting: after one provider response, start from its
+ * Match Codex history accounting after one provider response: start from its
  * authoritative TOTAL token count and add only local items placed after the
  * newest model-generated item. System instructions and tool schemas are
  * compared with the exact request footprint that produced the provider count;
- * positive growth is added. Without a bound anchor, estimate the entire
- * outgoing request rather than trusting stale usage from an earlier turn.
+ * positive growth is added. Callers must bind both values to the immediately
+ * preceding request; there is deliberately no whole-request fallback.
  */
 export function estimateCompleteModelInput(input: {
   current: CompleteModelInputFootprint;
-  provider?: ProviderContextTokenSignal | null;
-  providerRequestFootprint?: CompleteModelInputFootprint | null;
+  provider: ProviderContextTokenSignal;
+  providerRequestFootprint: CompleteModelInputFootprint;
 }): CompleteModelInputEstimate {
   const inputEstimate = estimateTokensBreakdown(input.current.input);
   const inputTokens = inputEstimate.totalTokens;
   const instructionsTokens = input.current.instructionsTokens;
   const toolSchemaTokens = input.current.toolSchemaTokens;
-  if (!input.provider || !input.providerRequestFootprint || input.provider.totalTokens <= 0) {
-    return {
-      tokens: inputTokens + instructionsTokens + toolSchemaTokens,
-      source: "complete_estimate",
-      inputTokens,
-      inputTextTokens: inputEstimate.textTokens,
-      inputImageTokens: inputEstimate.imageTokens,
-      inputImageCount: inputEstimate.imageCount,
-      inputImageFallbackCount: inputEstimate.imageFallbackCount,
-      instructionsTokens,
-      toolSchemaTokens,
-      appendedAfterModelTokens: 0,
-    };
-  }
-
   const appended = itemsAfterLastModelGeneratedItem(input.current.input);
   const appendedAfterModelTokens = estimateTokens(appended);
   const instructionGrowth = Math.max(
@@ -793,11 +778,12 @@ export function decideCompaction(input: {
     typeof input.lastInputTokens === "number" && input.lastInputTokens > 0
       ? input.lastInputTokens
       : 0;
-  const activeHistoryEstimate = estimateTokens(input.items);
-  // A durable provider count belongs to an earlier request. The full active
-  // estimate is a conservative cross-turn floor until an exact same-run anchor
-  // is available in the per-call guard.
-  const signalTokens = Math.max(recorded, activeHistoryEstimate);
+  // Automatic compaction is provider-accounted. A local history estimate is
+  // useful for shaping a compaction request and describing its replacement,
+  // but it is not authoritative enough to decide that an ordinary request must
+  // be compacted. A missing provider count therefore means "try the request";
+  // a genuine provider overflow enters the same recovery path.
+  const signalTokens = recorded;
   if (input.items.length === 0) {
     return {
       shouldCompact: false,
@@ -833,13 +819,13 @@ export function decideCompaction(input: {
 export class CompactionNeededError extends Error {
   readonly signalTokens: number;
   readonly thresholdTokens: number;
-  readonly signalSource: "provider" | "estimate";
+  readonly signalSource: "provider" | "operator";
   readonly trigger: "threshold" | "operator";
 
   constructor(input: {
     signalTokens: number;
     thresholdTokens: number;
-    signalSource: "provider" | "estimate";
+    signalSource: "provider" | "operator";
     trigger?: "threshold" | "operator";
   }) {
     const trigger = input.trigger ?? "threshold";

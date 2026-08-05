@@ -6509,10 +6509,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               attemptId: input.attemptId,
             },
             // Never reuse the persisted prior-turn signal for recovery. Proactive
-            // guards provide their exact current signal; provider overflows do not,
-            // so null derives decision metadata from active history. Forced
-            // recovery proves progress separately by comparing the replacement
-            // with the current active-history estimate in maybeCompactContext.
+            // guards provide their exact current provider-based signal; provider
+            // overflows do not, so their diagnostic signal stays unknown/zero.
+            // Forced recovery proves progress separately by comparing the
+            // replacement with the current active-history estimate.
             recoverySignalTokens,
             compactSummarizer,
             {

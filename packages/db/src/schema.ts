@@ -1499,10 +1499,9 @@ export const sessions = pgTable(
     nestedAgentDepthPolicySessionId: uuid("nested_agent_depth_policy_session_id"),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
-    // Actual input tokens reported for the last model call of the most recent
-    // turn. The pre-turn portable compaction trigger reads this as its budget
-    // signal (char/4 estimate is the same-turn fallback). Null until a turn with
-    // usage has completed.
+    // Actual input tokens reported for the latest authoritative ordinary model
+    // call. Compaction/context clearing invalidates it to null; local history
+    // estimates must never be stored here.
     lastInputTokens: integer("last_input_tokens"),
     // Operator /compact request flag. The API sets
     // it true; the worker honors it BEFORE the next turn's model call by forcing

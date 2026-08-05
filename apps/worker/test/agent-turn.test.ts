@@ -21,7 +21,6 @@ import {
 } from "@opengeni/db";
 import {
   CompactionProviderResponseError,
-  CompactionNeededError,
   EmptyCompactionSummaryError,
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
@@ -1241,8 +1240,8 @@ describe("production model-response usage callback authority", () => {
       );
 
       // The duplicate terminal callback must not advance the old response to
-      // revision 2. Revision 1 cannot bind to request 2, so the complete estimate
-      // (including the large new assistant output) still triggers compaction.
+      // revision 2. Revision 1 cannot bind to request 2, and an unbound local
+      // estimate must not force compaction.
       const third = [
         ...second,
         {
@@ -1254,7 +1253,7 @@ describe("production model-response usage callback authority", () => {
       ] as any;
       await expect(
         filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
-      ).rejects.toBeInstanceOf(CompactionNeededError);
+      ).resolves.toMatchObject({ input: third });
 
       // A worker restart/re-dispatch rebuilds local state. The stable provider
       // response id reaches the durable fences again, but duplicate authority

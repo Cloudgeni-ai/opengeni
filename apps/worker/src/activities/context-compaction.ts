@@ -339,7 +339,6 @@ async function compactContextRemoteV2(
     expectedAttemptId: scope.attemptId,
     replacementItems: replacementHistory.slice(0, -1),
     summaryItem: tailItem as Record<string, unknown>,
-    replacementInputTokens: estimatedTokensAfter,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
@@ -415,7 +414,6 @@ async function compactContextPortable(
     expectedAttemptId: scope.attemptId,
     replacementItems: replacementHistory.slice(0, -1),
     summaryItem: summaryItem as Record<string, unknown>,
-    replacementInputTokens: estimatedTokensAfter,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
