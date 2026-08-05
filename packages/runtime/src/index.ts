@@ -8647,6 +8647,22 @@ export function sandboxCommandOutput(result: unknown): string {
     .join("\n");
 }
 
+/**
+ * Return the command's stdout body exactly once. `sandboxCommandOutput()` is a
+ * human-readable aggregate and deliberately joins output/stderr/stdout; it is
+ * unsafe for machine-parsed output because a provider adapter may preserve the
+ * same body in both `output` and `stdout`.
+ */
+export function sandboxCommandStdout(result: unknown): string {
+  if (typeof result === "string") return sandboxCommandOutput(result);
+  if (!result || typeof result !== "object") return "";
+  const candidate = result as { output?: unknown; stdout?: unknown };
+  if (typeof candidate.stdout === "string" && candidate.stdout.length > 0) {
+    return candidate.stdout;
+  }
+  return typeof candidate.output === "string" ? candidate.output : "";
+}
+
 function assertSandboxCommandSucceeded(result: unknown, operation: string): void {
   const output = sandboxCommandOutput(result);
   if (sandboxCommandStillRunning(result)) {
