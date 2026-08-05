@@ -129,7 +129,7 @@ describe("release schema contract", () => {
       ].filter((file) => migrations.has(file)),
     );
     expect(contract.fileCount).toBe(
-      108 +
+      109 +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
@@ -190,9 +190,9 @@ describe("release schema contract", () => {
         (migrations.has("0173_codex_auth_boundaries.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "5c2bcbcf67ebcd1a77ee8525007e966932dee4efc0972a67aa6b3352d0cb8653",
+      "7fbf35b80e1490ce9604604cec928736d6a6e483148e38d0ecc62658c4ac603d",
     );
-    expect(contract.latestMigration).toBe("0173_codex_auth_boundaries.sql");
+    expect(contract.latestMigration).toBe("0174_session_wake_live_interruption.sql");
     expect(migrations.get("0173_codex_auth_boundaries.sql")).toMatchObject({
       sha256: "450075954cb9c8bfc346ccf09991edd362cc5ffdcf4e94d1c404d3fc6795e2ca",
       deploymentMode: "maintenance",
