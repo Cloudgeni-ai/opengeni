@@ -2957,6 +2957,38 @@ describe("escaped MCP transport timeout classifier", () => {
     });
   });
 
+  test("recovers rollout-safe first-party setup loss but keeps auth and typed defects terminal", () => {
+    const routeNotReady = safeMcpTransportError(
+      Object.assign(new Error("temporary first-party route"), { status: 404 }),
+      { recoverySafeSetup: true },
+    );
+    const statusless = safeMcpTransportError(new Error("fetch failed"), {
+      recoverySafeSetup: true,
+    });
+    const authRejected = safeMcpTransportError(
+      Object.assign(new Error("authentication failed"), { status: 401 }),
+      { recoverySafeSetup: true },
+    );
+    const typedProtocolFailure = safeMcpTransportError(new TypeError("invalid response"), {
+      recoverySafeSetup: true,
+    });
+
+    for (const recoverable of [routeNotReady, statusless]) {
+      expect(agentRunFailurePayload(recoverable)).toEqual({
+        error:
+          "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+        code: "mcp_transport_unavailable",
+        retryable: true,
+      });
+    }
+    expect(agentRunFailurePayload(authRejected)).toEqual({
+      error: "MCP transport operation failed (Error 401)",
+    });
+    expect(agentRunFailurePayload(typedProtocolFailure)).toEqual({
+      error: "MCP transport operation failed (TypeError)",
+    });
+  });
+
   test("emits a typed workflow recovery obligation only before a generation-2 model request", () => {
     const detail = {
       turnId: "turn-2",
