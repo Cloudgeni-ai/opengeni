@@ -1,5 +1,13 @@
 # @opengeni/worker-bundle
 
+## 0.16.22
+
+### Patch Changes
+
+- Updated dependencies [41f7ae3]
+  - @opengeni/core@0.21.3
+  - @opengeni/runtime@0.18.18
+
 ## 0.16.21
 
 ### Patch Changes
