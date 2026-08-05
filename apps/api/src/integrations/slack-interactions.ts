@@ -657,7 +657,10 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     if (!boundInteraction) {
       throw new Error("Durable Slack interaction could not bind its reserved session");
     }
-    if (interaction.triggeringProviderEventId === entry.providerEventId) {
+    const shouldRepairAcknowledgement =
+      interaction.triggeringProviderEventId === entry.providerEventId ||
+      (isDirectMessageShortcut(entry) && boundInteraction.ackSlackMessageTs === null);
+    if (shouldRepairAcknowledgement) {
       const boundClient = await createOpenGeniSlackBotInteractionClient(deps, {
         accountId: entry.accountId,
         workspaceId: entry.workspaceId,
