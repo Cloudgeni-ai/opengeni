@@ -121,6 +121,35 @@ export function selectBackend(backend: SandboxBackend): CapabilityDescriptor {
   return descriptor;
 }
 
+/**
+ * Return the Agents SDK wire identifier for a product sandbox backend.
+ *
+ * Durable envelopes use the SDK identifier, which differs from the product
+ * registry key for the local provider (`unix_local` versus `local`). Keep that
+ * translation here so persistence, routing, and provider construction cannot
+ * drift into near-identical private mappings.
+ */
+export function sdkBackendIdForSandboxBackend(backend: SandboxBackend): string {
+  return selectBackend(backend).backendId;
+}
+
+/**
+ * Resolve either a product registry key or an Agents SDK wire identifier to the
+ * canonical product backend. Unknown identifiers stay unknown instead of being
+ * coerced to the deployment default.
+ */
+export function sandboxBackendForSdkBackendId(backendId: string): SandboxBackend | null {
+  if (Object.hasOwn(CAPABILITY_DESCRIPTORS, backendId)) {
+    return backendId as SandboxBackend;
+  }
+  for (const backend of Object.keys(CAPABILITY_DESCRIPTORS) as SandboxBackend[]) {
+    if (CAPABILITY_DESCRIPTORS[backend].backendId === backendId) {
+      return backend;
+    }
+  }
+  return null;
+}
+
 /** True iff the descriptor lists the requested OS as supported. */
 export function backendSupportsOs(descriptor: CapabilityDescriptor, os: SandboxOs): boolean {
   return descriptor.os.supported.includes(os);

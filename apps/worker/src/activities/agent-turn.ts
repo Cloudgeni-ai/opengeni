@@ -126,6 +126,7 @@ import {
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
   WorkspaceArchiveIntegrityError,
+  sdkBackendIdForSandboxBackend,
   swapTargetEstablishability,
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
@@ -2279,10 +2280,6 @@ export function createTurnSandboxProvisioner<T>(
       }
     },
   };
-}
-
-function sdkBackendIdForSandboxBackend(backend: Settings["sandboxBackend"]): string {
-  return backend === "local" ? "unix_local" : backend;
 }
 
 /**
