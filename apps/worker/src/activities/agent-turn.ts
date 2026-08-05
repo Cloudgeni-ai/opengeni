@@ -323,6 +323,8 @@ import {
   recordCreditMicros,
   recordModelCacheTokens,
   recordModelInputTokens,
+  recordSessionEventAppendLatency,
+  recordSessionEventPublishLatency,
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
@@ -3391,6 +3393,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           executionGeneration,
           input.attemptId,
           inputs,
+          {
+            onAppend: ({ durationSeconds }) =>
+              recordSessionEventAppendLatency(observability, { durationSeconds }),
+            onPublish: ({ durationSeconds }) =>
+              recordSessionEventPublishLatency(observability, { durationSeconds }),
+          },
         );
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");

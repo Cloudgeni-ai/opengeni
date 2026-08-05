@@ -15,6 +15,7 @@ import {
   type MetricSample,
   type MetricWindow,
 } from "@opengeni/react/machines";
+import { usePageLiveActivity } from "@opengeni/react";
 import {
   ArrowLeftIcon,
   CheckIcon,
@@ -58,6 +59,7 @@ async function copyToClipboard(text: string, successMessage: string) {
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const machines = useMachines({ pollIntervalMs: 5000 });
+  const pageLive = usePageLiveActivity();
   const [enrollOpen, setEnrollOpen] = useState(false);
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
@@ -91,7 +93,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
     .join(",");
   useEffect(() => {
     const enrolled = machines.machines.filter((m) => m.enrollmentId && !m.isSessionGroup);
-    if (enrolled.length === 0) {
+    if (!pageLive || enrolled.length === 0) {
       setCardSeries({});
       return;
     }
@@ -108,19 +110,22 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       );
       if (!cancelled) setCardSeries(Object.fromEntries(entries));
     };
-    void load();
-    const id = setInterval(() => void load(), 30_000);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (!cancelled) timer = setTimeout(() => void load().finally(schedule), 30_000);
+    };
+    void load().finally(schedule);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer !== null) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enrolledKey, fetchSeries]);
+  }, [enrolledKey, fetchSeries, pageLive]);
 
   // Fetch the open machine's detail history: on select, on window change, and on
   // a 10s refresh while open.
   useEffect(() => {
-    if (!selectedEnrollmentId) {
+    if (!pageLive || !selectedEnrollmentId) {
       setDetailSeries([]);
       return;
     }
@@ -136,13 +141,16 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         if (!cancelled) setDetailLoading(false);
       }
     };
-    void load();
-    const id = setInterval(() => void load(), 10_000);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (!cancelled) timer = setTimeout(() => void load().finally(schedule), 10_000);
+    };
+    void load().finally(schedule);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer !== null) clearTimeout(timer);
     };
-  }, [selectedEnrollmentId, detailWindow, fetchSeries]);
+  }, [selectedEnrollmentId, detailWindow, fetchSeries, pageLive]);
 
   // "Machine connected" moment: watch the polled fleet and, once a machine first
   // shows online (a fresh enrollment coming up, or a reconnect), toast it. The
