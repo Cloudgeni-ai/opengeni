@@ -22281,8 +22281,9 @@ export async function nextSessionHistoryPosition(
 }
 
 /**
- * Record the actual input-token count of the most recent turn's final model
- * call, for the next turn's pre-read compaction trigger.
+ * Replace the input-token count for the most recent authoritative terminal
+ * response. Null means that response supplied no usable final-call count, so
+ * the next turn must not reuse an older response's value for compaction.
  */
 export async function setSessionLastInputTokensForTurnAttempt(
   db: Database,
@@ -22292,7 +22293,7 @@ export async function setSessionLastInputTokensForTurnAttempt(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
-    lastInputTokens: number;
+    lastInputTokens: number | null;
   },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {

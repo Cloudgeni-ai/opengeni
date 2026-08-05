@@ -65,8 +65,10 @@ instruction or tool-schema growth. That anchor is accepted only when the usage
 revision belongs to the immediately preceding model request; a delayed signal
 is ignored rather than attached to newer input. At a later turn boundary, the
 attempt-fenced provider-reported `last_input_tokens` is the only durable
-automatic signal. Compaction or context clearing sets it to null until the
-first successful ordinary model response reports the new context. Local
+automatic signal. Every newer authoritative terminal response replaces it with
+that response's usable input count or null when the provider supplied none;
+compaction and context clearing also set it to null. A missing or invalid count
+never carries an older response's value forward. Local
 estimates remain limited to shaping a compaction request and describing the
 history-only before/after replacement; they never enter `last_input_tokens`.
 
