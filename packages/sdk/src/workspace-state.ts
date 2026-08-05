@@ -22,6 +22,12 @@ export type WorkspaceStateSourceKindCounts = {
   other: number;
 };
 
+export type WorkspaceStateDocumentAuthorityKindCounts = {
+  organization: number;
+  workspace: number;
+  personal: number;
+};
+
 export type WorkspaceStateMemoryStatusCounts = {
   proposed: number;
   approved: number;
@@ -167,6 +173,13 @@ export type WorkspaceStateResponse = {
     };
     runtimeComposition: { status: "not_implemented" };
   };
+  preferences: {
+    authority: "preference_registry_preferences";
+    activeDescriptorCount: number;
+    activeDescriptorHash: string;
+    scopeCounts: { organization: number; workspace: number; user: number };
+    truncated: boolean;
+  };
   knowledge:
     | {
         availability: "unavailable";
@@ -188,6 +201,7 @@ export type WorkspaceStateResponse = {
         inspectedVisibleDocumentCount: number;
         documentStatusCounts: WorkspaceStateDocumentStatusCounts;
         sourceKindCounts: WorkspaceStateSourceKindCounts;
+        authorityKindCounts: WorkspaceStateDocumentAuthorityKindCounts;
         topics: Array<{ name: string; documentCount: number }>;
         topicsTruncated: boolean;
         latestDocumentUpdatedAt: string | null;
@@ -209,4 +223,22 @@ export type WorkspaceStateResponse = {
           relatedCount: number | null;
         }>;
       };
+};
+
+export type WorkspaceStateExportOmission =
+  | "hidden_platform_prompts"
+  | "policy_bodies"
+  | "preference_content"
+  | "document_content_and_private_metadata"
+  | "memory_content_and_provenance"
+  | "secret_values_and_credentials"
+  | "session_messages_and_tool_outputs";
+
+export type WorkspaceStateExportResponse = {
+  kind: "opengeni.workspace_state.sanitized_export";
+  schemaVersion: 1;
+  generatedAt: string;
+  stateSha256: string;
+  omissions: WorkspaceStateExportOmission[];
+  state: WorkspaceStateResponse;
 };

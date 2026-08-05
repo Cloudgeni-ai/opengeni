@@ -54,6 +54,7 @@ function NorthstarApp() {
             : "northstar grid h-dvh min-w-[980px] grid-cols-[320px_minmax(0,1fr)] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
         }
         data-agent-enabled={agentEnabled}
+        data-og-density="compact"
         data-og-theme="light"
       >
         <SupportInbox

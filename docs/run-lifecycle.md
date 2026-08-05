@@ -271,18 +271,30 @@ symptoms, never by counts**: the no-progress detector and budget exhaustion are
 the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
-Recoverable conditions end a turn gracefully (idle the session, keep the
-context) instead of failing it, so a long run survives them: hitting the
-model-call cap (if one is configured), provider rate-limit backpressure,
-escaped MCP request timeouts, and budget/credit exhaustion. With an active
-goal, provider/MCP backpressure resumes after a pacing delay; without one, the
-session idles until the next user message (a long-lived session between goals
-must not go terminal because an external service had a bad minute). For an MCP
-timeout that escapes after a successful tool output, conversation truth is
-checkpointed before the turn settles and the continuation is a new follow-up —
-the completed tool call/full turn is never blindly replayed. Budget/credit
-exhaustion likewise idles the turn rather than failing the session, so a top-up
-lets the same session continue.
+Recoverable conditions preserve context instead of failing the session, so a
+long run survives them. Retryable provider connectivity, 5xx failures, and
+secret-safely classified required-MCP connectivity failures resume the same
+accepted turn after a pacing delay. The MCP classifier retains only an
+allowlisted timeout/connectivity marker; raw transport messages, URLs, response
+bodies, and unknown provider codes never cross the runtime boundary. HTTP client
+failures remain authoritative and terminal. Hitting an explicitly configured
+model-call cap and budget/credit exhaustion ends the current turn gracefully;
+an active goal may create a later continuation, while an otherwise idle session
+waits for the next user message. For an MCP timeout that escapes after a
+successful tool output, conversation truth is checkpointed before the turn
+settles and the continuation is a new follow-up — the completed tool call/full
+turn is never blindly replayed. Budget/credit exhaustion likewise idles the turn
+rather than failing the session, so a top-up lets the same session continue.
+
+Retryable provider connectivity and 5xx failures recover the same accepted turn
+after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
+turn's durable provider-recovery count rather than unrelated execution attempts.
+An explicit provider retry hint is a lower bound. Rate limits use the provider's
+`Retry-After` when present and otherwise wait 60 s; other retryable classes keep
+their existing pacing. Every Steer commits a control wake revision, including
+when the recovering turn has no live attempt. A later coalesced Send cannot
+downgrade it to an ordinary queue signal, so the workflow interrupts the hold
+and processes the new direction immediately.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. With workspace-local leasing enabled, the worker atomically selects and
@@ -448,6 +460,11 @@ logical turn `recovering`; Steer closes it as `superseded`, makes the steered
 human prompt first, and does not revive the old turn. A missing or already
 closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
+If provider failure races with an accepted exact-attempt Pause or Steer, that
+control request owns the attempt: recovery returns stale and the normal
+settlement/quiescence path completes the transition. The workspace-control lock
+also orders the opposite race safely—if recovery commits first, the subsequent
+Steer immediately supersedes the now-ownerless recovering turn.
 Terminal Cancel uses the same exact-attempt interruption fence but settles the
 live turn as `cancelled`, marks the selected session and every existing
 descendant terminal, and drains their queued/non-running work in the same
@@ -464,6 +481,11 @@ cancelled descendants do not notify parents inside the same terminal subtree.
 Only physical attempt quiescence can clear the stopping projection.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
+Wake repair treats only an undelivered control revision, an actionable
+interruption, or a settled interruption whose exact attempt still lacks its
+quiescence receipt as control work. A fully quiesced historical interruption is
+audit evidence and cannot upgrade a later ordinary queue wake to
+`sessionControl`.
 For Agent Steer, accepting that signal is not an admission acknowledgement: if
 effective control is active while the newest `agent_steer_instruction` remains
 pending, the delivery path leaves its coalesced workflow-wake revision
@@ -505,7 +527,10 @@ physical receipt remains pending, `effectiveControl.settlement` stays typed as
 Hosted POSIX process cancellation still validates the exact PID, process group,
 and randomized command token before signalling; it reads those facts through
 `ps` when available and Linux `/proc` when a minimal image omits procps. Missing
-or malformed identity remains fail-closed.
+or malformed identity remains fail-closed. An explicit `tty:false` command keeps
+pipe-mode stdin/stdout/stderr and never receives terminal control bytes during
+cancellation; the same marker-bound process-group TERM/KILL proof remains
+authoritative. Omitting `tty` preserves the existing interactive default.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -529,19 +554,28 @@ admission authority. NATS publish happens only after the transaction and is
 best-effort live fanout; a NATS failure cannot trigger proof recovery or undo a
 committed receipt.
 
-While a settled interruption lacks that receipt, `peekSessionWork` returns a
-durable `cancellation-wait` and every claim path remains `control-pending`. The
-workflow waits up to five seconds for a wake and may then close without running
-another turn activity; a proof accepted at that timeout boundary is persisted
-before close. Once the receipt commits, its coalescing outbox wake uses
+Settling or stale-rejecting an interruption atomically commits its own durable
+control wake. While the receipt is absent, wake acknowledgement remains pending,
+`peekSessionWork` returns `cancellation-wait`, and every claim path remains
+`control-pending` from the interruption ledger alone—queue presentation metadata
+is never admission authority. The workflow waits up to five seconds for a wake
+and may then close without running another turn activity; the outbox continues
+bounded redelivery until the exact activity disappears or supplies its proof. A
+proof accepted at that timeout boundary is persisted before close. Once the
+receipt commits, its coalescing outbox wake uses
 `signalWithStart` on the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no
 quiescence scanner, inferred timeout, polling loop, synthetic user message,
-prompt/history/effect replay, or duplicate visible queue row. Queue telemetry
-follows the latest session attempt only: `stoppingPreviousAttempt` can
-truthfully be `true` with an empty human/API queue (internal Agent Steer),
-ignores replacement metadata corruption/withdrawal, and is not contaminated by
-an older attempt after a newer one exists.
+prompt/history/effect replay, or duplicate visible queue row. Admission searches
+all closed attempts for a settled or stale-rejected interruption that still
+lacks its receipt; a newer recovery generation cannot hide the exact predecessor
+that a queued Steer is waiting for. Reconciliation still requires the bound
+Temporal activity to be absent, heartbeat-expired, or attached to an exact
+workflow run that Temporal reports as missing, plus no open workspace writers
+or retained processes—elapsed time alone is never proof. Queue telemetry follows
+the latest live interruption and any exact predecessor referenced by a queued
+human/API Steer, so `stoppingPreviousAttempt` remains truthful without allowing
+unrelated historical attempts to contaminate current UI.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
@@ -907,10 +941,21 @@ strips provider item ids from every model-call input by default
 self-contained and reasoning continuity does not hinge on provider storage.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
-the same-credential active reasoning/compaction rows and the current turn's
-latest frozen RunState as provider-invalid. Their durable rows, summaries,
-messages, provenance, and timeline truth remain intact. Recovery then reclaims
-the same logical turn with a new attempt and omits or neutralizes only the
-rejected provider-bound identity. A generic 400, a different provider error, or
-a rejection that invalidates no matching artifact is terminal rather than an
-equivalent retry loop.
+the exact active reasoning/compaction row IDs and the current turn's latest
+RunState receipt containing opaque artifacts that participated in the rejected
+request as provider-invalid.
+Their durable rows, readable content, provenance, and timeline truth remain
+intact. Recovery then reclaims the same logical turn with a new attempt and
+builds one temporary input view that omits or neutralizes only that rejected
+identity; an unusable remote-compaction blob is omitted because no portable
+plaintext exists. Credential identity is irrelevant. A generic 400, a different
+provider error, or a rejection that invalidates none of that exact candidate set is terminal
+rather than an equivalent retry loop.
+
+Subscription, model, and provider-route changes never alter canonical history
+or a saved approval RunState. Responses consumes canonical history directly;
+Chat Completions receives one request-local transcript projection only for item
+types its wire protocol cannot represent. Historical `tool_search` and other
+tool call/output pairs are completed facts, not authorization to execute again.
+The projection is discarded after the request. Portable sessions may switch
+between supported providers; `remote_v2` sessions remain Codex-only.

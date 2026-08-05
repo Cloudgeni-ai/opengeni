@@ -12,7 +12,6 @@ import {
   getActiveSessionHistoryItems,
   getActiveSessionHistoryItemsPaged,
   getLatestRunState,
-  getLatestRunStateResumeMetadata,
   getSession,
   getSessionQueueSnapshot,
   getSessionTurn,
@@ -207,13 +206,6 @@ describe("standalone context compaction execution", () => {
       maximumPendingApprovalBytes: 100_000,
       maximumPendingApprovalItems: 10,
     };
-    await expect(
-      getLatestRunStateResumeMetadata(client.db, grant.workspaceId!, session.id),
-    ).resolves.toEqual({
-      turnId: null,
-      frozenCodexCredentialId: null,
-      providerArtifactInvalidatedAt: null,
-    });
     await expect(
       getLatestRunState(client.db, grant.workspaceId!, session.id, {
         ...defaults,

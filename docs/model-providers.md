@@ -170,6 +170,16 @@ credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted
 turn. Changing executable provider identity does.
 
+Credential identity is also not a conversation-history compatibility boundary.
+Changing the selected Codex subscription does not rewrite canonical history or
+a saved approval `RunState`. Responses providers receive canonical structured
+items directly. Chat Completions receives one request-local transcript view for
+canonical record types that its SDK converter cannot represent; that view is
+never persisted. Historical `tool_search` calls/outputs remain inert completed
+facts. A session frozen to `remote_v2` compaction admits only Codex models;
+portable sessions may use any supported route whose request adapter can express
+their canonical history.
+
 ## Canonicalization and compatibility
 
 `canonicalizeConfiguredModelId` accepts a canonical ID or an explicit alias.

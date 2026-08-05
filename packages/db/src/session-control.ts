@@ -7,7 +7,7 @@ import {
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
@@ -1494,12 +1494,13 @@ async function registerContinuableWakes(
       )
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
-        session_id, account_id, workspace_id, temporal_workflow_id, reason
+        session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
       )
-      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}
+      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}, 1
       from eligible
       on conflict (session_id) do update set
         wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+        control_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
         temporal_workflow_id = excluded.temporal_workflow_id,
         reason = excluded.reason,
         attempts = 0,
@@ -1611,12 +1612,13 @@ async function registerCancellationWakes(
         and session.id in (${sessionIds})
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
-        session_id, account_id, workspace_id, temporal_workflow_id, reason
+        session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
       )
-      select session_id, account_id, workspace_id, temporal_workflow_id, 'session_cancelled'
+      select session_id, account_id, workspace_id, temporal_workflow_id, 'session_cancelled', 1
       from eligible
       on conflict (session_id) do update set
         wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+        control_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
         temporal_workflow_id = excluded.temporal_workflow_id,
         reason = excluded.reason,
         attempts = 0,
@@ -1641,6 +1643,7 @@ export async function registerSessionWorkflowWakeInTransaction(
     sessionId: string;
     temporalWorkflowId: string;
     reason: string;
+    controlRequested?: boolean;
   },
 ): Promise<number> {
   const [row] = await db
@@ -1650,6 +1653,7 @@ export async function registerSessionWorkflowWakeInTransaction(
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       temporalWorkflowId: input.temporalWorkflowId,
+      controlRevision: input.controlRequested ? 1 : 0,
       reason: input.reason,
     })
     .onConflictDoUpdate({
@@ -1657,6 +1661,9 @@ export async function registerSessionWorkflowWakeInTransaction(
       set: {
         temporalWorkflowId: input.temporalWorkflowId,
         wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
+        controlRevision: input.controlRequested
+          ? sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`
+          : sql`${schema.sessionWorkflowWakeOutbox.controlRevision}`,
         reason: input.reason,
         attempts: 0,
         nextAttemptAt: new Date(),

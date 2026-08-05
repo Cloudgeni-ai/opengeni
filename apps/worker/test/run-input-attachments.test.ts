@@ -371,15 +371,17 @@ describe("turnInput attachment projection", () => {
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
     const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
       {
+        id: "00000000-0000-4000-8000-000000000054",
+        position: 0,
         item: storedUser,
-        producerCodexCredentialId: null,
+        providerArtifactInvalidatedAt: null,
       },
     ]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
       prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
         preparedInput = input;
-        return { input: [] };
+        return { input: [], persistedHistoryCount: 1 };
       },
     } as unknown as OpenGeniRuntime;
 
@@ -400,9 +402,9 @@ describe("turnInput attachment projection", () => {
           },
           occurredAt: "2026-07-19T00:00:00.000Z",
         },
-        { currentCodexCredentialId: null },
         {
           turnId: "00000000-0000-4000-8000-000000000053",
+          providerApi: "responses",
           projectModelHistory: createModelHistoryAttachmentProjector(
             {} as Database,
             image.workspaceId,
@@ -440,6 +442,86 @@ describe("turnInput attachment projection", () => {
     }
   });
 
+  test("system-update turns project durable attachment refs before model replay", async () => {
+    const imageBytes = new TextEncoder().encode("image");
+    const image = {
+      ...file("00000000-0000-4000-8000-000000000054", "image/png", 5, "update.png"),
+      sha256: sha256(imageBytes),
+    };
+    const storedUser = {
+      ...user("inspect the update"),
+      [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: image.id }],
+    };
+    let preparedInput: AgentSegmentInput | undefined;
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([
+      {
+        id: "00000000-0000-4000-8000-000000000055",
+        deliveredHistoryItemId: "00000000-0000-4000-8000-000000000056",
+      } as never,
+    ]);
+    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
+      {
+        id: "00000000-0000-4000-8000-000000000056",
+        position: 0,
+        item: storedUser,
+        providerArtifactInvalidatedAt: null,
+      },
+    ]);
+    const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image]);
+    const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
+    const runtime = {
+      prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
+        preparedInput = input;
+        return { input: input.historyItems ?? [], persistedHistoryCount: 1 };
+      },
+    } as unknown as OpenGeniRuntime;
+
+    try {
+      await turnInput(
+        {} as Database,
+        runtime,
+        {},
+        {
+          id: "00000000-0000-4000-8000-000000000057",
+          workspaceId: image.workspaceId,
+          sessionId: "00000000-0000-4000-8000-000000000058",
+          sequence: 2,
+          type: "system.update.delivered",
+          payload: {},
+          occurredAt: "2026-08-04T00:00:00.000Z",
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000059",
+          providerApi: "responses",
+          projectModelHistory: createModelHistoryAttachmentProjector(
+            {} as Database,
+            image.workspaceId,
+            { supportsImageInput: true, inputFileMediaTypes: [] },
+            async () => imageBytes,
+          ),
+        },
+      );
+
+      expect(preparedInput?.historyItems).toEqual([
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "inspect the update" },
+            { type: "input_image", image: "data:image/png;base64,aW1hZ2U=" },
+          ],
+        },
+      ]);
+      expect(getFiles).toHaveBeenCalledTimes(1);
+      expect(storedUser[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: image.id }]);
+    } finally {
+      listUpdates.mockRestore();
+      getHistory.mockRestore();
+      getFiles.mockRestore();
+      getEnvelope.mockRestore();
+    }
+  });
+
   test("uses only canonical history and recovery context after realtime", async () => {
     const workspaceId = "00000000-0000-4000-8000-000000000060";
     const sessionId = "00000000-0000-4000-8000-000000000061";
@@ -451,7 +533,12 @@ describe("turnInput attachment projection", () => {
       async () => [],
     );
     const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
-      { position: 0, item: storedUser, producerCodexCredentialId: null },
+      {
+        id: "00000000-0000-4000-8000-000000000064",
+        position: 0,
+        item: storedUser,
+        providerArtifactInvalidatedAt: null,
+      },
     ]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
@@ -472,22 +559,15 @@ describe("turnInput attachment projection", () => {
     };
 
     try {
-      await turnInput(
-        {} as Database,
-        runtime,
-        {},
-        trigger,
-        { currentCodexCredentialId: null },
-        { turnId: projectedTurnId, recovering: true },
-      );
-      await turnInput(
-        {} as Database,
-        runtime,
-        {},
-        trigger,
-        { currentCodexCredentialId: null },
-        { turnId: laterTurnId },
-      );
+      await turnInput({} as Database, runtime, {}, trigger, {
+        turnId: projectedTurnId,
+        recovering: true,
+        providerApi: "responses",
+      });
+      await turnInput({} as Database, runtime, {}, trigger, {
+        turnId: laterTurnId,
+        providerApi: "responses",
+      });
 
       const recoveryInput = modelInputs[0] as Array<Record<string, unknown>>;
       expect(recoveryInput[0]).toEqual(storedUser);

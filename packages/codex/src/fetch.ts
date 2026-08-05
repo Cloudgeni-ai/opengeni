@@ -13,6 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
+import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
@@ -489,6 +490,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       // summarizer) still gets a single JSON Response back.
       let callerWantsStream = true;
       let model: string | undefined;
+      let requestOpaqueArtifacts: string[] = [];
       const nextInit: RequestInit = { ...init, headers };
       if (typeof init?.body === "string") {
         try {
@@ -497,10 +499,12 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           const normalized = normalizeCodexRequestBody(parsed, ctx.resolveModel);
           model = typeof normalized.model === "string" ? normalized.model : undefined;
           nextInit.body = JSON.stringify(normalized);
+          requestOpaqueArtifacts = opaqueProviderArtifactFingerprints(normalized.input);
         } catch {
           /* leave unparseable bodies untouched (already copied from init) */
         }
       }
+      ctx.onRequestOpaqueArtifacts?.({ requestId, fingerprints: requestOpaqueArtifacts });
       headers.set(
         "Idempotency-Key",
         authenticationAttempt === 0 ? requestId : `${requestId}:auth-${authenticationAttempt}`,

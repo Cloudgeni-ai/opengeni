@@ -13,6 +13,7 @@ const testFiles =
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
         "./test/e2e/timeline-scroll.browser.e2e.ts",
+        "./test/e2e/user-message-disclosure.browser.e2e.ts",
         "./test/e2e/workbench.browser.e2e.ts",
       ];
 

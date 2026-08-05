@@ -50,6 +50,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
   return ClientModel.parse({
     id: model.id,
     label: model.label,
+    ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
     ...publicProvider,
     source,
     api: model.api,

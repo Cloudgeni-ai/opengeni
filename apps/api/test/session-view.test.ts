@@ -205,6 +205,7 @@ function sessionFixture(overrides: Partial<Session> = {}): Session {
     sandboxGroupId: SESSION,
     activeSandboxId: null,
     activeEpoch: 0,
+    workingDir: null,
     variableSetId: null,
     environmentId: null,
     rigId: null,

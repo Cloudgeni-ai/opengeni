@@ -947,7 +947,10 @@ describe("attempt-fenced Agent session commands", () => {
       temporalWorkflowId: `session-${target.id}`,
     });
     const receiptWake = await wakeRow(grant.workspaceId!, target.id);
-    expect(receiptWake!.wakeRevision).toBe(steeredWakeRevision + 1);
+    expect(receiptWake).toMatchObject({
+      wakeRevision: steeredWakeRevision + 2,
+      controlRevision: steeredWakeRevision + 1,
+    });
     expect(
       await markSessionWorkflowWakeDelivered(client.db, {
         accountId: grant.accountId,

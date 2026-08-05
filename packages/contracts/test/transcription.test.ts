@@ -227,6 +227,18 @@ describe("native voice input contracts", () => {
     expect(capability.maxDurationSeconds).toBe(60);
     expect(
       ClientVoiceInputConfig.safeParse({
+        ...capability,
+        maxDurationSeconds: 601,
+      }).success,
+    ).toBe(false);
+    expect(
+      ClientVoiceInputConfig.safeParse({
+        ...capability,
+        maxSizeBytes: 25 * 1024 * 1024 + 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      ClientVoiceInputConfig.safeParse({
         available: true,
         maxDurationSeconds: 60,
         maxSizeBytes: 1,

@@ -61,6 +61,7 @@ import { createObservability } from "@opengeni/observability";
 import {
   createProductionAgentRuntime,
   MaxTurnsExceededError,
+  safeMcpTransportError,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
@@ -1467,6 +1468,82 @@ describe("worker activities integration", () => {
     );
   });
 
+  test("a sanitized required-MCP connection refusal recovers the same turn", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "continue after required MCP reconnects",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      {
+        type: "user.message",
+        payload: { text: "continue after required MCP reconnects" },
+      },
+    ]);
+    const raw = new Error("MCP connect failed for https://private.example/token-value");
+    raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+      code: "ECONNREFUSED",
+    });
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () => {
+        throw safeMcpTransportError(raw);
+      },
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-required-mcp-connectivity",
+        workflowRunId: crypto.randomUUID(),
+      }),
+    ).resolves.toMatchObject({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        code: "mcp_transport_unavailable",
+        reason: "mcp_transport_unavailable",
+        retryable: true,
+        continueDelayMs: 2_000,
+      },
+    );
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("private.example");
+    expect(JSON.stringify(events)).not.toContain("127.0.0.1");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+  });
+
   test("records worker observability when setup fails before a turn starts", async () => {
     const grant = await testGrant(dbClient.db);
     const exported: Array<{ body: any }> = [];
@@ -1651,7 +1728,7 @@ describe("worker activities integration", () => {
       }),
       prepareInput: async (_agent, input) => {
         expect(input.kind).toBe("approval");
-        return { input: "approved", historyItemCount: 0 };
+        return { input: "approved", persistedHistoryCount: 0 };
       },
       runStream: async () => {
         const stored = await getSession(dbClient.db, grant.workspaceId, session.id);

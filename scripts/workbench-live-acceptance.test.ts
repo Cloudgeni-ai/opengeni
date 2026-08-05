@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
@@ -10,6 +13,7 @@ import {
   assertChangedFileLabelsContainRepositoryRoots,
   assertChangesDefaultVisible,
   assertRepositoryChangesVisible,
+  captureApiRegionalProbeEnvironment,
   controlCancellationDurationMs,
   fixturePrompt,
   isExpectedBrowserCancellation,
@@ -17,9 +21,12 @@ import {
   parseCookieHeader,
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
+  runCaptureApiRegionalProbe,
   sanitizeDiagnostic,
   selectTreeFile,
+  validateCaptureApiRegionalProbeResult,
   waitForSandboxLiveness,
+  type CaptureApiRegionalProbeRequest,
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
@@ -91,6 +98,7 @@ describe("workbench live acceptance preflight", () => {
     const directoryButton = { click: async () => clicks.push("directory") };
     const fileButton = { click: async () => clicks.push("file") };
     const directoryItem = {
+      isVisible: async () => true,
       getAttribute: async (name: string) => {
         expect(name).toBe("aria-expanded");
         return "true";
@@ -98,6 +106,7 @@ describe("workbench live acceptance preflight", () => {
       getByRole: () => ({ first: () => directoryButton }),
     };
     const fileItem = {
+      isVisible: async () => true,
       getByRole: () => fileButton,
     };
     const page = {
@@ -114,6 +123,332 @@ describe("workbench live acceptance preflight", () => {
     await selectTreeFile(page, "api", "base.txt");
 
     expect(clicks).toEqual(["file"]);
+  });
+
+  test("selects an off-screen virtualized file through the tree keyboard contract", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    const rows = ["api", "base.txt", "notes.txt", "server.ts"];
+    const directoryItem = {
+      isVisible: async () => true,
+      getAttribute: async () => "true",
+      getByRole: () => ({ first: () => ({ click: async () => {} }) }),
+    };
+    const fileItem = {
+      isVisible: async () => false,
+    };
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter({ hasText }: { hasText: string }) {
+            return { first: () => (hasText === "api" ? directoryItem : fileItem) };
+          },
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows[index] === "api" ? "true" : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(presses).toEqual(["Home", "ArrowDown", "ArrowDown", "ArrowDown", "Enter"]);
+  });
+
+  test("selects a file when its virtualized root directory is initially off-screen", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let expanded = false;
+    const rows = ["README.md", "api", "base.txt"];
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowRight" && rows[active] === "api") expanded = true;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "base.txt" ? "2" : "1";
+            if (name === "aria-expanded") {
+              return rows[index] === "api" && expanded ? "true" : "false";
+            }
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "base.txt");
+
+    expect(presses).toEqual(["Home", "ArrowDown", "ArrowRight", "ArrowDown", "Enter"]);
+  });
+
+  test("waits for a cold virtualized tree to expose an active descendant", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let hydrated = false;
+    let readinessWaits = 0;
+    const rows = ["api", "server.ts"];
+    const tree = {
+      waitFor: async (options: { state?: string; timeout?: number }) => {
+        expect(options).toEqual({ state: "visible", timeout: 20_000 });
+      },
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home" && hydrated) active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return hydrated ? `tree-item-${active}` : null;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[role="tree"][aria-activedescendant]:not([aria-activedescendant=""])') {
+          return {
+            first: () => ({
+              waitFor: async (options: { state?: string; timeout?: number }) => {
+                expect(options).toEqual({ state: "visible", timeout: 20_000 });
+                readinessWaits += 1;
+                hydrated = true;
+              },
+            }),
+          };
+        }
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows[index] === "api" ? "true" : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(readinessWaits).toBe(1);
+    expect(presses).toEqual(["Home", "Home", "ArrowDown", "Enter"]);
+  });
+
+  test("waits for an expanded lazy directory to finish hydrating its children", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let expanded = false;
+    let busy = false;
+    let loaded = false;
+    let hydrationWaits = 0;
+    const rows = () => (loaded ? ["api", "server.ts"] : ["api"]);
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowRight") {
+          expanded = true;
+          busy = true;
+        }
+        if (key === "ArrowDown") active = Math.min(active + 1, rows().length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[id="tree-item-0"][aria-expanded="true"]:not([aria-busy="true"])') {
+          return {
+            waitFor: async (options: { state?: string; timeout?: number }) => {
+              expect(options).toEqual({ state: "visible", timeout: 20_000 });
+              expect(expanded).toBe(true);
+              expect(busy).toBe(true);
+              hydrationWaits += 1;
+              busy = false;
+              loaded = true;
+            },
+          };
+        }
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows()[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows()[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows()[index] === "api" ? String(expanded) : null;
+            if (name === "aria-busy") return rows()[index] === "api" ? String(busy) : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows()[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(hydrationWaits).toBe(1);
+    expect(presses).toEqual(["Home", "ArrowRight", "ArrowDown", "Enter"]);
+  });
+
+  test("reports bounded tree observations when a target directory is absent", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    const rows = Array.from(
+      { length: 10 },
+      (_, index) => `root-${String(index).padStart(2, "0")}-${"x".repeat(120)}`,
+    );
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return "1";
+            if (name === "aria-expanded") return "false";
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    let failure: unknown;
+    try {
+      await selectTreeFile(page, "api", "server.ts");
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(
+      "file tree could not select api/server.ts: navigation stalled at the tree boundary",
+    );
+    expect((failure as Error).message).not.toContain("root-00");
+    expect((failure as Error).message).not.toContain("root-01");
+    expect((failure as Error).message).toContain('"label":"root-02-');
+    expect((failure as Error).message).toContain('"label":"root-09-');
+    expect((failure as Error).message).toContain('"level":1');
+    expect(presses).toEqual(["Home", ...Array.from({ length: 10 }, () => "ArrowDown")]);
+    expect((failure as Error).message.length).toBeLessThan(2_000);
   });
 
   test("accepts repository evidence from the compact changed-file picker", async () => {
@@ -205,10 +540,89 @@ describe("workbench live acceptance preflight", () => {
       "acceptance-001",
       "--model",
       "codex/model",
+      "--capture-api-region-probe-command",
+      "/tmp/capture-api-regional-probe.ts",
+      "--capture-api-region",
+      "northeurope",
+      "--capture-api-image",
+      `registry.example.com/opengeni-api:candidate-${"a".repeat(40)}@sha256:${"b".repeat(64)}`,
     ];
     expect(parseLiveAcceptanceArgs(base).repetitions).toBe(100);
     expect(() => parseLiveAcceptanceArgs([...base, "--repetitions", "99"])).toThrow(">= 100");
     expect(() => parseLiveAcceptanceArgs(base.with(1, "http://api.example.com"))).toThrow("HTTPS");
+  });
+
+  test("binds capture API samples to the exact regional deployment identity", () => {
+    const request = captureApiRegionalProbeRequest();
+    const result = captureApiRegionalProbeResult(request);
+    expect(validateCaptureApiRegionalProbeResult(result, request)).toEqual(result);
+    expect(result.captureTurnId).toBe(request.captureTurnId);
+    expect(() =>
+      validateCaptureApiRegionalProbeResult({ ...result, region: "westus" }, request),
+    ).toThrow("region mismatch");
+    expect(() =>
+      validateCaptureApiRegionalProbeResult(
+        { ...result, samplesMs: result.samplesMs.slice(1) },
+        request,
+      ),
+    ).toThrow("sample count mismatch");
+    expect(() =>
+      validateCaptureApiRegionalProbeResult({ ...result, extra: true }, request),
+    ).toThrow("fields are invalid");
+  });
+
+  test("passes the managed cookie only over probe stdin and redacts child failures", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "opengeni-regional-probe-"));
+    const success = resolve(directory, "success.ts");
+    const failure = resolve(directory, "failure.ts");
+    const request = captureApiRegionalProbeRequest();
+    try {
+      await writeFile(
+        success,
+        `const request = JSON.parse(await Bun.stdin.text());\n` +
+          `if (process.env.OPENGENI_ACCEPTANCE_SESSION_COOKIE) throw new Error("cookie leaked through environment");\n` +
+          `process.stdout.write(JSON.stringify({\n` +
+          `  schemaVersion: "opengeni/workbench-capture-api-regional-probe/v1",\n` +
+          `  apiOrigin: new URL(request.apiUrl).origin, environment: request.environment,\n` +
+          `  sourceSha: request.sourceSha, runId: request.runId, workspaceId: request.workspaceId,\n` +
+          `  sessionId: request.sessionId, captureRevision: request.captureRevision,\n` +
+          `  captureTurnId: request.captureTurnId, sampleCount: request.repetitions,\n` +
+          `  region: request.region, apiImage: request.apiImage, decodedBytes: 4096,\n` +
+          `  contentEncoding: "gzip", samplesMs: Array(request.repetitions).fill(12.5)\n` +
+          `}));\n`,
+      );
+      await writeFile(
+        failure,
+        `const request = JSON.parse(await Bun.stdin.text());\n` +
+          `console.error(request.cookieHeader);\nprocess.exit(7);\n`,
+      );
+
+      const result = await runCaptureApiRegionalProbe(success, request);
+      expect(result.sampleCount).toBe(request.repetitions);
+      expect(JSON.stringify(result)).not.toContain(request.cookieHeader);
+      await expect(runCaptureApiRegionalProbe(failure, request)).rejects.toThrow(
+        "exit code 7: [redacted]",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("strips every acceptance secret from the regional probe environment", () => {
+    expect(
+      captureApiRegionalProbeEnvironment({
+        PATH: "/usr/bin",
+        KUBECONFIG: "/tmp/kubeconfig",
+        OPENGENI_CAPTURE_API_PROBE_NAMESPACE: "opengeni",
+        OPENGENI_ACCEPTANCE_SESSION_COOKIE: "secret-cookie",
+        OPENGENI_ACCEPTANCE_PRODUCT_TOKEN: "secret-token",
+        UNDEFINED_VALUE: undefined,
+      }),
+    ).toEqual({
+      PATH: "/usr/bin",
+      KUBECONFIG: "/tmp/kubeconfig",
+      OPENGENI_CAPTURE_API_PROBE_NAMESPACE: "opengeni",
+    });
   });
 
   test("cookie parser preserves signed values and diagnostics strip URL credentials", () => {
@@ -550,4 +964,42 @@ function fixtureManifest(marker: string): WorkspaceCaptureManifest {
 
 function hash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function captureApiRegionalProbeRequest(): CaptureApiRegionalProbeRequest {
+  return {
+    schemaVersion: "opengeni/workbench-capture-api-regional-probe-request/v1",
+    apiUrl: "https://app.example.com",
+    environment: "production",
+    sourceSha: "a".repeat(40),
+    runId: "production-12345-1",
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    sessionId: "22222222-2222-4222-8222-222222222222",
+    captureRevision: 7,
+    captureTurnId: "33333333-3333-4333-8333-333333333333",
+    repetitions: 100,
+    region: "northeurope",
+    apiImage: `registry.example.com/opengeni-api:candidate-${"a".repeat(40)}@sha256:${"b".repeat(64)}`,
+    cookieHeader: "better-auth.session_token=secret-cookie",
+  };
+}
+
+function captureApiRegionalProbeResult(request: CaptureApiRegionalProbeRequest) {
+  return {
+    schemaVersion: "opengeni/workbench-capture-api-regional-probe/v1" as const,
+    apiOrigin: new URL(request.apiUrl).origin,
+    environment: request.environment,
+    sourceSha: request.sourceSha,
+    runId: request.runId,
+    workspaceId: request.workspaceId,
+    sessionId: request.sessionId,
+    captureRevision: request.captureRevision,
+    captureTurnId: request.captureTurnId,
+    sampleCount: request.repetitions,
+    region: request.region,
+    apiImage: request.apiImage,
+    decodedBytes: 4096,
+    contentEncoding: "gzip" as const,
+    samplesMs: Array(request.repetitions).fill(12.5),
+  };
 }

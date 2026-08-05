@@ -21,12 +21,18 @@ import {
   oauthConnectionOwnership,
   oauthConnectionRef,
   oauthResumeAction,
+  preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
-import type { CapabilityCatalogItem, CapabilityKind, ConnectionMetadata } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  CapabilityKind,
+  ConnectionMetadata,
+  SocialConnection,
+} from "@/types";
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   return {
@@ -83,6 +89,27 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     enabledReason: null,
     connectionRef: null,
     metadata: {},
+    ...overrides,
+  };
+}
+
+function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConnection {
+  return {
+    id: "11111111-1111-4111-8111-111111111111",
+    accountId: "22222222-2222-4222-8222-222222222222",
+    workspaceId: "33333333-3333-4333-8333-333333333333",
+    ownership: "workspace",
+    provider: "x",
+    accountHandle: "opengeni",
+    accountName: "OpenGeni",
+    externalAccountId: "x-account-1",
+    status: "connected",
+    scopes: ["tweet.read"],
+    credentialRef: null,
+    tokenMetadata: {},
+    metadata: {},
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
     ...overrides,
   };
 }
@@ -182,6 +209,17 @@ describe("curated skill provenance", () => {
 });
 
 describe("capabilityConnectPlan", () => {
+  test("first-party social APIs use their dedicated OAuth connector", () => {
+    const x = item({
+      id: "api:x",
+      kind: "api",
+      surfaceType: "first_party_social",
+      metadata: { provider: "x" },
+    });
+    expect(capabilityConnectPlan(x)).toEqual({ mode: "social_oauth", provider: "x" });
+    expect(capabilityAuthHint(x)).toBe("OAuth");
+  });
+
   test("non-MCP kinds just enable", () => {
     expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({ mode: "enable" });
     expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({
@@ -275,6 +313,18 @@ describe("capabilityConnectPlan", () => {
     );
     if (plan.mode !== "oauth") throw new Error("expected oauth");
     expect(plan.providerDomain).toBe("mcp.notion.com");
+  });
+});
+
+describe("first-party social capability state", () => {
+  test("prefers a usable connection", () => {
+    const disabled = socialConnection({
+      id: "11111111-1111-4111-8111-111111111112",
+      status: "disabled",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+    });
+    const connected = socialConnection({ updatedAt: "2026-08-02T00:00:00.000Z" });
+    expect(preferredSocialConnection([disabled, connected], "x")?.status).toBe("connected");
   });
 });
 

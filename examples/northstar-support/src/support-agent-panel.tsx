@@ -6,23 +6,28 @@ import {
   ShieldCheckIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Markdown,
   MessageTimeline,
+  ModelPolicyPicker,
   SessionStatus,
   useComposer,
   useFileAttachments,
   useSession,
   useSessionEvents,
+  useWorkspaceModelCatalog,
   type ComposerState,
   type UseFileAttachmentsResult,
 } from "@opengeni/react";
 import * as Composer from "@opengeni/react/composer";
-import type { EffectiveSessionControl } from "@opengeni/sdk";
+import { SessionRealtimeControl } from "@opengeni/react/realtime";
+import type { EffectiveSessionControl, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import type { DemoHealth, SupportCase } from "./types";
 import { createDemoSession } from "./use-support-demo";
 import { supportToolRegistry } from "./support-tool-renderers";
+
+const DEFAULT_CODEX_MODEL = "codex/gpt-5.6-luna";
 
 function demoPrompt(supportCase: SupportCase): string {
   const { ticket, customer } = supportCase;
@@ -52,12 +57,57 @@ export function SupportAgentPanel({
 }) {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<Error | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
+  const modelCatalog = useWorkspaceModelCatalog({
+    workspaceId: health?.workspaceId ?? null,
+    pollIntervalMs: 30_000,
+  });
+  const codexModelRows = useMemo(
+    () =>
+      modelCatalog.rows
+        .filter((row) => row.billingClass === "codex_subscription")
+        .map((row) => ({
+          ...row,
+          // Keep the SDK's catalog label in the menu data, but use its compact
+          // label for this narrow embedded composer surface.
+          label: row.shortLabel ?? row.label,
+        })),
+    [modelCatalog.rows],
+  );
+  const selectableModelIds = useMemo(
+    () => codexModelRows.filter((row) => row.selectable).map((row) => row.id),
+    [codexModelRows],
+  );
+  const defaultSelectableModel = useMemo(() => {
+    if (selectableModelIds.includes(DEFAULT_CODEX_MODEL)) {
+      return DEFAULT_CODEX_MODEL;
+    }
+    if (modelCatalog.defaultModel && selectableModelIds.includes(modelCatalog.defaultModel)) {
+      return modelCatalog.defaultModel;
+    }
+    return selectableModelIds[0] ?? null;
+  }, [modelCatalog.defaultModel, selectableModelIds]);
+
+  useEffect(() => {
+    if (!selectedModel || !selectableModelIds.includes(selectedModel)) {
+      setSelectedModel(defaultSelectableModel);
+    }
+  }, [defaultSelectableModel, selectableModelIds, selectedModel]);
 
   async function startDemo() {
+    if (!selectedModel) {
+      setStartError(new Error("Choose an available model before starting the agent."));
+      return;
+    }
     setStarting(true);
     setStartError(null);
     try {
-      const session = await createDemoSession(supportCase.ticket.id, demoPrompt(supportCase));
+      const session = await createDemoSession(supportCase.ticket.id, demoPrompt(supportCase), {
+        model: selectedModel,
+        reasoningEffort,
+      });
       onSessionCreated(session.id);
     } catch (cause) {
       setStartError(cause instanceof Error ? cause : new Error(String(cause)));
@@ -113,7 +163,16 @@ export function SupportAgentPanel({
       </header>
 
       {sessionId ? (
-        <LiveAgentSession sessionId={sessionId} expanded={expanded} />
+        <LiveAgentSession
+          sessionId={sessionId}
+          modelCatalog={modelCatalog}
+          selectedModel={selectedModel}
+          onModelChange={setSelectedModel}
+          reasoningEffort={reasoningEffort}
+          onReasoningEffortChange={setReasoningEffort}
+          latencyMode={latencyMode}
+          onLatencyModeChange={setLatencyMode}
+        />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col justify-between overflow-y-auto bg-[#f7f7f7] px-7 py-7">
           <div>
@@ -170,6 +229,29 @@ export function SupportAgentPanel({
                 <span>Act</span>
               </div>
             </div>
+
+            <div className="mt-5 rounded-xl border border-[#dedce8] bg-white px-4 py-3.5">
+              <p className="text-[11px] font-semibold text-[#514d59]">Start with Codex Luna</p>
+              <p className="mt-1 text-[10px] leading-4 text-[#96929c]">
+                Luna is the default first run. Once the session is live, switch between all
+                available Codex models directly from the composer.
+              </p>
+              {modelCatalog.loading ? (
+                <p className="mt-2 text-[10px] text-[#96929c]">Loading workspace models…</p>
+              ) : modelCatalog.error ? (
+                <p className="mt-2 text-[10px] text-[#b44835]">
+                  Could not load the workspace model catalog.
+                </p>
+              ) : selectableModelIds.length === 0 ? (
+                <p className="mt-2 text-[10px] text-[#b44835]">
+                  No model is currently available for this workspace.
+                </p>
+              ) : (
+                <p className="mt-2 text-[10px] text-[#96929c]">
+                  Reasoning: medium · model choices come from OpenGeni.
+                </p>
+              )}
+            </div>
           </div>
 
           <div className="sticky bottom-0 z-10 mt-8 border-t border-[#dedde2] bg-[#f7f7f7] pb-1 pt-4">
@@ -181,7 +263,13 @@ export function SupportAgentPanel({
             <button
               type="button"
               onClick={() => void startDemo()}
-              disabled={starting || !health?.ok}
+              disabled={
+                starting ||
+                !health?.ok ||
+                modelCatalog.loading ||
+                selectableModelIds.length === 0 ||
+                !selectedModel
+              }
               className="group flex w-full items-center justify-between rounded-lg bg-[#5f52c5] px-4 py-3 text-left text-[12px] font-semibold text-white transition hover:bg-[#5448b2] disabled:cursor-not-allowed disabled:opacity-45"
             >
               <span className="flex items-center gap-2.5">
@@ -195,7 +283,7 @@ export function SupportAgentPanel({
               <ArrowRightIcon className="size-4 transition-transform group-hover:translate-x-0.5" />
             </button>
             <p className="mt-3.5 text-center text-[10px] text-[#9792a1]">
-              Authenticated session · MCP tools · live product updates
+              Authenticated session · model picker · MCP tools · live product updates
             </p>
           </div>
         </div>
@@ -224,13 +312,45 @@ function McpIndicator({ health }: { health: DemoHealth | null }) {
   );
 }
 
-function LiveAgentSession({ sessionId, expanded }: { sessionId: string; expanded: boolean }) {
+function LiveAgentSession({
+  sessionId,
+  modelCatalog,
+  selectedModel,
+  onModelChange,
+  reasoningEffort,
+  onReasoningEffortChange,
+  latencyMode,
+  onLatencyModeChange,
+}: {
+  sessionId: string;
+  modelCatalog: ReturnType<typeof useWorkspaceModelCatalog>;
+  selectedModel: string | null;
+  onModelChange: (modelId: string) => void;
+  reasoningEffort: ReasoningEffort;
+  onReasoningEffortChange: (effort: ReasoningEffort) => void;
+  latencyMode: LatencyMode;
+  onLatencyModeChange: (mode: LatencyMode) => void;
+}) {
   const { session } = useSession(sessionId, { pollIntervalMs: 4_000 });
-  const { timeline, sessionStatus, connectionState, hasOlder, loadingOlder, loadOlder, error } =
-    useSessionEvents(sessionId);
+  const {
+    events,
+    timeline,
+    sessionStatus,
+    initialLoading,
+    connectionState,
+    hasOlder,
+    loadingOlder,
+    loadOlder,
+    error,
+  } = useSessionEvents(sessionId);
   const attachments = useFileAttachments();
   const composer = useComposer(sessionId, {
-    sendExtras: () => ({ resources: attachments.readyResources }),
+    sendExtras: () => ({
+      resources: attachments.readyResources,
+      ...(selectedModel ? { model: selectedModel } : {}),
+      reasoningEffort,
+      latencyMode,
+    }),
     sendBlocked: () => attachments.hasUnresolved,
     onSent: (_text, input) =>
       attachments.removeReadyFiles(
@@ -280,8 +400,18 @@ function LiveAgentSession({ sessionId, expanded }: { sessionId: string; expanded
         <NorthstarComposer
           composer={composer}
           effectiveControl={session?.effectiveControl}
+          events={events}
+          eventsReady={!initialLoading}
+          sessionId={sessionId}
+          sessionStatus={status}
           attachments={attachments}
-          expanded={expanded}
+          modelCatalog={modelCatalog}
+          selectedModel={selectedModel}
+          onModelChange={onModelChange}
+          reasoningEffort={reasoningEffort}
+          onReasoningEffortChange={onReasoningEffortChange}
+          latencyMode={latencyMode}
+          onLatencyModeChange={onLatencyModeChange}
         />
       </div>
     </div>
@@ -291,14 +421,44 @@ function LiveAgentSession({ sessionId, expanded }: { sessionId: string; expanded
 function NorthstarComposer({
   composer,
   effectiveControl,
+  events,
+  eventsReady,
+  sessionId,
+  sessionStatus,
   attachments,
-  expanded,
+  modelCatalog,
+  selectedModel,
+  onModelChange,
+  reasoningEffort,
+  onReasoningEffortChange,
+  latencyMode,
+  onLatencyModeChange,
 }: {
   composer: ComposerState;
   effectiveControl: EffectiveSessionControl | null | undefined;
+  events: Parameters<typeof SessionRealtimeControl>[0]["events"];
+  eventsReady: boolean;
+  sessionId: string;
+  sessionStatus: Parameters<typeof SessionRealtimeControl>[0]["sessionStatus"] | null;
   attachments: UseFileAttachmentsResult;
-  expanded: boolean;
+  modelCatalog: ReturnType<typeof useWorkspaceModelCatalog>;
+  selectedModel: string | null;
+  onModelChange: (modelId: string) => void;
+  reasoningEffort: ReasoningEffort;
+  onReasoningEffortChange: (effort: ReasoningEffort) => void;
+  latencyMode: LatencyMode;
+  onLatencyModeChange: (mode: LatencyMode) => void;
 }) {
+  const codexModelRows = useMemo(
+    () =>
+      modelCatalog.rows
+        .filter((row) => row.billingClass === "codex_subscription")
+        .map((row) => ({
+          ...row,
+          label: row.shortLabel ?? row.label,
+        })),
+    [modelCatalog.rows],
+  );
   const controller = Composer.useChatComposerController({
     delivery: composer,
     draft: composer,
@@ -315,23 +475,41 @@ function NorthstarComposer({
           <Composer.PausedState />
           <Composer.RestoredResources />
           <Composer.Attachments />
-          <Composer.Input
-            placeholder="Ask OpenGeni…"
-            className="min-h-[42px] px-3.5 pb-1 pt-2.5 !text-[13px] !leading-5"
-          />
+          <Composer.Input placeholder="Ask OpenGeni…" className="min-h-[42px] px-3.5 pb-1 pt-2.5" />
           {controller.confirmState ? (
             <Composer.Confirmation />
           ) : (
             <Composer.Footer className="items-center px-2.5 pb-2 pt-0.5">
               <Composer.Controls className="flex-nowrap gap-1">
                 <Composer.AttachButton className="size-7 rounded-lg pointer-coarse:size-10" />
-                <span className="min-w-0 flex-1 truncate px-1 text-[10px] text-og-fg-subtle">
-                  {expanded
-                    ? "Add context · Enter to send · Shift+Enter for a new line"
-                    : "Add context"}
-                </span>
+                <ModelPolicyPicker
+                  rows={codexModelRows}
+                  model={selectedModel ?? ""}
+                  effort={reasoningEffort}
+                  latencyMode={latencyMode}
+                  loading={modelCatalog.loading}
+                  error={modelCatalog.error?.message}
+                  sessionKey={sessionId}
+                  menuSide="top"
+                  onModelChange={onModelChange}
+                  onEffortChange={onReasoningEffortChange}
+                  onLatencyModeChange={onLatencyModeChange}
+                  className="max-w-[180px] rounded-lg bg-[#f6f4fc] px-1"
+                />
               </Composer.Controls>
               <Composer.Actions className="gap-1">
+                {sessionStatus && effectiveControl ? (
+                  <SessionRealtimeControl
+                    sessionId={sessionId}
+                    sessionStatus={sessionStatus}
+                    effectiveControl={effectiveControl}
+                    events={events}
+                    eventsReady={eventsReady}
+                    // The component resolves the workspace's live catalog itself;
+                    // fail closed until that authoritative response says voice is ready.
+                    codexConnected={false}
+                  />
+                ) : null}
                 <Composer.PauseButton className="size-7 rounded-lg pointer-coarse:size-10" />
                 <Composer.SendButton className="size-7 rounded-lg pointer-coarse:size-10" />
               </Composer.Actions>

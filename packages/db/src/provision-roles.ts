@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import type { RlsStrategy } from "./index";
+import type { RlsStrategy } from "./database";
 import {
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,

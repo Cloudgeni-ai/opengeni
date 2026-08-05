@@ -25,6 +25,9 @@ describe("document inventory bounds", () => {
     expect(inventorySource).toContain("count(*)::int");
     expect(inventorySource).toContain("count(distinct ${schema.documents.id})::int");
     expect(inventorySource).toContain("max(${schema.documents.updatedAt})");
+    expect(inventorySource).toContain("${schema.documents.authorityKind} = 'organization'");
+    expect(inventorySource).toContain("${schema.documents.authorityKind} = 'workspace'");
+    expect(inventorySource).toContain("${schema.documents.authorityKind} = 'personal'");
     expect(inventorySource).toContain(".limit(baseLimit)");
     expect(inventorySource).toContain(".limit(topicLimit + 1)");
     expect(

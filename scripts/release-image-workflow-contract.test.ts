@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -150,17 +151,21 @@ describe("release image workflow contract", () => {
     };
 
     expect(parsed.jobs["service-images"]?.needs).toBe("automation-admission");
+    expect(parsed.jobs["relay-image"]?.needs).toBe("automation-admission");
     expect(parsed.jobs["sandbox-image"]?.needs).toBe("automation-admission");
     expect(parsed.jobs.images?.name).toBe("Workload image builds");
     expect(parsed.jobs.images?.needs).toEqual([
       "automation-admission",
       "service-images",
+      "relay-image",
       "sandbox-image",
     ]);
+    expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["relay-image"]?.if);
+    expect(parsed.jobs["relay-image"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
     expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
     expect(parsed.jobs.images?.if).toBe(parsed.jobs["service-images"]?.if);
-    expect(images.match(/packages: write/g)).toHaveLength(2);
-    for (const jobName of ["service-images", "sandbox-image"]) {
+    expect(images.match(/packages: write/g)).toHaveLength(3);
+    for (const jobName of ["service-images", "relay-image", "sandbox-image"]) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
         registry: "ghcr.io",
@@ -170,26 +175,30 @@ describe("release image workflow contract", () => {
     }
     expect(images).toContain("Require every workload image build");
     expect(images).toContain("SERVICE_IMAGES_RESULT: ${{ needs.service-images.result }}");
+    expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
     const aggregate = parsed.jobs.images?.steps?.find(
       (step) => step.name === "Require every workload image build",
     );
     expect(aggregate?.env).toEqual({
       SERVICE_IMAGES_RESULT: "${{ needs.service-images.result }}",
+      RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
       SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
     });
-    const aggregateResult = (serviceResult: string, sandboxResult: string) =>
+    const aggregateResult = (serviceResult: string, relayResult: string, sandboxResult: string) =>
       Bun.spawnSync(["bash", "-c", aggregate?.run ?? "exit 1"], {
         env: {
           ...process.env,
           SERVICE_IMAGES_RESULT: serviceResult,
+          RELAY_IMAGE_RESULT: relayResult,
           SANDBOX_IMAGE_RESULT: sandboxResult,
         },
       }).exitCode;
-    expect(aggregateResult("success", "success")).toBe(0);
+    expect(aggregateResult("success", "success", "success")).toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      expect(aggregateResult(result, "success")).not.toBe(0);
-      expect(aggregateResult("success", result)).not.toBe(0);
+      expect(aggregateResult(result, "success", "success")).not.toBe(0);
+      expect(aggregateResult("success", result, "success")).not.toBe(0);
+      expect(aggregateResult("success", "success", result)).not.toBe(0);
     }
     expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
     expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
@@ -199,6 +208,7 @@ describe("release image workflow contract", () => {
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
     expect(images).toContain("API_DIGEST: ${{ needs.service-images.outputs.api_digest }}");
+    expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
     expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
     expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
@@ -383,6 +393,9 @@ describe("release image workflow contract", () => {
     expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');
     expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
     expect(publish).not.toContain('test "$(git rev-parse origin/main)" = "$SOURCE_SHA"');
+    expect(publish).toContain("else max_by(.id)");
+    expect(publish).toContain('.status == "completed" and .conclusion == "success"');
+    expect(publish).not.toContain("| length == 1");
     for (const required of [
       "Typecheck and unit tests",
       "Deployment artifacts",
@@ -493,9 +506,14 @@ ${parser}`,
 
   test("ordinary CI builds the same five physical image roles", async () => {
     const ci = await workflow("ci.yml");
+    const parsed = Bun.YAML.parse(ci) as { jobs: Record<string, { steps: Array<unknown> }> };
     const imagesJob = ci.slice(ci.indexOf("\n  service-images:\n"));
     const serviceImages = ci.slice(
       ci.indexOf("\n  service-images:\n"),
+      ci.indexOf("\n  relay-image:\n"),
+    );
+    const relayImage = ci.slice(
+      ci.indexOf("\n  relay-image:\n"),
       ci.indexOf("\n  sandbox-image:\n"),
     );
     const sandboxImage = ci.slice(ci.indexOf("\n  sandbox-image:\n"), ci.indexOf("\n  images:\n"));
@@ -512,7 +530,52 @@ ${parser}`,
     expect(imagesJob).toContain("docker/setup-qemu-action@");
     expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
     expect(serviceImages).not.toContain("docker/sandbox.Dockerfile");
+    expect(serviceImages).not.toContain("agent/crates/opengeni-relay/Dockerfile");
+    expect(relayImage).toContain("agent/crates/opengeni-relay/Dockerfile");
+    expect(relayImage).not.toMatch(/target: (?:api|worker|web)/);
+    expect(relayImage).not.toContain("docker/sandbox.Dockerfile");
     expect(sandboxImage).toContain("docker/sandbox.Dockerfile");
     expect(sandboxImage).not.toMatch(/target: (?:api|worker|web)/);
+
+    const imageSteps = ["service-images", "relay-image", "sandbox-image"].flatMap((jobName) =>
+      parsed.jobs[jobName]!.steps.filter(
+        (step): step is { name: string; uses: string } =>
+          typeof step === "object" &&
+          step !== null &&
+          "uses" in step &&
+          step.uses === "docker/build-push-action@v7.3.0",
+      ).map((step) => ({
+        jobName,
+        name: step.name,
+        fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
+      })),
+    );
+    expect(imageSteps).toEqual([
+      {
+        jobName: "service-images",
+        name: "Build API image",
+        fingerprint: "4f1bf9e5979e86bc78b8813e4c2ed834bd9e24781d8906a493be33d235113231",
+      },
+      {
+        jobName: "service-images",
+        name: "Build worker image",
+        fingerprint: "df6c0eea3a346c6ad9f71bb5545044a062179ffd9447553a1e21f467d85c65f4",
+      },
+      {
+        jobName: "service-images",
+        name: "Build web image",
+        fingerprint: "a535f3fae1f58cdd9d47273d2340c26d4e3c143c4e69c59f2de984fcfec37714",
+      },
+      {
+        jobName: "relay-image",
+        name: "Build relay image",
+        fingerprint: "1e26cd74190f9b806413e6943324c20a9da0e8f84dd42406555fca5b5c11c4f9",
+      },
+      {
+        jobName: "sandbox-image",
+        name: "Build headless sandbox image",
+        fingerprint: "6d1ce559070b6825ff5684da724e4c69baad72f6346ab3db04acb46f3cdccbff",
+      },
+    ]);
   });
 });

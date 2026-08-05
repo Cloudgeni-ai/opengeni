@@ -7,6 +7,7 @@ import {
 import {
   createSocialConnection,
   createSocialPost,
+  getSocialConnection,
   listSocialConnections,
   listSocialPosts,
   updateSocialConnectionCredential,
@@ -24,8 +25,15 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/social/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    return c.json(await listSocialConnections(db, workspaceId, boundedLimit(c.req.query("limit"))));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    return c.json(
+      await listSocialConnections(
+        db,
+        workspaceId,
+        boundedLimit(c.req.query("limit")),
+        grant.subjectId,
+      ),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/social/connections", async (c) => {
@@ -59,10 +67,16 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   // reconnecting via the OAuth flow revives it.
   app.delete("/v1/workspaces/:workspaceId/social/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const connectionId = c.req.param("connectionId");
+    const existing = await getSocialConnection(db, workspaceId, connectionId, grant.subjectId);
+    if (!existing) throw new HTTPException(404, { message: "social connection not found" });
+    if (existing.ownership === "workspace")
+      await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const connection = await updateSocialConnectionCredential(db, {
       workspaceId,
-      connectionId: c.req.param("connectionId"),
+      connectionId,
+      subjectId: existing.ownership === "personal" ? grant.subjectId : null,
       credentialEncrypted: null,
       status: "disabled",
       tokenMetadata: {},
@@ -78,7 +92,6 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   // callback is unauthenticated (browser redirect) but bound by signed state.
   app.post("/v1/workspaces/:workspaceId/social/oauth/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const parsed = SocialOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -86,6 +99,12 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const payload = parsed.data;
+    const grant = await requireAccessGrant(
+      c,
+      deps,
+      workspaceId,
+      payload.ownership === "workspace" ? "workspace:admin" : "workspace:read",
+    );
     const result = await startSocialOAuth(
       { db, settings, observability },
       {
@@ -114,7 +133,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/social/posts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const since = parseSince(c.req.query("since"));
     const connectionIds = parseConnectionIds(
       c.req.query("connectionIds") ?? c.req.query("connectionId"),
@@ -122,6 +141,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       await listSocialPosts(db, {
         workspaceId,
+        subjectId: grant.subjectId,
         ...(connectionIds?.length ? { connectionIds } : {}),
         ...(since ? { since } : {}),
         limit: boundedLimit(c.req.query("limit")),
@@ -138,6 +158,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
         await createSocialPost(db, {
           accountId: grant.accountId,
           workspaceId,
+          subjectId: grant.subjectId,
           connectionId: payload.connectionId,
           externalPostId: payload.externalPostId ?? null,
           url: payload.url ?? null,

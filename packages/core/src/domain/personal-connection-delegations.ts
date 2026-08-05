@@ -4,12 +4,15 @@ import type {
   ConnectionMetadata,
   McpPersonalConnectionDelegation,
   SessionTurn,
+  SocialConnection,
   ToolRef,
 } from "@opengeni/contracts";
 import {
   getSessionTurnPersonalConnectionDelegations,
+  getSocialConnection,
   getWorkspaceGrant,
   listConnectionsMetadata,
+  listSocialConnections,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -19,6 +22,7 @@ export type PersonalConnectionDelegationSource =
   | { kind: "subject"; subjectId: string }
   | { kind: "turn"; sessionId: string; turnId: string }
   | { kind: "none" };
+export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
 
 export function directPersonalConnectionSubjectId(
   turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
@@ -49,6 +53,58 @@ export function personalConnectionDelegationSourceForGrant(
     return { kind: "none" };
   }
   return { kind: "subject", subjectId: grant.subjectId };
+}
+
+export async function authorizedSocialConnectionsForGrant(input: {
+  db: Database;
+  grant: AccessGrant;
+  limit?: number;
+}): Promise<AuthorizedSocialConnection[]> {
+  const workspace = await listSocialConnections(
+    input.db,
+    input.grant.workspaceId,
+    input.limit ?? 500,
+    null,
+  );
+  const source = personalConnectionDelegationSourceForGrant(input.grant);
+  if (source.kind === "none")
+    return workspace.map((connection) => ({ connection, subjectId: null }));
+  if (source.kind === "subject") {
+    const visible = await listSocialConnections(
+      input.db,
+      input.grant.workspaceId,
+      input.limit ?? 500,
+      source.subjectId,
+    );
+    return visible.map((connection) => ({
+      connection,
+      subjectId: connection.ownership === "personal" ? source.subjectId : null,
+    }));
+  }
+  const delegations = (
+    await getSessionTurnPersonalConnectionDelegations(
+      input.db,
+      input.grant.workspaceId,
+      source.sessionId,
+      source.turnId,
+    )
+  ).filter((item) => item.connectionType === "social");
+  const personal: AuthorizedSocialConnection[] = [];
+  for (const delegation of delegations) {
+    if (!(await getWorkspaceGrant(input.db, delegation.ownerSubjectId, input.grant.workspaceId)))
+      continue;
+    const connection = await getSocialConnection(
+      input.db,
+      input.grant.workspaceId,
+      delegation.connectionId,
+      delegation.ownerSubjectId,
+    );
+    if (!connection || connection.ownership !== "personal") continue;
+    const domain = connection.provider === "x" ? "x.com" : `${connection.provider}.com`;
+    if (!sameProviderDomain(domain, delegation.providerDomain)) continue;
+    personal.push({ connection, subjectId: delegation.ownerSubjectId });
+  }
+  return [...workspace.map((connection) => ({ connection, subjectId: null })), ...personal];
 }
 
 export function selectedPersonalConnectionServers(
@@ -111,7 +167,7 @@ export function personalConnectionDelegationsFromParent(input: {
   servers: McpServerConfig[];
   parentDelegations: McpPersonalConnectionDelegation[];
 }): McpPersonalConnectionDelegation[] {
-  return input.servers.flatMap((server) => {
+  const mcp = input.servers.flatMap((server) => {
     const ref = server.connectionRef;
     if (!ref || ref.subjectScope !== "subject") return [];
     const delegation = input.parentDelegations.find(
@@ -122,6 +178,12 @@ export function personalConnectionDelegationsFromParent(input: {
     );
     return delegation ? [{ ...delegation }] : [];
   });
+  return [
+    ...mcp,
+    ...input.parentDelegations
+      .filter((item) => item.connectionType === "social")
+      .map((item) => ({ ...item })),
+  ];
 }
 
 export function personalConnectionDelegationsEqual(
@@ -136,7 +198,8 @@ export function personalConnectionDelegationsEqual(
       other?.connectionId === delegation.connectionId &&
       other.ownerSubjectId === delegation.ownerSubjectId &&
       sameProviderDomain(other.providerDomain, delegation.providerDomain) &&
-      other.kind === delegation.kind
+      other.kind === delegation.kind &&
+      other.connectionType === delegation.connectionType
     );
   });
 }
@@ -225,9 +288,10 @@ export async function freezePersonalConnectionDelegations(input: {
   source: PersonalConnectionDelegationSource;
 }): Promise<McpPersonalConnectionDelegation[]> {
   const servers = selectedPersonalConnectionServers(input.settings, input.tools);
-  if (servers.length === 0 || input.source.kind === "none") return [];
+  const includeSocial = input.tools.some((tool) => tool.id === "opengeni");
+  if ((servers.length === 0 && !includeSocial) || input.source.kind === "none") return [];
   if (input.source.kind === "turn") {
-    return personalConnectionDelegationsFromParent({
+    const inherited = personalConnectionDelegationsFromParent({
       servers,
       parentDelegations: await getSessionTurnPersonalConnectionDelegations(
         input.db,
@@ -236,12 +300,39 @@ export async function freezePersonalConnectionDelegations(input: {
         input.source.turnId,
       ),
     });
+    return includeSocial ? inherited : inherited.filter((item) => item.connectionType !== "social");
   }
   const membership = await getWorkspaceGrant(input.db, input.source.subjectId, input.workspaceId);
   if (!membership) return [];
-  return personalConnectionDelegationsFromVisibleConnections({
+  const mcp = personalConnectionDelegationsFromVisibleConnections({
     servers,
     subjectId: input.source.subjectId,
     connections: await listConnectionsMetadata(input.db, input.workspaceId, input.source.subjectId),
   });
+  if (!includeSocial) return mcp;
+  const ownerSubjectId = input.source.subjectId;
+  const visible = await listSocialConnections(input.db, input.workspaceId, 500, ownerSubjectId);
+  const latest = new Map<"x" | "reddit", (typeof visible)[number]>();
+  for (const connection of visible) {
+    if (
+      connection.ownership !== "personal" ||
+      connection.status !== "connected" ||
+      (connection.provider !== "x" && connection.provider !== "reddit")
+    )
+      continue;
+    const prior = latest.get(connection.provider);
+    if (!prior || connection.updatedAt > prior.updatedAt)
+      latest.set(connection.provider, connection);
+  }
+  return [
+    ...mcp,
+    ...[...latest.values()].map((connection) => ({
+      serverId: `social:${connection.provider}`,
+      connectionId: connection.id,
+      ownerSubjectId,
+      providerDomain: connection.provider === "x" ? "x.com" : `${connection.provider}.com`,
+      kind: "oauth2" as const,
+      connectionType: "social" as const,
+    })),
+  ];
 }

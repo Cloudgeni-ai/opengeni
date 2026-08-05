@@ -1663,6 +1663,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       createdByContext: {},
       model: "gpt-5.2",
       sandboxBackend: "modal",
+      workingDir: null,
       sandboxOs: "linux",
       sandboxGroupId: sessionId,
       activeSandboxId: null,

@@ -3,7 +3,7 @@
 // Hoisted here from apps/worker/src/activities/codex-auth.ts so BOTH the worker
 // (turn-time bearer for the streamed run) AND the api (the /wham/usage quota-bar
 // reads) drive ONE resolver — no duplicated refresh/CAS/single-flight logic. The
-// worker re-exports buildCodexTokenResolver from this module for back-compat, so
+// worker re-exports buildCodexTokenResolver from @opengeni/db for back-compat, so
 // the agent-turn.ts call site is unchanged.
 //
 // Why @opengeni/db is the right home: the resolver only orchestrates accessors
@@ -35,15 +35,52 @@ import {
   refreshCodexToken,
 } from "@opengeni/codex";
 import { encryptEnvironmentValue } from "./environment-crypto";
-import {
-  loadCodexCredentialForRun,
-  recordCodexAccountUsage,
-  recordCodexTokenRefresh,
-  setCodexCredentialStatus,
-  withCodexCredentialRefreshLock,
-  type CodexCredentialForRun,
-  type Database,
-} from "./index";
+import type { Database } from "./database";
+
+export type CodexCredentialTokens = {
+  accessToken: string;
+  refreshToken: string;
+  idToken: string;
+};
+
+export type CodexCredentialForRun = {
+  id: string;
+  version: number;
+  workspaceId: string;
+  tokens: CodexCredentialTokens;
+  chatgptAccountId: string | null;
+  scopes: string | null;
+  planType: string | null;
+  isFedramp: boolean;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  status: string;
+  lastError: string | null;
+};
+
+export type CodexAccountUsageSnapshot = {
+  primaryUsedPercent?: number | null;
+  primaryResetAt?: Date | null;
+  secondaryUsedPercent?: number | null;
+  secondaryResetAt?: Date | null;
+  checkedAt?: Date;
+  resetCreditAvailableCount?: number | null;
+  resetCreditsCheckedAt?: Date | null;
+};
+
+type CodexCredentialRefreshInput = {
+  id: string;
+  version: number;
+  workspaceId: string;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+  lastRefreshAt: Date;
+};
+
+type CodexCredentialStatusTarget = {
+  id: string;
+  version: number;
+};
 
 // Single-flight per CREDENTIAL INSTANCE (row id + version), process-module scope.
 // Keying by the loaded credential's id+version — NOT by workspaceId alone (P1-b) —
@@ -142,25 +179,37 @@ export async function withCodexTokenDeadline<T>(
 
 // Dependencies are injectable so the lifecycle logic (single-flight, staleness,
 // needs_relogin transition) is unit-testable without a database. Production uses
-// the real db + codex functions via the default bag.
+// the root composition wrapper supplies the real db + codex functions.
 export type CodexAuthDeps = {
-  loadCredential: typeof loadCodexCredentialForRun;
-  recordRefresh: typeof recordCodexTokenRefresh;
-  setStatus: typeof setCodexCredentialStatus;
+  loadCredential: (
+    db: Database,
+    settings: Settings,
+    workspaceId: string,
+    credentialId: string,
+  ) => Promise<CodexCredentialForRun | null>;
+  recordRefresh: (db: Database, input: CodexCredentialRefreshInput) => Promise<boolean>;
+  setStatus: (
+    db: Database,
+    workspaceId: string,
+    status: "active" | "needs_relogin" | "error",
+    lastError: string | null,
+    target: CodexCredentialStatusTarget,
+  ) => Promise<boolean>;
   refresh: typeof refreshCodexToken;
   encrypt: typeof encryptEnvironmentValue;
   keyBytes: typeof environmentsEncryptionKeyBytes;
-  withRefreshLock: typeof withCodexCredentialRefreshLock;
-};
-
-const defaultDeps: CodexAuthDeps = {
-  loadCredential: loadCodexCredentialForRun,
-  recordRefresh: recordCodexTokenRefresh,
-  setStatus: setCodexCredentialStatus,
-  refresh: refreshCodexToken,
-  encrypt: encryptEnvironmentValue,
-  keyBytes: environmentsEncryptionKeyBytes,
-  withRefreshLock: withCodexCredentialRefreshLock,
+  withRefreshLock: <T>(
+    db: Database,
+    workspaceId: string,
+    credentialId: string,
+    fn: (lockedDb: Database) => Promise<T>,
+  ) => Promise<T>;
+  recordUsage?: (
+    db: Database,
+    workspaceId: string,
+    credentialId: string,
+    snapshot: CodexAccountUsageSnapshot,
+  ) => Promise<boolean>;
 };
 
 export function buildCodexTokenResolver(
@@ -173,7 +222,7 @@ export function buildCodexTokenResolver(
   // 0 rows against the now-inactive row — so a refresh racing a switch can never
   // clobber the newly-active account. The single-flight map needs zero change.
   credentialId: string,
-  deps: CodexAuthDeps = defaultDeps,
+  deps: CodexAuthDeps,
 ): { getToken: () => Promise<CodexTokenSnapshot>; refresh: () => Promise<CodexTokenSnapshot> } {
   const snapshot = (cred: CodexCredentialForRun): CodexTokenSnapshot => ({
     accessToken: cred.tokens.accessToken,
@@ -336,9 +385,10 @@ export async function fetchCodexUsageForAccount(
   settings: Settings,
   workspaceId: string,
   credentialId: string,
+  deps: CodexAuthDeps,
   fetchImpl: CodexFetch = fetch,
 ): Promise<CodexUsagePayload> {
-  const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId);
+  const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId, deps);
   let token: CodexTokenSnapshot;
   try {
     token = await resolver.getToken();
@@ -373,27 +423,29 @@ export async function fetchCodexUsageForAccount(
     // cached without erasing or falsely refreshing the last valid quota truth.
     // Cache-write is best-effort: a disconnect under us (false) or a transient
     // write error must NOT sink the freshly-read result we are about to return.
-    await recordCodexAccountUsage(db, workspaceId, credentialId, {
-      ...(parsedQuota
-        ? {
-            primaryUsedPercent: normalized.fiveHour?.percent ?? null,
-            primaryResetAt: normalized.fiveHour?.resetAt
-              ? new Date(normalized.fiveHour.resetAt)
-              : null,
-            secondaryUsedPercent: normalized.weekly?.percent ?? null,
-            secondaryResetAt: normalized.weekly?.resetAt
-              ? new Date(normalized.weekly.resetAt)
-              : null,
-            checkedAt,
-          }
-        : {}),
-      ...(normalized.rateLimitResetCredits
-        ? {
-            resetCreditAvailableCount: normalized.rateLimitResetCredits.availableCount,
-            resetCreditsCheckedAt: checkedAt,
-          }
-        : {}),
-    }).catch(() => undefined);
+    await deps
+      .recordUsage?.(db, workspaceId, credentialId, {
+        ...(parsedQuota
+          ? {
+              primaryUsedPercent: normalized.fiveHour?.percent ?? null,
+              primaryResetAt: normalized.fiveHour?.resetAt
+                ? new Date(normalized.fiveHour.resetAt)
+                : null,
+              secondaryUsedPercent: normalized.weekly?.percent ?? null,
+              secondaryResetAt: normalized.weekly?.resetAt
+                ? new Date(normalized.weekly.resetAt)
+                : null,
+              checkedAt,
+            }
+          : {}),
+        ...(normalized.rateLimitResetCredits
+          ? {
+              resetCreditAvailableCount: normalized.rateLimitResetCredits.availableCount,
+              resetCreditsCheckedAt: checkedAt,
+            }
+          : {}),
+      })
+      .catch(() => undefined);
   }
 
   return normalized;
@@ -418,9 +470,10 @@ export async function fetchCodexRateLimitResetCreditsForAccount(
   settings: Settings,
   workspaceId: string,
   credentialId: string,
+  deps: CodexAuthDeps,
   fetchImpl: CodexFetch = fetch,
 ): Promise<CodexRateLimitResetCreditsAccountResult> {
-  const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId);
+  const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId, deps);
   let token: CodexTokenSnapshot;
   try {
     token = await resolver.getToken();

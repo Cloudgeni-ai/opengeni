@@ -10,7 +10,6 @@ import type {
   CodexOverviewResponse,
   CodexResetCredit,
   CodexResetRedemptionRecovery,
-  CodexRotationSettings,
   CodexUsage,
   CodexUsageMap,
   CodexUsageWindow,
@@ -841,12 +840,9 @@ export function CodexSubscriptionsCard({
     [client, workspaceId, refreshAccounts],
   );
 
-  // P3: enable/disable auto-rotation or change the strategy, then re-read settings.
+  // Enable or disable auto-rotation, then re-read effective settings.
   const setRotation = useCallback(
-    async (patch: {
-      rotationEnabled?: boolean;
-      rotationStrategy?: CodexRotationSettings["rotationStrategy"];
-    }) => {
+    async (patch: { rotationEnabled: boolean }) => {
       setBusy(true);
       try {
         await client.setCodexRotationSettings(workspaceId, patch);
@@ -885,6 +881,29 @@ export function CodexSubscriptionsCard({
       }
     },
     [client, workspaceId, refreshAccounts],
+  );
+
+  const setAppsCredential = useCallback(
+    async (account: CodexAccount, enabled: boolean) => {
+      if (!data?.apps) return;
+      setBusy(true);
+      try {
+        if (enabled) {
+          await client.designateCodexAppsAccount(workspaceId, account.id, data.apps.version);
+          toast.success("Codex Apps credential enabled");
+        } else {
+          await client.clearCodexAppsAccount(workspaceId, data.apps.version);
+          toast.success("Codex Apps credential disabled");
+        }
+        await refreshAccounts();
+      } catch (error) {
+        await refreshAccounts();
+        toast.error(error instanceof Error ? error.message : "Failed to update Codex Apps");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, data, workspaceId, refreshAccounts],
   );
 
   const beginRedemption = useCallback(
@@ -1224,6 +1243,11 @@ export function CodexSubscriptionsCard({
                         {account.plan}
                       </MetaChip>
                     ) : null}
+                    {account.appsDesignated ? (
+                      <MetaChip dot="running" rounded="full">
+                        Apps
+                      </MetaChip>
+                    ) : null}
                     {!needsRelogin ? (
                       <div onClick={(event) => event.stopPropagation()}>
                         <CompactAccountUsage
@@ -1309,7 +1333,7 @@ export function CodexSubscriptionsCard({
                     </div>
                     <label
                       className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5"
-                      title="Pausing affects only new automatic selection. Current leased or frozen turns continue; quota, cooldown, and relogin state still gate eligibility."
+                      title="Pausing affects only new automatic selection. A current live lease continues; quota, cooldown, and relogin state still gate eligibility."
                     >
                       <span className="text-xs font-medium">Use for new automatic turns</span>
                       <span className="flex items-center gap-2 text-xs text-fg-muted">
@@ -1325,6 +1349,26 @@ export function CodexSubscriptionsCard({
                           {account.allocatorEnabled ? "Enabled" : "Paused"}
                         </span>
                       </span>
+                    </label>
+                    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5 py-1.5">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium">Use for Codex Apps</div>
+                        <div className="text-2xs text-fg-subtle">
+                          Independent of inference, usage limits, rotation, and active selection.
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        className="size-4 shrink-0 accent-brand"
+                        checked={account.appsDesignated}
+                        disabled={
+                          busy ||
+                          !data?.apps ||
+                          (account.appsDesignated ? !data.apps.canDisable : !account.canEnableApps)
+                        }
+                        aria-label={`Use ${accountDisplay(account)} for Codex Apps`}
+                        onChange={(event) => void setAppsCredential(account, event.target.checked)}
+                      />
                     </label>
                     {needsRelogin ? (
                       <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
@@ -1387,19 +1431,26 @@ export function CodexSubscriptionsCard({
         </div>
       )}
       {accounts.length > 0 && !pending && !loading ? (
-        <p className="text-2xs text-fg-subtle">
-          {rotationEnabled ? (
-            <>
-              Sessions are spread across all {accounts.length} subscriptions, each sticking to its
-              own plan for maximum prompt-cache reuse. Pinned sessions stay on their pin.
-            </>
-          ) : (
-            <>
-              The <span className="font-medium">active</span> subscription runs every session that
-              isn't pinned to a specific one.
-            </>
-          )}
-        </p>
+        <div className="grid gap-1 text-2xs text-fg-subtle">
+          <p>
+            {rotationEnabled ? (
+              <>
+                Sessions are spread across all {accounts.length} subscriptions, each sticking to its
+                own plan for maximum prompt-cache reuse. Pinned sessions stay on their pin.
+              </>
+            ) : (
+              <>
+                The <span className="font-medium">active</span> subscription runs every session that
+                isn't pinned to a specific one.
+              </>
+            )}
+          </p>
+          <p>
+            {data?.apps?.available
+              ? "Codex Apps uses only the separately marked Apps subscription. With none marked, Apps tools are unavailable."
+              : "Codex Apps is disabled for this deployment."}
+          </p>
+        </div>
       ) : null}
       <ConfirmDialog
         open={redemption != null}

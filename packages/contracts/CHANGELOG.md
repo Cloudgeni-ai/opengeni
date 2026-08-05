@@ -1,5 +1,63 @@
 # @opengeni/contracts
 
+## 0.38.3
+
+### Patch Changes
+
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+
+## 0.38.2
+
+### Patch Changes
+
+- 4502474: Add workspace-default and explicitly personal ownership for first-party social connections, preserve causal personal authority for agent work, and retain actionable structured gateway errors.
+
+## 0.38.1
+
+### Patch Changes
+
+- c9d8b69: Make Connected Machine project paths portable and diagnosable: session responses now expose `workingDir`, and the native agent consistently supports the service user's `~` path across exec, filesystem, git, and terminal operations while reporting missing working directories accurately.
+
+## 0.38.0
+
+### Minor Changes
+
+- bef5920: Add subject-scoped Workspace State preference and document-authority inventory
+  metadata plus a canonical, explicitly sanitized export API and SDK method.
+
+### Patch Changes
+
+- b6e39fc: Polish session chrome and apply_patch rendering; clarify realtime voice-end handoff.
+
+  SessionChrome gets denser selected-chip UX and Codex function-tool apply_patch shapes render in the specialized diff UI. Solo goal_continuation machine-input rows are suppressed in favor of the GoalRow landmark. The realtime transcript-tail instruction now keeps in-flight work going after voice ends.
+
+## 0.37.0
+
+### Minor Changes
+
+- fd13ba9: Add one immutable organization, workspace, or personal document destination contract for connector configuration, and make Google Drive persist and consume that authority independently from optional collections.
+
+## 0.36.1
+
+### Patch Changes
+
+- abe0de6: Persist timesliced composer voice recordings in browser storage with reload-safe document ownership, opener/duplicate-tab fencing, oldest-first recovery, byte-ceiling enforcement, and durable transcript-before-draft handoff. Interrupted audio retries reuse the same recording, uncertain saved transcripts require explicit insertion instead of automatic retranscription or duplicate append, and transient handed-off cleanup failures are retried and garbage-collected owner-safely.
+
+## 0.36.0
+
+### Minor Changes
+
+- 00f7d3b: Add durable, tenant-isolated onboarding proposals that atomically create inactive instruction-policy drafts with typed replay, stale-baseline, conflict, and audit contracts, plus a bounded Workspace State admin composer.
+
+## 0.35.0
+
+### Minor Changes
+
+- b121e7c: Add durable Google Drive pause, resume, disconnect, reconnect, revoked-token,
+  removed-app, and permission re-consent lifecycle handling with version-fenced
+  state transitions, generation-bound disconnect idempotency, stale-replay
+  protection, and secret-safe provider error classification.
+
 ## 0.34.0
 
 ### Minor Changes

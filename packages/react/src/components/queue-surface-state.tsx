@@ -10,7 +10,7 @@ export function EmptyQueueStateSurface({ queue }: QueueStateProps) {
   const hasError = Boolean(queue.error || queue.mutationError);
   return (
     <div
-      className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
+      className="og-root mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
       data-testid="queue-surface"
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface/80 shadow-sm">
@@ -31,7 +31,7 @@ export function QueueStoppingStatus({
     <div
       role="status"
       aria-live="polite"
-      className={`flex min-h-11 items-center gap-2.5 bg-status-waiting/[0.07] px-3 py-2 text-xs text-fg ${
+      className={`flex min-h-11 items-center gap-2.5 bg-status-waiting/[0.07] px-3 py-2 text-og-control text-fg ${
         dividerAfter ? "border-b border-status-waiting/20" : ""
       }`}
       data-testid="stopping-previous-attempt"
@@ -64,7 +64,7 @@ export function QueueErrorAlert({
     <div className={`${dividerBefore ? "border-t border-border" : ""} p-2`}>
       <div
         role="alert"
-        className="flex min-w-0 max-w-full flex-wrap items-start gap-2 rounded-md bg-status-failed/10 px-2 py-1.5 text-xs text-status-failed"
+        className="flex min-w-0 max-w-full flex-wrap items-start gap-2 rounded-md bg-status-failed/10 px-2 py-1.5 text-og-control text-status-failed"
       >
         <span
           role="region"

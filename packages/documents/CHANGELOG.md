@@ -1,5 +1,134 @@
 # @opengeni/documents
 
+## 0.5.7
+
+### Patch Changes
+
+- Updated dependencies [8135dbb]
+- Updated dependencies [17643a5]
+  - @opengeni/config@0.10.14
+  - @opengeni/db@0.27.11
+  - @opengeni/storage@0.2.67
+
+## 0.5.6
+
+### Patch Changes
+
+- Updated dependencies [69bc207]
+- Updated dependencies [144fd9e]
+- Updated dependencies [c0f8e40]
+  - @opengeni/db@0.27.10
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+  - @opengeni/storage@0.2.66
+
+## 0.5.5
+
+### Patch Changes
+
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/db@0.27.9
+  - @opengeni/config@0.10.12
+  - @opengeni/storage@0.2.65
+
+## 0.5.4
+
+### Patch Changes
+
+- Updated dependencies [dfa3aef]
+  - @opengeni/db@0.27.8
+
+## 0.5.3
+
+### Patch Changes
+
+- Updated dependencies [c29fd4c]
+  - @opengeni/db@0.27.7
+
+## 0.5.2
+
+### Patch Changes
+
+- @opengeni/db@0.27.6
+
+## 0.5.1
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+  - @opengeni/config@0.10.11
+  - @opengeni/storage@0.2.64
+
+## 0.5.0
+
+### Minor Changes
+
+- bef5920: Add subject-scoped Workspace State preference and document-authority inventory
+  metadata plus a canonical, explicitly sanitized export API and SDK method.
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+  - @opengeni/storage@0.2.63
+
+## 0.4.1
+
+### Patch Changes
+
+- d5df927: Keep legacy personal document checks anchored to their originating workspace and fail closed for incomplete, non-canonical, overlong, or unknown authority tuples.
+  - @opengeni/db@0.27.3
+
+## 0.4.0
+
+### Minor Changes
+
+- fd13ba9: Add one immutable organization, workspace, or personal document destination contract for connector configuration, and make Google Drive persist and consume that authority independently from optional collections.
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/config@0.10.9
+  - @opengeni/db@0.27.2
+  - @opengeni/storage@0.2.62
+
+## 0.3.4
+
+### Patch Changes
+
+- Updated dependencies [abe0de6]
+  - @opengeni/config@0.10.8
+  - @opengeni/contracts@0.36.1
+  - @opengeni/db@0.27.1
+  - @opengeni/storage@0.2.61
+
+## 0.3.3
+
+### Patch Changes
+
+- Updated dependencies [00f7d3b]
+  - @opengeni/contracts@0.36.0
+  - @opengeni/db@0.27.0
+  - @opengeni/config@0.10.7
+  - @opengeni/storage@0.2.60
+
+## 0.3.2
+
+### Patch Changes
+
+- Updated dependencies [b121e7c]
+  - @opengeni/contracts@0.35.0
+  - @opengeni/db@0.26.0
+  - @opengeni/config@0.10.6
+  - @opengeni/storage@0.2.59
+
 ## 0.3.1
 
 ### Patch Changes

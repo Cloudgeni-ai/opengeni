@@ -94,7 +94,6 @@ export function codexCapacityDecision(
     sessionPinnedCredentialId: context.sessionPinnedCredentialId,
     sessionPinSource: context.sessionPinSource,
     sessionLastCredentialId: context.sessionLastCredentialId,
-    continuationCredentialId: null,
     now,
   });
   if (selected.credentialId) {

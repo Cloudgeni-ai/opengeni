@@ -113,7 +113,7 @@ export async function createValidatedScheduledTask(input: {
     db: input.db,
     workspaceId: input.grant.workspaceId,
     settings: runtimeSettings,
-    tools: agentConfig.tools,
+    tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
     source: personalConnectionDelegationSourceForGrant(input.grant),
   });
   const creationInitiator = creationInitiatorForGrant(input.grant);
@@ -260,7 +260,7 @@ export async function validatedScheduledTaskUpdate(input: {
       db: input.db,
       workspaceId: input.existing.workspaceId,
       settings: runtimeSettings,
-      tools: nextAgentConfig.tools,
+      tools: [...nextAgentConfig.tools, { kind: "mcp", id: "opengeni" }],
       source: personalConnectionDelegationSourceForGrant(input.grant),
     });
     if (input.existing.reusableSessionId && input.existing.runMode === "reusable_session") {

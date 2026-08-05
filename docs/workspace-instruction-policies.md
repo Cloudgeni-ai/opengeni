@@ -35,6 +35,11 @@ Migration `0130_workspace_instruction_policies.sql` adds dedicated
 - `workspace_instruction_policy_heads` is the mutable active-head projection;
 - `workspace_instruction_policy_activation_events` is append-only audit history.
 
+Migration `0168_workspace_instruction_policy_operation_receipts.sql` adds
+immutable request fingerprints for natural-convergence replay. Migration
+`0169_workspace_instruction_policy_onboarding_proposals.sql` adds immutable
+onboarding evidence that references exactly one inactive authoritative revision.
+
 Revision numbers come from one monotonic PostgreSQL sequence. The server computes
 the SHA-256 hash of the exact UTF-8 content, and PostgreSQL independently checks
 that the stored hash matches. A revision may identify a superseded revision only
@@ -53,6 +58,35 @@ and one provenance source:
 The optional provenance source identifier is evidence about where the content
 came from. The legacy-import operation does not trust a caller-provided label: it
 uses the fixed source `workspaces.agent_instructions`.
+
+## Draft-only onboarding proposals
+
+An onboarding proposal is evidence for one suggested charter, global policy, or
+normalized role policy. It does not create another prompt, Memory, preference,
+Documents, or knowledge authority. One transaction:
+
+1. locks the workspace and checks the exact target's active-head baseline;
+2. fences the operation ID against every instruction-policy mutation kind;
+3. converges the natural `(source id, source version, target)` identity;
+4. creates a normal inactive instruction-policy revision with `onboarding`
+   provenance and the immutable proposal UUID as its provenance source ID; and
+5. appends the immutable proposal evidence with bounded source/version,
+   confidence basis points, actor, baseline, request fingerprint, and timestamp.
+
+The caller must supply both the expected current revision ID and activation
+version (`null` and `0` when no head exists). A changed head returns
+`WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE`. Reusing the same
+source version for the same target with different content, confidence, or
+baseline returns `WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT`.
+Empty and oversized content use the typed `..._EMPTY` and `..._OVERSIZED`
+responses. Exact operation replay returns the original proposal; changed input
+under that operation ID returns `WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED`.
+
+The proposal table is append-only, uses `FORCE ROW LEVEL SECURITY`, and receives
+only `SELECT`/`INSERT` runtime privileges. PostgreSQL validates that its linked
+revision has the same tenant, target, actor, content fingerprint, and exact
+`onboarding` provenance. Proposal creation never writes a head or activation
+event, and there is intentionally no proposal activation endpoint.
 
 ## Activation, conflicts, and rollback
 
@@ -92,6 +126,11 @@ The API and `OpenGeniClient` expose:
 - diff two revisions of the same target;
 - activate a revision;
 - roll back to a previously active revision.
+
+They also expose list/create onboarding proposals below
+`/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals`. Listing
+requires `workspace:read`; creating an inactive proposal requires
+`workspace:admin`.
 
 The routes live below
 `/v1/workspaces/:workspaceId/instruction-policies`. List, get, and diff require
@@ -185,24 +224,30 @@ rewrites the legacy field.
 
 ## Isolation and deliberate non-goals
 
-All three tables carry account/workspace keys, `FORCE ROW LEVEL SECURITY`, and
-the canonical `workspace_isolation` policy. The application role can mutate only
-heads; revision and activation evidence are append-only.
+All instruction-policy tables carry account/workspace keys, `FORCE ROW LEVEL
+SECURITY`, and the canonical `workspace_isolation` policy. The application role
+can mutate only heads; revision, activation, receipt, snapshot, and onboarding
+proposal evidence is immutable or append-only according to its exact privilege
+class.
 
 This slice deliberately does not implement:
 
-- web UI or onboarding administration;
-- workspace memory, knowledge ingestion, or automatic proposal ingestion;
+- automatic proposal ingestion or source connectors;
+- workspace memory or knowledge ingestion;
 - model, tool, integration, or Linear enforcement;
-- governance authoring workflows or activation authority beyond the existing
-  policy backend.
+- proposal review/approval state or proposal-specific activation authority;
+- broader Workspace State source inventory, export, or governance authoring
+  workflows beyond the existing policy backend.
 
 Canonical implementation: `packages/contracts/src/workspace-instruction-policies.ts`,
 `packages/db/src/workspace-instruction-policies-schema.ts`,
 `packages/db/src/workspace-instruction-policies.ts`,
 `packages/db/drizzle/0130_workspace_instruction_policies.sql`,
 `packages/db/drizzle/0157_session_policy_role_snapshots.sql`,
+`packages/db/drizzle/0168_workspace_instruction_policy_operation_receipts.sql`,
+`packages/db/drizzle/0169_workspace_instruction_policy_onboarding_proposals.sql`,
 `apps/api/src/routes/workspace-instruction-policies.ts`, and
-`packages/sdk/src/workspace-instruction-policies.ts`, plus runtime composition in
+`packages/sdk/src/workspace-instruction-policies.ts`, with the bounded admin
+composer in `apps/web/src/routes/workspace-state.tsx`, plus runtime composition in
 `packages/runtime/src/workspace-governance.ts` and
 `apps/worker/src/activities/agent-turn.ts`.

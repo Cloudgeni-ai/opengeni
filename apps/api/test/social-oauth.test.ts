@@ -5,6 +5,7 @@ import type { Database } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../src/http/api-error";
 import {
   parseSocialCredentialBundle,
   SocialTokenRequestError,
@@ -70,12 +71,16 @@ describe("startSocialOAuth", () => {
     const settings = settingsWithClients({ x: { clientId: "x-client" } });
     const result = await startSocialOAuth(
       { db: noDb, settings },
-      { ...startContext, payload: { provider: "x", returnPath: "/social?tab=x" } },
+      {
+        ...startContext,
+        payload: { provider: "x", ownership: "personal", returnPath: "/social?tab=x" },
+      },
     );
     const payload = readSignedState(result.state, STATE_SECRET) as Record<string, unknown>;
     expect(payload.kind).toBe("social_oauth");
     expect(payload.workspaceId).toBe(startContext.workspaceId);
     expect(payload.provider).toBe("x");
+    expect(payload.ownership).toBe("personal");
     expect(payload.returnPath).toBe("/social?tab=x");
     expect(typeof payload.nonce).toBe("string");
     // The PKCE verifier must never travel in cleartext state.
@@ -93,14 +98,21 @@ describe("startSocialOAuth", () => {
     );
   });
 
-  test("unconfigured provider fails with 503, not a broken redirect", async () => {
+  test("unconfigured provider returns actionable operator configuration details", async () => {
     const settings = settingsWithClients({ x: { clientId: "x-client" } });
-    await expect(
-      startSocialOAuth(
-        { db: noDb, settings },
-        { ...startContext, payload: { provider: "reddit" } },
-      ),
-    ).rejects.toThrow(HTTPException);
+    const error = await startSocialOAuth(
+      { db: noDb, settings },
+      { ...startContext, payload: { provider: "reddit" } },
+    ).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ApiHttpError);
+    expect(error).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: false,
+      message:
+        "Reddit connection is not configured. An operator must add Reddit OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON.",
+      details: { oauthReason: "operator_oauth_app_missing", provider: "reddit" },
+    });
   });
 
   test("absolute returnPath is rejected", async () => {

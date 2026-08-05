@@ -21,8 +21,8 @@ import type {
   ScopedKnowledgeScope,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./index";
-import { setSubjectRlsContext, withRlsContext } from "./index";
+import type { Database } from "./database";
+import { setSubjectRlsContext, withRlsContext } from "./database";
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
 

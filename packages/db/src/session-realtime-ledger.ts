@@ -4,7 +4,7 @@ import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengen
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 import {
   assertSessionRealtimeOwnerInTransaction,

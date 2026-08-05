@@ -14,7 +14,9 @@ GitHub-App token mint is skipped and exec carries `env: {}` on the wire, so this
 agent authenticates git with the machine's **own** credentials. The session runs
 under a **per-session working directory** (the control plane's `sessions.working_dir`,
 threaded to the agent as `workingDir`); the agent's reported `workspace_root` is the
-default base, and the control plane never `git clone`s a repo onto the machine.
+default base. Exact `~` / `~/...` paths resolve against the service user's home;
+ordinary relative and absolute paths retain their usual meaning. The control plane
+never `git clone`s a repo onto the machine.
 
 ## Crates
 
@@ -52,8 +54,9 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   binary on a failed boot health-gate. A tampered artifact is always rejected.
 - **Service (opt-in)** — `opengeni-agent service install|uninstall|start|stop|status`
   installs an always-on service (systemd user/system unit, macOS LaunchAgent,
-  Windows Service). `--print` dry-runs the generated unit/plist. The default
-  remains foreground `run`.
+  Windows Service). The generated Unix service preserves the installer's command
+  `PATH`, avoiding the narrow defaults supplied by some service managers.
+  `--print` dry-runs the generated unit/plist. The default remains foreground `run`.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
   (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows

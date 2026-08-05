@@ -4,7 +4,7 @@ import {
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import type { SessionCommandActor } from "./session-control";
 import * as schema from "./schema";
 

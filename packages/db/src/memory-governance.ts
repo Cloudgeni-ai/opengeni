@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
-import type { Database } from "./index";
-import { setSubjectRlsContext, withWorkspaceRls } from "./index";
+import type { Database } from "./database";
+import { setSubjectRlsContext, withWorkspaceRls } from "./database";
 import {
   hashMemoryOperationPlan,
   hashMemoryRevertPlan,

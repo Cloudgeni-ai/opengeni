@@ -1099,7 +1099,9 @@ export async function postUserMessageTurn(input: {
       sessionId,
       workflowId: turn.temporalWorkflowId,
       wakeRevision: result.wakeRevision,
-      ...(result.interruptionCount > 0 ? { interruptionRequested: true } : {}),
+      ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+        ? { interruptionRequested: true }
+        : {}),
     });
   } catch (error) {
     console.warn(

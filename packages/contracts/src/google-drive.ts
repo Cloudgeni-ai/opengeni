@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 import { ConnectionMetadata } from "./index";
+import {
+  ConnectorDocumentDestination,
+  ConnectorDocumentDestinationSelection,
+} from "./connector-destinations";
 
 export const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com" as const;
 export const GOOGLE_DRIVE_FULL_SCOPE = "https://www.googleapis.com/auth/drive" as const;
@@ -63,6 +67,7 @@ export function googleDriveScopesAllowCapability(
   return googleDriveOAuthScopeDecision(grantedScopes).capabilities.includes(capability);
 }
 
+/** @deprecated Connector document destinations use organization/workspace/personal authority. */
 export const GoogleDriveTargetScope = z.enum(["user", "workspace", "organization"]);
 export type GoogleDriveTargetScope = z.infer<typeof GoogleDriveTargetScope>;
 
@@ -130,7 +135,9 @@ export const GoogleDriveSelectedSource = z.object({
   name: z.string().min(1).max(1024),
   mimeType: z.string().min(1).max(256),
   driveId: z.string().min(1).max(256).nullable().default(null),
-  targetScope: GoogleDriveTargetScope,
+  destination: ConnectorDocumentDestination.optional(),
+  /** @deprecated Missing destinations resolve to the current workspace boundary. */
+  targetScope: GoogleDriveTargetScope.optional(),
   syncCadence: GoogleDriveSyncCadence.default("hourly"),
   readPolicy: GoogleDriveReadPolicy.default("allow"),
   selectedAt: z.string().datetime({ offset: true }),
@@ -147,6 +154,7 @@ export const GoogleDriveConnectionMetadata = z
     verifiedAt: z.string().datetime({ offset: true }),
     accessMode: z.enum(["metadata_readonly", "readonly"]),
     lifecycle: GoogleDriveConnectionLifecycle.optional(),
+    documentDestination: ConnectorDocumentDestination.optional(),
     selectedSources: z.array(GoogleDriveSelectedSource).max(100).optional(),
     /** @deprecated Read `selectedSources`; retained while existing connections migrate. */
     selectedSource: GoogleDriveSelectedSource.nullable().optional(),
@@ -199,22 +207,28 @@ export const GoogleDriveBrowseResponse = z.object({
 });
 export type GoogleDriveBrowseResponse = z.infer<typeof GoogleDriveBrowseResponse>;
 
-export const SaveGoogleDriveSourceRequest = z.object({
-  sources: z
-    .array(
-      GoogleDriveBrowseItem.pick({
-        id: true,
-        name: true,
-        mimeType: true,
-        driveId: true,
+export const SaveGoogleDriveSourceRequest = z
+  .object({
+    sources: z
+      .array(
+        GoogleDriveBrowseItem.pick({
+          id: true,
+          name: true,
+          mimeType: true,
+          driveId: true,
+        }),
+      )
+      .max(100)
+      .refine((sources) => new Set(sources.map((source) => source.id)).size === sources.length, {
+        message: "Google Drive sources must be unique",
       }),
-    )
-    .max(100)
-    .refine((sources) => new Set(sources.map((source) => source.id)).size === sources.length, {
-      message: "Google Drive sources must be unique",
-    }),
-  targetScope: GoogleDriveTargetScope,
-  syncCadence: GoogleDriveSyncCadence.default("hourly"),
-  readPolicy: GoogleDriveReadPolicy.default("allow"),
-});
+    destination: ConnectorDocumentDestinationSelection.optional(),
+    /** @deprecated Legacy requests are accepted but resolve to workspace authority. */
+    targetScope: GoogleDriveTargetScope.optional(),
+    syncCadence: GoogleDriveSyncCadence.default("hourly"),
+    readPolicy: GoogleDriveReadPolicy.default("allow"),
+  })
+  .refine((request) => request.destination !== undefined || request.targetScope !== undefined, {
+    message: "Google Drive document destination is required",
+  });
 export type SaveGoogleDriveSourceRequest = z.infer<typeof SaveGoogleDriveSourceRequest>;

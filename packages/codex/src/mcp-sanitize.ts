@@ -105,7 +105,7 @@ export class ToolNameMapper {
 /**
  * Drop bad outputSchemas + sanitize tool names on a JSON-RPC tools/list result, in place.
  *
- * P4 (Part B.1): when `namespaceSink` is provided, accumulate each tool's ORIGINAL
+ * When `namespaceSink` is provided, accumulate each tool's ORIGINAL
  * connector namespace (the segment BEFORE the first dot, e.g. `github` from
  * `github.create_issue`) into it — captured HERE because this pass sees the original
  * dotted name BEFORE mapper.sanitize rewrites the dot away. Only dotted names carry a
@@ -264,10 +264,11 @@ export function remapToolCallRequestBody(body: string, mapper: ToolNameMapper): 
  * to the MCP server's original. Only the POST request/response is buffered; the
  * long-lived GET notification SSE stream is passed through untouched.
  *
- * P4 (Part B.1): an optional `namespaceSink` Set accumulates the ORIGINAL-dotted
+ * An optional `namespaceSink` Set accumulates the ORIGINAL-dotted
  * connector namespaces seen across every tools/list this turn (captured before the
- * dot is sanitized away). The worker reads the (live, by-reference) Set after the
- * turn to cache the serving account's connector set — packages/codex stays db-free.
+ * dot is sanitized away). The runtime reads the live by-reference Set only to keep
+ * this turn's `tool_search` description accurate; it is never persisted or used
+ * for inference selection.
  */
 export function codexAppsSanitizingFetch(
   base: FetchLike = globalThis.fetch,

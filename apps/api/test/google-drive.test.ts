@@ -397,6 +397,7 @@ describe("Google Drive local source preview", () => {
     const authorization = await bearer(workspace, "subject-a", [
       "connections:read",
       "connections:write",
+      "workspace:admin",
     ]);
     const browse = await app(google.fetch).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
@@ -443,7 +444,7 @@ describe("Google Drive local source preview", () => {
               driveId: null,
             },
           ],
-          targetScope: "workspace",
+          destination: { authorityKind: "workspace", collectionId: null },
           syncCadence: "hourly",
           readPolicy: "allow",
         }),
@@ -457,18 +458,35 @@ describe("Google Drive local source preview", () => {
       "subject-a",
     );
     expect(persisted?.metadata).toMatchObject({
+      documentDestination: {
+        authorityKind: "workspace",
+        authorityAccountId: workspace.accountId,
+        authorityWorkspaceId: workspace.workspaceId,
+        authoritySubjectId: null,
+        collectionId: null,
+      },
       selectedSources: [
         {
           id: "folder-1",
           name: "Product",
-          targetScope: "workspace",
+          destination: {
+            authorityKind: "workspace",
+            authorityAccountId: workspace.accountId,
+            authorityWorkspaceId: workspace.workspaceId,
+            authoritySubjectId: null,
+          },
           syncCadence: "hourly",
           readPolicy: "allow",
         },
         {
           id: "root",
           name: "My Drive",
-          targetScope: "workspace",
+          destination: {
+            authorityKind: "workspace",
+            authorityAccountId: workspace.accountId,
+            authorityWorkspaceId: workspace.workspaceId,
+            authoritySubjectId: null,
+          },
           syncCadence: "hourly",
           readPolicy: "allow",
         },
@@ -479,6 +497,110 @@ describe("Google Drive local source preview", () => {
       select id from documents where workspace_id = ${workspace.workspaceId}
     `,
     ).toHaveLength(0);
+  });
+
+  test("authorizes all connector destinations and keeps legacy config workspace-bound", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const endpoint =
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/` +
+      `${connected.connection.id}/source`;
+    const save = async (
+      authorization: string,
+      destination: Record<string, unknown>,
+    ): Promise<Response> =>
+      await app(google.fetch).request(endpoint, {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          sources: [],
+          ...destination,
+          syncCadence: "hourly",
+          readPolicy: "allow",
+        }),
+      });
+
+    const writer = await bearer(workspace, "subject-a", ["connections:write"]);
+    const deniedWorkspace = await save(writer, {
+      destination: { authorityKind: "workspace", collectionId: null },
+    });
+    expect(deniedWorkspace.status).toBe(403);
+    const deniedOrganization = await save(writer, {
+      destination: { authorityKind: "organization", collectionId: null },
+    });
+    expect(deniedOrganization.status).toBe(403);
+
+    const workspaceAdmin = await bearer(workspace, "subject-a", [
+      "connections:write",
+      "workspace:admin",
+    ]);
+    const legacySave = await save(workspaceAdmin, { targetScope: "organization" });
+    expect(legacySave.status).toBe(200);
+    expect(
+      (
+        await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          connected.connection.id,
+          "subject-a",
+        )
+      )?.metadata.documentDestination,
+    ).toEqual({
+      authorityKind: "workspace",
+      authorityAccountId: workspace.accountId,
+      authorityWorkspaceId: workspace.workspaceId,
+      authoritySubjectId: null,
+      collectionId: null,
+    });
+
+    const personalSave = await save(writer, {
+      destination: { authorityKind: "personal", collectionId: null },
+    });
+    expect(personalSave.status).toBe(200);
+    expect(
+      (
+        await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          connected.connection.id,
+          "subject-a",
+        )
+      )?.metadata.documentDestination,
+    ).toMatchObject({
+      authorityKind: "personal",
+      authorityWorkspaceId: workspace.workspaceId,
+      authoritySubjectId: "subject-a",
+    });
+
+    const accountAdmin = await bearer(workspace, "subject-a", [
+      "connections:write",
+      "account:admin",
+    ]);
+    const organizationSave = await save(accountAdmin, {
+      destination: { authorityKind: "organization", collectionId: null },
+    });
+    expect(organizationSave.status).toBe(200);
+    expect(
+      (
+        await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          connected.connection.id,
+          "subject-a",
+        )
+      )?.metadata.documentDestination,
+    ).toMatchObject({
+      authorityKind: "organization",
+      authorityAccountId: workspace.accountId,
+      authorityWorkspaceId: null,
+      authoritySubjectId: null,
+    });
   });
 
   test("pauses and resumes with idempotent version-fenced transitions", async () => {

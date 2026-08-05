@@ -62,6 +62,11 @@ export type CodexModelRequestEvent = {
   willRetry?: boolean;
 };
 
+export type CodexRequestOpaqueArtifacts = {
+  requestId: string;
+  fingerprints: readonly string[];
+};
+
 export type CodexRequestContext = {
   clientVersion: string;
   /**
@@ -94,6 +99,8 @@ export type CodexRequestContext = {
   responseTimeoutPolicy?: Partial<CodexResponseTimeoutPolicy>;
   /** Worker-owned durable audit sink; payloads never contain request bodies or auth. */
   onModelRequestEvent?: (event: CodexModelRequestEvent) => Promise<void> | void;
+  /** Exact opaque artifacts on the normalized wire request, never their ciphertext. */
+  onRequestOpaqueArtifacts?: (artifacts: CodexRequestOpaqueArtifacts) => void;
   /** Stable request identity supplied by the owning durable execution. */
   nextRequestId?: () => string;
   /**

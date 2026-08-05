@@ -22,7 +22,7 @@ import {
 } from "@opengeni/runtime";
 import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import type { SessionEvent } from "@opengeni/contracts";
-import { applyCodexHistoryStrip, type TurnCodexAccount } from "./run-input";
+import { projectRejectedProviderArtifacts } from "./run-input";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
 export type MaybeCompactResult =
@@ -85,15 +85,12 @@ export async function maybeCompactContext(
     force?: boolean;
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
-    codexAccount?: TurnCodexAccount;
     /** Frozen session mode; remote_v2 selects the Codex opaque path. */
     codexCompactionMode?: "remote_v2" | "portable";
     /** True when this turn's resolved provider is codex-subscription. */
     isCodexSubscriptionTurn?: boolean;
     /** Injected remote requester; required for the remote_v2 branch. */
     requestRemoteCompactionV2?: RemoteCompactionV2Requester;
-    /** Tag persisted history with the Codex credential that produced it. */
-    producerCodexCredentialId?: string | null;
     /**
      * Live fanout for the attempt-fenced `compaction.started` event so the
      * timeline can show progress before the provider call returns. Must never
@@ -146,10 +143,7 @@ export async function maybeCompactContext(
     };
   }
 
-  const canonicalItems = applyCodexHistoryStrip(
-    active,
-    options.codexAccount ?? { currentCodexCredentialId: null },
-  ) as CompactionItem[];
+  const canonicalItems = projectRejectedProviderArtifacts(active) as CompactionItem[];
   const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> =>
     sanitizeHistoryItemsForModel(
       options.projectModelInput ? await options.projectModelInput(input) : input,
@@ -314,7 +308,6 @@ async function compactContextRemoteV2(
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
     requestRemoteCompactionV2?: RemoteCompactionV2Requester;
-    producerCodexCredentialId?: string | null;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
@@ -350,9 +343,6 @@ async function compactContextRemoteV2(
     summaryItem: tailItem as Record<string, unknown>,
     replacementInputTokens: estimatedTokensAfter,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
-    ...(options.producerCodexCredentialId
-      ? { producerCodexCredentialId: options.producerCodexCredentialId }
-      : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
       implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,

@@ -7,6 +7,17 @@ const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
 const DEMO_API_PREFIX = "/demo-api";
+const HOP_BY_HOP_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+] as const;
+const HTTP_FIELD_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 export type DemoApiProxyOptions = {
   targetBaseUrl: string;
@@ -91,19 +102,12 @@ async function proxyDemoApi(
     normalizedBaseUrl(options.targetBaseUrl),
   );
   const headers = new Headers(request.headers);
+  stripHopByHopHeaders(headers);
   for (const name of [
     "authorization",
-    "connection",
     "content-length",
     "forwarded",
     "host",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-port",
@@ -116,6 +120,10 @@ async function proxyDemoApi(
   for (const [name, value] of new Headers(options.credentialHeaders)) {
     headers.set(name, value);
   }
+  // Bun's fetch transparently decodes compressed upstream responses. Ask for
+  // the identity representation so the streamed body and response metadata
+  // agree even before the defensive response-header normalization below.
+  headers.set("accept-encoding", "identity");
   headers.set("x-forwarded-host", incomingUrl.host);
   headers.set("x-forwarded-proto", incomingUrl.protocol.slice(0, -1));
 
@@ -129,6 +137,15 @@ async function proxyDemoApi(
       signal: request.signal,
     });
     const responseHeaders = new Headers(upstream.headers);
+    stripHopByHopHeaders(responseHeaders);
+    // A fetch implementation may retain the upstream representation headers
+    // after transparently decoding its body. Forwarding those stale headers
+    // makes browsers attempt a second decompression and fail before the SDK can
+    // read even an ordinary JSON error response.
+    if (request.method !== "HEAD") {
+      responseHeaders.delete("content-encoding");
+      responseHeaders.delete("content-length");
+    }
     responseHeaders.set("cache-control", "no-store");
     return new Response(request.method === "HEAD" ? null : upstream.body, {
       status: upstream.status,
@@ -138,6 +155,14 @@ async function proxyDemoApi(
   } catch {
     return new Response("Demo API upstream unavailable", { status: 502 });
   }
+}
+
+function stripHopByHopHeaders(headers: Headers): void {
+  for (const name of headers.get("connection")?.split(",") ?? []) {
+    const normalized = name.trim();
+    if (HTTP_FIELD_NAME_PATTERN.test(normalized)) headers.delete(normalized);
+  }
+  for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
 }
 
 function normalizedBaseUrl(value: string): string {

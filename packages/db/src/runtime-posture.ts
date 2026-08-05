@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import type { Database, RlsStrategy } from "./index";
+import type { Database, RlsStrategy } from "./database";
 import {
   classifyRoleRelationships,
   roleRelationshipsCatalogQuery,
@@ -18,6 +18,7 @@ export const FORCE_RLS_TABLES = [
   "billing_customers",
   "capability_catalog_items",
   "capability_installations",
+  "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
   "codex_reset_redemption_attempts",
@@ -126,6 +127,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_inference_controls",
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_heads",
+  "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
   "workspace_instruction_policy_snapshots",
   "workspace_model_policies",
@@ -171,6 +173,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "billing_customers",
   "capability_catalog_items",
   "capability_installations",
+  "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
   "codex_reset_redemption_attempts",
@@ -294,6 +297,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "workspace_artifact_events",
   "workspace_artifact_versions",
   "workspace_instruction_policy_activation_events",
+  "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
 ] as const;
 

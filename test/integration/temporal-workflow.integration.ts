@@ -501,6 +501,75 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "a stale sessionControl wake cannot cancel an unrelated live turn",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      let runStarted = false;
+      let runCompleted = false;
+      let cancellationObserved = false;
+      let settlementCalls = 0;
+      let releaseTurn!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () =>
+          runStarted ? ({ kind: "idle" } as const) : ({ kind: "runnable" } as const),
+        markSessionIdle: async () => undefined,
+        runAgentTurn: async () => {
+          runStarted = true;
+          const cancellation = currentActivityContext()?.cancellationSignal;
+          await Promise.race([
+            released,
+            new Promise<never>((_resolve, reject) => {
+              cancellation?.addEventListener(
+                "abort",
+                () => {
+                  cancellationObserved = true;
+                  reject(new Error("stale control cancelled the live turn"));
+                },
+                { once: true },
+              );
+            }),
+          ]);
+          runCompleted = true;
+          return { status: "idle" };
+        },
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => {
+          settlementCalls += 1;
+          return { action: "stale" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId: crypto.randomUUID() }],
+        });
+        await waitFor(() => runStarted);
+        await handle.signal("sessionControl");
+        await waitFor(() => settlementCalls === 1);
+        expect(runCompleted).toBe(false);
+        expect(cancellationObserved).toBe(false);
+        releaseTurn();
+        await handle.result();
+        expect(runCompleted).toBe(true);
+        expect(cancellationObserved).toBe(false);
+        expect(settlementCalls).toBe(1);
+      } finally {
+        releaseTurn();
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "Pause start-or-signals an idle session with no running workflow",
     async () => {
       // Reproduces the operator-can't-stop bug: a long-lived session that has gone

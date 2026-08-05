@@ -18,88 +18,33 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
-  stripReasoningEncryptedContent,
-  stripReasoningIdentityFromSerializedRunState,
-  neutralizeToolSearchItemsInSerializedRunState,
+  projectHistoryForProvider,
+  projectRejectedProviderArtifactsFromSerializedRunState,
+  projectRejectedReasoningArtifact,
+  hasOpaqueProviderArtifact,
+  type HistoryProviderApi,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 
-/**
- * The codex account THIS turn runs on, threaded into every history read path so a
- * cross-account turn never replays another account's encrypted reasoning. The
- * single rule across all paths: DROP any reasoning item whose producing codex
- * account differs from `currentCodexCredentialId`.
- *
- * `currentCodexCredentialId` is the resolved codex credential id on a codex turn,
- * or NULL on a non-codex turn (the "account" of the built-in Azure/OpenAI path).
- * NULL is a real value in the comparison, not a "skip" sentinel: a non-codex turn
- * (current = null) still drops codex-produced reasoning (producer != null) so a
- * foreign encrypted blob never reaches the Azure/built-in Responses call. A
- * session with no codex history (every producer == null == current) is a no-op.
- */
-export type TurnCodexAccount = { currentCodexCredentialId: string | null };
-
-/** A non-codex turn's account (current = null): no codex credential resolved. */
-const NON_CODEX_TURN: TurnCodexAccount = { currentCodexCredentialId: null };
-
-/**
- * Apply the cross-account reasoning strip to a set of stored history rows. Pure +
- * non-mutating. The single rule: a row whose producing codex account EQUALS the
- * turn's current account replays verbatim (by reference); a row produced by a
- * DIFFERENT account is treated by item type —
- *
- *  - `reasoning`  → DROPPED WHOLE (id + blob filtered out of the history). The
- *    foreign `rs_…` id is validated by the Responses backend, which rejects a
- *    reasoning item that has a foreign id and no encrypted_content (store:false),
- *    so blanking only the blob is not enough — the whole item must go.
- *  - `compaction` → kept, with only its account-bound `encrypted_content` blob
- *    stripped (its summary is real conversation content that must survive).
- *  - everything else (messages, tool calls, tool outputs) → kept verbatim by
- *    reference; message and tool content are never account-bound, never touched.
- *
- * Mismatch covers a foreign codex account, the non-codex/Azure producer (null on
- * a codex turn), and legacy untagged rows (null): all are stripped, which is
- * defensive and harmless (at most one turn of lost chain-of-thought continuity,
- * never any content). No-op (rows by reference) when every producer equals the
- * current account — a single-account workspace, an unchanged-account turn, or a
- * non-codex turn over a history with no codex-produced reasoning.
- */
-export function applyCodexHistoryStrip(
+/** Project only artifacts explicitly rejected by the provider out of its next view. */
+export function projectRejectedProviderArtifacts(
   rows: ReadonlyArray<{
     item: Record<string, unknown>;
-    producerCodexCredentialId: string | null;
     providerArtifactInvalidatedAt?: Date | null;
   }>,
-  current: TurnCodexAccount,
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   for (const row of rows) {
-    if (
-      row.producerCodexCredentialId === current.currentCodexCredentialId &&
-      !row.providerArtifactInvalidatedAt
-    ) {
+    if (!row.providerArtifactInvalidatedAt) {
       out.push(row.item);
       continue;
     }
     const type = typeof row.item.type === "string" ? row.item.type : undefined;
     if (type === "reasoning") {
-      // Foreign reasoning: drop the WHOLE item (id + blob) — see rule above.
-      continue;
-    }
-    if (type === "tool_search_call" || type === "tool_search_output") {
-      // Foreign tool_search items (progressive connector disclosure): drop WHOLE,
-      // like reasoning. The `tsc_…` id is minted by the producing account's
-      // backend, and the output's disclosure set reflects THAT account's
-      // connectors — replaying either into a different account risks a 400 /
-      // wrong-connector disclosure. Dropping both sides keeps the pair invariant
-      // (the history sanitizer would drop a stranded half anyway); the model
-      // simply re-searches on the new account, re-disclosing from the NEW
-      // account's own connector pool. Never any content loss — search items
-      // carry tool metadata, not conversation content.
+      out.push(projectRejectedReasoningArtifact(row.item));
       continue;
     }
     if (type === "compaction") {
-      out.push(stripReasoningEncryptedContent(row.item));
       continue;
     }
     out.push(row.item);
@@ -107,52 +52,26 @@ export function applyCodexHistoryStrip(
   return out;
 }
 
-/**
- * Resolve the serialized RunState used only for an approval resume, applying
- * the same cross-account rule as the canonical history-items path. The blob
- * carries no per-item producer tag, so we
- * compare the codex account that FROZE the state to the resuming turn's account:
- * when they differ, neutralize every reasoning item's account-bound identity
- * (encrypted_content + provider id) in the blob; when they match (including
- * null == null for non-codex / single-account) the blob replays byte-for-byte
- * (same string reference). This closes the gap where a frozen A-minted RunState
- * was replayed verbatim into a turn that switched to account B (or to a non-codex
- * turn), 400ing the resume.
- */
-export function resumeRunStateForCodexAccount(
-  state: {
-    serializedRunState: string;
-    frozenCodexCredentialId: string | null;
-    providerArtifactInvalidatedAt?: Date | null;
-  },
-  current: TurnCodexAccount,
-): string {
-  if (
-    state.frozenCodexCredentialId === current.currentCodexCredentialId &&
-    !state.providerArtifactInvalidatedAt
-  ) {
+/** Build the attempt-local RunState view after an explicit provider rejection. */
+export function resumeRunState(state: {
+  serializedRunState: string;
+  providerArtifactInvalidatedAt?: Date | null;
+}): string {
+  if (!state.providerArtifactInvalidatedAt) {
     return state.serializedRunState;
   }
-  // Cross-account: neutralize reasoning identity in place AND flip frozen
-  // tool_search pairs to execution:"server" in place (count-preserving — HOLE E
-  // forbids removing blob items). The server flip makes the SDK skip its
-  // client-executor rehydration (which would THROW when the resuming account's
-  // connector pool differs from the freezing account's); the flipped shape is
-  // live-verified wire-safe. The model can still re-search on this account.
-  return neutralizeToolSearchItemsInSerializedRunState(
-    stripReasoningIdentityFromSerializedRunState(state.serializedRunState),
-  );
+  return projectRejectedProviderArtifactsFromSerializedRunState(state.serializedRunState);
 }
 
-/**
- * Prepared model input plus the exact sanitized durable prefix represented by
- * that input. Carrying the runtime-produced count keeps item-mode cross-account
- * stripping and approval RunState neutralization path-correct without a second
- * active-history read during reconciliation.
- */
+/** Prepared input and its exact durable-history prefix length for reconciliation. */
 export type PreparedTurnInput = {
   input: Awaited<ReturnType<OpenGeniRuntime["prepareInput"]>>;
   persistedHistoryCount: number;
+  providerArtifactCandidates: {
+    knownHistoryItemIds: string[];
+    historyItemIds: string[];
+    runStateId?: string;
+  };
 };
 
 export type TurnInputOptions = {
@@ -160,6 +79,7 @@ export type TurnInputOptions = {
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
+  providerApi: HistoryProviderApi;
   projectModelHistory?: ModelHistoryAttachmentProjector;
 };
 
@@ -449,7 +369,6 @@ export async function turnInput(
   runtime: OpenGeniRuntime,
   agent: any,
   trigger: Awaited<ReturnType<typeof getSessionEvent>>,
-  current: TurnCodexAccount = NON_CODEX_TURN,
   options: TurnInputOptions,
 ): Promise<PreparedTurnInput> {
   if (!trigger) {
@@ -498,8 +417,8 @@ export async function turnInput(
       trigger,
       undefined,
       joinInternalContext(internalContext, attachmentContext),
-      current,
       fileAttachments.map((attachment) => attachment.resource),
+      options.providerApi,
       options.projectModelHistory,
     );
   }
@@ -507,7 +426,17 @@ export async function turnInput(
     if (updates.length === 0) {
       throw new Error("Internal update inference has no delivered updates");
     }
-    return await messageInput(db, runtime, agent, trigger, undefined, internalContext, current);
+    return await messageInput(
+      db,
+      runtime,
+      agent,
+      trigger,
+      undefined,
+      internalContext,
+      [],
+      options.providerApi,
+      options.projectModelHistory,
+    );
   }
   if (trigger.type === "user.approvalDecision") {
     const payload = trigger.payload as {
@@ -521,21 +450,21 @@ export async function turnInput(
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
-    const input = await runtime.prepareInput(agent, {
+    const prepared = await runtime.prepareInput(agent, {
       kind: "approval",
-      // Cross-account run-state strip (HOLE C): if the account resuming this
-      // frozen approval differs from the one that froze it, neutralize the
-      // blob's account-bound reasoning before replay (else byte-for-byte).
-      serializedRunState: resumeRunStateForCodexAccount(state, current),
+      serializedRunState: resumeRunState(state),
       approvalId: String(payload.approvalId ?? ""),
       decision: payload.decision === "approve" ? "approve" : "reject",
       ...(typeof payload.message === "string" ? { message: payload.message } : {}),
     });
     return {
-      input,
-      // The approval RunState neutralizes foreign reasoning in place, so its
-      // materialized history count includes those retained items (HOLE E).
-      persistedHistoryCount: input.historyItemCount,
+      input: prepared,
+      persistedHistoryCount: prepared.persistedHistoryCount,
+      providerArtifactCandidates: {
+        knownHistoryItemIds: [],
+        historyItemIds: [],
+        runStateId: state.id,
+      },
     };
   }
   if (trigger.type === "user.humanInputResponse") {
@@ -549,12 +478,20 @@ export async function turnInput(
     if (!resume) {
       throw new Error("Human-input response does not resolve to a durable request");
     }
-    const input = await runtime.prepareInput(agent, {
+    const prepared = await runtime.prepareInput(agent, {
       kind: "human_input",
-      serializedRunState: resumeRunStateForCodexAccount(state, current),
+      serializedRunState: resumeRunState(state),
       toolCallId: resume.toolCallId,
     });
-    return { input, persistedHistoryCount: input.historyItemCount };
+    return {
+      input: prepared,
+      persistedHistoryCount: prepared.persistedHistoryCount,
+      providerArtifactCandidates: {
+        knownHistoryItemIds: [],
+        historyItemIds: [],
+        runStateId: state.id,
+      },
+    };
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
 }
@@ -572,8 +509,8 @@ async function messageInput(
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>,
   text: string | undefined,
   internalContext: string | undefined,
-  current: TurnCodexAccount = NON_CODEX_TURN,
   currentAttachmentRefs: FileResourceRef[] = [],
+  providerApi: HistoryProviderApi = "responses",
   projectModelHistory?: ModelHistoryAttachmentProjector,
 ): Promise<PreparedTurnInput> {
   const stored = await getActiveSessionHistoryItemsPaged(
@@ -582,14 +519,13 @@ async function messageInput(
     trigger.sessionId,
   );
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
-  const referencedHistory = withCurrentUserAttachmentRefs(
-    applyCodexHistoryStrip(stored, current),
-    currentAttachmentRefs,
-  );
+  const canonicalView = projectRejectedProviderArtifacts(stored);
+  const providerView = projectHistoryForProvider(canonicalView, providerApi);
+  const referencedHistory = withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs);
   const historyItems = projectModelHistory
     ? await projectModelHistory(referencedHistory)
     : referencedHistory;
-  const input = await runtime.prepareInput(agent, {
+  const prepared = await runtime.prepareInput(agent, {
     kind: "message",
     ...(text ? { text } : {}),
     ...(internalContext ? { internalContext } : {}),
@@ -597,7 +533,24 @@ async function messageInput(
     sandboxEnvelope: envelope,
     ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
   });
-  return { input, persistedHistoryCount: input.historyItemCount };
+  const preparedItems = Array.isArray(prepared.input)
+    ? new Set(prepared.input)
+    : new Set<unknown>();
+  return {
+    input: prepared,
+    persistedHistoryCount: prepared.persistedHistoryCount,
+    providerArtifactCandidates: {
+      knownHistoryItemIds: stored.map((row) => row.id),
+      historyItemIds: stored
+        .filter(
+          (row) =>
+            row.providerArtifactInvalidatedAt === null &&
+            hasOpaqueProviderArtifact(row.item) &&
+            preparedItems.has(row.item),
+        )
+        .map((row) => row.id),
+    },
+  };
 }
 
 export async function userMessageTextWithAttachments(

@@ -12,7 +12,6 @@ import {
   getCodexCredentialStatus,
   listCodexAccountStatuses,
   recordCodexAccountUsage,
-  recordCodexAccountConnectors,
   setActiveCodexCredential,
   upsertCodexSubscriptionCredential,
   type Database,
@@ -253,43 +252,6 @@ describe("recordCodexAccountUsage + the cached read", () => {
         secondaryResetAt: null,
         checkedAt: new Date(),
       }),
-    ).toBe(false);
-  });
-});
-
-describe("recordCodexAccountConnectors + the cached read (P4 Part B.1)", () => {
-  test("writes the connector set and listCodexAccountStatuses reads it back; null until first write", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const id = await connect(
-      ws,
-      "acct_x",
-      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
-      new Date(Date.now() + 3_600_000),
-    );
-    // Never-probed → null (the ranker treats it as unknown).
-    const [before] = await listCodexAccountStatuses(db, ws.workspaceId);
-    expect(before!.connectorNamespaces).toBeNull();
-    expect(before!.connectorsCheckedAt).toBeNull();
-    expect(await recordCodexAccountConnectors(db, ws.workspaceId, id, ["github", "gmail"])).toBe(
-      true,
-    );
-    const [after] = await listCodexAccountStatuses(db, ws.workspaceId);
-    expect([...(after!.connectorNamespaces ?? [])].sort()).toEqual(["github", "gmail"]);
-    expect(after!.connectorsCheckedAt).not.toBeNull();
-  });
-
-  test("an unknown id writes 0 rows (false)", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    await connect(
-      ws,
-      "acct_x",
-      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
-      new Date(Date.now() + 3_600_000),
-    );
-    expect(
-      await recordCodexAccountConnectors(db, ws.workspaceId, crypto.randomUUID(), ["github"]),
     ).toBe(false);
   });
 });

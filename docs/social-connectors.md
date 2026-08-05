@@ -26,10 +26,17 @@ used only host-side; agents never see credentials, only normalized posts.
 
 ## Connecting an account
 
-`POST /v1/workspaces/:id/social/oauth/start` (workspace:admin) with
-`{"provider": "x"}` or `{"provider": "reddit"}` returns an `authorizationUrl`;
+In the web app, open **Capabilities → X** and choose either **Connect for
+workspace** (the default) or **Connect only for me**.
+The catalog item uses this first-party OAuth flow and remains visibly enabled
+when the account needs reconnection, so the repair action does not disappear.
+
+`POST /v1/workspaces/:id/social/oauth/start` with
+`{"provider": "x", "ownership": "workspace"}` or
+`{"provider": "reddit", "ownership": "personal"}` returns an `authorizationUrl`;
 open it in a browser and approve. The callback upserts a `social_connections`
-row (reconnecting the same handle replaces the credential). SDK:
+row. Workspace ownership requires `workspace:admin`; personal ownership requires
+workspace membership and remains visible only to that subject. SDK:
 `client.startSocialOAuth(workspaceId, { provider: "x" })`, then
 `client.listSocialConnections(workspaceId)`.
 
@@ -57,14 +64,12 @@ permission set):
 
 ## Identity model
 
-A social connection stores a **human's** personal X/Reddit grant as a
-workspace-shared row, and the live tools are deliberately usable from
-scheduled (service-initiated) turns — that is the point of the marketing
-loop. This is an intentional exception to the personal-connection rule for
-broker `connections` rows (where unattended turns fail closed rather than
-borrow a user's OAuth row) and mirrors the workspace-shared posture of the
-Slack bot connection. Connect a dedicated brand account, not a personal one,
-when the workspace's scheduled tasks should not act as an individual.
+Workspace-owned social connections are available to workspace agents and
+scheduled tasks, so connect a dedicated brand account for unattended marketing
+loops. Personal social connections use the same frozen causal authority model
+as personal MCP credentials: direct work snapshots the current subject's exact
+connection, children and user-created schedules inherit that snapshot, and
+unrelated service work cannot discover or borrow it.
 
 ## Composing the marketing loop with scheduled tasks
 

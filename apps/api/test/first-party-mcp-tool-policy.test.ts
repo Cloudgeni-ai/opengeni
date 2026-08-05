@@ -138,6 +138,7 @@ describe("first-party MCP tool visibility policy", () => {
 
     expect(registeredToolNames(server)).toEqual([...FIRST_PARTY_MCP_TOOL_NAMES].sort());
     expect(registeredToolNames(server)).not.toContain("files_get_download_url");
+    expect(registeredToolNames(server)).not.toContain("github_token");
   });
 
   test("the download URL tool exists only on the dedicated files MCP server", () => {

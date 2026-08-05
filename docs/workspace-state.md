@@ -1,10 +1,13 @@
 # Workspace State
 
-Workspace State is a read-only, read-time inventory of existing workspace
-authorities. It helps operators understand instruction-policy metadata,
-knowledge coverage, freshness, and deterministic structural gaps without
-creating another editor, storage authority, background synthesizer, or runtime
-prompt source.
+Workspace State is a read-time inventory of existing workspace authorities. It
+helps operators understand instruction-policy metadata, structured preference
+identities, document authority coverage, knowledge freshness, and deterministic
+structural gaps. The inventory remains read-only;
+the console additionally provides one bounded workspace-admin action that
+creates an inactive onboarding proposal through the existing instruction-policy
+authority. It does not create another storage authority, background synthesizer,
+or runtime prompt source.
 
 The current slice is additive and dependency-safe. It does not implement the
 full structured Workspace State administration planned for later phases.
@@ -18,6 +21,9 @@ Workspace State projects existing sources; it owns none of them:
   `workspace_instruction_policy_heads`, and
   `workspace_instruction_policy_activation_events` as documented in
   [`workspace-instruction-policies.md`](workspace-instruction-policies.md);
+- onboarding evidence remains in
+  `workspace_instruction_policy_onboarding_proposals`, and every proposal links
+  to one inactive revision in that same instruction-policy authority;
 - indexed knowledge remains in Documents (`document_bases`, `documents`, and
   `document_chunks`);
 - durable facts, decisions, procedures, and other retrieval observations remain
@@ -43,6 +49,18 @@ explicitly activates them.
 returns `Cache-Control: private, no-store`. The optional
 `?attemptId=<uuid>` query requests immutable governance metadata for one
 accepted attempt.
+
+`GET /v1/workspaces/:workspaceId/workspace-state/export` accepts the same query,
+requires the same permissions, and runs the same permission-filtered projection
+before serialization. It returns canonical JSON as a private, no-store
+attachment. The export is not a raw database dump or compliance audit log.
+
+The separate proposal surface lives at
+`/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals`.
+`GET` requires `workspace:read`; `POST` requires `workspace:admin`, an exact
+active-head baseline, bounded source/version/confidence evidence, and an
+idempotent operation ID. The POST creates only immutable proposal evidence plus
+one inactive instruction-policy revision. It never activates policy.
 
 Attempt inspection additionally requires the authenticated subject to equal
 the turn's immutable initiating-human subject (including a causal human carried
@@ -95,6 +113,19 @@ It returns only bounded metadata and aggregates:
 | Accepted-attempt policy entries | 3 | Immutable snapshot-table constraint; count and hash are explicit |
 | Accepted-attempt preference descriptors | 64 / 16 KiB | Only descriptor count/hash is projected; `truncated` is explicit |
 
+The current structured-preference inventory uses the same subject-scoped,
+bounded descriptor identity query as accepted-attempt drift comparison. It
+returns only the active descriptor count, a deterministic identity hash,
+organization/workspace/user counts, and truncation truth. Preference titles,
+descriptions, values, stable keys, precedence details, provenance, expiration,
+and retrieval handles do not cross the boundary.
+
+Subject-visible document aggregates additionally include fixed-cardinality
+counts for the immutable `organization`, `workspace`, and `personal` document
+authorities. The personal count includes only the authenticated subject's own
+documents; another subject's personal rows and every cross-tenant row remain
+outside both the inventory and export.
+
 Base names are normalized and clipped to 160 characters. Topic labels are
 normalized and clipped to 96 characters. Aggregate status and source-kind
 counts cover all subject-visible documents through fixed-cardinality SQL
@@ -117,6 +148,27 @@ does not read, duplicate, or create another preference store.
 
 `generatedAt`, `latestDocumentUpdatedAt`, per-base `latestUpdatedAt`, and the
 Memory sample's `latestUpdatedAt` make freshness explicit.
+
+## Sanitized export
+
+The export envelope is versioned as
+`opengeni.workspace_state.sanitized_export` schema version `1`. It embeds the
+already-validated `WorkspaceStateResponse`, includes a SHA-256 over canonical
+JSON for that sanitized state, and carries an explicit omission manifest for:
+
+- hidden platform prompts;
+- policy bodies;
+- preference content;
+- document content and private metadata;
+- Memory content and provenance;
+- secret values and credentials;
+- session messages and tool outputs.
+
+Object keys are recursively sorted and arrays preserve their projection order,
+so an identical sanitized state produces byte-identical export JSON and the
+same digest. `generatedAt` is reused from the projected state rather than
+introducing a second export clock. Any future export shape requires a new schema
+version; raw content must never be added to version `1`.
 
 ## Current state versus accepted-attempt governance
 
@@ -175,23 +227,30 @@ changes. Gaps are not persisted and cannot activate policy.
 
 `/workspaces/:workspaceId/state` renders Workspace State with loading, empty,
 permission-unavailable, error/retry, partial-coverage, freshness, and accepted-
-attempt governance states. The inspector accepts an attempt UUID and displays
+attempt governance states. It separately shows current structured-preference
+identity counts and company/workspace/personal document authority counts. The
+inspector accepts an attempt UUID and displays
 only drift status, counts, hashes, role metadata, and timestamps. Loader
 generation fences include both workspace and attempt IDs, so a late response
-cannot populate a newer selection. The surface contains no edit, synthesis,
-lock, activation, or policy mutation control. Deep links lead to the existing
-Documents, Memory, Capabilities/Skills, Sessions/Agents, Rigs, Variable Sets,
-and Workspace Settings surfaces.
+cannot populate a newer selection. A second generation-fenced loader lists
+recent onboarding proposal evidence. Workspace admins may submit one explicit
+draft-only proposal with the exact displayed active-head baseline; readers see
+the immutable source/version/confidence, linked draft, baseline, and timestamp.
+There is no activation, rollback, Memory promotion, Documents promotion, or
+general policy editor. Deep links lead to the existing Documents, Memory,
+Capabilities/Skills, Sessions/Agents, Rigs, Variable Sets, and Workspace
+Settings surfaces.
 
 ## Explicit non-goals
 
 This slice does not implement:
 
-- policy or preference administration mutations;
+- policy activation, rollback, preference administration, or general policy
+  editing;
 - preference storage;
 - source/fact schema work;
 - Slack, transcript, email, repository, or other connectors;
-- policy draft creation, activation, rollback, or administration UI;
+- proposal review/approval states or automatic proposal generation;
 - background sweeps, auto-synthesis, direct prompt injection, or a new charter
   authority.
 

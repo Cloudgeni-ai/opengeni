@@ -39,8 +39,12 @@ describe("workspace state route discipline", () => {
     expect(route).not.toContain("WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,");
   });
 
-  test("exposes only a no-store GET route with no mutation registration", () => {
-    expect(route).toContain('app.get("/v1/workspaces/:workspaceId/workspace-state"');
+  test("reuses one permission-filtered read for the inventory and sanitized export", () => {
+    expect(route).toContain('const base = "/v1/workspaces/:workspaceId/workspace-state"');
+    expect(route).toContain("app.get(base");
+    expect(route).toContain("app.get(`${base}/export`");
+    expect(route.match(/readWorkspaceState\(deps/g)).toHaveLength(2);
+    expect(route).toContain("serializeWorkspaceStateExport(state)");
     expect(route).toContain('context.header("cache-control", "private, no-store")');
     expect(route).not.toMatch(/app\.(?:post|put|patch|delete)\(/);
   });

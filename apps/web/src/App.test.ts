@@ -1808,6 +1808,7 @@ function session(patch: Partial<Session> = {}): Session {
     sandboxBackend: "none",
     sandboxOs: "linux",
     sandboxGroupId: "session-1",
+    workingDir: null,
     activeSandboxId: null,
     activeEpoch: 0,
     parentSessionId: null,
