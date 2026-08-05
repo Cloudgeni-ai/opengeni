@@ -1480,14 +1480,9 @@ export async function emitModelCallUsage(input: {
   if (!authoritative) return false;
   try {
     input.observability.info("model call usage", {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
       provider: input.provider,
       providerApi: input.providerApi,
       model: input.model,
-      sourceKey: input.sourceKey,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
@@ -1505,7 +1500,6 @@ export async function emitModelCallUsage(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         model: input.model,
-        sourceKey: input.sourceKey,
         rejectedFields: normalizedUsage.rejectedFields.join(","),
       });
     }
@@ -9401,11 +9395,6 @@ export async function recordAuthoritativeModelCallFact(input: {
     });
   } catch (error) {
     input.observability.warn("model call fact persist failed", {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      sourceKey: input.sourceKey,
       ...safeErrorDiagnostic(error),
     });
   }

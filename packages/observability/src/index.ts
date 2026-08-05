@@ -92,8 +92,14 @@ const PUBLIC_TELEMETRY_OMITTED_ATTRIBUTE_KEYS = new Set([
   "consumerId",
   "consumer_id",
   "error",
+  "errorName",
+  "error_name",
   "errorMessage",
   "error_message",
+  "message",
+  "stack",
+  "cause",
+  "code",
   "exception.message",
   "exception.stacktrace",
   "command",
@@ -108,6 +114,112 @@ const PUBLIC_TELEMETRY_OMITTED_ATTRIBUTE_KEYS = new Set([
   "endpoint",
   "toolResult",
   "tool_result",
+]);
+
+/**
+ * Public diagnostic values are protocol constants, never values inferred from
+ * an exception's name, constructor, code, message, or enumerable properties.
+ * Unknown classes collapse to one fixed fallback; unknown codes and origins
+ * are omitted rather than copied through based on syntax.
+ */
+const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
+  "OperationError",
+  "CodexCheckpointOperationError",
+  "CodexFleetShadowOperationError",
+  "ComputerActionTimeoutError",
+  "ComputerUnavailableError",
+  "CredentialRenewalOperationError",
+  "CredentialReadOperationError",
+  "EventPublishOperationError",
+  "GitCredentialRenewalOperationError",
+  "HostExportOperationError",
+  "HttpOperationError",
+  "McpLifecycleError",
+  "McpOperationError",
+  "MemoryEmbeddingOperationError",
+  "MemorySearchOperationError",
+  "NatsAuthCalloutOperationError",
+  "OAuthOperationError",
+  "RunCredentialRenewalOperationError",
+  "RunStateCompatibilityError",
+  "SnapshotOperationError",
+  "StartupDependencyError",
+  "TelemetryExportError",
+  "ToolspaceOperationError",
+  "ToolspaceTokenRenewalOperationError",
+  "WorkerLifecycleOperation",
+  "WorkerLifecycleOperationError",
+  "WorkerOperationError",
+  "WorkflowWakeOperationError",
+]);
+
+const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
+  "agent_command_wake_failed",
+  "cleared_goal_live_publish_failed",
+  "codex_failover_checkpoint_failed",
+  "codex_fleet_shadow_failed",
+  "codex_lease_loss_checkpoint_failed",
+  "codex_active_credential_read_failed",
+  "command_yield_timeout",
+  "conflict",
+  "control_wake_dispatch_failed",
+  "fenced_event_live_publish_failed",
+  "forbidden",
+  "host_export_batch_delivery_failed",
+  "host_export_failure_settlement_stale",
+  "host_export_pump_iteration_failed",
+  "host_export_retention_prune_failed",
+  "idempotency_conflict",
+  "incompatible_exposed_ports",
+  "internal_error",
+  "limit_exceeded",
+  "mcp_close_failed",
+  "mcp_connect_failed",
+  "mcp_tool_call_failed",
+  "mcp_tools_list_failed",
+  "mcp_transport_failed",
+  "memory_edit_embedding_failed",
+  "memory_hybrid_vector_failed",
+  "memory_save_embedding_failed",
+  "nats_auth_callout_start_failed",
+  "nested_agent_depth_exceeded",
+  "nested_agent_depth_override_forbidden",
+  "not_found",
+  "oauth_operation_failed",
+  "otlp_export_failed",
+  "payment_required",
+  "provider_verification_failed",
+  "screenshot_capture_failed",
+  "session_event_live_publish_failed",
+  "session_workflow_wake_failed",
+  "snapshot_operation_failed",
+  "startup_dependency_retry",
+  "tool_list_too_large",
+  "tool_result_too_large",
+  "toolspace_operation_failed",
+  "unauthenticated",
+  "upstream_unavailable",
+  "validation_failed",
+  "worker_draining",
+  "worker_operation_failed",
+  "worker_shutdown_request_failed",
+  "workspace_control_live_publish_failed",
+]);
+
+const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
+  "api",
+  "core",
+  "db",
+  "events",
+  "host-export",
+  "oauth",
+  "observability",
+  "runtime",
+  "sandbox-computer",
+  "sandbox-resume",
+  "toolspace",
+  "worker",
+  "worker-lifecycle",
 ]);
 
 export type SandboxOperationMetricObservation = {
@@ -589,11 +701,34 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
 }
 
 function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
+  if ("errorClass" in attributes || "errorCode" in attributes) {
+    return projectPublicDiagnosticAttributes(attributes);
+  }
   return Object.fromEntries(
     Object.entries(attributes).filter(
       ([key, value]) => value !== undefined && !PUBLIC_TELEMETRY_OMITTED_ATTRIBUTE_KEYS.has(key),
     ),
   );
+}
+
+function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
+  const errorClass = attributes.errorClass;
+  const errorCode = attributes.errorCode;
+  const status = attributes.status;
+  const origin = attributes.origin;
+  return {
+    errorClass:
+      typeof errorClass === "string" && PUBLIC_TELEMETRY_ERROR_CLASSES.has(errorClass)
+        ? errorClass
+        : "OperationError",
+    ...(typeof errorCode === "string" && PUBLIC_TELEMETRY_ERROR_CODES.has(errorCode)
+      ? { errorCode }
+      : {}),
+    ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+      ? { status }
+      : {}),
+    ...(typeof origin === "string" && PUBLIC_TELEMETRY_ERROR_ORIGINS.has(origin) ? { origin } : {}),
+  };
 }
 
 type TelemetrySpanError = {

@@ -52,6 +52,45 @@ describe("lossless PostgreSQL content boundaries", () => {
     expect(fromPostgresLosslessJson(stored, LOSSLESS_CONTENT_CODEC_VERSION)).toEqual(value);
   });
 
+  test("preserves nested __proto__ as own JSON data through encode and decode", () => {
+    const source = JSON.parse(
+      `{"nested":{"__proto__":{"polluted":true},"safe":"x\\u0000y"}}`,
+    ) as Record<string, Record<string, unknown>>;
+
+    const stored = toPostgresLosslessJson(source) as Record<string, Record<string, unknown>>;
+    const restored = fromPostgresLosslessJson(stored, LOSSLESS_CONTENT_CODEC_VERSION);
+
+    for (const value of [source.nested, stored.nested, restored.nested]) {
+      expect(Object.keys(value!)).toEqual(["__proto__", "safe"]);
+      expect(Object.hasOwn(value!, "__proto__")).toBeTrue();
+      expect(Object.getPrototypeOf(value!)).toBe(Object.prototype);
+      expect((value as { polluted?: unknown }).polluted).toBeUndefined();
+      expect(value!["__proto__"]).toEqual({ polluted: true });
+    }
+    expect(restored).toEqual(source);
+  });
+
+  test("fails closed when decoding an encoded key would collide with literal storage", () => {
+    const unsafeKey = `unsafe${String.fromCharCode(0)}key`;
+    const encoded = toPostgresLosslessJson({ [unsafeKey]: "encoded" }) as Record<string, unknown>;
+    const encodedKey = Object.keys(encoded)[0]!;
+    const collision: Record<string, unknown> = {};
+    Object.defineProperty(collision, encodedKey, {
+      value: "encoded",
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(collision, unsafeKey, {
+      value: "literal",
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+
+    expect(fromPostgresLosslessJson(collision, LOSSLESS_CONTENT_CODEC_VERSION)).toBe(collision);
+  });
+
   test("preserves large and deep ordinary JSON without wrapping its SQL shape", () => {
     const root: Record<string, unknown> = {
       id: "large-synthetic",

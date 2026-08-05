@@ -258,9 +258,9 @@ describe("observability", () => {
         endpoint: `https://provider.example/${sentinel}`,
         toolResult: `result-${sentinel}`,
         errorClass: "OperationError",
-        errorCode: "operation_failed",
+        errorCode: "worker_operation_failed",
         status: 503,
-        origin: "test",
+        origin: "worker",
       });
     } finally {
       console.warn = originalWarn;
@@ -271,10 +271,50 @@ describe("observability", () => {
     expect(JSON.parse(observed[0]!)).toMatchObject({
       message: "operation failed",
       errorClass: "OperationError",
-      errorCode: "operation_failed",
+      errorCode: "worker_operation_failed",
       status: 503,
-      origin: "test",
+      origin: "worker",
     });
+  });
+
+  test("public diagnostics reject syntactically valid secret-shaped classes and codes", () => {
+    const sentinel = "SECRET_SENTINEL_123";
+    const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
+    const exactError = Object.assign(new SecretSentinelError(`exact ${sentinel}`), {
+      name: sentinel,
+      code: sentinel,
+      status: 503,
+      cause: { exact: sentinel },
+    });
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "worker", now: () => 1 });
+      obs.warn("operation failed", {
+        errorClass: exactError.constructor.name,
+        errorCode: exactError.code,
+        status: exactError.status,
+        origin: sentinel,
+        arbitraryDiagnostic: sentinel,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(exactError.message).toBe(`exact ${sentinel}`);
+    expect(exactError.constructor.name).toBe(sentinel);
+    expect(exactError.code).toBe(sentinel);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toContain(sentinel);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "operation failed",
+      errorClass: "OperationError",
+      status: 503,
+    });
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("errorCode");
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("origin");
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("arbitraryDiagnostic");
   });
 
   test("OTLP exporter failures expose only a fixed structural diagnostic", async () => {

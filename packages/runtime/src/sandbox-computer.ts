@@ -229,19 +229,25 @@ export class ComputerActionError extends Error {
   }
 }
 
-function computerPublicErrorFields(
+type ComputerPublicErrorClass = "ComputerActionTimeoutError" | "ComputerUnavailableError";
+type ComputerPublicErrorCode = "command_yield_timeout" | "screenshot_capture_failed";
+
+function computerPublicErrorFields<
+  ErrorClass extends ComputerPublicErrorClass,
+  ErrorCode extends ComputerPublicErrorCode,
+>(
   error: unknown,
-  fallbackClass: string,
-  fallbackCode: string,
+  fallbackClass: ErrorClass,
+  fallbackCode: ErrorCode,
 ): {
-  errorClass: string;
-  errorCode: string;
+  errorClass: ErrorClass;
+  errorCode: ErrorCode;
   status?: number;
   origin: "sandbox-computer";
 } {
   const fields: {
-    errorClass: string;
-    errorCode: string;
+    errorClass: ErrorClass;
+    errorCode: ErrorCode;
     status?: number;
     origin: "sandbox-computer";
   } = { errorClass: fallbackClass, errorCode: fallbackCode, origin: "sandbox-computer" };

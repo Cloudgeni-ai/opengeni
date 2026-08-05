@@ -7835,10 +7835,11 @@ export async function updateKnowledgeMemory(
           embedding = vector;
           embeddingModel = embedder.model;
         }
-      } catch (error) {
+      } catch {
         console.warn("workspace memory edit: embedding failed; storing keyword-only", {
-          workspaceId,
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "MemoryEmbeddingOperationError",
+          errorCode: "memory_edit_embedding_failed",
+          origin: "db",
         });
       }
     }
@@ -8356,10 +8357,11 @@ export async function saveWorkspaceMemory(
         embedding = vector;
         embeddingModel = embedder.model;
       }
-    } catch (error) {
+    } catch {
       console.warn("workspace memory save: embedding failed; saving keyword-only", {
-        workspaceId: input.workspaceId,
-        error: error instanceof Error ? error.message : String(error),
+        errorClass: "MemoryEmbeddingOperationError",
+        errorCode: "memory_save_embedding_failed",
+        origin: "db",
       });
     }
   }
@@ -8841,8 +8843,9 @@ export async function searchWorkspaceMemories(
         console.warn(
           "workspace memory hybrid search vector component failed; falling back to keyword",
           {
-            workspaceId,
-            error: error instanceof Error ? error.message : String(error),
+            errorClass: "MemorySearchOperationError",
+            errorCode: "memory_hybrid_vector_failed",
+            origin: "db",
           },
         );
       }
@@ -12375,10 +12378,11 @@ export async function workspaceCodexSubscriptionActive(
   // Every attempt threw: this is a real, persistent read outage, not a one-off
   // blip. Surface the underlying error (truthful + retryable) instead of
   // silently denying an active subscription.
-  console.error(
-    `workspaceCodexSubscriptionActive: credential read failed for workspace ${workspaceId} after ${CODEX_ACTIVE_READ_ATTEMPTS} attempts`,
-    lastError,
-  );
+  console.error("workspace Codex subscription credential read failed after retries", {
+    errorClass: "CredentialReadOperationError",
+    errorCode: "codex_active_credential_read_failed",
+    origin: "db",
+  });
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 

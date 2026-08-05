@@ -1558,13 +1558,17 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
-      sourceKey: "resp-1",
       inputTokens: 1200,
       outputTokens: 100,
       cachedTokens: 1024,
       cacheWriteTokens: 256,
       reasoningTokens: 12,
     });
+    expect(infos[0]).not.toHaveProperty("accountId");
+    expect(infos[0]).not.toHaveProperty("workspaceId");
+    expect(infos[0]).not.toHaveProperty("sessionId");
+    expect(infos[0]).not.toHaveProperty("turnId");
+    expect(infos[0]).not.toHaveProperty("sourceKey");
     expect(events).toEqual([
       {
         type: "agent.model.usage",
@@ -1625,12 +1629,16 @@ describe("model call usage observability", () => {
     });
 
     expect(infos[0]).toMatchObject({
-      sessionId: "sess-1",
       inputTokens: 1200,
       cachedTokens: 200,
       servingAccountHash: "abc123def456",
       accountChangedFromPrevCall: true,
     });
+    expect(infos[0]).not.toHaveProperty("accountId");
+    expect(infos[0]).not.toHaveProperty("workspaceId");
+    expect(infos[0]).not.toHaveProperty("sessionId");
+    expect(infos[0]).not.toHaveProperty("turnId");
+    expect(infos[0]).not.toHaveProperty("sourceKey");
   });
 
   test("does not log a duplicate usage observation as authoritative", async () => {

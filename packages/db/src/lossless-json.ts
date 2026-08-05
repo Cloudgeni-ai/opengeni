@@ -202,7 +202,7 @@ function encodeJsonValue(value: unknown, ancestors: Set<object>, depth: number):
         throw new UnsupportedCanonicalValueError("Canonical JSON key encoding collided");
       }
       const encodedValue = encodeJsonValue(descriptor.value, ancestors, depth + 1);
-      output[encodedKey] = encodedValue.value;
+      defineJsonDataProperty(output, encodedKey, encodedValue.value);
       changed ||= encodedKey !== key || encodedValue.changed;
     }
     return changed ? { value: output, changed: true } : { value, changed: false };
@@ -238,10 +238,29 @@ function decodeJsonValue(value: unknown, depth: number): TransformResult {
       return { value, changed: false };
     }
     const decodedValue = decodeJsonValue(entry, depth + 1);
-    output[decodedKey] = decodedValue.value;
+    defineJsonDataProperty(output, decodedKey, decodedValue.value);
     changed ||= decodedKey !== key || decodedValue.changed;
   }
   return changed ? { value: output, changed: true } : { value, changed: false };
+}
+
+/**
+ * JSON permits own keys such as `__proto__`. Assignment into an ordinary `{}`
+ * would invoke the inherited legacy setter and silently replace the object's
+ * prototype instead of creating data. Define every transformed key explicitly
+ * so encode/decode preserve hostile-but-valid JSON keys and property order.
+ */
+function defineJsonDataProperty(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
 }
 
 function encodeUtf16(value: string): string {

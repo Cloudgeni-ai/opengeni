@@ -33,6 +33,7 @@ import {
   registerPendingSessionToolCall,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
+  updateKnowledgeMemory,
   withWorkspaceRls,
   type Database,
 } from "../src/index";
@@ -594,6 +595,10 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       type: "agent.toolCall.output",
       exactCommand,
       nested: { source: unsafeText },
+      hostile: JSON.parse(`{"__proto__":{"polluted":true},"safe":"x\\u0000y"}`) as Record<
+        string,
+        unknown
+      >,
     };
     const largePayload = {
       type: "agent.message.completed",
@@ -618,6 +623,14 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     ]);
     expect(appended[0]?.payload).toEqual(queryablePayload);
     expect(appended[1]?.payload).toEqual(largePayload);
+    const restoredHostile = (appended[0]!.payload as typeof queryablePayload).hostile;
+    expect(Object.keys(restoredHostile)).toHaveLength(2);
+    expect(Object.keys(restoredHostile)).toContain("__proto__");
+    expect(Object.keys(restoredHostile)).toContain("safe");
+    expect(Object.hasOwn(restoredHostile, "__proto__")).toBeTrue();
+    expect(Object.getPrototypeOf(restoredHostile)).toBe(Object.prototype);
+    expect((restoredHostile as { polluted?: unknown }).polluted).toBeUndefined();
+    expect(restoredHostile["__proto__"]).toEqual({ polluted: true });
 
     const [rawEvent] = await shared.admin<
       Array<{
@@ -627,6 +640,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         recordingId: string | null;
         code: string | null;
         type: string | null;
+        hostileHasProto: boolean;
+        hostilePolluted: string | null;
       }>
     >`
       select payload ->> 'id' as id,
@@ -634,7 +649,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
              payload ->> 'sourceKey' as "sourceKey",
              payload ->> 'recordingId' as "recordingId",
              payload ->> 'code' as code,
-             payload ->> 'type' as type
+             payload ->> 'type' as type,
+             (payload -> 'hostile') ? '__proto__' as "hostileHasProto",
+             payload #>> '{hostile,__proto__,polluted}' as "hostilePolluted"
       from session_events where id = ${appended[0]!.id}`;
     expect(rawEvent).toEqual({
       id: queryablePayload.id,
@@ -643,6 +660,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       recordingId: queryablePayload.recordingId,
       code: queryablePayload.code,
       type: queryablePayload.type,
+      hostileHasProto: true,
+      hostilePolluted: "true",
     });
 
     const [largeRaw] = await shared.admin<Array<{ bytes: number }>>`
@@ -921,6 +940,94 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     expect(
       memorySearch.find((entry) => entry.memory.id === savedMemory.memory.id)?.memory.text,
     ).toBe(memoryText);
+
+    const publicBoundarySentinel = "SECRET_SENTINEL_123";
+    const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
+    const exactEmbeddingError = Object.assign(
+      new SecretSentinelError(`embedding failed ${publicBoundarySentinel}`),
+      {
+        name: publicBoundarySentinel,
+        code: publicBoundarySentinel,
+        cause: { exact: publicBoundarySentinel },
+      },
+    );
+    const failingEmbedder = {
+      model: `model-${publicBoundarySentinel}`,
+      embedMany: async () => {
+        throw exactEmbeddingError;
+      },
+    };
+    const publicWarnings: Array<[unknown, unknown]> = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown, attributes?: unknown) => {
+      publicWarnings.push([message, attributes]);
+    };
+    let fallbackMemory: Awaited<ReturnType<typeof saveWorkspaceMemory>> | undefined;
+    let updatedFallbackMemory: Awaited<ReturnType<typeof updateKnowledgeMemory>> | undefined;
+    let fallbackSearch: Awaited<ReturnType<typeof searchWorkspaceMemories>> | undefined;
+    try {
+      fallbackMemory = await saveWorkspaceMemory(
+        app.db,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          text: "public boundary memory save",
+          sessionId: session.id,
+          origin: "agent",
+        },
+        failingEmbedder,
+      );
+      updatedFallbackMemory = await updateKnowledgeMemory(
+        app.db,
+        workspaceId,
+        fallbackMemory.memory.id,
+        { text: "public boundary memory edit" },
+        failingEmbedder,
+      );
+      fallbackSearch = await searchWorkspaceMemories(
+        app.db,
+        workspaceId,
+        { query: "public boundary memory edit", mode: "hybrid" },
+        failingEmbedder,
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(fallbackMemory!.memory.text).toBe("public boundary memory save");
+    expect(updatedFallbackMemory!.text).toBe("public boundary memory edit");
+    expect(fallbackSearch!.map((entry) => entry.memory.id)).toContain(fallbackMemory!.memory.id);
+    expect(publicWarnings).toEqual([
+      [
+        "workspace memory save: embedding failed; saving keyword-only",
+        {
+          errorClass: "MemoryEmbeddingOperationError",
+          errorCode: "memory_save_embedding_failed",
+          origin: "db",
+        },
+      ],
+      [
+        "workspace memory edit: embedding failed; storing keyword-only",
+        {
+          errorClass: "MemoryEmbeddingOperationError",
+          errorCode: "memory_edit_embedding_failed",
+          origin: "db",
+        },
+      ],
+      [
+        "workspace memory hybrid search vector component failed; falling back to keyword",
+        {
+          errorClass: "MemorySearchOperationError",
+          errorCode: "memory_hybrid_vector_failed",
+          origin: "db",
+        },
+      ],
+    ]);
+    expect(JSON.stringify(publicWarnings)).not.toContain(publicBoundarySentinel);
+    expect(JSON.stringify(publicWarnings)).not.toContain(workspaceId);
+    expect(JSON.stringify(publicWarnings)).not.toContain(session.id);
+    expect(exactEmbeddingError.message).toBe(`embedding failed ${publicBoundarySentinel}`);
+    expect(exactEmbeddingError.constructor.name).toBe(publicBoundarySentinel);
+    expect(exactEmbeddingError.code).toBe(publicBoundarySentinel);
 
     const legacyPayload = {
       [LEGACY_LOSSLESS_JSON_ENVELOPE_KEY]: {
