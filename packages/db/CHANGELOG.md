@@ -1,5 +1,14 @@
 # @opengeni/db
 
+## 0.28.3
+
+### Patch Changes
+
+- 1503151: Keep capped rotation-off Codex sessions in one durable capacity wait and suppress wakes for identical usage snapshots.
+- Updated dependencies [7dbd057]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/config@0.11.2
+
 ## 0.28.2
 
 ### Patch Changes
