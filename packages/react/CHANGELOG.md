@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.46.3
+
+### Patch Changes
+
+- 800d091: Clear file attachments when their client or workspace changes, revoke outstanding preview URLs on unmount, fence late upload settlements from stale scopes, and reset Changes-tab virtualization measurements when a same-size diff is replaced.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- Updated dependencies [30a0b9a]
+  - @opengeni/sdk@0.46.3
+
 ## 0.46.2
 
 ### Patch Changes

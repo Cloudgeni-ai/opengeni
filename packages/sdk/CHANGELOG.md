@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.46.3
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+
 ## 0.46.2
 
 ### Patch Changes

@@ -1,5 +1,22 @@
 # @opengeni/runtime
 
+## 0.18.19
+
+### Patch Changes
+
+- 1fbb6e7: Bound nested MCP transport error inspection and fail closed on pathological wrappers.
+- 7dbd057: Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
+- 78a1577: Separate expected sandbox path misses from actual provider-operation failures in metrics and alerts.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- 0b23696: Recover required first-party MCP setup across rolling API replacements when the route temporarily returns 404 or a statusless transport error, while preserving terminal authentication, external-server, tool-invocation, and typed protocol failures.
+- 4c7b956: Read routed sandbox command stdout exactly once so Modal screenshot size and chunk output remain machine-parseable.
+- 42c04ce: Bound sandbox screenshot readback size, provider calls, deadlines, cancellation, and cleanup with typed failures.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/codex@0.2.12
+  - @opengeni/config@0.11.2
+
 ## 0.18.18
 
 ### Patch Changes

@@ -1,5 +1,16 @@
 # @opengeni/events
 
+## 0.3.82
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [1503151]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/db@0.28.3
+
 ## 0.3.81
 
 ### Patch Changes
