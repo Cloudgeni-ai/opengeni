@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -77,12 +76,12 @@ describe("retire model-visible GitHub token migration", () => {
           and table_name = 'sessions'
           and column_name = 'first_party_mcp_tools'`;
       expect(column?.column_default).not.toContain("github_token");
-      const toolsIntroducedAfterMigration = new Set(["variable_set_get_variable"]);
-      for (const tool of FIRST_PARTY_MCP_TOOL_NAMES.filter(
-        (name) => !toolsIntroducedAfterMigration.has(name),
-      )) {
-        expect(column?.column_default).toContain(tool);
-      }
+      // This assertion is intentionally bound to the historical 0172 default.
+      // Later migrations may add first-party tools; replaying 0172 in isolation
+      // must not be reinterpreted through today's expanded tool registry.
+      expect(column?.column_default).toContain("session_get");
+      expect(column?.column_default).toContain("github_connect_link");
+      expect(column?.column_default).toContain("artifacts_rollback");
 
       let staleWriterError: unknown;
       try {
