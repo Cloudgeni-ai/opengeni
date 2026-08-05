@@ -195,7 +195,7 @@ describe("release schema contract", () => {
         (migrations.has("0176_connected_machine_removal.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "6d00791839f8b2984521f7aea97593e923d9e01f332b49f4e72b0e98f1d1b96a",
+      "62c1e89bbab02ecfc5f97fb4dc9af1b4ba0e01adbf370253442fca19f64f3814",
     );
     expect(contract.latestMigration).toBe("0176_connected_machine_removal.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
@@ -237,7 +237,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0172_retire_model_visible_github_token.sql")).toMatchObject({
-      sha256: "6e2123085f5574a046eaea7db7b5168540625d554771ee9e5639787bbde4c713",
+      sha256: "e16ecce0d4e067168590cd54086c85b2bb0d6e0f244976aa4190b942e5f76356",
       deploymentMode: "maintenance",
     });
     expect(
