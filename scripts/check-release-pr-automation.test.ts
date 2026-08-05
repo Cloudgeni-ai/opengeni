@@ -1390,6 +1390,46 @@ describe("release head retention recovery", () => {
     ).toBe(false);
   });
 
+  test("retains the reviewed head when the provider squashes it after disjoint main movement", async () => {
+    const fixture = recoverySealFixture({
+      sourceTreeSha: "9".repeat(40),
+      releaseHeadRef: null,
+      release: null,
+    });
+
+    const result = await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+
+    expect(result).toMatchObject({
+      baseSha,
+      headSha,
+      sourceSha: mergeSha,
+      mergeMethod: "provider-verified-moving-main",
+      releaseHead: {
+        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
+        sha: headSha,
+      },
+    });
+    expect(
+      fixture.requests.filter(
+        (request) => request.method === "POST" && request.path.endsWith("/git/refs"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fixture.checks.find(
+        (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+      ),
+    ).toMatchObject({
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+    });
+  });
+
   test("rejects a conflicting retention check for an exact retained pair before mutation", async () => {
     const fixture = recoverySealFixture();
     const options = {
