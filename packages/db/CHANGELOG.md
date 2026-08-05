@@ -1,5 +1,13 @@
 # @opengeni/db
 
+## 0.27.11
+
+### Patch Changes
+
+- 17643a5: Prevent parallel child-session creation from the same agent attempt from deadlocking on the parent session row.
+- Updated dependencies [8135dbb]
+  - @opengeni/config@0.10.14
+
 ## 0.27.10
 
 ### Patch Changes
