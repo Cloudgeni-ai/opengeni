@@ -3263,6 +3263,7 @@ export async function prepareAgentTools(
         bestEffort,
         aggregateToolBudget,
         `${config.id}:${index}`,
+        firstParty && !bestEffort,
       );
       return {
         server,
@@ -3765,6 +3766,17 @@ type SafeMcpTransportError = Error & {
   mcpTransportFailureKind?: "request_timeout" | "connectivity_unavailable";
 };
 
+type SafeMcpTransportErrorOptions = {
+  /**
+   * The failed operation was connect/tools-list for a required first-party MCP
+   * server. Those setup requests have no external side effect; the worker
+   * checkpoints any preceding model/tool truth before recovering the same turn.
+   * A rolling API replacement can briefly surface either the old route's 404 or
+   * a statusless plain transport Error.
+   */
+  recoverySafeSetup?: boolean;
+};
+
 const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNRESET",
   "ETIMEDOUT",
@@ -3880,7 +3892,10 @@ function inspectMcpTransportError(
  * a nested object also carries a socket-looking code. Raw messages, URLs,
  * response bodies, and arbitrary provider codes are never copied forward.
  */
-function isRawMcpTransportConnectivityError(error: unknown): boolean {
+function isRawMcpTransportConnectivityError(
+  error: unknown,
+  options: SafeMcpTransportErrorOptions = {},
+): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
@@ -3891,13 +3906,33 @@ function isRawMcpTransportConnectivityError(error: unknown): boolean {
   if (!inspection.complete) {
     return false;
   }
-  if (inspection.statuses.some((status) => status >= 400 && status < 500)) {
+  if (
+    inspection.statuses.some(
+      (status) =>
+        status >= 400 && status < 500 && !(options.recoverySafeSetup === true && status === 404),
+    )
+  ) {
     return false;
   }
   if (inspection.statuses.some((status) => status >= 500 && status < 600)) {
     return true;
   }
-  return inspection.hasConnectivityCode;
+  if (options.recoverySafeSetup === true && inspection.statuses.includes(404)) {
+    return true;
+  }
+  if (inspection.hasConnectivityCode) {
+    return true;
+  }
+  // The MCP SDK can erase the transport's socket code while wrapping a failed
+  // first-party initialize/tools-list request. Retry only its plain statusless
+  // Error shape. Typed parser, validation, and programming errors remain
+  // terminal so a broken protocol implementation cannot masquerade as rollout
+  // unavailability.
+  return (
+    options.recoverySafeSetup === true &&
+    inspection.statuses.length === 0 &&
+    safeMcpErrorFields(error).errorClass === "Error"
+  );
 }
 
 /**
@@ -3923,7 +3958,10 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
   return inspectMcpTransportError(error, seen).hasRequestTimeout;
 }
 
-export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
+export function safeMcpTransportError(
+  error: unknown,
+  options: SafeMcpTransportErrorOptions = {},
+): SafeMcpTransportError {
   const fields = safeMcpErrorFields(error);
   const safeError = new Error(
     `MCP transport operation failed (${mcpErrorReason(fields)})`,
@@ -3935,7 +3973,7 @@ export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
   }
   if (isMcpRequestTimeoutError(error)) {
     safeError.mcpTransportFailureKind = "request_timeout";
-  } else if (isRawMcpTransportConnectivityError(error)) {
+  } else if (isRawMcpTransportConnectivityError(error, options)) {
     safeError.mcpTransportFailureKind = "connectivity_unavailable";
   }
   return safeError;
@@ -4242,6 +4280,7 @@ class PrefixedMcpServer implements MCPServer {
     bestEffort = false,
     private readonly aggregateToolBudget?: McpAggregateToolListBudget,
     private readonly aggregateSourceId = registryId,
+    private readonly recoverySafeSetup = false,
   ) {
     this.name = registryId;
     this.prefix = prefixedMcpToolName(registryId, "");
@@ -4254,7 +4293,7 @@ class PrefixedMcpServer implements MCPServer {
     return this.inner.connect().catch((error: unknown) => {
       // connectMcpServers has its own global logger and logs the thrown Error.
       // Never let a raw transport response body cross that logging boundary.
-      throw safeMcpTransportError(error);
+      throw safeMcpTransportError(error, { recoverySafeSetup: this.recoverySafeSetup });
     });
   }
 
@@ -4284,7 +4323,7 @@ class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort) {
-        throw safeMcpTransportError(error);
+        throw safeMcpTransportError(error, { recoverySafeSetup: this.recoverySafeSetup });
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a

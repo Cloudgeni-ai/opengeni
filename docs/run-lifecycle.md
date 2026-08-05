@@ -250,9 +250,13 @@ run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and
 secret-safely classified required-MCP connectivity failures resume the same
-accepted turn after a pacing delay. The MCP classifier retains only an
-allowlisted timeout/connectivity marker; raw transport messages, URLs, response
-bodies, and unknown provider codes never cross the runtime boundary. HTTP client
+accepted turn after a pacing delay. Required first-party connect/tools-list also
+treats a rolling API replacement's temporary `404` or statusless plain transport
+`Error` as recovery-safe. That narrow exception does not apply to external MCP
+servers, tool invocation, explicit non-404 client responses, or typed
+protocol/programming failures. The MCP classifier retains only an allowlisted
+timeout/connectivity marker; raw transport messages, URLs, response bodies, and
+unknown provider codes never cross the runtime boundary. Other HTTP client
 failures remain authoritative and terminal. Hitting an explicitly configured
 model-call cap and budget/credit exhaustion ends the current turn gracefully;
 an active goal may create a later continuation, while an otherwise idle session
