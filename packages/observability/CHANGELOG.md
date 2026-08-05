@@ -1,5 +1,12 @@
 # @opengeni/observability
 
+## 0.5.0
+
+### Minor Changes
+
+- 33166b0: Export the canonical namespace and Grafana dashboard selectors used by the
+  shared self-hostable Prometheus and Grafana distribution.
+
 ## 0.4.17
 
 ### Patch Changes
