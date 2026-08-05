@@ -1,28 +1,9 @@
-import {
-  afterAll,
-  beforeAll,
-  describe,
-  expect,
-  setDefaultTimeout,
-  test,
-} from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
-import {
-  bootstrapWorkspace,
-  createApiKey,
-  createDb,
-  createSession,
-  type DbClient,
-} from "../src";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { bootstrapWorkspace, createApiKey, createDb, createSession, type DbClient } from "../src";
 
-const migrationUrl = new URL(
-  "../drizzle/0178_permissioned_secret_reads.sql",
-  import.meta.url,
-);
+const migrationUrl = new URL("../drizzle/0178_permissioned_secret_reads.sql", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const addedPermissions = [
   "variable-sets:list",
@@ -39,9 +20,7 @@ let client: DbClient | null = null;
 setDefaultTimeout(180_000);
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase(
-    "migration-0178-permissioned-secret-reads",
-  );
+  shared = await acquireSharedTestDatabase("migration-0178-permissioned-secret-reads");
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error(
@@ -114,17 +93,10 @@ describe("0178 permissioned secret reads migration", () => {
         from workspace_memberships
        where workspace_id = ${grant.workspaceId}
          and subject_id = ${subjectId}`;
-    expect(membership?.permissions).toEqual([
-      ...legacyPermissions,
-      ...addedPermissions,
-    ]);
-    expect(new Set(membership!.permissions).size).toBe(
-      membership!.permissions.length,
-    );
+    expect(membership?.permissions).toEqual([...legacyPermissions, ...addedPermissions]);
+    expect(new Set(membership!.permissions).size).toBe(membership!.permissions.length);
 
-    const [persistedApiKey] = await shared.admin<
-      Array<{ permissions: string[] }>
-    >`
+    const [persistedApiKey] = await shared.admin<Array<{ permissions: string[] }>>`
       select permissions from api_keys where id = ${apiKey.id}`;
     expect(persistedApiKey?.permissions).toEqual([...legacyPermissions]);
 
@@ -134,8 +106,6 @@ describe("0178 permissioned secret reads migration", () => {
       select first_party_mcp_permissions as "firstPartyMcpPermissions"
         from sessions
        where id = ${session.id}`;
-    expect(persistedSession?.firstPartyMcpPermissions).toEqual([
-      ...legacyPermissions,
-    ]);
+    expect(persistedSession?.firstPartyMcpPermissions).toEqual([...legacyPermissions]);
   });
 });
