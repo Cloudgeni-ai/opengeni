@@ -61,4 +61,54 @@ describe("exact internal content contracts", () => {
     expect(stableJson(parsed.payload)).toBe(stableJson(payload));
     expect(parsed.payload).toEqual(payload);
   });
+
+  test("SessionEvent preserves executable command and source-edit arguments exactly", () => {
+    const exactCommand = [
+      "python3 - <<'PY'",
+      "from datetime import datetime, timezone",
+      "from pathlib import Path",
+      'stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")',
+      'path = Path("synthetic.ts")',
+      "source = path.read_text()",
+      'needle = "const cookie ="',
+      'replacement = \'const cookie = ["synthetic", "cookie", "value"].join("-");\'',
+      "assert needle in source",
+      "path.write_text(source.replace(needle, replacement, 1))",
+      "print(stamp)",
+      "PY",
+    ].join("\n");
+    const exactArguments = JSON.stringify({
+      cmd: exactCommand,
+      workdir: "/workspace/synthetic",
+    });
+    const payload = {
+      id: "call_synthetic_exact_content",
+      name: "exec_command",
+      arguments: exactArguments,
+      raw: {
+        id: "fc_synthetic_exact_content",
+        type: "function_call",
+        name: "exec_command",
+        callId: "call_synthetic_exact_content",
+        status: "completed",
+        arguments: exactArguments,
+      },
+    };
+    const parsed = SessionEvent.parse({
+      id: "00000000-0000-4000-8000-000000000021",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      sequence: 43,
+      type: "agent.toolCall.created",
+      payload,
+      occurredAt: "2026-08-05T00:00:01.000Z",
+    });
+
+    expect(stableJson(parsed.payload)).toBe(stableJson(payload));
+    expect(parsed.payload).toEqual(payload);
+    expect((parsed.payload as typeof payload).arguments).toBe(exactArguments);
+    expect((parsed.payload as typeof payload).raw.arguments).toBe(exactArguments);
+    expect(JSON.parse((parsed.payload as typeof payload).arguments).cmd).toBe(exactCommand);
+    expect(exactCommand).not.toContain("[redacted]");
+  });
 });
