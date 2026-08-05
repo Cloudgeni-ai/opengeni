@@ -546,14 +546,19 @@ wrong one is the classic mistake.
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
    second conversation-memory read path. Historical inline image and screenshot
-   items remain backward-compatible model history; `computer_screenshot` does
-   not yet create a retained artifact receipt or browser-rendering lifecycle.
+   items remain backward-compatible model history. New `computer_screenshot`
+   typed PNG bytes are validated and retained before persistence; every new
+   history copy receives the deterministic bounded artifact receipt (or an
+   explicit unavailable fact), never the provider object key or re-encoded
+   base64 source.
 2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval or
    structured-input tool call (`requires_action`); neither a half-finished tool
    approval nor an unanswered tool call can be represented as plain history
-   items. The blob is written only for those cases.
+   items. Before the blob is written, every copy of a retained screenshot tool
+   result inside the RunState is compacted to the same retry-stable receipt.
+   The blob is written only for those cases.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
@@ -561,11 +566,36 @@ wrong one is the classic mistake.
    payload is capped at 64 KiB with explicit surface/byte/token/non-retention
    metadata. Large text keeps deterministic head/tail facts; inline media is a
    compact `media_preview` and its bytes are not retained by this generic path.
+   A newly retained `computer_screenshot` event instead carries only its closed
+   session artifact receipt after settlement succeeds, or a typed unavailable
+   reason if validation, quota, or storage could not establish that receipt.
    It is correct for human progress/audit previews and must never be used to
    reconstruct the target session's model conversation or advertised as a
    full-output evidence store. A manager can inspect an independently bounded
    cross-session monitoring projection as ordinary tool output; that does not
    turn audit events into conversation truth.
+
+Retained screenshots have a separate database/object lifecycle, not a fourth
+conversation store. Preparation creates a deterministic pending file/artifact
+pair and reserves exact workspace bytes. Verified provider settlement moves
+`quota_state` from `reserved` to `ready` once; duplicate settlement replays the
+same ready row. Session, turn, and attempt deletion use nullable `SET NULL`
+references plus `cleanup_queued`, preserving the object, file row, and charged
+quota until maintenance owns cleanup. Generic file deletion is restricted while
+the lifecycle row exists.
+
+The global bounded reaper claims stale pending, expired ready, and queued
+cleanup rows with an exact UUID. A reconcile observation that is missing or
+mismatched must first atomically promote that exact claim to `cleanup_pending`;
+only then may it issue the idempotent provider delete. If a concurrent writer
+settles the artifact ready, settlement clears the claim, promotion fails, and
+the reaper cannot delete the live key. Terminal completion releases the
+artifact's explicit reserved/ready quota bucket idempotently. Detached-session
+cleanup removes the lifecycle and file rows only after provider deletion; a
+late PUT racing parent deletion is compensated by deleting the now-unowned key.
+Authenticated session artifact routes expose sanitized metadata and one bounded
+range at a time, and the SDK verifies assembled length and SHA before React
+renders an object URL.
 
 Structured human input adds a durable control checkpoint, not a fourth memory
 store. When the built-in `request_human_input` tool interrupts a run, the same

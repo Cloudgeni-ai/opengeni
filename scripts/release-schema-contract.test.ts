@@ -158,7 +158,7 @@ describe("release schema contract", () => {
         (migrations.has("0176_retained_screenshot_lifecycle_fences.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "d606be002fb867ec28c26c23ccec0222d68ac5d9d232a051e92825eaebfaf8b9",
+      "8c8612579f5b1553f10cb723bb415c8cb7445e3a4186f0f7a071be02c9d7d46d",
     );
     expect(contract.latestMigration).toBe("0176_retained_screenshot_lifecycle_fences.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
