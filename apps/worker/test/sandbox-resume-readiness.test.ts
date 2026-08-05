@@ -97,6 +97,27 @@ describe("workspace snapshot cancellation", () => {
     expect(JSON.stringify(safeSnapshotError(error))).not.toContain(sentinel);
   });
 
+  test("public snapshot status projection tolerates hostile proxies", () => {
+    const sentinel = "synthetic-snapshot-hostile-status-123456";
+    const source = new Error(`snapshot failed: ${sentinel}`);
+    const hostile = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile snapshot status getter: ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(safeSnapshotError(hostile)).toEqual({
+      errorClass: "SnapshotOperationError",
+      errorCode: "snapshot_operation_failed",
+      origin: "sandbox-resume",
+    });
+    expect(source.message).toContain(sentinel);
+    expect(JSON.stringify(safeSnapshotError(hostile))).not.toContain(sentinel);
+  });
+
   test("Steer/Pause preempts an in-flight snapshot wait instead of paying its timeout", async () => {
     const controller = new AbortController();
     const startedAt = performance.now();

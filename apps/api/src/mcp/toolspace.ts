@@ -805,14 +805,18 @@ export function toolspacePublicErrorFields(
     errorCode,
     origin: "toolspace",
   };
-  const status =
-    error && typeof error === "object"
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : Number.NaN;
-  if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public telemetry is best-effort. A hostile getter/proxy must never
+    // replace the exact Toolspace failure with a projection failure.
+  }
   return fields;
 }
 

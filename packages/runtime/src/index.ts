@@ -3296,6 +3296,7 @@ export async function prepareAgentTools(
         bestEffort,
         aggregateToolBudget,
         `${config.id}:${index}`,
+        firstParty && !bestEffort,
       );
       return {
         server,
@@ -3851,14 +3852,30 @@ type McpTransportError = Error & {
 
 type McpTransportFailureKind = "request_timeout" | "connectivity_unavailable";
 
+type McpTransportErrorOptions = {
+  /**
+   * The failed operation was connect/tools-list for a required first-party MCP
+   * server. Those setup requests have no external side effect; the worker
+   * checkpoints any preceding model/tool truth before recovering the same turn.
+   * A rolling API replacement can briefly surface either the old route's 404 or
+   * a statusless plain transport Error.
+   */
+  recoverySafeSetup?: boolean;
+};
+
 // Lifecycle errors must cross the SDK boundary as structural safe errors while
 // the authoritative caller receives the original Error object. Keep retry
 // classification out-of-band so exact Error identity and content are unchanged.
 const mcpTransportFailureKinds = new WeakMap<object, McpTransportFailureKind>();
 
 function mcpTransportFailureKind(error: object): McpTransportFailureKind | undefined {
-  const inline = (error as Record<string, unknown>).mcpTransportFailureKind;
-  if (inline === "request_timeout" || inline === "connectivity_unavailable") return inline;
+  try {
+    const inline = (error as Record<string, unknown>).mcpTransportFailureKind;
+    if (inline === "request_timeout" || inline === "connectivity_unavailable") return inline;
+  } catch {
+    // Hostile getters/proxies cannot replace the exact internal failure or
+    // widen its retry classification.
+  }
   return mcpTransportFailureKinds.get(error);
 }
 
@@ -3977,7 +3994,10 @@ function inspectMcpTransportError(
  * a nested object also carries a socket-looking code. Classification never
  * rewrites the source diagnostic.
  */
-function isRawMcpTransportConnectivityError(error: unknown): boolean {
+function isRawMcpTransportConnectivityError(
+  error: unknown,
+  options: McpTransportErrorOptions = {},
+): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
@@ -3988,13 +4008,35 @@ function isRawMcpTransportConnectivityError(error: unknown): boolean {
   if (!inspection.complete) {
     return false;
   }
-  if (inspection.statuses.some((status) => status >= 400 && status < 500)) {
+  if (
+    inspection.statuses.some(
+      (status) =>
+        status >= 400 && status < 500 && !(options.recoverySafeSetup === true && status === 404),
+    )
+  ) {
     return false;
   }
   if (inspection.statuses.some((status) => status >= 500 && status < 600)) {
     return true;
   }
-  return inspection.hasConnectivityCode;
+  if (options.recoverySafeSetup === true && inspection.statuses.includes(404)) {
+    return true;
+  }
+  if (inspection.hasConnectivityCode) {
+    return true;
+  }
+  // The MCP SDK can erase the transport's socket code while wrapping a failed
+  // first-party initialize/tools-list request. Retry only its plain statusless
+  // Error shape. Typed parser, validation, and programming errors remain
+  // terminal so a broken protocol implementation cannot masquerade as rollout
+  // unavailability.
+  let isPlainError = false;
+  try {
+    isPlainError = error instanceof Error && Object.getPrototypeOf(error) === Error.prototype;
+  } catch {
+    // A hostile proxy is not a rollout-safe plain transport Error.
+  }
+  return options.recoverySafeSetup === true && inspection.statuses.length === 0 && isPlainError;
 }
 
 /**
@@ -4019,29 +4061,39 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
   return inspectMcpTransportError(error, seen).hasRequestTimeout;
 }
 
-export function mcpTransportErrorWithRetryMetadata(error: unknown): McpTransportError {
-  const fields = mcpErrorFields(error, "mcp_transport_failed");
-  const classified = new Error(exactErrorMessage(error), {
-    cause: error,
-  }) as McpTransportError;
-  classified.name = error instanceof Error ? error.name : "McpTransportError";
-  if (fields.status !== undefined) {
-    classified.status = fields.status;
-    classified.code = fields.status;
-  }
+export function mcpTransportErrorWithRetryMetadata(
+  error: unknown,
+  options: McpTransportErrorOptions = {},
+): McpTransportError {
+  const classified =
+    error instanceof Error
+      ? (error as McpTransportError)
+      : (new Error(exactErrorMessage(error), { cause: error }) as McpTransportError);
   if (isMcpRequestTimeoutError(error)) {
-    classified.mcpTransportFailureKind = "request_timeout";
-  } else if (isRawMcpTransportConnectivityError(error)) {
-    classified.mcpTransportFailureKind = "connectivity_unavailable";
+    mcpTransportFailureKinds.set(classified, "request_timeout");
+  } else if (isRawMcpTransportConnectivityError(error, options)) {
+    mcpTransportFailureKinds.set(classified, "connectivity_unavailable");
   }
   return classified;
 }
 
-function exactMcpLifecycleError(error: unknown): Error {
+/**
+ * Compatibility alias retained for the rollout-recovery API introduced on
+ * main. Despite the historical name, internal callers receive exact content;
+ * public lifecycle logging uses `publicMcpLifecycleError` instead.
+ */
+export function safeMcpTransportError(
+  error: unknown,
+  options: McpTransportErrorOptions = {},
+): McpTransportError {
+  return mcpTransportErrorWithRetryMetadata(error, options);
+}
+
+function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOptions = {}): Error {
   const exactError = error instanceof Error ? error : new Error(String(error), { cause: error });
   if (isMcpRequestTimeoutError(error)) {
     mcpTransportFailureKinds.set(exactError, "request_timeout");
-  } else if (isRawMcpTransportConnectivityError(error)) {
+  } else if (isRawMcpTransportConnectivityError(error, options)) {
     mcpTransportFailureKinds.set(exactError, "connectivity_unavailable");
   }
   return exactError;
@@ -4365,6 +4417,7 @@ export class PrefixedMcpServer implements MCPServer {
     bestEffort = false,
     private readonly aggregateToolBudget?: McpAggregateToolListBudget,
     private readonly aggregateSourceId = registryId,
+    private readonly recoverySafeSetup = false,
   ) {
     this.registryId = registryId;
     this.prefix = prefixedMcpToolName(registryId, "");
@@ -4380,7 +4433,9 @@ export class PrefixedMcpServer implements MCPServer {
     } catch (error) {
       // The SDK logs its rejected Error directly. Keep exact internal truth
       // out-of-band and reject only a structural public lifecycle error.
-      const exactError = exactMcpLifecycleError(error);
+      const exactError = exactMcpLifecycleError(error, {
+        recoverySafeSetup: this.recoverySafeSetup,
+      });
       const publicError = publicMcpLifecycleError(exactError, "connect");
       this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
       throw publicError;
@@ -4426,7 +4481,9 @@ export class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort) {
-        throw mcpTransportErrorWithRetryMetadata(error);
+        throw mcpTransportErrorWithRetryMetadata(error, {
+          recoverySafeSetup: this.recoverySafeSetup,
+        });
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a

@@ -194,18 +194,13 @@ test("preserves nested MCP connectivity diagnostics while adding a typed retry m
     code: "ECONNREFUSED",
   });
 
+  expect(isMcpTransportConnectivityError(raw)).toBe(false);
   const classified = mcpTransportErrorWithRetryMetadata(raw);
 
-  expect(isMcpTransportConnectivityError(raw)).toBe(false);
   expect(isMcpTransportConnectivityError(classified)).toBe(true);
-  expect(classified).toMatchObject({
-    name: "Error",
-    message: raw.message,
-    mcpTransportFailureKind: "connectivity_unavailable",
-  });
-  expect(classified.cause).toBe(raw);
+  expect(classified).toBe(raw);
   expect(classified.message).toContain("private.example");
-  expect((classified.cause as Error).cause).toMatchObject({
+  expect(classified.cause).toMatchObject({
     message: "connect ECONNREFUSED 127.0.0.1:8000",
   });
 });
@@ -255,6 +250,43 @@ test("fails closed on pathological MCP transport error wrappers", () => {
   expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingFields))).toBe(
     false,
   );
+});
+
+test("recovers only rollout-safe first-party MCP setup 404 and statusless Error shapes", () => {
+  const routeNotReady = Object.assign(new Error("temporary route body with secret detail"), {
+    status: 404,
+  });
+  const statuslessTransport = new Error("fetch failed for a secret first-party URL");
+  const authRejected = Object.assign(new Error("authentication failed"), { status: 401 });
+  const typedProtocolFailure = new TypeError("invalid MCP response shape");
+
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(routeNotReady))).toBe(
+    false,
+  );
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(routeNotReady, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(statuslessTransport, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(authRejected, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(typedProtocolFailure, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(mcpTransportErrorWithRetryMetadata(routeNotReady, { recoverySafeSetup: true })).toBe(
+    routeNotReady,
+  );
+  expect(routeNotReady.message).toContain("secret detail");
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -5311,6 +5343,63 @@ describe("runtime event normalization", () => {
       ).rejects.toThrow();
     } finally {
       broken.close();
+    }
+  });
+
+  test("required first-party setup 404 is recoverable while an external 404 remains terminal", async () => {
+    const unavailable = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("temporary route not found", { status: 404 }),
+    });
+    const url = `http://127.0.0.1:${unavailable.port}/mcp`;
+    const workspaceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    try {
+      let firstPartyFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            opengeniMcpUrl: url,
+            mcpServers: [
+              {
+                id: "opengeni",
+                name: "OpenGeni",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "opengeni" }],
+          { workspaceId },
+        );
+      } catch (error) {
+        firstPartyFailure = error;
+      }
+      expect(firstPartyFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(firstPartyFailure)).toBe(true);
+
+      let externalFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "external-required",
+                name: "External required MCP",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "external-required" }],
+        );
+      } catch (error) {
+        externalFailure = error;
+      }
+      expect(externalFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(externalFailure)).toBe(false);
+    } finally {
+      unavailable.stop(true);
     }
   });
 

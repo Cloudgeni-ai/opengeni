@@ -248,12 +248,18 @@ the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
 Recoverable conditions preserve context instead of failing the session, so a
-long run survives them. Retryable provider connectivity, 5xx failures, and
-typed required-MCP connectivity failures resume the same accepted turn after a
-pacing delay. The retry classifier records structured category metadata without
-rewriting the exact source diagnostic retained by OpenGeni. HTTP client failures
-and unknown provider codes remain authoritative and terminal. Hitting an
-explicitly configured
+long run survives them. Retryable provider connectivity, 5xx failures, and typed
+required-MCP connectivity failures resume the same accepted turn after a pacing
+delay. Required first-party connect/tools-list also treats a rolling API
+replacement's temporary `404` or statusless plain transport `Error` as
+recovery-safe. That narrow exception does not apply to external MCP servers,
+tool invocation, explicit non-404 client responses, or typed
+protocol/programming failures. The retry classifier records typed out-of-band
+category metadata without rewriting the exact source diagnostic retained by
+OpenGeni. Only genuinely public SDK/console diagnostics receive a fixed
+structural projection; raw transport messages, URLs, and response bodies remain
+exact on internal data paths. Other HTTP client failures and unknown provider
+codes remain authoritative and terminal. Hitting an explicitly configured
 model-call cap and budget/credit exhaustion ends the current turn gracefully;
 an active goal may create a later continuation, while an otherwise idle session
 waits for the next user message. For an MCP timeout that escapes after a

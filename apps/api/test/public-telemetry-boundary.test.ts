@@ -47,4 +47,31 @@ describe("public telemetry boundaries", () => {
     expect(error.result).toEqual({ content: [{ type: "text", text: sentinel }] });
     expect(JSON.stringify(toolspacePublicErrorFields(error))).not.toContain(sentinel);
   });
+
+  test("public API status projection tolerates hostile proxies without exposing content", () => {
+    const source = new Error(`hostile API error ${sentinel}`);
+    const hostile = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile API status getter ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(oauthPublicErrorFields(hostile)).toEqual({
+      errorClass: "OAuthOperationError",
+      errorCode: "oauth_operation_failed",
+      origin: "oauth",
+    });
+    expect(toolspacePublicErrorFields(hostile)).toEqual({
+      errorClass: "ToolspaceOperationError",
+      errorCode: "toolspace_operation_failed",
+      origin: "toolspace",
+    });
+    expect(source.message).toContain(sentinel);
+    expect(
+      JSON.stringify([oauthPublicErrorFields(hostile), toolspacePublicErrorFields(hostile)]),
+    ).not.toContain(sentinel);
+  });
 });

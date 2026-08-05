@@ -209,6 +209,36 @@ describe("observability", () => {
     expect(large.value.stringValue.length).toBeLessThanOrEqual(512);
   });
 
+  test("OTLP status projection tolerates hostile proxies without masking the span", async () => {
+    const sentinel = "OTLP_HOSTILE_STATUS_SENTINEL_61a0c7";
+    const exported: Array<{ body: any }> = [];
+    const obs = createObservability(settings, {
+      component: "api",
+      exporter: async (_url, body) => {
+        exported.push({ body });
+      },
+    });
+    const source = new Error(`exact OTLP failure ${sentinel}`);
+    const hostile = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile OTLP status getter ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const span = obs.startSpan("worker.hostile_status", {});
+    expect(() => span.end({ error: hostile })).not.toThrow();
+    await Bun.sleep(0);
+
+    expect(exported).toHaveLength(1);
+    const rendered = JSON.stringify(exported[0]!.body);
+    expect(rendered).not.toContain(sentinel);
+    expect(rendered).toContain("operation failed");
+    expect(source.message).toContain(sentinel);
+  });
+
   test("parses OTLP headers", () => {
     expect(parseHeaders("a=b,c=d=e")).toEqual({ a: "b", c: "d=e" });
   });

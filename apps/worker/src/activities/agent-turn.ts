@@ -861,14 +861,19 @@ export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
     errorCode: "worker_operation_failed",
     origin: "worker",
   };
-  if (error && typeof error === "object") {
-    const status = Number(
-      (error as { status?: unknown; statusCode?: unknown }).status ??
-        (error as { statusCode?: unknown }).statusCode,
-    );
-    if (Number.isInteger(status) && status >= 100 && status <= 599) {
-      diagnostic.status = status;
+  try {
+    if (error && typeof error === "object") {
+      const status = Number(
+        (error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode,
+      );
+      if (Number.isInteger(status) && status >= 100 && status <= 599) {
+        diagnostic.status = status;
+      }
     }
+  } catch {
+    // Public diagnostics are best-effort and must never replace the exact
+    // internal worker failure.
   }
   return diagnostic;
 }

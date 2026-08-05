@@ -351,6 +351,26 @@ describe("turn exact-content boundaries", () => {
     expect(diagnostic).not.toHaveProperty("cause");
     expect(JSON.stringify(diagnostic)).not.toContain(syntheticValue);
   });
+
+  test("public worker status projection tolerates hostile proxies", () => {
+    const source = new Error(`worker status getter ${syntheticValue}`);
+    const hostile = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile worker status ${syntheticValue}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(safeErrorDiagnostic(hostile)).toEqual({
+      errorClass: "WorkerOperationError",
+      errorCode: "worker_operation_failed",
+      origin: "worker",
+    });
+    expect(source.message).toContain(syntheticValue);
+    expect(JSON.stringify(safeErrorDiagnostic(hostile))).not.toContain(syntheticValue);
+  });
 });
 
 describe("accepted turn execution identity", () => {
@@ -2825,8 +2845,12 @@ describe("escaped MCP transport timeout classifier", () => {
       status: "recovering",
       continueDelayMs: 2_000,
     });
+    expect(classified).toBe(raw);
     expect(classified.message).toBe(raw.message);
-    expect(classified.cause).toBe(raw);
+    expect(classified.cause).toMatchObject({
+      message: "connect ECONNREFUSED 127.0.0.1:8000",
+      code: "ECONNREFUSED",
+    });
     expect(agentRunFailurePayload(classified).detail).toContain("private.example");
   });
 
@@ -2848,6 +2872,47 @@ describe("escaped MCP transport timeout classifier", () => {
     });
     expect(agentRunFailurePayload(ambiguous)).toEqual({
       error: "policy refused the connection",
+    });
+  });
+
+  test("recovers rollout-safe first-party setup loss but keeps auth and typed defects terminal", () => {
+    const routeNotReady = mcpTransportErrorWithRetryMetadata(
+      Object.assign(new Error("temporary first-party route"), { status: 404 }),
+      { recoverySafeSetup: true },
+    );
+    const statusless = mcpTransportErrorWithRetryMetadata(new Error("fetch failed"), {
+      recoverySafeSetup: true,
+    });
+    const authRejected = mcpTransportErrorWithRetryMetadata(
+      Object.assign(new Error("authentication failed"), { status: 401 }),
+      { recoverySafeSetup: true },
+    );
+    const typedProtocolFailure = mcpTransportErrorWithRetryMetadata(
+      new TypeError("invalid response"),
+      {
+        recoverySafeSetup: true,
+      },
+    );
+
+    expect(agentRunFailurePayload(routeNotReady)).toEqual({
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
+      detail: "temporary first-party route",
+    });
+    expect(agentRunFailurePayload(statusless)).toEqual({
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
+      detail: "fetch failed",
+    });
+    expect(agentRunFailurePayload(authRejected)).toEqual({
+      error: "authentication failed",
+    });
+    expect(agentRunFailurePayload(typedProtocolFailure)).toEqual({
+      error: "invalid response",
     });
   });
 

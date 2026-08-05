@@ -752,17 +752,22 @@ function projectSpanErrorForTelemetry(error: unknown): TelemetrySpanError {
 
 function errorStatusCode(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) return undefined;
-  const value = (error as { status?: unknown; statusCode?: unknown }).status;
-  const statusCode =
-    Number.isInteger(value) && typeof value === "number"
-      ? value
-      : (error as { statusCode?: unknown }).statusCode;
-  return Number.isInteger(statusCode) &&
-    typeof statusCode === "number" &&
-    statusCode >= 100 &&
-    statusCode <= 599
-    ? statusCode
-    : undefined;
+  try {
+    const value = (error as { status?: unknown; statusCode?: unknown }).status;
+    const statusCode =
+      Number.isInteger(value) && typeof value === "number"
+        ? value
+        : (error as { statusCode?: unknown }).statusCode;
+    return Number.isInteger(statusCode) &&
+      typeof statusCode === "number" &&
+      statusCode >= 100 &&
+      statusCode <= 599
+      ? statusCode
+      : undefined;
+  } catch {
+    // OTLP projection must never mask the exact internal failure.
+    return undefined;
+  }
 }
 
 function errorToAttributes(error: TelemetrySpanError): Attributes {

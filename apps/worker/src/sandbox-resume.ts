@@ -251,14 +251,18 @@ export function safeSnapshotError(error: unknown): {
     errorCode: "snapshot_operation_failed",
     origin: "sandbox-resume",
   };
-  const status =
-    error && typeof error === "object"
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : Number.NaN;
-  if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public diagnostics are best-effort and must never replace the exact
+    // internal snapshot failure.
+  }
   return fields;
 }
 
