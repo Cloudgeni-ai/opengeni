@@ -151,22 +151,6 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
   }) as ManagedAuth;
 }
 
-export async function managedSessionAccessContext(
-  auth: ManagedAuth,
-  db: Database,
-  headers: Headers,
-) {
-  const session = await auth.api.getSession({ headers });
-  if (!session?.user) {
-    return null;
-  }
-  return await ensureManagedAccessForUser(db, {
-    userId: session.user.id,
-    email: session.user.email,
-    name: session.user.name,
-  });
-}
-
 function betterAuthBaseUrl(settings: Settings) {
   const allowedHosts = splitCsv(settings.betterAuthAllowedHosts);
   if (allowedHosts.length === 0) {
