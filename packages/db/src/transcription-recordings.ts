@@ -7,6 +7,7 @@ import type {
 import { and, asc, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withWorkspaceSubjectRls } from "./database";
+import { fromPostgresLosslessText, withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 
 type RecordingRow = typeof schema.transcriptionRecordings.$inferSelect;
@@ -107,7 +108,10 @@ function recordingFromRow(row: RecordingRow): TranscriptionRecording {
     totalDurationMilliseconds: row.totalDurationMilliseconds,
     segmentCount: row.segmentCount,
     completedSegmentCount: row.completedSegmentCount,
-    transcriptText: row.transcriptText,
+    transcriptText:
+      row.transcriptText === null
+        ? null
+        : fromPostgresLosslessText(row.transcriptText, row.transcriptTextCodecVersion),
     languages: languages(row.languages),
     errorCode: (row.errorCode as TranscriptionRecordingErrorCode | null) ?? null,
     retryable: row.retryable,
@@ -580,20 +584,26 @@ export async function claimTranscriptionRecordingAssembly(
     const now = new Date();
     const [updated] = await scopedDb
       .update(schema.transcriptionRecordings)
-      .set({
-        state: "segmenting",
-        processingGeneration: generation,
-        processingOwner: input.owner,
-        processingStartedAt: now,
-        segmentCount: 0,
-        completedSegmentCount: 0,
-        transcriptText: null,
-        languages: [],
-        errorCode: null,
-        retryable: false,
-        objectsCleanedAt: null,
-        updatedAt: now,
-      })
+      .set(
+        withLosslessContentWriteVersion(
+          {
+            state: "segmenting",
+            processingGeneration: generation,
+            processingOwner: input.owner,
+            processingStartedAt: now,
+            segmentCount: 0,
+            completedSegmentCount: 0,
+            transcriptText: null,
+            languages: [],
+            errorCode: null,
+            retryable: false,
+            objectsCleanedAt: null,
+            updatedAt: now,
+          },
+          "transcriptText",
+          "transcriptTextCodecVersion",
+        ),
+      )
       .where(eq(schema.transcriptionRecordings.id, input.recordingId))
       .returning();
     if (!updated) throw new TranscriptionRecordingStateError("Assembly claim was lost");
@@ -1060,11 +1070,19 @@ export async function startTranscriptionRecordingSegmentProviderCall(
 }
 
 export function assembleTranscriptionSegments(
-  segments: readonly Pick<SegmentRow, "segmentNumber" | "transcriptText" | "languages">[],
+  segments: readonly (Pick<SegmentRow, "segmentNumber" | "transcriptText" | "languages"> &
+    Partial<Pick<SegmentRow, "transcriptTextCodecVersion">>)[],
 ): { text: string; languages: string[] } {
   const ordered = [...segments].sort((left, right) => left.segmentNumber - right.segmentNumber);
   const text = ordered
-    .map((segment) => segment.transcriptText?.trim() ?? "")
+    .map((segment) =>
+      segment.transcriptText === null
+        ? ""
+        : fromPostgresLosslessText(
+            segment.transcriptText,
+            segment.transcriptTextCodecVersion,
+          ).trim(),
+    )
     .filter(Boolean)
     .join("\n\n");
   const seen = new Set<string>();
@@ -1106,18 +1124,24 @@ export async function completeTranscriptionRecordingSegment(
     const now = new Date();
     const [completed] = await scopedDb
       .update(schema.transcriptionRecordingSegments)
-      .set({
-        state: "complete",
-        attemptId: null,
-        attemptStartedAt: null,
-        attemptDeadlineAt: null,
-        transcriptText: input.text,
-        languages: input.languages,
-        providerId: input.providerId,
-        errorCode: null,
-        retryable: false,
-        updatedAt: now,
-      })
+      .set(
+        withLosslessContentWriteVersion(
+          {
+            state: "complete",
+            attemptId: null,
+            attemptStartedAt: null,
+            attemptDeadlineAt: null,
+            transcriptText: input.text,
+            languages: input.languages,
+            providerId: input.providerId,
+            errorCode: null,
+            retryable: false,
+            updatedAt: now,
+          },
+          "transcriptText",
+          "transcriptTextCodecVersion",
+        ),
+      )
       .where(
         and(
           eq(schema.transcriptionRecordingSegments.recordingId, input.recordingId),
@@ -1138,17 +1162,23 @@ export async function completeTranscriptionRecordingSegment(
     const assembled = allComplete ? assembleTranscriptionSegments(segments) : null;
     const [updated] = await scopedDb
       .update(schema.transcriptionRecordings)
-      .set({
-        state: allComplete ? "complete" : "ready",
-        completedSegmentCount: completedCount,
-        transcriptText: assembled?.text ?? null,
-        languages: assembled?.languages ?? [],
-        processingOwner: null,
-        processingStartedAt: null,
-        errorCode: null,
-        retryable: false,
-        updatedAt: now,
-      })
+      .set(
+        withLosslessContentWriteVersion(
+          {
+            state: allComplete ? "complete" : "ready",
+            completedSegmentCount: completedCount,
+            transcriptText: assembled?.text ?? null,
+            languages: assembled?.languages ?? [],
+            processingOwner: null,
+            processingStartedAt: null,
+            errorCode: null,
+            retryable: false,
+            updatedAt: now,
+          },
+          "transcriptText",
+          "transcriptTextCodecVersion",
+        ),
+      )
       .where(
         and(
           eq(schema.transcriptionRecordings.id, input.recordingId),

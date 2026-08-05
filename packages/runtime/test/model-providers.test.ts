@@ -374,6 +374,7 @@ describe("pinned Responses streamed terminal failures", () => {
         responseId: "resp_failed",
         responseStatus: "failed",
       },
+      sentinel: "SECRET response.failed provider detail",
     },
     {
       name: "nested response.error",
@@ -396,6 +397,7 @@ describe("pinned Responses streamed terminal failures", () => {
         responseId: "resp_error",
         responseStatus: "failed",
       },
+      sentinel: "SECRET nested response.error provider detail",
     },
     {
       name: "top-level error",
@@ -410,6 +412,7 @@ describe("pinned Responses streamed terminal failures", () => {
         type: "rate_limit_exceeded",
         eventType: "error",
       },
+      sentinel: "SECRET top-level error provider detail",
     },
     {
       name: "response.incomplete",
@@ -429,6 +432,7 @@ describe("pinned Responses streamed terminal failures", () => {
         responseId: "resp_incomplete",
         responseStatus: "incomplete",
       },
+      sentinel: "SECRET provider incomplete reason",
     },
     {
       name: "missing terminal",
@@ -488,7 +492,11 @@ describe("pinned Responses streamed terminal failures", () => {
         error: (observed as { error?: unknown }).error,
       });
       expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(2_000);
-      expect(serialized).not.toContain("SECRET");
+      if ("sentinel" in terminalCase) {
+        expect(serialized).toContain(terminalCase.sentinel);
+      } else {
+        expect(serialized).not.toContain("SECRET");
+      }
     });
   }
 

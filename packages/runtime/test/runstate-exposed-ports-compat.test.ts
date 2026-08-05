@@ -249,17 +249,9 @@ describe("RunState exposedPorts compatibility", () => {
       [
         "[runtime] repaired incompatible RunState exposedPorts",
         {
-          provider: "modal",
-          sessionClass: "root",
-          path: "sandbox.sessionState.exposedPorts",
-        },
-      ],
-      [
-        "[runtime] repaired incompatible RunState exposedPorts",
-        {
-          provider: "modal",
-          sessionClass: "agent",
-          path: "sandbox.sessionsByAgent[*].sessionState.exposedPorts",
+          errorClass: "RunStateCompatibilityError",
+          errorCode: "incompatible_exposed_ports",
+          origin: "runtime",
         },
       ],
     ]);

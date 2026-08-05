@@ -123,7 +123,6 @@ export {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,

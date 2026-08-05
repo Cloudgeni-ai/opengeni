@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  boundSessionEventPayload,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
 } from "@opengeni/contracts";
@@ -674,7 +675,7 @@ describe("clean session control plane", () => {
     const projectedThird = all.sessions.find((entry) => entry.id === third.id)!;
     expect(projectedSecond.latestMessage?.preview).toHaveLength(600);
     expect(projectedSecond.latestMessage?.previewOriginalChars).toBeGreaterThan(600);
-    expect(projectedSecond.latestMessage?.previewOriginalChars).toBeLessThan(20_000);
+    expect(projectedSecond.latestMessage?.previewOriginalChars).toBe(20_000);
     expect(Array.from(projectedSecond.title!)).toHaveLength(200);
     expect(projectedSecond.titleOriginalChars).toBe(200_000);
     expect(Array.from(projectedThird.goal!.text)).toHaveLength(600);
@@ -1319,7 +1320,7 @@ describe("clean session control plane", () => {
     );
   });
 
-  test("history, pending receipt, and recovery audit keep distinct truthful output representations", async () => {
+  test("history, pending receipt, canonical recovery event, and public preview stay distinct", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "inspect a very large result");
     const attemptId = crypto.randomUUID();
@@ -1585,12 +1586,18 @@ describe("clean session control plane", () => {
         event.type === "agent.toolCall.output" &&
         (event.payload as { id?: unknown }).id === "pending-call",
     )?.payload as { output: { text: string }; truncation: unknown };
-    expect(recoveryOutput.output.text).toContain("bytes omitted");
-    expect(recoveryOutput.output.text.length).toBeLessThan(50_000);
-    expect(sessionEventJsonBytes(recoveryOutput)).toBeLessThanOrEqual(
+    expect(recoveryOutput.output.text).toBe(huge);
+    expect(sessionEventJsonBytes(recoveryOutput)).toBeGreaterThan(SESSION_EVENT_PAYLOAD_MAX_BYTES);
+    expect(sessionEventPayloadTruncation(recoveryOutput)).toBeNull();
+    const recoveryPreview = boundSessionEventPayload(recoveryOutput, {
+      surface: "durable_audit",
+    });
+    expect(recoveryPreview.output.text).toContain("bytes omitted");
+    expect(recoveryPreview.output.text.length).toBeLessThan(50_000);
+    expect(sessionEventJsonBytes(recoveryPreview)).toBeLessThanOrEqual(
       SESSION_EVENT_PAYLOAD_MAX_BYTES,
     );
-    expect(sessionEventPayloadTruncation(recoveryOutput)).toMatchObject({
+    expect(sessionEventPayloadTruncation(recoveryPreview)).toMatchObject({
       truncated: true,
       surface: "durable_audit",
       reason: "payload_bytes_exceeded",
@@ -1607,12 +1614,17 @@ describe("clean session control plane", () => {
       output: Array<Record<string, unknown>>;
       recovery: { outcome: string };
     };
-    expect(mixedRecoveryOutput.output.length).toBeLessThan(360);
+    expect(mixedRecoveryOutput.output).toEqual(mixedOutput);
     expect(mixedRecoveryOutput.recovery.outcome).toBe("durable_result_found");
-    expect(sessionEventJsonBytes(mixedRecoveryOutput)).toBeLessThanOrEqual(
+    expect(sessionEventPayloadTruncation(mixedRecoveryOutput)).toBeNull();
+    const mixedRecoveryPreview = boundSessionEventPayload(mixedRecoveryOutput, {
+      surface: "durable_audit",
+    });
+    expect(mixedRecoveryPreview.output.length).toBeLessThan(360);
+    expect(sessionEventJsonBytes(mixedRecoveryPreview)).toBeLessThanOrEqual(
       SESSION_EVENT_PAYLOAD_MAX_BYTES,
     );
-    expect(sessionEventPayloadTruncation(mixedRecoveryOutput)).toMatchObject({
+    expect(sessionEventPayloadTruncation(mixedRecoveryPreview)).toMatchObject({
       truncated: true,
       surface: "durable_audit",
       fullEvidence: { available: false, reason: "not_retained" },

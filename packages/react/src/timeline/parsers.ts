@@ -437,25 +437,6 @@ export function isApplyPatch(item: { name: string; raw: unknown }): boolean {
   return name === "apply_patch_call" || name === "apply_patch" || name.endsWith("__apply_patch");
 }
 
-/* --- secret redaction ------------------------------------------------------- */
-
-const SECRET_KEY = /^(value|secret|token|password|api[_-]?key|signing[_-]?key)$/i;
-
-/** Deep-redact secret-looking values so arguments never leak a key into the UI. */
-export function redactSecrets(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(redactSecrets);
-  }
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = SECRET_KEY.test(k) ? "••••" : redactSecrets(v);
-    }
-    return out;
-  }
-  return value;
-}
-
 /** Parse tool arguments that may arrive as a JSON string or an object. */
 export function parseToolArgs(args: unknown): Record<string, unknown> {
   if (args == null) {

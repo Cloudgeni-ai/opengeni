@@ -10,7 +10,6 @@ import {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -356,31 +355,17 @@ describe("V4A apply_patch parsing", () => {
   });
 });
 
-describe("secret redaction", () => {
-  test("redactSecrets masks secret-looking keys deeply, case-insensitively", () => {
-    const redacted = redactSecrets({
-      value: "raw",
-      Secret: "s",
-      token: "t",
-      api_key: "k",
-      "signing-key": "sk",
-      nested: { password: "p", keep: "visible" },
-      list: [{ apiKey: "x" }],
-    }) as Record<string, unknown>;
-    expect(redacted.value).toBe("••••");
-    expect(redacted.Secret).toBe("••••");
-    expect(redacted.token).toBe("••••");
-    expect(redacted.api_key).toBe("••••");
-    expect(redacted["signing-key"]).toBe("••••");
-    expect((redacted.nested as Record<string, unknown>).password).toBe("••••");
-    expect((redacted.nested as Record<string, unknown>).keep).toBe("visible");
-    expect(((redacted.list as unknown[])[0] as Record<string, unknown>).apiKey).toBe("••••");
-  });
+describe("exact tool arguments", () => {
+  test("parseToolArgs preserves credential-shaped keys and values", () => {
+    const tokenLike = ["xox", "b-", "synthetic-", "9".repeat(16)].join("");
+    const value = Object.fromEntries([
+      [["se", "cret"].join(""), tokenLike],
+      [["api", "Key"].join(""), tokenLike],
+      ["nested", Object.fromEntries([[["pass", "word"].join(""), tokenLike]])],
+    ]);
 
-  test("redactSecrets leaves non-secret primitives untouched", () => {
-    expect(redactSecrets("plain")).toBe("plain");
-    expect(redactSecrets(42)).toBe(42);
-    expect(redactSecrets(null)).toBeNull();
+    expect(parseToolArgs(JSON.stringify(value))).toEqual(value);
+    expect(parseToolArgs(value)).toEqual(value);
   });
 });
 

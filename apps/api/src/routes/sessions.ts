@@ -1342,11 +1342,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (event) {
       try {
         await bus.publish(workspaceId, sessionId, [event]);
-      } catch (error) {
-        console.warn(
-          `[api] live publish failed for cleared goal ${workspaceId}/${sessionId}; event is durable and reconciles on replay`,
-          error,
-        );
+      } catch {
+        console.warn("[api] cleared-goal live publish failed; durable event reconciles on replay", {
+          errorClass: "EventPublishOperationError",
+          errorCode: "cleared_goal_live_publish_failed",
+          origin: "api",
+        });
       }
     }
     return c.body(null, 204);

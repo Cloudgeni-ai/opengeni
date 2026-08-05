@@ -366,11 +366,13 @@ export async function startApi() {
           { db: dbClient.db, settings, callout, observability },
           settings.natsUrl,
         );
-      } catch (error) {
+      } catch {
         // A responder start failure must not crash the API (other planes work); log
         // loudly — selfhosted agents will fail to connect until it is up.
         observability.error("OpenGeni NATS auth-callout responder failed to start", {
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "NatsAuthCalloutOperationError",
+          errorCode: "nats_auth_callout_start_failed",
+          origin: "api",
         });
       }
     } else {

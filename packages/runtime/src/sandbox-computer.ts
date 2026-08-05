@@ -39,7 +39,6 @@ import {
   PointerButton,
   type DesktopInputRequest,
 } from "@opengeni/agent-proto";
-import { redactSensitiveText } from "@opengeni/contracts";
 
 import {
   sandboxCommandExitCode,
@@ -266,6 +265,43 @@ export class ComputerActionError extends Error {
   }
 }
 
+type ComputerPublicErrorClass = "ComputerActionTimeoutError" | "ComputerUnavailableError";
+type ComputerPublicErrorCode = "command_yield_timeout" | "screenshot_capture_failed";
+
+function computerPublicErrorFields<
+  ErrorClass extends ComputerPublicErrorClass,
+  ErrorCode extends ComputerPublicErrorCode,
+>(
+  error: unknown,
+  fallbackClass: ErrorClass,
+  fallbackCode: ErrorCode,
+): {
+  errorClass: ErrorClass;
+  errorCode: ErrorCode;
+  status?: number;
+  origin: "sandbox-computer";
+} {
+  const fields: {
+    errorClass: ErrorClass;
+    errorCode: ErrorCode;
+    status?: number;
+    origin: "sandbox-computer";
+  } = { errorClass: fallbackClass, errorCode: fallbackCode, origin: "sandbox-computer" };
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public diagnostics are best-effort. Hostile getters/proxies must never
+    // replace the exact internal failure with a logging projection failure.
+  }
+  return fields;
+}
+
 type ScreenshotReadbackFence = {
   overallDeadline: number;
   dataDeadline: number;
@@ -409,7 +445,8 @@ export class SandboxComputer implements Computer {
       // produces empty bytes, and the retry loop eventually throws. The wire-level
       // backstop in computerCallNormalizingFetch is also in place as a second net.
       console.warn(
-        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${redactSensitiveText(cmd)}`,
+        "[SandboxComputer] action command did not finish before the yield window; proceeding to screenshot",
+        computerPublicErrorFields(undefined, "ComputerActionTimeoutError", "command_yield_timeout"),
       );
       return output;
     }
@@ -1301,14 +1338,15 @@ export class NativeDesktopComputer implements Computer {
         // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
         if (Date.now() + this.screenshotRetryDelayMs >= warmupDeadline) break;
       }
-      // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
-      // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
-      // then rethrow — never return "".
-      const reason = redactSensitiveText(
-        lastError instanceof Error ? lastError.message : String(lastError),
-      );
+      // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Public logs
+      // receive only structural metadata; the exact error is rethrown internally.
       console.warn(
-        `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
+        "[NativeDesktopComputer] screenshot failed after the capture retry budget",
+        computerPublicErrorFields(
+          lastError,
+          "ComputerUnavailableError",
+          "screenshot_capture_failed",
+        ),
       );
       if (lastError instanceof Error) throw lastError;
       throw new ComputerUnavailableError(

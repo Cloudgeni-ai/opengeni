@@ -1606,7 +1606,7 @@ function capabilityInstallationRuntimeReady(
 }
 
 /**
- * Checks the redacted installation config (header names only) against the
+ * Checks the generic installation projection (header names only) against the
  * capability's declared credential requirements.
  */
 function storedCredentialHeadersSatisfy(

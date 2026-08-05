@@ -1,5 +1,3 @@
-import { sanitizeEventString } from "./event-payload-sanitizer";
-
 export type DatabaseFailureCode = "db_deadlock" | "db_serialization_failure" | "db_failure";
 
 export type PersistenceRetryOutcome = "not_retryable" | "exhausted";
@@ -58,7 +56,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function safeFact(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
-  return sanitizeEventString(value).slice(0, 256);
+  return value;
 }
 
 /** Find the driver SQLSTATE even when Drizzle wrapped it under nested causes. */
@@ -98,8 +96,8 @@ export function isRetryablePersistenceSqlState(sqlState: string | null): boolean
 
 /**
  * Distinguish database/ORM failures from expected domain exceptions when a
- * driver omitted SQLSTATE. This checks shape only and never retains query text,
- * bound parameters, or a raw driver cause.
+ * driver omitted SQLSTATE. This checks shape only; callers retain the original
+ * failure independently as canonical error evidence.
  */
 export function isDatabasePersistenceFailure(error: unknown): boolean {
   if (nestedPostgresSqlState(error) !== null) return true;
@@ -156,36 +154,30 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
   return facts;
 }
 
-/** Public-safe cause that preserves database classification without driver data. */
-export class SanitizedDatabasePersistenceCause extends Error {
-  readonly name = "SanitizedDatabasePersistenceCause";
-
-  constructor(
-    readonly sqlState: string | null,
-    readonly database: SafeDatabaseErrorFacts,
-  ) {
-    super(sqlState === null ? "Database driver failure" : `PostgreSQL failure ${sqlState}`);
-  }
-}
-
 /**
- * Public-safe replacement for a raw Drizzle/postgres-js failure. Its `cause`
- * is a newly constructed sanitized projection; the original driver cause can
- * contain full SQL and bound parameters and is never retained.
+ * Typed persistence classification that retains the exact original failure as
+ * `cause`. Classification metadata supplements the cause; it never replaces or
+ * rewrites source error content.
  */
 export class SessionEventPersistenceError extends Error {
   readonly name = "SessionEventPersistenceError";
-  readonly cause: SanitizedDatabasePersistenceCause;
+  readonly cause: unknown;
 
-  constructor(readonly details: PersistenceFailureDetails) {
+  constructor(
+    readonly details: PersistenceFailureDetails,
+    cause?: unknown,
+  ) {
     const label =
       details.code === "db_deadlock"
         ? "Database deadlock"
         : details.code === "db_serialization_failure"
           ? "Database serialization failure"
           : "Database failure";
-    super(`${label} while persisting ${details.eventTypes.join(", ") || "session events"}`);
-    this.cause = new SanitizedDatabasePersistenceCause(details.sqlState, details.database);
+    const operation = `${label} while persisting ${details.eventTypes.join(", ") || "session events"}`;
+    const sourceMessage =
+      cause === undefined ? null : cause instanceof Error ? cause.message : String(cause);
+    super(sourceMessage ? `${operation}: ${sourceMessage}` : operation);
+    this.cause = cause;
   }
 
   get code(): DatabaseFailureCode {
@@ -236,16 +228,19 @@ export async function runIdempotentPersistenceTransaction<T>(
         continue;
       }
       if (!isDatabasePersistenceFailure(error)) throw error;
-      throw new SessionEventPersistenceError({
-        code: databaseFailureCode(sqlState),
-        sqlState,
-        stage: options.stage,
-        eventTypes,
-        correlationId,
-        attempts: attempt,
-        retryOutcome: retryable ? "exhausted" : "not_retryable",
-        database: safeDatabaseErrorFacts(error),
-      });
+      throw new SessionEventPersistenceError(
+        {
+          code: databaseFailureCode(sqlState),
+          sqlState,
+          stage: options.stage,
+          eventTypes,
+          correlationId,
+          attempts: attempt,
+          retryOutcome: retryable ? "exhausted" : "not_retryable",
+          database: safeDatabaseErrorFacts(error),
+        },
+        error,
+      );
     }
   }
   throw new Error("Unreachable persistence retry state");

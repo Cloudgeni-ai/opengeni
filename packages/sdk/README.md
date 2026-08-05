@@ -408,7 +408,7 @@ Every public endpoint group has typed methods:
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
-| Variable sets | `listVariable sets`, `createVariable set`, `getVariable set`, `updateVariable set`, `deleteVariable set`, `setVariable setVariable`, `deleteVariable setVariable` (values are write-only) |
+| Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
 | Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |

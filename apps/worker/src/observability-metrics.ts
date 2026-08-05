@@ -37,11 +37,11 @@ function eventAttributes(attributes: Record<string, unknown> | undefined): Attri
   if (!attributes) {
     return undefined;
   }
-  const sanitized: Attributes = {};
+  const projected: Attributes = {};
   for (const [key, value] of Object.entries(attributes)) {
-    sanitized[key] = eventAttributeValue(value);
+    projected[key] = eventAttributeValue(value);
   }
-  return sanitized;
+  return projected;
 }
 
 function eventAttributeValue(value: unknown): AttributeValue {

@@ -13,7 +13,7 @@ import {
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { sanitizeEventPayload } from "./event-payload-sanitizer";
+import { withLosslessContentWriteVersion } from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -44,6 +44,10 @@ import {
   initiatorFromStorage,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
+
+type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
+  payload: unknown;
+};
 
 export type QueueCommandConflictCode =
   | "QUEUE_VERSION_CHANGED"
@@ -294,18 +298,22 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     const cancelledHumanInputEvents = await db
       .insert(schema.sessionEvents)
       .values(
-        cancelledHumanInputs.map((request) => ({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          sequence: ++lastSequence,
-          type: "user.humanInputResponse",
-          turnId: current.id,
-          turnGeneration: current.executionGeneration,
-          turnAssociation: "current",
-          payload: { requestId: request.id, response: { outcome: "cancelled" } },
-          occurredAt: now,
-        })),
+        withLosslessContentWriteVersion(
+          cancelledHumanInputs.map((request) => ({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: ++lastSequence,
+            type: "user.humanInputResponse",
+            turnId: current.id,
+            turnGeneration: current.executionGeneration,
+            turnAssociation: "current",
+            payload: { requestId: request.id, response: { outcome: "cancelled" } },
+            occurredAt: now,
+          })),
+          "payload",
+          "payloadCodecVersion",
+        ),
       )
       .returning();
     const requestsById = new Map(cancelledHumanInputs.map((request) => [request.id, request]));
@@ -639,21 +647,27 @@ export async function moveQueuedTurnInTransaction(
     );
     const [event] = await db
       .insert(schema.sessionEvents)
-      .values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        sequence: session.lastSequence + 1,
-        type: "session.queue.changed",
-        turnId: target.id,
-        payload: {
-          operation: "move",
-          queueVersion,
-          turnId: target.id,
-          beforeTurnId: input.beforeTurnId,
-        },
-        occurredAt: new Date(),
-      })
+      .values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "session.queue.changed",
+            turnId: target.id,
+            payload: {
+              operation: "move",
+              queueVersion,
+              turnId: target.id,
+              beforeTurnId: input.beforeTurnId,
+            },
+            occurredAt: new Date(),
+          },
+          "payload",
+          "payloadCodecVersion",
+        ),
+      )
       .returning({ id: schema.sessionEvents.id });
     if (!event) throw new Error("Queue move event was not inserted");
     eventIds.push(event.id);
@@ -767,20 +781,26 @@ export async function deleteSessionQueueItemInTransaction(
   );
   const [event] = await db
     .insert(schema.sessionEvents)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sequence: session.lastSequence + 1,
-      type: "session.queue.changed",
-      turnId: turn.id,
-      payload: {
-        operation: "delete",
-        queueVersion,
-        turnId: turn.id,
-      },
-      occurredAt: now,
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sequence: session.lastSequence + 1,
+          type: "session.queue.changed",
+          turnId: turn.id,
+          payload: {
+            operation: "delete",
+            queueVersion,
+            turnId: turn.id,
+          },
+          occurredAt: now,
+        },
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionEvents.id });
   if (!event) throw new Error("Queue delete event was not inserted");
   await db
@@ -939,21 +959,27 @@ export async function editQueuedTurnInTransaction(
   );
   const [event] = await db
     .insert(schema.sessionEvents)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sequence: session.lastSequence + 1,
-      type: "session.queue.changed",
-      turnId: turn.id,
-      payload: {
-        operation: "edit",
-        queueVersion,
-        turnId: turn.id,
-        draftRevision: nextDraftRevision,
-      },
-      occurredAt: now,
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sequence: session.lastSequence + 1,
+          type: "session.queue.changed",
+          turnId: turn.id,
+          payload: {
+            operation: "edit",
+            queueVersion,
+            turnId: turn.id,
+            draftRevision: nextDraftRevision,
+          },
+          occurredAt: now,
+        },
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionEvents.id });
   if (!event) throw new Error("Queue edit event was not inserted");
   await db
@@ -1118,7 +1144,7 @@ export async function steerQueuedTurnInTransaction(
     input.actor.type === "agent_attempt"
       ? `attempt:${input.actor.attemptId}`
       : input.actor.subjectId;
-  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [];
+  const eventValues: SessionEventInsertWithPayload[] = [];
   if (supersededTurnId && !liveCurrentTurnId) {
     eventValues.push({
       accountId: input.accountId,
@@ -1146,9 +1172,12 @@ export async function steerQueuedTurnInTransaction(
     },
     occurredAt: now,
   });
-  const eventRows = await db.insert(schema.sessionEvents).values(eventValues).returning({
-    id: schema.sessionEvents.id,
-  });
+  const eventRows = await db
+    .insert(schema.sessionEvents)
+    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .returning({
+      id: schema.sessionEvents.id,
+    });
   await db
     .update(schema.sessions)
     .set({
@@ -1161,19 +1190,25 @@ export async function steerQueuedTurnInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessions.id, input.sessionId));
-  await db.insert(schema.auditEvents).values({
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: actor,
-    action: "session.queue.steer",
-    targetType: "session_turn",
-    targetId: target.id,
-    metadata: {
-      operationId: reserved.receipt.id,
-      replacedTurnId: supersededTurnId,
-      interruptionCount,
-    },
-  });
+  await db.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: actor,
+        action: "session.queue.steer",
+        targetType: "session_turn",
+        targetId: target.id,
+        metadata: {
+          operationId: reserved.receipt.id,
+          replacedTurnId: supersededTurnId,
+          interruptionCount,
+        },
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
   const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -1485,7 +1520,7 @@ export async function submitHumanPromptInTransaction(
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
   let sequence = session.lastSequence;
-  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
+  const eventValues: SessionEventInsertWithPayload[] = [
     {
       id: acceptedEventId,
       accountId: input.accountId,
@@ -1494,7 +1529,7 @@ export async function submitHumanPromptInTransaction(
       sequence: ++sequence,
       type: "user.message",
       clientEventId: input.operationKey,
-      payload: sanitizeEventPayload({
+      payload: {
         text: input.messagePresentation?.text ?? input.text,
         ...(input.messagePresentation
           ? {
@@ -1510,54 +1545,60 @@ export async function submitHumanPromptInTransaction(
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         delivery: input.delivery,
         initiator: frozenInitiator.initiator,
-      }),
+      },
       occurredAt: now,
     },
   ];
   const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
   const [turn] = await db
     .insert(schema.sessionTurns)
-    .values({
-      id: turnId,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      triggerEventId: acceptedEventId,
-      temporalWorkflowId: workflowId,
-      status: "queued",
-      source: input.source,
-      position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
-      prompt: input.text,
-      turnInstructions:
-        editedSourceTurnInstructions !== undefined
-          ? editedSourceTurnInstructions
-          : (input.turnInstructions ?? null),
-      resources: input.resources,
-      tools: [],
-      toolsProvided: false,
-      model: input.model ?? session.model,
-      reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-      latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
-      sandboxBackend: session.sandboxBackend,
-      metadata: input.turnExecutionPolicy
-        ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
-        : (input.turnMetadata ?? {}),
-      lineage: { actor: input.actor.type },
-      ...initiatorColumns(frozenInitiator),
-      initiatingHumanSubjectId: editedSourceTurn
-        ? (editedSourceTurn.initiatingHumanSubjectId ??
-          (editedSourceTurn.initiatorKind === "subject"
-            ? editedSourceTurn.initiatorSubjectId
-            : null))
-        : frozenInitiator.initiator.kind === "subject"
-          ? frozenInitiator.initiator.subjectId
-          : null,
-      personalConnectionDelegations: editedSourceTurn
-        ? editedSourceTurn.personalConnectionDelegations
-        : (input.personalConnectionDelegations ?? []),
-      createdAt: now,
-      updatedAt: now,
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          id: turnId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          triggerEventId: acceptedEventId,
+          temporalWorkflowId: workflowId,
+          status: "queued",
+          source: input.source,
+          position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
+          prompt: input.text,
+          turnInstructions:
+            editedSourceTurnInstructions !== undefined
+              ? editedSourceTurnInstructions
+              : (input.turnInstructions ?? null),
+          resources: input.resources,
+          tools: [],
+          toolsProvided: false,
+          model: input.model ?? session.model,
+          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
+          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          sandboxBackend: session.sandboxBackend,
+          metadata: input.turnExecutionPolicy
+            ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
+            : (input.turnMetadata ?? {}),
+          lineage: { actor: input.actor.type },
+          ...initiatorColumns(frozenInitiator),
+          initiatingHumanSubjectId: editedSourceTurn
+            ? (editedSourceTurn.initiatingHumanSubjectId ??
+              (editedSourceTurn.initiatorKind === "subject"
+                ? editedSourceTurn.initiatorSubjectId
+                : null))
+            : frozenInitiator.initiator.kind === "subject"
+              ? frozenInitiator.initiator.subjectId
+              : null,
+          personalConnectionDelegations: editedSourceTurn
+            ? editedSourceTurn.personalConnectionDelegations
+            : (input.personalConnectionDelegations ?? []),
+          createdAt: now,
+          updatedAt: now,
+        },
+        "prompt",
+        "promptCodecVersion",
+      ),
+    )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
   eventValues.push({
@@ -1686,7 +1727,10 @@ export async function submitHumanPromptInTransaction(
       occurredAt: now,
     });
   }
-  const eventRows = await db.insert(schema.sessionEvents).values(eventValues).returning();
+  const eventRows = await db
+    .insert(schema.sessionEvents)
+    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .returning();
   if (input.actor.type === "human") {
     const realtimeRouting =
       input.delivery === "steer"
@@ -1742,25 +1786,31 @@ export async function submitHumanPromptInTransaction(
     reason: input.delivery === "steer" ? "prompt_steer" : "prompt_send",
     controlRequested: input.delivery === "steer",
   });
-  await db.insert(schema.auditEvents).values({
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId:
-      input.actor.type === "agent_attempt"
-        ? `attempt:${input.actor.attemptId}`
-        : input.actor.subjectId,
-    action: input.delivery === "steer" ? "session.prompt.steer" : "session.prompt.send",
-    targetType: "session_turn",
-    targetId: turnId,
-    metadata: {
-      operationId: reserved.receipt.id,
-      replacedTurnId,
-      interruptionCount,
-      ...(input.turnExecutionPolicy
-        ? turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId)
-        : {}),
-    },
-  });
+  await db.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId:
+          input.actor.type === "agent_attempt"
+            ? `attempt:${input.actor.attemptId}`
+            : input.actor.subjectId,
+        action: input.delivery === "steer" ? "session.prompt.steer" : "session.prompt.send",
+        targetType: "session_turn",
+        targetId: turnId,
+        metadata: {
+          operationId: reserved.receipt.id,
+          replacedTurnId,
+          interruptionCount,
+          ...(input.turnExecutionPolicy
+            ? turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId)
+            : {}),
+        },
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
   const eventIds = eventRows.map((event) => event.id);
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: resumed.revision,
@@ -1879,46 +1929,62 @@ export async function sendAgentMessageInTransaction(
   const now = new Date();
   const [update] = await db
     .insert(schema.sessionSystemUpdates)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.targetSessionId,
-      kind: "agent_message",
-      classification: "info",
-      sourceId: input.actor.sessionId,
-      dedupeKey: `agent-message:${reserved.receipt.id}`,
-      summary: input.text,
-      payload: {
-        type: "agent_message",
-        text: input.text,
-        operationId: reserved.receipt.id,
-      },
-      lineage: {
-        callerSessionId: input.actor.sessionId,
-        callerTurnId: input.actor.turnId,
-        callerAttemptId: input.actor.attemptId,
-        callerExecutionGeneration: input.actor.executionGeneration,
-      },
-      personalConnectionDelegations,
-      state: "pending",
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.targetSessionId,
+            kind: "agent_message",
+            classification: "info",
+            sourceId: input.actor.sessionId,
+            dedupeKey: `agent-message:${reserved.receipt.id}`,
+            summary: input.text,
+            payload: {
+              type: "agent_message",
+              text: input.text,
+              operationId: reserved.receipt.id,
+            },
+            lineage: {
+              callerSessionId: input.actor.sessionId,
+              callerTurnId: input.actor.turnId,
+              callerAttemptId: input.actor.attemptId,
+              callerExecutionGeneration: input.actor.executionGeneration,
+            },
+            personalConnectionDelegations,
+            state: "pending",
+          },
+          "summary",
+          "summaryCodecVersion",
+        ),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent message was not inserted");
   const [event] = await db
     .insert(schema.sessionEvents)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.targetSessionId,
-      sequence: session.lastSequence + 1,
-      type: "system.update.pending",
-      payload: {
-        updateId: update.id,
-        kind: "agent_message",
-        sourceSessionId: input.actor.sessionId,
-      },
-      occurredAt: now,
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.targetSessionId,
+          sequence: session.lastSequence + 1,
+          type: "system.update.pending",
+          payload: {
+            updateId: update.id,
+            kind: "agent_message",
+            sourceSessionId: input.actor.sessionId,
+          },
+          occurredAt: now,
+        },
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionEvents.id });
   if (!event) throw new SessionControlInvariantError("Agent message event was not inserted");
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -1939,21 +2005,27 @@ export async function sendAgentMessageInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessions.id, input.targetSessionId));
-  await db.insert(schema.auditEvents).values({
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: `attempt:${input.actor.attemptId}`,
-    action: "session.agent_message",
-    targetType: "session",
-    targetId: input.targetSessionId,
-    metadata: {
-      operationId: reserved.receipt.id,
-      callerSessionId: input.actor.sessionId,
-      callerTurnId: input.actor.turnId,
-      callerAttemptId: input.actor.attemptId,
-      callerExecutionGeneration: input.actor.executionGeneration,
-    },
-  });
+  await db.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: `attempt:${input.actor.attemptId}`,
+        action: "session.agent_message",
+        targetType: "session",
+        targetId: input.targetSessionId,
+        metadata: {
+          operationId: reserved.receipt.id,
+          callerSessionId: input.actor.sessionId,
+          callerTurnId: input.actor.turnId,
+          callerAttemptId: input.actor.attemptId,
+          callerExecutionGeneration: input.actor.executionGeneration,
+        },
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     result: {
       updateId: update.id,
@@ -2084,33 +2156,43 @@ export async function steerAgentSessionInTransaction(
   const now = new Date();
   const [update] = await db
     .insert(schema.sessionSystemUpdates)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.targetSessionId,
-      kind: "agent_steer_instruction",
-      classification: "action_required",
-      sourceId: input.actor.sessionId,
-      dedupeKey: `agent-steer:${reserved.receipt.id}`,
-      summary: input.instruction,
-      payload: {
-        type: "agent_steer_instruction",
-        instruction: input.instruction,
-        operationId: reserved.receipt.id,
-      },
-      lineage: {
-        callerSessionId: input.actor.sessionId,
-        callerTurnId: input.actor.turnId,
-        callerAttemptId: input.actor.attemptId,
-        callerExecutionGeneration: input.actor.executionGeneration,
-      },
-      personalConnectionDelegations,
-      state: "pending",
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.targetSessionId,
+            kind: "agent_steer_instruction",
+            classification: "action_required",
+            sourceId: input.actor.sessionId,
+            dedupeKey: `agent-steer:${reserved.receipt.id}`,
+            summary: input.instruction,
+            payload: {
+              type: "agent_steer_instruction",
+              instruction: input.instruction,
+              operationId: reserved.receipt.id,
+            },
+            lineage: {
+              callerSessionId: input.actor.sessionId,
+              callerTurnId: input.actor.turnId,
+              callerAttemptId: input.actor.attemptId,
+              callerExecutionGeneration: input.actor.executionGeneration,
+            },
+            personalConnectionDelegations,
+            state: "pending",
+          },
+          "summary",
+          "summaryCodecVersion",
+        ),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent Steer instruction was not inserted");
   let sequence = supersession.lastSequence;
-  const events: Array<typeof schema.sessionEvents.$inferInsert> = [];
+  const events: SessionEventInsertWithPayload[] = [];
   if (supersession.replacedTurn && !supersession.liveCurrentTurnId) {
     events.push({
       accountId: input.accountId,
@@ -2175,9 +2257,12 @@ export async function steerAgentSessionInTransaction(
       occurredAt: now,
     },
   );
-  const insertedEvents = await db.insert(schema.sessionEvents).values(events).returning({
-    id: schema.sessionEvents.id,
-  });
+  const insertedEvents = await db
+    .insert(schema.sessionEvents)
+    .values(withLosslessContentWriteVersion(events, "payload", "payloadCodecVersion"))
+    .returning({
+      id: schema.sessionEvents.id,
+    });
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
   const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {
     accountId: input.accountId,
@@ -2196,24 +2281,30 @@ export async function steerAgentSessionInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessions.id, input.targetSessionId));
-  await db.insert(schema.auditEvents).values({
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: `attempt:${input.actor.attemptId}`,
-    action: "session.agent_steer",
-    targetType: "session",
-    targetId: input.targetSessionId,
-    metadata: {
-      operationId: reserved.receipt.id,
-      callerSessionId: input.actor.sessionId,
-      callerTurnId: input.actor.turnId,
-      callerAttemptId: input.actor.attemptId,
-      callerExecutionGeneration: input.actor.executionGeneration,
-      controlRevision: resumed.revision,
-      interruptionCount: supersession.interruptionCount,
-      workspaceControlEventId: resumed.workspaceControlEventId,
-    },
-  });
+  await db.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: `attempt:${input.actor.attemptId}`,
+        action: "session.agent_steer",
+        targetType: "session",
+        targetId: input.targetSessionId,
+        metadata: {
+          operationId: reserved.receipt.id,
+          callerSessionId: input.actor.sessionId,
+          callerTurnId: input.actor.turnId,
+          callerAttemptId: input.actor.attemptId,
+          callerExecutionGeneration: input.actor.executionGeneration,
+          controlRevision: resumed.revision,
+          interruptionCount: supersession.interruptionCount,
+          workspaceControlEventId: resumed.workspaceControlEventId,
+        },
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
   const eventIds = insertedEvents.map((event) => event.id);
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: resumed.revision,
