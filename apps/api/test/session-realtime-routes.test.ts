@@ -13,7 +13,9 @@ import {
   ensureCodexRotationSettings,
   getActiveSessionHistoryItems,
   setActiveCodexCredential,
+  submitHumanPromptInTransaction,
   upsertCodexSubscriptionCredential,
+  withWorkspaceSubjectRls,
   withWorkspaceRls,
   type Database,
   type DbClient,
@@ -474,6 +476,23 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
   test("mints one single-use Gateway token behind the same owner and activation fences", async () => {
     const value = await fixture();
     const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    await withWorkspaceSubjectRls(client.db, value.workspaceId, value.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: value.accountId,
+          workspaceId: value.workspaceId,
+          sessionId: value.sessionId,
+          subjectId: value.subjectId,
+          actor: { type: "human", subjectId: value.subjectId },
+          operationKey: `gateway-history-${crypto.randomUUID()}`,
+          delivery: "send",
+          text: "Gateway capability history fixture",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
     const attemptId = crypto.randomUUID();
     const claimed = await claimSessionWorkForAttempt(client.db, value.workspaceId, {
       sessionId: value.sessionId,
