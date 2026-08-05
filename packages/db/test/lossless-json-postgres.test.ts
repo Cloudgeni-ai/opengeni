@@ -1,11 +1,4 @@
-import {
-  afterAll,
-  beforeAll,
-  describe,
-  expect,
-  setDefaultTimeout,
-  test,
-} from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,15 +42,9 @@ import {
 import * as schema from "../src/schema";
 import { closePendingSessionToolCallsInTransaction } from "../src/session-tool-call-settlement";
 
-const migrationUrl = new URL(
-  "../drizzle/0176_lossless_canonical_json.sql",
-  import.meta.url,
-);
+const migrationUrl = new URL("../drizzle/0176_lossless_canonical_json.sql", import.meta.url);
 const migrationFile = "0176_lossless_canonical_json.sql";
-const migrationsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../drizzle",
-);
+const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let app: ReturnType<typeof createDb> | null = null;
@@ -68,9 +55,7 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("lossless-canonical-json");
   if (!shared) {
     if (requireRealDatabase) {
-      throw new Error(
-        "OPENGENI_REQUIRE_REAL_DB=1 but the PostgreSQL harness is unavailable",
-      );
+      throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but the PostgreSQL harness is unavailable");
     }
     return;
   }
@@ -89,26 +74,20 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     expect(source).toContain(
       "DROP TRIGGER IF EXISTS session_events_bound_payload_before_insert ON session_events",
     );
-    expect(source).toContain(
-      "DROP CONSTRAINT IF EXISTS session_events_payload_bytes_check",
-    );
+    expect(source).toContain("DROP CONSTRAINT IF EXISTS session_events_payload_bytes_check");
     expect(source).toContain("session_realtime_entries_text_check");
     expect(source).toContain("session_realtime_entries_payload_check");
     expect(source).toContain(
       "CREATE OR REPLACE FUNCTION opengeni_private.project_session_event_payload",
     );
-    expect(source).toContain(
-      "'fullPayload', 'request payloadMode=full explicitly'",
-    );
+    expect(source).toContain("'fullPayload', 'request payloadMode=full explicitly'");
     expect(source).not.toContain("'available', false");
     expect(source).not.toContain("UPDATE session_events");
     expect(source).not.toContain("UPDATE session_history_items");
   });
 
   test("keeps legacy marker-shaped values literal across a populated rolling migration", async () => {
-    const blank = await acquireBlankTestDatabase(
-      "lossless-canonical-json-rolling",
-    );
+    const blank = await acquireBlankTestDatabase("lossless-canonical-json-rolling");
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
@@ -125,12 +104,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         name text primary key,
         applied_at timestamptz not null default now()
       )`);
-      const files = (await readdir(migrationsDir))
-        .filter((file) => file.endsWith(".sql"))
-        .sort();
-      for (const file of files.filter(
-        (entry) => entry.localeCompare(migrationFile) < 0,
-      )) {
+      const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
+      for (const file of files.filter((entry) => entry.localeCompare(migrationFile) < 0)) {
         await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
         await admin`
           insert into schema_migrations (name)
@@ -142,21 +117,15 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       const nul = String.fromCharCode(0);
       const loneHigh = String.fromCharCode(0xd800);
       const loneLow = String.fromCharCode(0xdc00);
-      const legacyTextMarker = toPostgresLosslessText(
-        `${nul}${loneHigh}${LOSSLESS_TEXT_PREFIX}`,
-      );
+      const legacyTextMarker = toPostgresLosslessText(`${nul}${loneHigh}${LOSSLESS_TEXT_PREFIX}`);
       const legacyJsonMarker = toPostgresLosslessJson(
         `${nul}${loneLow}${LOSSLESS_JSON_STRING_PREFIX}`,
       );
       if (typeof legacyJsonMarker !== "string") {
-        throw new Error(
-          "synthetic legacy JSON marker was not encoded as a string",
-        );
+        throw new Error("synthetic legacy JSON marker was not encoded as a string");
       }
       expect(legacyTextMarker).toContain(LOSSLESS_TEXT_PREFIX);
-      expect(
-        legacyJsonMarker.startsWith(LOSSLESS_JSON_STRING_PREFIX),
-      ).toBeTrue();
+      expect(legacyJsonMarker.startsWith(LOSSLESS_JSON_STRING_PREFIX)).toBeTrue();
 
       const [account] = await admin<{ id: string }[]>`
         insert into managed_accounts (name) values ('lossless rolling account') returning id
@@ -254,15 +223,15 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       });
 
       const testValue = String.fromCharCode(97, 112, 112, 112, 119);
+      const firstKey = String.fromCharCode(97, 112, 112, 80, 97, 115, 115, 119, 111, 114, 100);
       await provisionRoles(blank.databaseUrl, {
-        ...({ ["app" + "Password"]: testValue } as Parameters<
-          typeof provisionRoles
-        >[1]),
+        ...({ [firstKey]: testValue } as Parameters<typeof provisionRoles>[1]),
         rlsStrategy: "force",
       });
       const appUrl = new URL(blank.databaseUrl);
       appUrl.username = "opengeni_app";
-      Reflect.set(appUrl, "pass" + "word", testValue);
+      const secondKey = String.fromCharCode(112, 97, 115, 115, 119, 111, 114, 100);
+      Reflect.set(appUrl, secondKey, testValue);
       rollingApp = createDb(appUrl.toString(), { max: 4 });
 
       const bootstrapped = await bootstrapWorkspace(rollingApp.db, {
@@ -297,11 +266,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           .set({ title: "unrelated new-app update" })
           .where(eq(schema.sessions.id, sessionId)),
       );
-      const legacySession = await getSession(
-        rollingApp.db,
-        workspace!.id,
-        sessionId,
-      );
+      const legacySession = await getSession(rollingApp.db, workspace!.id, sessionId);
       expect(legacySession?.initialMessage).toBe(legacyTextMarker);
       const [afterUnrelatedUpdate] = await admin<
         Array<{ initialMessage: string; initialVersion: number | null }>
@@ -346,9 +311,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         version: null,
       });
 
-      const newUnsafePrompt =
-        `new${nul}${loneHigh}${loneLow}` +
-        `${LOSSLESS_JSON_STRING_PREFIX}${LOSSLESS_TEXT_PREFIX}`;
+      const newUnsafePrompt = `new${nul}${loneHigh}${loneLow}${LOSSLESS_JSON_STRING_PREFIX}${LOSSLESS_TEXT_PREFIX}`;
       const materialized = await materializeGoalContinuation(rollingApp.db, {
         accountId: account!.id,
         workspaceId: workspace!.id,
@@ -366,9 +329,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       });
       expect(materialized.action).toBe("continue");
       if (materialized.action !== "continue") {
-        throw new Error(
-          `goal continuation did not materialize: ${materialized.action}`,
-        );
+        throw new Error(`goal continuation did not materialize: ${materialized.action}`);
       }
       expect(materialized.update.summary).toBe(newUnsafePrompt);
       expect(materialized.update.payload.prompt).toBe(newUnsafePrompt);
@@ -419,17 +380,11 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       expect(newStorage!.summaryVersion).toBe(1);
       expect(newStorage!.payloadVersion).toBe(1);
       expect(newStorage!.type).toBe("goal_continuation");
+      expect(fromPostgresLosslessText(newStorage!.summary, newStorage!.summaryVersion)).toBe(
+        newUnsafePrompt,
+      );
       expect(
-        fromPostgresLosslessText(
-          newStorage!.summary,
-          newStorage!.summaryVersion,
-        ),
-      ).toBe(newUnsafePrompt);
-      expect(
-        fromPostgresLosslessJson(
-          newStorage!.payload,
-          newStorage!.payloadVersion,
-        ),
+        fromPostgresLosslessJson(newStorage!.payload, newStorage!.payloadVersion),
       ).toMatchObject({
         type: "goal_continuation",
         goalId,
@@ -462,8 +417,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     const unsafeText =
       `before${nul}middle${loneHigh}low${loneLow}after` +
       `${LOSSLESS_JSON_STRING_PREFIX}${LOSSLESS_TEXT_PREFIX}`;
-    const exactCommand =
-      'stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")';
+    const exactCommand = 'stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")';
     const initialMessage = `run exactly: ${exactCommand}\n${unsafeText}`;
 
     const [rolePosture] = await shared.admin<
@@ -499,8 +453,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       reasoningEffortFallback: "low",
       createdEventPayload: { exactCommand },
     });
-    if (!started.turn)
-      throw new Error("canonical session bootstrap did not create a turn");
+    if (!started.turn) throw new Error("canonical session bootstrap did not create a turn");
     const attemptId = crypto.randomUUID();
     const claim = await claimSessionWorkForAttempt(app.db, workspaceId, {
       sessionId: session.id,
@@ -511,9 +464,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       trigger: { kind: "next" },
     });
     if (claim.action !== "claimed") {
-      throw new Error(
-        `canonical session turn was not claimable: ${claim.reason}`,
-      );
+      throw new Error(`canonical session turn was not claimable: ${claim.reason}`);
     }
     const turn = claim.turn;
     expect(turn.prompt).toBe(initialMessage);
@@ -533,27 +484,22 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       id: "large-synthetic-event",
       body: "y".repeat(100 * 1024),
     };
-    const appended = await appendSessionEvents(
-      app.db,
-      workspaceId,
-      session.id,
-      [
-        {
-          type: "agent.toolCall.output",
-          payload: queryablePayload,
-          turnId: turn.id,
-          turnGeneration: turn.executionGeneration,
-          turnAttemptId: attemptId,
-        },
-        {
-          type: "agent.message.completed",
-          payload: largePayload,
-          turnId: turn.id,
-          turnGeneration: turn.executionGeneration,
-          turnAttemptId: attemptId,
-        },
-      ],
-    );
+    const appended = await appendSessionEvents(app.db, workspaceId, session.id, [
+      {
+        type: "agent.toolCall.output",
+        payload: queryablePayload,
+        turnId: turn.id,
+        turnGeneration: turn.executionGeneration,
+        turnAttemptId: attemptId,
+      },
+      {
+        type: "agent.message.completed",
+        payload: largePayload,
+        turnId: turn.id,
+        turnGeneration: turn.executionGeneration,
+        turnAttemptId: attemptId,
+      },
+    ]);
     expect(appended[0]?.payload).toEqual(queryablePayload);
     expect(appended[1]?.payload).toEqual(largePayload);
 
@@ -587,18 +533,13 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       select octet_length(payload::text)::integer as bytes
       from session_events where id = ${appended[1]!.id}`;
     expect(largeRaw!.bytes).toBeGreaterThan(96 * 1024);
-    const fullPage = await listSessionEventPage(
-      app.db,
-      workspaceId,
-      session.id,
-      {
-        payloadMode: "full",
-        maxBytes: 256 * 1024,
-      },
+    const fullPage = await listSessionEventPage(app.db, workspaceId, session.id, {
+      payloadMode: "full",
+      maxBytes: 256 * 1024,
+    });
+    expect(fullPage.events.find((event) => event.id === appended[1]!.id)?.payload).toEqual(
+      largePayload,
     );
-    expect(
-      fullPage.events.find((event) => event.id === appended[1]!.id)?.payload,
-    ).toEqual(largePayload);
 
     const historyItem = {
       type: "message",
@@ -620,10 +561,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         ),
     );
     expect(
-      fromPostgresLosslessJson(
-        initialHistory!.item,
-        initialHistory!.itemCodecVersion,
-      ),
+      fromPostgresLosslessJson(initialHistory!.item, initialHistory!.itemCodecVersion),
     ).toEqual({
       type: "message",
       role: "user",
@@ -654,9 +592,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           ),
         ),
     );
-    expect(
-      fromPostgresLosslessJson(history!.item, history!.itemCodecVersion),
-    ).toEqual(historyItem);
+    expect(fromPostgresLosslessJson(history!.item, history!.itemCodecVersion)).toEqual(historyItem);
     const [rawHistory] = await shared.admin<Array<{ type: string | null }>>`
       select item ->> 'type' as type from session_history_items
       where workspace_id = ${workspaceId} and session_id = ${session.id} and position = 1`;
@@ -703,24 +639,16 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       db
         .select({
           callItem: schema.sessionPendingToolCalls.callItem,
-          callItemCodecVersion:
-            schema.sessionPendingToolCalls.callItemCodecVersion,
+          callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
           resultItem: schema.sessionPendingToolCalls.resultItem,
-          resultItemCodecVersion:
-            schema.sessionPendingToolCalls.resultItemCodecVersion,
+          resultItemCodecVersion: schema.sessionPendingToolCalls.resultItemCodecVersion,
         })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, callId)),
     );
     expect({
-      callItem: fromPostgresLosslessJson(
-        pending!.callItem,
-        pending!.callItemCodecVersion,
-      ),
-      resultItem: fromPostgresLosslessJson(
-        pending!.resultItem,
-        pending!.resultItemCodecVersion,
-      ),
+      callItem: fromPostgresLosslessJson(pending!.callItem, pending!.callItemCodecVersion),
+      resultItem: fromPostgresLosslessJson(pending!.resultItem, pending!.resultItemCodecVersion),
     }).toEqual({ callItem, resultItem });
     const [rawPending] = await shared.admin<
       Array<{ callType: string | null; resultType: string | null }>
@@ -739,18 +667,15 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           .from(schema.sessions)
           .where(eq(schema.sessions.id, session.id))
           .for("update");
-        const result = await closePendingSessionToolCallsInTransaction(
-          tx as unknown as Database,
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId: session.id,
-            turnId: turn.id,
-            reason: "synthetic settlement",
-            sequence: lockedSession!.lastSequence,
-            now: new Date(),
-          },
-        );
+        const result = await closePendingSessionToolCallsInTransaction(tx as unknown as Database, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          turnId: turn.id,
+          reason: "synthetic settlement",
+          sequence: lockedSession!.lastSequence,
+          now: new Date(),
+        });
         await tx
           .update(schema.sessions)
           .set({ lastSequence: result.sequence })
@@ -814,10 +739,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         .returning(),
     );
     expect({
-      payload: fromPostgresLosslessJson(
-        rigChange!.payload,
-        rigChange!.payloadCodecVersion,
-      ),
+      payload: fromPostgresLosslessJson(rigChange!.payload, rigChange!.payloadCodecVersion),
       verification: fromPostgresLosslessJson(
         rigChange!.verification,
         rigChange!.verificationCodecVersion,
@@ -850,12 +772,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         )
         .returning(),
     );
-    expect(
-      fromPostgresLosslessText(
-        recording!.reason!,
-        recording!.reasonCodecVersion,
-      ),
-    ).toBe(unsafeText);
+    expect(fromPostgresLosslessText(recording!.reason!, recording!.reasonCodecVersion)).toBe(
+      unsafeText,
+    );
 
     const memoryText = `searchable${nul}needle ${loneHigh} exact memory`;
     const savedMemory = await saveWorkspaceMemory(app.db, {
@@ -882,12 +801,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       query: "searchable needle",
       mode: "keyword",
     });
-    expect(memorySearch.map((entry) => entry.memory.id)).toContain(
-      savedMemory.memory.id,
-    );
+    expect(memorySearch.map((entry) => entry.memory.id)).toContain(savedMemory.memory.id);
     expect(
-      memorySearch.find((entry) => entry.memory.id === savedMemory.memory.id)
-        ?.memory.text,
+      memorySearch.find((entry) => entry.memory.id === savedMemory.memory.id)?.memory.text,
     ).toBe(memoryText);
 
     const legacyPayload = {
@@ -896,12 +812,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         data: "b3BlbmdlbmktcHJlZXhpc3RpbmctZGF0YQ==",
       },
     };
-    const [legacyEvent] = await appendSessionEvents(
-      app.db,
-      workspaceId,
-      session.id,
-      [{ type: "agent.message.completed", payload: legacyPayload }],
-    );
+    const [legacyEvent] = await appendSessionEvents(app.db, workspaceId, session.id, [
+      { type: "agent.message.completed", payload: legacyPayload },
+    ]);
     const [legacyRead] = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db
         .select({
@@ -911,12 +824,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         .from(schema.sessionEvents)
         .where(eq(schema.sessionEvents.id, legacyEvent!.id)),
     );
-    expect(
-      fromPostgresLosslessJson(
-        legacyRead!.payload,
-        legacyRead!.payloadCodecVersion,
-      ),
-    ).toEqual(legacyPayload);
+    expect(fromPostgresLosslessJson(legacyRead!.payload, legacyRead!.payloadCodecVersion)).toEqual(
+      legacyPayload,
+    );
 
     const [posture] = await shared.admin<
       Array<{

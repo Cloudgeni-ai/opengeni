@@ -108,7 +108,7 @@ describe("lossless PostgreSQL content boundaries", () => {
   });
 
   test("never decodes valid marker-shaped legacy content without out-of-band version truth", () => {
-    const validJsonMarker = `${LOSSLESS_JSON_STRING_PREFIX}QQA=`;
+    const validJsonMarker = `${LOSSLESS_JSON_STRING_PREFIX}QQAAAA==`;
     const validTextMarker = ` ${LOSSLESS_TEXT_PREFIX}0000; `;
     expect(fromPostgresLosslessJson(validJsonMarker, null)).toBe(validJsonMarker);
     expect(fromPostgresLosslessText(validTextMarker, null)).toBe(validTextMarker);

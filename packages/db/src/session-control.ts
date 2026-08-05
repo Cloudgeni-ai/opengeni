@@ -114,9 +114,7 @@ export type SessionDiscoveryControl = {
   additionalBlockerCount: number;
 };
 
-export function serializeEffectiveSessionControl(
-  control: EffectiveSessionControl,
-) {
+export function serializeEffectiveSessionControl(control: EffectiveSessionControl) {
   const blocker = (
     value: EffectiveControlBlocker,
   ): Omit<EffectiveControlBlocker, "changedAt"> & {
@@ -127,18 +125,14 @@ export function serializeEffectiveSessionControl(
   });
   return {
     ...control,
-    primaryBlocker: control.primaryBlocker
-      ? blocker(control.primaryBlocker)
-      : null,
+    primaryBlocker: control.primaryBlocker ? blocker(control.primaryBlocker) : null,
     blockers: control.blockers.map(blocker),
-    resumeOptions: control.resumeOptions.map(
-      ({ remainingPrimaryBlocker, ...option }) => ({
-        ...option,
-        ...(remainingPrimaryBlocker
-          ? { remainingPrimaryBlocker: blocker(remainingPrimaryBlocker) }
-          : {}),
-      }),
-    ),
+    resumeOptions: control.resumeOptions.map(({ remainingPrimaryBlocker, ...option }) => ({
+      ...option,
+      ...(remainingPrimaryBlocker
+        ? { remainingPrimaryBlocker: blocker(remainingPrimaryBlocker) }
+        : {}),
+    })),
   };
 }
 
@@ -171,8 +165,7 @@ type AncestryRow = {
 
 type AncestryNode = Omit<AncestryRow, "targetId" | "depth" | "cycle">;
 
-export type SessionCommandReceiptRow =
-  typeof schema.sessionCommandReceipts.$inferSelect;
+export type SessionCommandReceiptRow = typeof schema.sessionCommandReceipts.$inferSelect;
 
 export class SessionControlInvariantError extends Error {
   readonly code = "SESSION_CONTROL_INVARIANT";
@@ -203,11 +196,7 @@ export class SessionCommandIdempotencyError extends Error {
 
 export class AgentCommandAuthorityError extends Error {
   constructor(
-    readonly code:
-      | "CALLER_STALE"
-      | "CALLER_INTERRUPTED"
-      | "SELF_OR_ANCESTOR_PAUSE"
-      | "SELF_STEER",
+    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "SELF_OR_ANCESTOR_PAUSE" | "SELF_STEER",
     message: string,
   ) {
     super(message);
@@ -224,13 +213,8 @@ export async function assertAgentCommandAuthorityInTransaction(
     action: "pause" | "resume" | "steer" | "message" | "goal";
   },
 ): Promise<void> {
-  if (
-    input.action === "goal" &&
-    input.targetSessionId !== input.actor.sessionId
-  ) {
-    throw new SessionControlInvariantError(
-      "An agent goal command must target its own session",
-    );
+  if (input.action === "goal" && input.targetSessionId !== input.actor.sessionId) {
+    throw new SessionControlInvariantError("An agent goal command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.
   // Reusing the event-write helper here keeps cross-session actor authority on
@@ -245,15 +229,10 @@ export async function assertAgentCommandAuthorityInTransaction(
   });
   const lockedSessions = authorityLocks.sessions;
   if (!lockedSessions.some((row) => row.id === input.actor.sessionId)) {
-    throw new AgentCommandAuthorityError(
-      "CALLER_STALE",
-      "The calling session no longer exists",
-    );
+    throw new AgentCommandAuthorityError("CALLER_STALE", "The calling session no longer exists");
   }
   if (!lockedSessions.some((row) => row.id === input.targetSessionId)) {
-    throw new SessionControlInvariantError(
-      `Target session not found: ${input.targetSessionId}`,
-    );
+    throw new SessionControlInvariantError(`Target session not found: ${input.targetSessionId}`);
   }
   const rows = await db.execute<{
     attemptId: string;
@@ -299,9 +278,7 @@ export async function assertAgentCommandAuthorityInTransaction(
     Number(caller.executionGeneration) !== input.actor.executionGeneration ||
     caller.activeAttemptId !== input.actor.attemptId ||
     caller.activeTurnId !== input.actor.turnId ||
-    !["running", "requires_action", "recovering", "waiting_capacity"].includes(
-      caller.turnStatus,
-    )
+    !["running", "requires_action", "recovering", "waiting_capacity"].includes(caller.turnStatus)
   ) {
     throw new AgentCommandAuthorityError(
       "CALLER_STALE",
@@ -314,14 +291,8 @@ export async function assertAgentCommandAuthorityInTransaction(
       "The calling agent attempt is being interrupted",
     );
   }
-  if (
-    input.action === "steer" &&
-    input.targetSessionId === input.actor.sessionId
-  ) {
-    throw new AgentCommandAuthorityError(
-      "SELF_STEER",
-      "An agent cannot steer its own session",
-    );
+  if (input.action === "steer" && input.targetSessionId === input.actor.sessionId) {
+    throw new AgentCommandAuthorityError("SELF_STEER", "An agent cannot steer its own session");
   }
   if (input.action !== "pause") return;
   const ancestry = await db.execute<{
@@ -358,16 +329,11 @@ export async function assertAgentCommandAuthorityInTransaction(
   }
 }
 
-function asSafeRevision(
-  value: number | string | null,
-  label: string,
-): number | null {
+function asSafeRevision(value: number | string | null, label: string): number | null {
   if (value === null) return null;
   const revision = Number(value);
   if (!Number.isSafeInteger(revision) || revision < 0) {
-    throw new SessionControlInvariantError(
-      `${label} is not a safe non-negative revision`,
-    );
+    throw new SessionControlInvariantError(`${label} is not a safe non-negative revision`);
   }
   return revision;
 }
@@ -682,18 +648,14 @@ export async function closeSessionTurnAttemptInTransaction(
     )
     .returning({ id: schema.sessionTurnAttempts.id });
   if (!closed) {
-    throw new SessionControlInvariantError(
-      `Attempt ${input.id} changed while locked`,
-    );
+    throw new SessionControlInvariantError(`Attempt ${input.id} changed while locked`);
   }
   return { action: "closed" };
 }
 
 function targetValues(sessionIds: string[]) {
   if (sessionIds.length === 0) {
-    throw new SessionControlInvariantError(
-      "At least one target session is required",
-    );
+    throw new SessionControlInvariantError("At least one target session is required");
   }
   return sql.join(
     sessionIds.map((id) => sql`(${id}::uuid)`),
@@ -810,10 +772,7 @@ async function loadAncestryNodes(
   return new Map(rows.map((row: AncestryNode) => [row.sessionId, row]));
 }
 
-function ancestryRowsForTarget(
-  targetId: string,
-  nodes: Map<string, AncestryNode>,
-): AncestryRow[] {
+function ancestryRowsForTarget(targetId: string, nodes: Map<string, AncestryNode>): AncestryRow[] {
   const rows: AncestryRow[] = [];
   const path = new Set<string>();
   let sessionId: string | null = targetId;
@@ -831,14 +790,10 @@ function ancestryRowsForTarget(
 
 function assertCompleteAncestry(sessionId: string, rows: AncestryRow[]): void {
   if (rows.length === 0) {
-    throw new SessionControlInvariantError(
-      `Session ${sessionId} does not exist in its workspace`,
-    );
+    throw new SessionControlInvariantError(`Session ${sessionId} does not exist in its workspace`);
   }
   if (rows.some((row) => row.cycle)) {
-    throw new SessionControlInvariantError(
-      `Session ${sessionId} has cyclic ancestry`,
-    );
+    throw new SessionControlInvariantError(`Session ${sessionId} has cyclic ancestry`);
   }
   const last = rows.at(-1)!;
   const depth = Number(last.depth);
@@ -851,10 +806,7 @@ function assertCompleteAncestry(sessionId: string, rows: AncestryRow[]): void {
   }
 }
 
-function blockerForSession(
-  row: AncestryRow,
-  revision: number,
-): EffectiveControlBlocker {
+function blockerForSession(row: AncestryRow, revision: number): EffectiveControlBlocker {
   return {
     kind: "session",
     sessionId: row.sessionId,
@@ -873,35 +825,21 @@ function projectEffectiveControl(
   settlementAttempts: SettlementAttemptCounts,
 ): EffectiveSessionControl {
   assertCompleteAncestry(targetId, rows);
-  const workspaceRevision = asSafeRevision(
-    workspace.revision,
-    "workspace control revision",
-  )!;
+  const workspaceRevision = asSafeRevision(workspace.revision, "workspace control revision")!;
   const path = rows.map((row) => ({
     row,
     depth: Number(row.depth),
-    pauseRevision: asSafeRevision(
-      row.directPauseRevision,
-      "direct pause revision",
-    ),
+    pauseRevision: asSafeRevision(row.directPauseRevision, "direct pause revision"),
     overrideRevision: asSafeRevision(
       row.subtreeRunOverrideRevision,
       "subtree run override revision",
     ),
-    controlVersion: asSafeRevision(
-      row.controlVersion,
-      "session control version",
-    )!,
+    controlVersion: asSafeRevision(row.controlVersion, "session control version")!,
   }));
 
-  const undefeated: Array<{ blocker: EffectiveControlBlocker; depth: number }> =
-    [];
+  const undefeated: Array<{ blocker: EffectiveControlBlocker; depth: number }> = [];
   for (const candidate of path) {
-    if (
-      candidate.row.directState !== "paused" ||
-      candidate.pauseRevision === null
-    )
-      continue;
+    if (candidate.row.directState !== "paused" || candidate.pauseRevision === null) continue;
     const defeated = path.some(
       (possibleOverride) =>
         possibleOverride.depth < candidate.depth &&
@@ -922,14 +860,11 @@ function projectEffectiveControl(
   );
   if (workspace.workspaceState === "paused") {
     if (workspacePauseRevision === null) {
-      throw new SessionControlInvariantError(
-        "Paused workspace is missing its pause revision",
-      );
+      throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
     }
     const defeated = path.some(
       (candidate) =>
-        candidate.overrideRevision !== null &&
-        candidate.overrideRevision > workspacePauseRevision,
+        candidate.overrideRevision !== null && candidate.overrideRevision > workspacePauseRevision,
     );
     if (!defeated) {
       undefeated.push({
@@ -960,19 +895,13 @@ function projectEffectiveControl(
       scope: "selected",
       targetId,
       selectedStateAfter: "active",
-      impactCopy:
-        "Resume this session and its descendants without changing sibling workstreams.",
+      impactCopy: "Resume this session and its descendants without changing sibling workstreams.",
     });
     for (const entry of undefeated) {
-      if (
-        entry.blocker.kind !== "session" ||
-        entry.blocker.sessionId === targetId
-      )
-        continue;
+      if (entry.blocker.kind !== "session" || entry.blocker.sessionId === targetId) continue;
       const remaining = undefeated.find(
         (candidate) =>
-          candidate.depth < entry.depth &&
-          candidate.blocker.sessionId !== entry.blocker.sessionId,
+          candidate.depth < entry.depth && candidate.blocker.sessionId !== entry.blocker.sessionId,
       )?.blocker;
       options.push({
         scope: "session",
@@ -983,15 +912,12 @@ function projectEffectiveControl(
       });
     }
     if (workspace.workspaceState === "paused") {
-      const remaining = undefeated.find(
-        (entry) => entry.blocker.kind === "session",
-      )?.blocker;
+      const remaining = undefeated.find((entry) => entry.blocker.kind === "session")?.blocker;
       options.push({
         scope: "workspace",
         selectedStateAfter: remaining ? "paused" : "active",
         ...(remaining ? { remainingPrimaryBlocker: remaining } : {}),
-        impactCopy:
-          "Resume the entire workspace; narrower session pauses remain in force.",
+        impactCopy: "Resume the entire workspace; narrower session pauses remain in force.",
       });
     }
   }
@@ -1029,9 +955,7 @@ function projectEffectiveControl(
             revision: override.overrideRevision,
           },
     settlement:
-      settlementAttempts.attemptCount > 0
-        ? { state: "stopping", ...settlementAttempts }
-        : null,
+      settlementAttempts.attemptCount > 0 ? { state: "stopping", ...settlementAttempts } : null,
   };
 }
 
@@ -1148,21 +1072,14 @@ export async function evaluateSessionControls(
   if (uniqueIds.length === 0) {
     return new Map();
   }
-  if (
-    options.workspaceControl &&
-    options.workspaceControl.workspaceId !== workspaceId
-  ) {
+  if (options.workspaceControl && options.workspaceControl.workspaceId !== workspaceId) {
     throw new SessionControlInvariantError(
       `Locked workspace control ${options.workspaceControl.workspaceId} does not match ${workspaceId}`,
     );
   }
   const workspace =
     options.workspaceControl ??
-    (await lockWorkspaceInferenceControl(
-      db,
-      workspaceId,
-      options.lock ?? "share",
-    ));
+    (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
   const stopping = await settlementAttemptCounts(db, workspaceId, uniqueIds);
   const result = new Map<string, EffectiveSessionControl>();
   if (uniqueIds.length <= TARGET_PATH_PROJECTION_LIMIT) {
@@ -1242,22 +1159,13 @@ export async function evaluateSessionDiscoveryControls(
     );
   }
 
-  const workspace = await lockWorkspaceInferenceControl(
-    db,
-    workspaceId,
-    "share",
-  );
+  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, "share");
   const workspacePauseRevision = asSafeRevision(
     workspace.workspacePauseRevision,
     "workspace pause revision",
   );
-  if (
-    workspace.workspaceState === "paused" &&
-    workspacePauseRevision === null
-  ) {
-    throw new SessionControlInvariantError(
-      "Paused workspace is missing its pause revision",
-    );
+  if (workspace.workspaceState === "paused" && workspacePauseRevision === null) {
+    throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
   }
 
   const rows = await db.execute<SessionDiscoveryControlRow>(sql`
@@ -1407,9 +1315,7 @@ export async function evaluateSessionDiscoveryControls(
           ...(row.primarySessionId ? { sessionId: row.primarySessionId } : {}),
           displayName:
             row.primaryDisplayName ??
-            (row.primaryKind === "workspace"
-              ? "Workspace"
-              : "Untitled session"),
+            (row.primaryKind === "workspace" ? "Workspace" : "Untitled session"),
           displayNameOriginalChars: Number(
             row.primaryDisplayNameOriginalChars ??
               (row.primaryKind === "workspace" ? 9 : "Untitled session".length),
@@ -1428,9 +1334,7 @@ export async function evaluateSessionDiscoveryControls(
     });
   }
   if (result.size !== uniqueIds.length) {
-    throw new SessionControlInvariantError(
-      "Session discovery control projection is incomplete",
-    );
+    throw new SessionControlInvariantError("Session discovery control projection is incomplete");
   }
   return result;
 }
@@ -1444,9 +1348,7 @@ export async function evaluateSessionControl(
     workspaceControl?: WorkspaceControlRow | undefined;
   } = {},
 ): Promise<EffectiveSessionControl> {
-  return (
-    await evaluateSessionControls(db, workspaceId, [sessionId], options)
-  ).get(sessionId)!;
+  return (await evaluateSessionControls(db, workspaceId, [sessionId], options)).get(sessionId)!;
 }
 
 async function findCommandReceipt(
@@ -1461,20 +1363,15 @@ async function findCommandReceipt(
     identityScope: "actor" | "goal_operation";
   },
 ): Promise<SessionCommandReceiptRow | null> {
-  const actorSubjectId =
-    input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
-  const actorAttemptId =
-    input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
+  const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
+  const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
   const identity =
     input.identityScope === "goal_operation"
       ? and(
           eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
           eq(schema.sessionCommandReceipts.actorType, "agent_attempt"),
           eq(schema.sessionCommandReceipts.action, input.action),
-          eq(
-            schema.sessionCommandReceipts.targetSessionId,
-            input.targetSessionId!,
-          ),
+          eq(schema.sessionCommandReceipts.targetSessionId, input.targetSessionId!),
           sql`${schema.sessionCommandReceipts.targetTurnId} is null`,
           eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
         )
@@ -1488,11 +1385,7 @@ async function findCommandReceipt(
           sql`${schema.sessionCommandReceipts.targetTurnId} is not distinct from ${input.targetTurnId}::uuid`,
           eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
         );
-  const rows = await db
-    .select()
-    .from(schema.sessionCommandReceipts)
-    .where(identity)
-    .for("update");
+  const rows = await db.select().from(schema.sessionCommandReceipts).where(identity).for("update");
   return rows[0] ?? null;
 }
 
@@ -1510,8 +1403,7 @@ export async function reserveSessionCommandReceipt(
     identityScope?: "actor" | "goal_operation";
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
-  if (!input.operationKey.trim())
-    throw new Error("operationKey must not be empty");
+  if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   const identityScope = input.identityScope ?? "actor";
   if (
     identityScope === "goal_operation" &&
@@ -1524,34 +1416,22 @@ export async function reserveSessionCommandReceipt(
       "Target-scoped receipt identity is reserved for agent goal.update commands",
     );
   }
-  const actorSubjectId =
-    input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
-  const actorAttemptId =
-    input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
+  const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
+  const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
   const [inserted] = await db
     .insert(schema.sessionCommandReceipts)
-    .values(
-      withLosslessContentWriteVersion(
-        withLosslessContentWriteVersion(
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            actorType: input.actor.type,
-            actorSubjectId,
-            actorAttemptId,
-            action: input.action,
-            targetSessionId: input.targetSessionId,
-            targetTurnId: input.targetTurnId,
-            operationKey: input.operationKey,
-            canonicalRequestHash: input.canonicalRequestHash,
-          },
-          "summary",
-          "summaryCodecVersion",
-        ),
-        "payload",
-        "payloadCodecVersion",
-      ),
-    )
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      actorType: input.actor.type,
+      actorSubjectId,
+      actorAttemptId,
+      action: input.action,
+      targetSessionId: input.targetSessionId,
+      targetTurnId: input.targetTurnId,
+      operationKey: input.operationKey,
+      canonicalRequestHash: input.canonicalRequestHash,
+    })
     .onConflictDoNothing()
     .returning();
   const receipt =
@@ -1565,10 +1445,7 @@ export async function reserveSessionCommandReceipt(
       operationKey: input.operationKey,
       identityScope,
     }));
-  if (!receipt)
-    throw new SessionControlInvariantError(
-      "Command receipt conflict was not readable",
-    );
+  if (!receipt) throw new SessionControlInvariantError("Command receipt conflict was not readable");
   if (receipt.canonicalRequestHash !== input.canonicalRequestHash) {
     throw new SessionCommandIdempotencyError();
   }
@@ -1576,14 +1453,9 @@ export async function reserveSessionCommandReceipt(
 }
 
 function nextRevision(workspace: WorkspaceControlRow): number {
-  const current = asSafeRevision(
-    workspace.revision,
-    "workspace control revision",
-  )!;
+  const current = asSafeRevision(workspace.revision, "workspace control revision")!;
   if (current >= Number.MAX_SAFE_INTEGER) {
-    throw new SessionControlInvariantError(
-      "Workspace control revision is exhausted",
-    );
+    throw new SessionControlInvariantError("Workspace control revision is exhausted");
   }
   return current + 1;
 }
@@ -1802,9 +1674,7 @@ export async function registerSessionWorkflowWakeInTransaction(
     })
     .returning({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision });
   if (!row) {
-    throw new SessionControlInvariantError(
-      `Failed to register wake for ${input.sessionId}`,
-    );
+    throw new SessionControlInvariantError(`Failed to register wake for ${input.sessionId}`);
   }
   return Number(row.wakeRevision);
 }
@@ -1960,22 +1830,15 @@ export async function updateSessionCommandReceiptResult(
       ...(input.controlRevision !== undefined
         ? { appliedControlRevision: input.controlRevision }
         : {}),
-      ...(input.queueVersion !== undefined
-        ? { appliedQueueVersion: input.queueVersion }
-        : {}),
-      ...(input.turnVersion !== undefined
-        ? { appliedTurnVersion: input.turnVersion }
-        : {}),
-      ...(input.draftRevision !== undefined
-        ? { appliedDraftRevision: input.draftRevision }
-        : {}),
+      ...(input.queueVersion !== undefined ? { appliedQueueVersion: input.queueVersion } : {}),
+      ...(input.turnVersion !== undefined ? { appliedTurnVersion: input.turnVersion } : {}),
+      ...(input.draftRevision !== undefined ? { appliedDraftRevision: input.draftRevision } : {}),
       result: input.result,
       updatedAt: new Date(),
     })
     .where(eq(schema.sessionCommandReceipts.id, receiptId))
     .returning();
-  if (!receipt)
-    throw new SessionControlInvariantError("Command receipt disappeared");
+  if (!receipt) throw new SessionControlInvariantError("Command receipt disappeared");
   return receipt;
 }
 
@@ -2020,16 +1883,10 @@ async function loadSessionSubtreeIds(
     order by id
   `);
   if (rows.length === 0) {
-    throw new SessionControlInvariantError(
-      `Session ${rootSessionId} does not exist`,
-    );
+    throw new SessionControlInvariantError(`Session ${rootSessionId} does not exist`);
   }
-  if (
-    rows.some((row) => row.cycle || Number(row.depth) >= SESSION_ANCESTRY_LIMIT)
-  ) {
-    throw new SessionControlInvariantError(
-      `Session ${rootSessionId} subtree is invalid`,
-    );
+  if (rows.some((row) => row.cycle || Number(row.depth) >= SESSION_ANCESTRY_LIMIT)) {
+    throw new SessionControlInvariantError(`Session ${rootSessionId} subtree is invalid`);
   }
   return {
     sessionIds: rows.map((row) => row.id),
@@ -2057,10 +1914,7 @@ async function loadCancellationTurnIds(
       and(
         eq(schema.sessionTurns.workspaceId, workspaceId),
         inArray(schema.sessionTurns.sessionId, sessionIds),
-        inArray(
-          schema.sessionTurns.status,
-          TERMINAL_CANCELLATION_LIVE_TURN_STATUSES,
-        ),
+        inArray(schema.sessionTurns.status, TERMINAL_CANCELLATION_LIVE_TURN_STATUSES),
       ),
     )
     .orderBy(schema.sessionTurns.id);
@@ -2100,9 +1954,7 @@ async function enqueueCancelledChildOutboxInTransaction(
       )
       .limit(1);
     if (parentTurn) {
-      const parsed = McpPersonalConnectionDelegations.safeParse(
-        parentTurn.delegations,
-      );
+      const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
       if (!parsed.success) {
         throw new SessionControlInvariantError(
           `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.rootSession.parentTurnId}`,
@@ -2186,14 +2038,10 @@ async function assertSessionBranchIsNotCancelled(
     from ancestry
   `);
   if (rows[0]?.invalid) {
-    throw new SessionControlInvariantError(
-      `Session ${sessionId} ancestry is invalid`,
-    );
+    throw new SessionControlInvariantError(`Session ${sessionId} ancestry is invalid`);
   }
   if (rows[0]?.cancelled) {
-    throw new SessionControlConflictError(
-      "Cancelled session subtree cannot accept work",
-    );
+    throw new SessionControlConflictError("Cancelled session subtree cannot accept work");
   }
 }
 
@@ -2218,13 +2066,9 @@ async function cancelSessionSubtreeInTransaction(
   affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
 }> {
   const candidateTurnIdSet = new Set(input.candidateTurnIds);
-  const candidateTurns = input.lockedTurns.filter((turn) =>
-    candidateTurnIdSet.has(turn.id),
-  );
+  const candidateTurns = input.lockedTurns.filter((turn) => candidateTurnIdSet.has(turn.id));
   if (candidateTurns.length !== candidateTurnIdSet.size) {
-    throw new SessionControlInvariantError(
-      "Cancellation candidate turns changed while locking",
-    );
+    throw new SessionControlInvariantError("Cancellation candidate turns changed while locking");
   }
   // The outer command acquired every session and candidate turn in one UUID-
   // sorted call before the actor attempt. Repeat only those already-held locks
@@ -2241,53 +2085,36 @@ async function cancelSessionSubtreeInTransaction(
     suffixLocks.sessions.length !== input.lockedSessions.length ||
     suffixLocks.turns.length !== candidateTurnIdSet.size
   ) {
-    throw new SessionControlInvariantError(
-      "Cancellation rows changed under canonical locks",
-    );
+    throw new SessionControlInvariantError("Cancellation rows changed under canonical locks");
   }
   const sessionIdSet = new Set(input.sessionIds);
-  const rootSession = input.lockedSessions.find(
-    (session) => session.id === input.rootSessionId,
-  );
+  const rootSession = input.lockedSessions.find((session) => session.id === input.rootSessionId);
   if (!rootSession) {
     throw new SessionControlInvariantError(
       `Cancellation root ${input.rootSessionId} was not locked with its subtree`,
     );
   }
   const rootParentSession = rootSession.parentSessionId
-    ? (input.lockedSessions.find(
-        (session) => session.id === rootSession.parentSessionId,
-      ) ?? null)
+    ? (input.lockedSessions.find((session) => session.id === rootSession.parentSessionId) ?? null)
     : null;
-  const candidateTurnById = new Map(
-    candidateTurns.map((turn) => [turn.id, turn]),
-  );
+  const candidateTurnById = new Map(candidateTurns.map((turn) => [turn.id, turn]));
   const liveTurnIds = new Set(
     input.lockedSessions
       .filter((session) => session.activeTurnId !== null)
       .flatMap((session) => {
-        const turn = session.activeTurnId
-          ? candidateTurnById.get(session.activeTurnId)
-          : undefined;
+        const turn = session.activeTurnId ? candidateTurnById.get(session.activeTurnId) : undefined;
         if (turn?.activeAttemptId === null) return [];
         return turn ? [turn.id] : [];
       }),
   );
-  const immediatelyCancelledTurns = candidateTurns.filter(
-    (turn) => !liveTurnIds.has(turn.id),
-  );
-  const cancelledTurnsBySession = new Map<
-    string,
-    typeof immediatelyCancelledTurns
-  >();
+  const immediatelyCancelledTurns = candidateTurns.filter((turn) => !liveTurnIds.has(turn.id));
+  const cancelledTurnsBySession = new Map<string, typeof immediatelyCancelledTurns>();
   for (const turn of immediatelyCancelledTurns) {
     const turns = cancelledTurnsBySession.get(turn.sessionId);
     if (turns) turns.push(turn);
     else cancelledTurnsBySession.set(turn.sessionId, [turn]);
   }
-  const immediatelyCancelledTurnIds = immediatelyCancelledTurns.map(
-    (turn) => turn.id,
-  );
+  const immediatelyCancelledTurnIds = immediatelyCancelledTurns.map((turn) => turn.id);
   const now = new Date();
   let cancelledHumanInputs: Array<{
     id: string;
@@ -2320,10 +2147,7 @@ async function cancelSessionSubtreeInTransaction(
       .where(
         and(
           eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
-          inArray(
-            schema.sessionHumanInputRequests.turnId,
-            immediatelyCancelledTurnIds,
-          ),
+          inArray(schema.sessionHumanInputRequests.turnId, immediatelyCancelledTurnIds),
           eq(schema.sessionHumanInputRequests.status, "pending"),
         ),
       )
@@ -2343,10 +2167,7 @@ async function cancelSessionSubtreeInTransaction(
       .where(
         and(
           eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-          inArray(
-            schema.codexCapacityWaiters.blockedTurnId,
-            immediatelyCancelledTurnIds,
-          ),
+          inArray(schema.codexCapacityWaiters.blockedTurnId, immediatelyCancelledTurnIds),
           eq(schema.codexCapacityWaiters.status, "waiting"),
         ),
       );
@@ -2371,10 +2192,7 @@ async function cancelSessionSubtreeInTransaction(
     if (inputs) inputs.push(humanInput);
     else humanInputsByTurn.set(humanInput.turnId, [humanInput]);
   }
-  const systemUpdatesBySession = new Map<
-    string,
-    typeof cancelledSystemUpdates
-  >();
+  const systemUpdatesBySession = new Map<string, typeof cancelledSystemUpdates>();
   for (const update of cancelledSystemUpdates) {
     const updates = systemUpdatesBySession.get(update.sessionId);
     if (updates) updates.push(update);
@@ -2387,13 +2205,12 @@ async function cancelSessionSubtreeInTransaction(
   }> = [];
   for (const session of input.lockedSessions) {
     if (!sessionIdSet.has(session.id)) continue;
-    let sequence =
-      session.lastSequence + (session.id === input.rootSessionId ? 1 : 0);
+    let sequence = session.lastSequence + (session.id === input.rootSessionId ? 1 : 0);
     const cancelledTurns = cancelledTurnsBySession.get(session.id) ?? [];
     const preinsertedEvents: Array<{ id: string; sequence: number }> = [];
     const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [];
-    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort(
-      (left, right) => left.id.localeCompare(right.id),
+    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
+      left.id.localeCompare(right.id),
     )) {
       eventValues.push({
         accountId: input.accountId,
@@ -2422,8 +2239,8 @@ async function cancelSessionSubtreeInTransaction(
           sequence: event.sequence,
         })),
       );
-      for (const humanInput of (humanInputsByTurn.get(turn.id) ?? []).sort(
-        (left, right) => left.id.localeCompare(right.id),
+      for (const humanInput of (humanInputsByTurn.get(turn.id) ?? []).sort((left, right) =>
+        left.id.localeCompare(right.id),
       )) {
         eventValues.push({
           accountId: input.accountId,
@@ -2433,9 +2250,7 @@ async function cancelSessionSubtreeInTransaction(
           type: "user.humanInputResponse",
           turnId: turn.id,
           turnGeneration: turn.executionGeneration,
-          ...(turn.id === session.activeTurnId
-            ? { turnAssociation: "current" as const }
-            : {}),
+          ...(turn.id === session.activeTurnId ? { turnAssociation: "current" as const } : {}),
           payload: {
             requestId: humanInput.id,
             response: { outcome: "cancelled" },
@@ -2451,9 +2266,7 @@ async function cancelSessionSubtreeInTransaction(
         type: "turn.cancelled",
         turnId: turn.id,
         turnGeneration: turn.executionGeneration,
-        ...(turn.id === session.activeTurnId
-          ? { turnAssociation: "current" as const }
-          : {}),
+        ...(turn.id === session.activeTurnId ? { turnAssociation: "current" as const } : {}),
         payload: {
           reason: input.reason ?? "session_cancelled",
           operationId: input.operationId,
@@ -2480,13 +2293,7 @@ async function cancelSessionSubtreeInTransaction(
       eventValues.length > 0
         ? await db
             .insert(schema.sessionEvents)
-            .values(
-              withLosslessContentWriteVersion(
-                eventValues,
-                "payload",
-                "payloadCodecVersion",
-              ),
-            )
+            .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
             .returning({
               id: schema.sessionEvents.id,
               sequence: schema.sessionEvents.sequence,
@@ -2530,9 +2337,7 @@ async function cancelSessionSubtreeInTransaction(
       });
     }
     const liveTurnId =
-      session.activeTurnId && liveTurnIds.has(session.activeTurnId)
-        ? session.activeTurnId
-        : null;
+      session.activeTurnId && liveTurnIds.has(session.activeTurnId) ? session.activeTurnId : null;
     await db
       .update(schema.sessions)
       .set({
@@ -2545,18 +2350,13 @@ async function cancelSessionSubtreeInTransaction(
         updatedAt: now,
       })
       .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, session.id),
-        ),
+        and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, session.id)),
       );
     const eventIds = [...preinsertedEvents, ...inserted]
       .sort((left, right) => left.sequence - right.sequence)
       .map((event) => event.id);
-    if (session.id === input.rootSessionId)
-      eventIds.unshift(input.rootControlEventId);
-    if (eventIds.length > 0)
-      affectedSessionEvents.push({ sessionId: session.id, eventIds });
+    if (session.id === input.rootSessionId) eventIds.unshift(input.rootControlEventId);
+    if (eventIds.length > 0) affectedSessionEvents.push({ sessionId: session.id, eventIds });
   }
   await enqueueCancelledChildOutboxInTransaction(db, {
     workspaceId: input.workspaceId,
@@ -2583,11 +2383,7 @@ export async function mutateSessionControlInTransaction(
     expectedControlEtag?: string | null;
   },
 ): Promise<SessionControlMutationResult> {
-  const workspace = await lockWorkspaceInferenceControl(
-    db,
-    input.workspaceId,
-    "update",
-  );
+  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
   const cancellationSubtree =
     input.action === "cancel"
       ? await loadSessionSubtreeIds(db, input.workspaceId, input.sessionId)
@@ -2595,11 +2391,7 @@ export async function mutateSessionControlInTransaction(
   const cancellationSessionIds = cancellationSubtree.sessionIds;
   const cancellationTurnIds =
     input.action === "cancel"
-      ? await loadCancellationTurnIds(
-          db,
-          input.workspaceId,
-          cancellationSessionIds,
-        )
+      ? await loadCancellationTurnIds(db, input.workspaceId, cancellationSessionIds)
       : [];
   const locks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
@@ -2623,17 +2415,11 @@ export async function mutateSessionControlInTransaction(
       input.actor.type === "agent_attempt"
         ? [input.actor.turnId, ...cancellationTurnIds]
         : cancellationTurnIds,
-    attemptIds:
-      input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
+    attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
   if (input.action === "cancel") {
-    const rootSession = locks.sessions.find(
-      (session) => session.id === input.sessionId,
-    );
-    if (
-      !rootSession ||
-      rootSession.parentSessionId !== cancellationSubtree.rootParentSessionId
-    ) {
+    const rootSession = locks.sessions.find((session) => session.id === input.sessionId);
+    if (!rootSession || rootSession.parentSessionId !== cancellationSubtree.rootParentSessionId) {
       throw new SessionControlInvariantError(
         `Session ${input.sessionId} parent changed while establishing cancellation locks`,
       );
@@ -2655,13 +2441,9 @@ export async function mutateSessionControlInTransaction(
     canonicalRequestHash: hash,
   });
   if (reserved.replay && reserved.receipt.appliedControlRevision !== null) {
-    const workspaceControlEventId = String(
-      reserved.receipt.result.workspaceControlEventId ?? "",
-    );
+    const workspaceControlEventId = String(reserved.receipt.result.workspaceControlEventId ?? "");
     if (!workspaceControlEventId) {
-      throw new SessionControlInvariantError(
-        "Replayed session control receipt has no event",
-      );
+      throw new SessionControlInvariantError("Replayed session control receipt has no event");
     }
     const sessionControlEventId = String(reserved.receipt.result.eventId ?? "");
     if (!sessionControlEventId) {
@@ -2671,27 +2453,16 @@ export async function mutateSessionControlInTransaction(
     }
     return {
       receipt: reserved.receipt,
-      control: await evaluateSessionControl(
-        db,
-        input.workspaceId,
-        input.sessionId,
-        {
-          workspaceControl: workspace,
-        },
-      ),
+      control: await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
+        workspaceControl: workspace,
+      }),
       sessionControlEventId,
       workspaceControlEventId,
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
       wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
-      cancelledSessionCount: Number(
-        reserved.receipt.result.cancelledSessionCount ?? 0,
-      ),
-      cancelledTurnCount: Number(
-        reserved.receipt.result.cancelledTurnCount ?? 0,
-      ),
-      affectedSessionEvents: Array.isArray(
-        reserved.receipt.result.affectedSessionEvents,
-      )
+      cancelledSessionCount: Number(reserved.receipt.result.cancelledSessionCount ?? 0),
+      cancelledTurnCount: Number(reserved.receipt.result.cancelledTurnCount ?? 0),
+      affectedSessionEvents: Array.isArray(reserved.receipt.result.affectedSessionEvents)
         ? (reserved.receipt.result.affectedSessionEvents as Array<{
             sessionId: string;
             eventIds: string[];
@@ -2709,24 +2480,12 @@ export async function mutateSessionControlInTransaction(
     });
   }
   if (input.action === "resume") {
-    await assertSessionBranchIsNotCancelled(
-      db,
-      input.workspaceId,
-      input.sessionId,
-    );
+    await assertSessionBranchIsNotCancelled(db, input.workspaceId, input.sessionId);
   }
-  const before = await evaluateSessionControl(
-    db,
-    input.workspaceId,
-    input.sessionId,
-    {
-      workspaceControl: workspace,
-    },
-  );
-  if (
-    input.expectedControlEtag &&
-    input.expectedControlEtag !== before.controlEtag
-  ) {
+  const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
+    workspaceControl: workspace,
+  });
+  if (input.expectedControlEtag && input.expectedControlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();
   }
 
@@ -2775,27 +2534,23 @@ export async function mutateSessionControlInTransaction(
       lastSequence: schema.sessions.lastSequence,
     });
   const updated = updatedRows.find((row) => row.id === input.sessionId);
-  if (!updated)
-    throw new SessionControlInvariantError(
-      `Session ${input.sessionId} disappeared`,
-    );
+  if (!updated) throw new SessionControlInvariantError(`Session ${input.sessionId} disappeared`);
 
   const actor =
     input.actor.type === "agent_attempt"
       ? `attempt:${input.actor.attemptId}`
       : input.actor.subjectId;
-  const workspaceControlEventId =
-    await insertWorkspaceControlEventInTransaction(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      revision,
-      scope: "session",
-      rootSessionId: input.sessionId,
-      action: input.action === "cancel" ? "pause" : input.action,
-      automatic: false,
-      reason: input.reason ?? null,
-      actor,
-    });
+  const workspaceControlEventId = await insertWorkspaceControlEventInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    revision,
+    scope: "session",
+    rootSessionId: input.sessionId,
+    action: input.action === "cancel" ? "pause" : input.action,
+    automatic: false,
+    reason: input.reason ?? null,
+    actor,
+  });
 
   const interruptionCount =
     input.action === "pause" || input.action === "cancel"
@@ -2853,9 +2608,7 @@ export async function mutateSessionControlInTransaction(
     )
     .returning({ id: schema.sessionEvents.id });
   if (!controlEvent)
-    throw new SessionControlInvariantError(
-      "Session control event was not inserted",
-    );
+    throw new SessionControlInvariantError("Session control event was not inserted");
   await db
     .update(schema.sessions)
     .set({ lastSequence: updated.lastSequence + 1, updatedAt: new Date() })
@@ -2905,34 +2658,23 @@ export async function mutateSessionControlInTransaction(
       : {
           cancelledSessionCount: 0,
           cancelledTurnCount: 0,
-          affectedSessionEvents: [
-            { sessionId: input.sessionId, eventIds: [controlEvent.id] },
-          ],
+          affectedSessionEvents: [{ sessionId: input.sessionId, eventIds: [controlEvent.id] }],
         };
-  const receipt = await updateSessionCommandReceiptResult(
-    db,
-    reserved.receipt.id,
-    {
-      controlRevision: revision,
-      result: {
-        interruptionCount,
-        wakeCount,
-        eventId: controlEvent.id,
-        workspaceControlEventId,
-        cancelledSessionCount: cancellation.cancelledSessionCount,
-        cancelledTurnCount: cancellation.cancelledTurnCount,
-        affectedSessionEvents: cancellation.affectedSessionEvents,
-      },
+  const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
+    controlRevision: revision,
+    result: {
+      interruptionCount,
+      wakeCount,
+      eventId: controlEvent.id,
+      workspaceControlEventId,
+      cancelledSessionCount: cancellation.cancelledSessionCount,
+      cancelledTurnCount: cancellation.cancelledTurnCount,
+      affectedSessionEvents: cancellation.affectedSessionEvents,
     },
-  );
-  const control = await evaluateSessionControl(
-    db,
-    input.workspaceId,
-    input.sessionId,
-    {
-      lock: "share",
-    },
-  );
+  });
+  const control = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
+    lock: "share",
+  });
   return {
     receipt,
     control,
@@ -2953,12 +2695,7 @@ export async function autoResumeSessionBranchInTransaction(
     workspaceId: string;
     sessionId: string;
     actor: string;
-    reason:
-      | "human_send"
-      | "human_steer"
-      | "service_send"
-      | "service_steer"
-      | "agent_steer";
+    reason: "human_send" | "human_steer" | "service_send" | "service_steer" | "agent_steer";
     observedControlEtag?: string | null;
   },
 ): Promise<{
@@ -2967,36 +2704,17 @@ export async function autoResumeSessionBranchInTransaction(
   changed: boolean;
   workspaceControlEventId: string | null;
 }> {
-  const workspace = await lockWorkspaceInferenceControl(
-    db,
-    input.workspaceId,
-    "update",
-  );
-  await assertSessionBranchIsNotCancelled(
-    db,
-    input.workspaceId,
-    input.sessionId,
-  );
-  const before = await evaluateSessionControl(
-    db,
-    input.workspaceId,
-    input.sessionId,
-    {
-      lock: "share",
-    },
-  );
-  if (
-    input.observedControlEtag &&
-    input.observedControlEtag !== before.controlEtag
-  ) {
+  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await assertSessionBranchIsNotCancelled(db, input.workspaceId, input.sessionId);
+  const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
+    lock: "share",
+  });
+  if (input.observedControlEtag && input.observedControlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();
   }
   if (before.state === "active") {
     return {
-      revision: asSafeRevision(
-        workspace.revision,
-        "workspace control revision",
-      )!,
+      revision: asSafeRevision(workspace.revision, "workspace control revision")!,
       control: before,
       changed: false,
       workspaceControlEventId: null,
@@ -3022,28 +2740,22 @@ export async function autoResumeSessionBranchInTransaction(
         eq(schema.sessions.id, input.sessionId),
       ),
     );
-  const workspaceControlEventId =
-    await insertWorkspaceControlEventInTransaction(db, {
-      accountId: workspace.accountId,
-      workspaceId: input.workspaceId,
-      revision,
-      scope: "session",
-      rootSessionId: input.sessionId,
-      action: "resume",
-      automatic: true,
-      reason: input.reason,
-      actor: input.actor,
-    });
+  const workspaceControlEventId = await insertWorkspaceControlEventInTransaction(db, {
+    accountId: workspace.accountId,
+    workspaceId: input.workspaceId,
+    revision,
+    scope: "session",
+    rootSessionId: input.sessionId,
+    action: "resume",
+    automatic: true,
+    reason: input.reason,
+    actor: input.actor,
+  });
   return {
     revision,
-    control: await evaluateSessionControl(
-      db,
-      input.workspaceId,
-      input.sessionId,
-      {
-        lock: "share",
-      },
-    ),
+    control: await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
+      lock: "share",
+    }),
     changed: true,
     workspaceControlEventId,
   };
@@ -3071,15 +2783,8 @@ export async function mutateWorkspaceControlInTransaction(
     expectedRevision?: number | null;
   },
 ): Promise<WorkspaceControlMutationResult> {
-  const workspace = await lockWorkspaceInferenceControl(
-    db,
-    input.workspaceId,
-    "update",
-  );
-  const currentRevision = asSafeRevision(
-    workspace.revision,
-    "workspace control revision",
-  )!;
+  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const currentRevision = asSafeRevision(workspace.revision, "workspace control revision")!;
   const hash = canonicalSessionCommandHash({
     action: input.action,
     reason: input.reason ?? null,
@@ -3096,13 +2801,9 @@ export async function mutateWorkspaceControlInTransaction(
     canonicalRequestHash: hash,
   });
   if (reserved.replay && reserved.receipt.appliedControlRevision !== null) {
-    const workspaceControlEventId = String(
-      reserved.receipt.result.workspaceControlEventId ?? "",
-    );
+    const workspaceControlEventId = String(reserved.receipt.result.workspaceControlEventId ?? "");
     if (!workspaceControlEventId) {
-      throw new SessionControlInvariantError(
-        "Replayed workspace control receipt has no event",
-      );
+      throw new SessionControlInvariantError("Replayed workspace control receipt has no event");
     }
     return {
       receipt: reserved.receipt,
@@ -3115,8 +2816,7 @@ export async function mutateWorkspaceControlInTransaction(
     };
   }
   if (input.expectedRevision !== null && input.expectedRevision !== undefined) {
-    if (input.expectedRevision !== currentRevision)
-      throw new SessionControlConflictError();
+    if (input.expectedRevision !== currentRevision) throw new SessionControlConflictError();
   }
 
   const revision = nextRevision(workspace);
@@ -3143,22 +2843,19 @@ export async function mutateWorkspaceControlInTransaction(
     )
     .returning({ workspaceId: schema.workspaceInferenceControls.workspaceId });
   if (!updated) {
-    throw new SessionControlInvariantError(
-      "Workspace control did not mutate exactly once",
-    );
+    throw new SessionControlInvariantError("Workspace control did not mutate exactly once");
   }
-  const workspaceControlEventId =
-    await insertWorkspaceControlEventInTransaction(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      revision,
-      scope: "workspace",
-      rootSessionId: null,
-      action: input.action,
-      automatic: false,
-      reason: input.reason ?? null,
-      actor,
-    });
+  const workspaceControlEventId = await insertWorkspaceControlEventInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    revision,
+    scope: "workspace",
+    rootSessionId: null,
+    action: input.action,
+    automatic: false,
+    reason: input.reason ?? null,
+    actor,
+  });
   const interruptionCount =
     input.action === "pause"
       ? await interruptWorkspaceAttempts(db, {
@@ -3177,14 +2874,10 @@ export async function mutateWorkspaceControlInTransaction(
           workspaceId: input.workspaceId,
           reason: "workspace_resume",
         });
-  const receipt = await updateSessionCommandReceiptResult(
-    db,
-    reserved.receipt.id,
-    {
-      controlRevision: revision,
-      result: { interruptionCount, wakeCount, workspaceControlEventId },
-    },
-  );
+  const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
+    controlRevision: revision,
+    result: { interruptionCount, wakeCount, workspaceControlEventId },
+  });
   return {
     receipt,
     revision,
@@ -3237,18 +2930,14 @@ async function insertWorkspaceControlEventInTransaction(
       reasonOriginalBytes:
         input.reason === null
           ? null
-          : (field("reason")?.originalBytes ??
-            workspaceControlUtf8Bytes(projected.reason!)),
+          : (field("reason")?.originalBytes ?? workspaceControlUtf8Bytes(projected.reason!)),
       actor: projected.actor,
       actorOriginalBytes:
-        field("actor")?.originalBytes ??
-        workspaceControlUtf8Bytes(projected.actor),
+        field("actor")?.originalBytes ?? workspaceControlUtf8Bytes(projected.actor),
     })
     .returning({ id: schema.workspaceControlEvents.id });
   if (!event) {
-    throw new SessionControlInvariantError(
-      "Workspace control event was not inserted",
-    );
+    throw new SessionControlInvariantError("Workspace control event was not inserted");
   }
   return event.id;
 }

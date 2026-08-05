@@ -1667,7 +1667,7 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     await r.unmount();
   });
 
-  test("settled environment_set_variable shows write-only copy (regression guard)", async () => {
+  test("settled environment_set_variable confirms exact value preservation", async () => {
     const item = toolItem({
       name: "environment_set_variable",
       arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
@@ -1679,7 +1679,8 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     await flush();
 
     const text = r.container.textContent ?? "";
-    expect(text.toLowerCase()).toContain("write-only");
+    expect(text.toLowerCase()).toContain("exact value preserved");
+    expect(text.toLowerCase()).not.toContain("write-only");
 
     await r.unmount();
   });
