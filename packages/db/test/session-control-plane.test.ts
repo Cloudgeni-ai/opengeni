@@ -3842,9 +3842,104 @@ describe("clean session control plane", () => {
       state: "paused",
       settlement: null,
     });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: predecessor!.id,
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id)).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "idle",
     });
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
+
+    await controlSession(grant, session.id, "resume");
+    const resumed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+    );
+    expect(resumed).toMatchObject({
+      id: predecessor!.id,
+      status: "running",
+      executionGeneration: predecessor!.executionGeneration + 1,
+    });
+  });
+
+  test("an already-quiesced paused recovery repairs its stale public projection", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run until the parked projection is repaired");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+
+    await controlSession(grant, session.id, "pause");
+    await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: predecessor!.id,
+    });
+
+    // Recreate the exact pre-fix production shape: the receipt and status event
+    // are durable, but the session row still projects recovering.
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessions)
+        .set({ status: "recovering" })
+        .where(eq(schema.sessions.id, session.id));
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    expect(
+      await reconcileSessionAttemptQuiescence(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        activitySettled: true,
+      }),
+    ).toMatchObject({ action: "quiesced" });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: predecessor!.id,
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id)).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId!, session.id)).filter(
+        (event) => event.clientEventId === `opengeni:paused-recovery-settled:${attemptId}`,
+      ),
+    ).toHaveLength(1);
   });
 
   test("quiescence reconciliation finds an older rejected-stale predecessor", async () => {

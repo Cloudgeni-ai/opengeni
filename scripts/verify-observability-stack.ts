@@ -47,11 +47,16 @@ const requiredRules = [
 
 const args = parseArgs(process.argv.slice(2));
 const sourceRevision = args.sourceRevision ?? process.env.OPENGENI_SOURCE_REVISION ?? gitHead();
+const chartDefinition = Bun.YAML.parse(
+  await Bun.file("deploy/observability/Chart.yaml").text(),
+) as { name?: string; version?: string };
+assert(chartDefinition.name, "observability Chart.yaml has no name");
+assert(chartDefinition.version, "observability Chart.yaml has no version");
 
 const release = helmRelease(args.namespace, args.releaseName);
 assert(release.status === "deployed", `Helm release is ${release.status}, not deployed`);
 assert(
-  release.chart === "opengeni-observability-0.1.0",
+  release.chart === `${chartDefinition.name}-${chartDefinition.version}`,
   `unexpected observability chart: ${release.chart}`,
 );
 assertMonitoringNamespace(args.namespace);
@@ -107,7 +112,7 @@ for (const configMap of configMaps) {
   );
 }
 
-const serviceMonitors = kubectlJson<KubernetesList<{ metadata: KubernetesMetadata }>>([
+const applicationServiceMonitors = kubectlJson<KubernetesList<{ metadata: KubernetesMetadata }>>([
   "-n",
   args.appNamespace,
   "get",
@@ -117,7 +122,34 @@ const serviceMonitors = kubectlJson<KubernetesList<{ metadata: KubernetesMetadat
   "-o",
   "json",
 ]).items;
-assert(serviceMonitors.length > 0, "no OpenGeni ServiceMonitor resources were found");
+assert(applicationServiceMonitors.length > 0, "no OpenGeni ServiceMonitor resources were found");
+
+const platformServiceMonitors = kubectlJson<KubernetesList<{ metadata: KubernetesMetadata }>>([
+  "-n",
+  args.namespace,
+  "get",
+  "servicemonitors.monitoring.coreos.com",
+  "-l",
+  monitoringSelector,
+  "-o",
+  "json",
+]).items;
+const requiredPlatformApplicationNames = [
+  "grafana",
+  "kube-state-metrics",
+  "prometheus-node-exporter",
+] as const;
+const requiredPlatformServiceMonitors = requiredPlatformApplicationNames.map((applicationName) => {
+  const matches = platformServiceMonitors.filter(
+    (serviceMonitor) =>
+      serviceMonitor.metadata.labels?.["app.kubernetes.io/name"] === applicationName,
+  );
+  assert(
+    matches.length === 1,
+    `expected one selected ${applicationName} ServiceMonitor, found ${matches.length}`,
+  );
+  return matches[0] as { metadata: KubernetesMetadata };
+});
 
 const prometheusRules = kubectlJson<
   KubernetesList<{
@@ -184,8 +216,11 @@ if (!args.skipLiveApis) {
       };
     }>(`${baseUrl}/api/v1/targets?state=active`);
     assert(targets.status === "success", "Prometheus targets API did not return success");
-    for (const serviceMonitor of serviceMonitors) {
-      const poolPrefix = `serviceMonitor/${args.appNamespace}/${serviceMonitor.metadata.name}/`;
+    for (const [namespace, serviceMonitor] of [
+      ...applicationServiceMonitors.map((item) => [args.appNamespace, item] as const),
+      ...requiredPlatformServiceMonitors.map((item) => [args.namespace, item] as const),
+    ]) {
+      const poolPrefix = `serviceMonitor/${namespace}/${serviceMonitor.metadata.name}/`;
       const matches = (targets.data?.activeTargets ?? []).filter((target) =>
         target.scrapePool?.startsWith(poolPrefix),
       );
@@ -231,7 +266,10 @@ console.log(
       release: `${args.namespace}/${args.releaseName}`,
       sourceRevision,
       dashboards: [...expectedDashboards.keys()].sort(),
-      serviceMonitors: serviceMonitors.map((item) => item.metadata.name).sort(),
+      serviceMonitors: applicationServiceMonitors.map((item) => item.metadata.name).sort(),
+      platformServiceMonitors: requiredPlatformServiceMonitors
+        .map((item) => item.metadata.name)
+        .sort(),
       prometheusRules: prometheusRules.map((item) => item.metadata.name).sort(),
       liveApisVerified: !args.skipLiveApis,
     },

@@ -1,5 +1,13 @@
 # @opengeni/sdk
 
+## 0.46.2
+
+### Patch Changes
+
+- 5d1d0c2: Make browser live streams visibility-aware, share one routed session feed,
+  bound reconciliation and heartbeat recovery, coalesce overlapping reads, and
+  expose the append, publish, and SSE connection lifecycle in metrics.
+
 ## 0.46.0
 
 ### Minor Changes

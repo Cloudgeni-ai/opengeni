@@ -200,9 +200,10 @@ describe("first-party MCP tool visibility policy", () => {
       const tool = (await client.listTools()).tools.find(
         (candidate) => candidate.name === "sandboxes_list",
       );
-      expect(tool?.description).toContain("may report offline/cold/draining");
-      expect(tool?.description).toContain("still wake or restore");
-      expect(tool?.description).toContain("typed operation/attach failure");
+      expect(tool?.description).toContain("operationAvailability");
+      expect(tool?.description).toContain("`wakeable`");
+      expect(tool?.description).toContain("will wake or restore");
+      expect(tool?.description).toContain("not ordinary operation availability");
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

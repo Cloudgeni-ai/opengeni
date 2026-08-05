@@ -4,6 +4,7 @@ import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-con
 import {
   useDebouncedCallback,
   useMutationRunner,
+  usePageLiveActivity,
   useSessionEventTrigger,
   type SessionEventFeedOptions,
 } from "./internal";
@@ -75,6 +76,7 @@ export function useGoal(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const sharedEvents = options.events;
   const sharedFeed = sharedEvents !== undefined;
+  const pageLive = usePageLiveActivity();
   const [goal, setGoal] = useState<SessionGoal | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
@@ -116,7 +118,7 @@ export function useGoal(
       setGoal(null);
       setError(null);
     }
-    if (!enabled) {
+    if (!enabled || !pageLive) {
       setLoading(false);
       return;
     }
@@ -127,19 +129,29 @@ export function useGoal(
       };
     }
     setLoading(true);
-    void load();
     const pollIntervalMs = options.pollIntervalMs;
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
+      void load();
       return () => {
         generation.current += 1;
       };
     }
-    const timer = setInterval(() => void load(), pollIntervalMs);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (cancelled) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void load().finally(schedule);
+      }, pollIntervalMs);
+    };
+    void load().finally(schedule);
     return () => {
-      clearInterval(timer);
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
       generation.current += 1;
     };
-  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs, sharedFeed]);
+  }, [load, enabled, pageLive, workspaceId, sessionId, options.pollIntervalMs, sharedFeed]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
   useSessionEventTrigger(client, workspaceId, sessionId, isGoalRefreshEvent, scheduleRefresh, {

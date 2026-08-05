@@ -97,6 +97,9 @@ kube-prometheus-stack:
   grafana:
     rbac:
       namespaced: true
+    serviceMonitor:
+      labels:
+        opengeni.ai/monitoring: enabled
     resources:
       requests:
         cpu: 100m
@@ -131,6 +134,10 @@ kube-prometheus-stack:
         resource: configmap
 
   kube-state-metrics:
+    prometheus:
+      monitor:
+        additionalLabels:
+          opengeni.ai/monitoring: enabled
     resources:
       requests:
         cpu: 50m
@@ -140,6 +147,10 @@ kube-prometheus-stack:
         memory: 256Mi
 
   prometheus-node-exporter:
+    prometheus:
+      monitor:
+        additionalLabels:
+          opengeni.ai/monitoring: enabled
     resources:
       requests:
         cpu: 50m

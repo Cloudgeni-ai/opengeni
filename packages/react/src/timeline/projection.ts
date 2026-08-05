@@ -1609,6 +1609,15 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
     return null;
   }
   const record = value as Record<string, unknown>;
+  const receiptResource = asRecord(record.resource);
+  if (
+    record.receiptVersion === "mcp-mutation-receipt.v1" &&
+    receiptResource.type === "session" &&
+    typeof receiptResource.id === "string" &&
+    looksLikeId(receiptResource.id)
+  ) {
+    return receiptResource.id;
+  }
   if (typeof record.sessionId === "string" && looksLikeId(record.sessionId)) {
     return record.sessionId;
   }

@@ -14,6 +14,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
@@ -374,12 +375,17 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   });
   const isSessionRoute = /\/sessions\/[^/]+/.test(pathname);
   const showSessionActions = Boolean(context.session) && isSessionRoute;
-  // A lineage read for the header's "spawned by" breadcrumb (disabled when there
-  // is no session). The header lives outside the session route's event feed, so
-  // spawn events can't trigger a refresh here; a modest poll keeps the ancestor
-  // link honest without threading the stream into the rail. (The child-agents
-  // count moved to the composer pill, which reads lineage off the live feed.)
+  const sharedFeed = useSyncExternalStore(
+    context.sessionEventFeedStore.subscribe,
+    context.sessionEventFeedStore.getSnapshot,
+    context.sessionEventFeedStore.getSnapshot,
+  );
+  const sessionEvents =
+    sharedFeed && sharedFeed.sessionId === context.session?.id ? sharedFeed.events : [];
+  // The route owns the only session stream. An empty shared feed is still an
+  // authoritative shared feed, so this header can never fall back to self-streaming.
   const lineage = useSessionLineage(context.session?.id ?? null, {
+    events: sessionEvents,
     pollIntervalMs: 30_000,
   });
   const ancestors = lineage.lineage?.ancestors ?? [];
@@ -419,6 +425,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         ancestors={ancestors}
         lineageLoading={lineage.loading}
         lineageError={lineage.error}
+        events={sessionEvents}
         hamburger={hamburger}
       />
     );
@@ -448,19 +455,22 @@ function SessionRouteHeader({
   ancestors,
   lineageLoading,
   lineageError,
+  events,
   hamburger,
 }: {
   session: Session;
   ancestors: SessionSummary[];
   lineageLoading: boolean;
   lineageError: Error | null;
+  events: import("@opengeni/sdk").SessionEvent[];
   hamburger: ReactNode;
 }) {
   const rail = useRail();
   const context = useAppContext();
-  // Header is outside the session route event feed — poll instead of a second SSE.
-  // Updates when a new turn admits (`turn.started`); composer picker changes do not.
-  const lastStarted = useLastStartedTurnPolicy(session.id, { pollIntervalMs: 15_000 });
+  const lastStarted = useLastStartedTurnPolicy(session.id, {
+    events,
+    pollIntervalMs: 15_000,
+  });
   const lastStartedModel = lastStarted.policy?.model;
   const lastStartedReasoningEffort = isIntelligenceEffort(lastStarted.policy?.reasoningEffort)
     ? lastStarted.policy.reasoningEffort
@@ -512,6 +522,7 @@ function SessionRouteHeader({
             sessionId={session.id}
             model={displayModelId}
             modelReady={policyReady}
+            events={events}
           />
         ) : null
       }

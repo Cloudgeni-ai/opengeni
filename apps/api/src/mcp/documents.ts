@@ -9,6 +9,7 @@ import {
 import { createKnowledgeMemory, listKnowledgeMemories, type Database } from "@opengeni/db";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
+import { mcpMutationReceipt } from "./receipts";
 
 const SearchInputSchema = {
   query: z.string().min(1),
@@ -192,31 +193,47 @@ export function buildDocumentsMcpServer(
         metadata: z.record(z.string(), z.unknown()).optional(),
       },
     },
-    async ({ text, kind, scope, sourceRefs, confidence, metadata }) => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            await createKnowledgeMemory(db, {
-              accountId,
-              workspaceId,
-              status: "proposed",
-              kind: kind ?? "semantic",
-              scope: scope ?? "workspace",
-              text,
-              sourceRefs:
-                sourceRefs?.map((sourceRef) => ({
-                  ...sourceRef,
-                  metadata: sourceRef.metadata ?? {},
-                })) ?? [],
-              confidence: confidence ?? 0.5,
-              metadata: metadata ?? {},
-              createdBySessionId: options.createdBySessionId,
-            }),
-          ),
-        },
-      ],
-    }),
+    async ({ text, kind, scope, sourceRefs, confidence, metadata }) => {
+      const memory = await createKnowledgeMemory(db, {
+        accountId,
+        workspaceId,
+        status: "proposed",
+        kind: kind ?? "semantic",
+        scope: scope ?? "workspace",
+        text,
+        sourceRefs:
+          sourceRefs?.map((sourceRef) => ({
+            ...sourceRef,
+            metadata: sourceRef.metadata ?? {},
+          })) ?? [],
+        confidence: confidence ?? 0.5,
+        metadata: metadata ?? {},
+        createdBySessionId: options.createdBySessionId,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              mcpMutationReceipt({
+                operation: "memory_propose",
+                committed: true,
+                outcome: "created",
+                changed: true,
+                resource: {
+                  type: "knowledge_memory",
+                  id: memory.id,
+                  state: memory.status,
+                },
+                timestamp: memory.updatedAt,
+                idempotency: { status: "not_supported" },
+                nextAction: { tool: "memory_search", arguments: {} },
+              }),
+            ),
+          },
+        ],
+      };
+    },
   );
 
   return server;

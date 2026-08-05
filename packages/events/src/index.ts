@@ -627,7 +627,9 @@ export async function appendAndPublishTurnEventsFenced(
   executionGeneration: number,
   attemptId: string,
   events: AppendEventInput[],
+  observe?: AppendPublishObserver,
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
+  const appendStartedAt = performance.now();
   const result = await appendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -637,7 +639,9 @@ export async function appendAndPublishTurnEventsFenced(
     attemptId,
     events,
   );
+  observeSince(observe?.onAppend, appendStartedAt, result.events.length);
   if (result.events.length === 0) return result;
+  const publishStartedAt = performance.now();
   try {
     await bus.publish(workspaceId, sessionId, result.events);
   } catch {
@@ -648,6 +652,7 @@ export async function appendAndPublishTurnEventsFenced(
       eventCount: result.events.length,
     });
   }
+  observeSince(observe?.onPublish, publishStartedAt, result.events.length);
   return result;
 }
 
