@@ -77,7 +77,10 @@ describe("retire model-visible GitHub token migration", () => {
           and table_name = 'sessions'
           and column_name = 'first_party_mcp_tools'`;
       expect(column?.column_default).not.toContain("github_token");
-      for (const tool of FIRST_PARTY_MCP_TOOL_NAMES) {
+      const toolsIntroducedAfterMigration = new Set(["variable_set_get_variable"]);
+      for (const tool of FIRST_PARTY_MCP_TOOL_NAMES.filter(
+        (name) => !toolsIntroducedAfterMigration.has(name),
+      )) {
         expect(column?.column_default).toContain(tool);
       }
 
