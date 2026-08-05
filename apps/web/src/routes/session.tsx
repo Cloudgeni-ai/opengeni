@@ -68,12 +68,7 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import type {
-  ComposerDraft,
-  LineageNode,
-  RetainedArtifactReference,
-  SessionRealtimeModel,
-} from "@opengeni/sdk";
+import type { ComposerDraft, LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const LazySessionInspector = lazy(() =>
