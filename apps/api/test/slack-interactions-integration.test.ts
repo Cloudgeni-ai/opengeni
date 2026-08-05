@@ -2770,10 +2770,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       trigger_id: `shortcut-${crypto.randomUUID()}`,
       team: { id: value.teamId },
       user: { id: value.ownerSlackUserId },
-      channel: { id: "D_HUMAN_TO_HUMAN" },
+      channel: { id: "C_SHORTCUT" },
       message: {
         ts: "1725000000.000001",
-        text: "Explicitly send this human DM message to OpenGeni",
+        text: "Explicitly send this channel message to OpenGeni",
       },
     });
     const shortcut = new URLSearchParams({
@@ -2799,7 +2799,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           visibility: "workspace",
         }),
         expect.objectContaining({
-          route_key: "D_HUMAN_TO_HUMAN:1725000000.000001",
+          route_key: "C_SHORTCUT:1725000000.000001",
           slack_thread_ts: "1725000000.000001",
           visibility: "workspace",
         }),
@@ -2876,6 +2876,120 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           and provider_event_id = ${`command:${triggerId}`}`;
       expect(inbox[0]!.count).toBe(0);
     }
+  });
+
+  test("human-DM shortcuts stay owner-private and continue in the invoking user's bot DM", async () => {
+    if (!available) return;
+    const sourceDm = "D_HUMAN_TO_HUMAN";
+    const value = await fixture({
+      deniedChannels: [sourceDm],
+      linkOther: true,
+    });
+    const shortcut = async (slackUserId: string, triggerId: string) => {
+      const payload = JSON.stringify({
+        type: "message_action",
+        trigger_id: triggerId,
+        team: { id: value.teamId },
+        user: { id: slackUserId },
+        channel: { id: sourceDm },
+        message: {
+          ts: "1725000000.000001",
+          text: "Explicitly send this human DM message to OpenGeni",
+        },
+      });
+      return await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/interactions",
+          new URLSearchParams({ payload }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+    };
+
+    const ownerTriggerId = `shortcut-owner-${crypto.randomUUID()}`;
+    expect((await shortcut(value.ownerSlackUserId, ownerTriggerId)).status).toBe(200);
+    await drainAll(value.deps);
+
+    const ownerAck = value.slack.posts.at(-1)!;
+    expect(ownerAck).toMatchObject({
+      channel: `D_${value.ownerSlackUserId}`,
+      threadTimestamp: null,
+    });
+    expect(ownerAck.text).toContain("started a private task from the selected DM message");
+    expect(ownerAck.text).toContain("source DM was not opened to the bot");
+    expect(
+      value.slack.calls.some(
+        (call) => call.method === "conversations.info" && call.channel === sourceDm,
+      ),
+    ).toBe(false);
+
+    let routes = await interactions(value.owner.workspaceId);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      route_key: `${ownerAck.channel}:${ownerAck.timestamp}`,
+      slack_thread_ts: ownerAck.timestamp,
+      visibility: "private",
+    });
+
+    // Reclaiming the exact durable event after acknowledgement reuses the same
+    // session and post operation rather than recreating work after a crash.
+    await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'pending',
+          claim_holder_id = null,
+          claim_expires_at = null,
+          retry_at = null,
+          processed_at = null,
+          updated_at = now()
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${`shortcut:${ownerTriggerId}`}`;
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
+    expect(value.slack.posts).toHaveLength(1);
+
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_SHORTCUT_BOT_DM_REPLY_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: ownerAck.channel,
+            ts: "1725000000.000003",
+            thread_ts: ownerAck.timestamp,
+            text: "Continue the private shortcut task",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [ownerMessages] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${routes[0]!.session_id}
+        and type = 'user.message'`;
+    expect(ownerMessages!.count).toBe(2);
+
+    // The same human-to-human DM may contain multiple linked workspace users.
+    // Each explicit invocation receives a distinct private bot-DM route.
+    expect(
+      (await shortcut(value.otherSlackUserId, `shortcut-other-${crypto.randomUUID()}`)).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    routes = await interactions(value.owner.workspaceId);
+    expect(routes).toHaveLength(2);
+    expect(routes.every((route) => route.visibility === "private")).toBe(true);
+    expect(new Set(routes.map((route) => route.session_id)).size).toBe(2);
+    expect(new Set(routes.map((route) => route.route_key)).size).toBe(2);
+    expect(value.slack.posts.at(-1)?.channel).toBe(`D_${value.otherSlackUserId}`);
+
+    const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
+      select
+        (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
+        (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
+    expect(persistence).toEqual({ documents: 0, memories: 0 });
   });
 
   test("unmapped identities receive a link affordance, denied channels fail closed, and bot loops create nothing", async () => {

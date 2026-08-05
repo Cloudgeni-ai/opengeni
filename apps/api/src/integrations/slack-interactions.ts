@@ -120,6 +120,31 @@ export type NormalizedSlackInteraction = {
   text: string;
 };
 
+export function slackInteractionRoutePolicy(
+  entry: Pick<
+    SlackInteractionInboxEntry,
+    "triggerKind" | "slackChannelId" | "slackThreadTs" | "slackMessageTs" | "slackUserId"
+  >,
+) {
+  const directMessageShortcut = isDirectMessageShortcut(entry);
+  const source = slackRouteKey(entry.slackChannelId, entry.slackThreadTs ?? entry.slackMessageTs);
+  return {
+    directMessageShortcut,
+    requiresChannelAccess: !directMessageShortcut,
+    visibility:
+      entry.triggerKind === "dm" || directMessageShortcut
+        ? ("private" as const)
+        : ("workspace" as const),
+    // A human-to-human DM may be shared by multiple linked workspace users. The
+    // signed shortcut authorizes only the invoking user, so the pre-ack route
+    // must keep each user's private reservation distinct until it is rekeyed to
+    // that user's OpenGeni bot-DM thread.
+    initialRouteKey: directMessageShortcut
+      ? `${source}:shortcut-user:${entry.slackUserId}`
+      : source,
+  };
+}
+
 export function verifySlackRequestSignature(
   input: {
     timestamp: string | null;
@@ -566,7 +591,8 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await processSlackReactionInboxEntry(deps, entry);
     return;
   }
-  const routeKey = slackRouteKey(entry.slackChannelId, entry.slackThreadTs ?? entry.slackMessageTs);
+  const routePolicy = slackInteractionRoutePolicy(entry);
+  const routeKey = routePolicy.initialRouteKey;
   const existing = await getSlackInteractionByRoute(
     deps.db,
     entry.workspaceId,
@@ -588,7 +614,9 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     subjectId: link?.subjectId ?? "service:slack-interaction",
     ...(existing?.sessionId ? { sessionId: existing.sessionId } : {}),
   });
-  await client.verifyChannelAccess(entry.slackChannelId);
+  if (routePolicy.requiresChannelAccess) {
+    await client.verifyChannelAccess(entry.slackChannelId);
+  }
   if (!link) {
     await client.postMessage({
       operationId: deterministicUuid(`slack-link:${entry.id}`),
@@ -602,6 +630,44 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   });
   if (!grant || grant.accountId !== entry.accountId) {
     throw new SlackInteractionPermanentError("identity_access_revoked");
+  }
+
+  const alreadyDurable = await getSlackInteractionByClientEventId(
+    deps.db,
+    entry.workspaceId,
+    entry.connectionId,
+    `slack:${entry.providerEventId}`,
+  );
+  if (alreadyDurable) {
+    const { interaction, eventSessionId } = alreadyDurable;
+    if (interaction.visibility === "private" && interaction.owningSubjectId !== grant.subjectId) {
+      throw new SlackInteractionPermanentError("session_owner_mismatch");
+    }
+    if (interaction.sessionId !== null && interaction.sessionId !== eventSessionId) {
+      throw new SlackInteractionPermanentError("slack_interaction_event_conflict");
+    }
+    const boundInteraction =
+      interaction.sessionId !== null
+        ? interaction
+        : await bindSlackInteractionSession(deps.db, {
+            ...interaction,
+            owningSubjectId: grant.subjectId,
+            sessionId: eventSessionId,
+          });
+    if (!boundInteraction) {
+      throw new Error("Durable Slack interaction could not bind its reserved session");
+    }
+    if (interaction.triggeringProviderEventId === entry.providerEventId) {
+      const boundClient = await createOpenGeniSlackBotInteractionClient(deps, {
+        accountId: entry.accountId,
+        workspaceId: entry.workspaceId,
+        connectionId: entry.connectionId,
+        subjectId: grant.subjectId,
+        sessionId: eventSessionId,
+      });
+      await acknowledgeSlackSession(deps, boundClient, boundInteraction, entry);
+    }
+    return;
   }
 
   if (existing?.sessionId) {
@@ -621,7 +687,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     routeKey,
     triggeringProviderEventId: entry.providerEventId,
     owningSubjectId: grant.subjectId,
-    visibility: entry.triggerKind === "dm" ? "private" : "workspace",
+    visibility: routePolicy.visibility,
   });
   if (interaction.sessionId) {
     await continueSlackSession(deps, grant, interaction, entry);
@@ -647,10 +713,14 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     if (error instanceof HTTPException) {
       await client.postMessage({
         operationId: deterministicUuid(`slack-admission-failed:${interaction.id}`),
-        channelId: entry.slackChannelId,
-        ...(entry.triggerKind === "slash_command"
-          ? {}
-          : { threadTimestamp: entry.slackThreadTs ?? entry.slackMessageTs }),
+        ...(isDirectMessageShortcut(entry)
+          ? { userId: entry.slackUserId }
+          : {
+              channelId: entry.slackChannelId,
+              ...(entry.triggerKind === "slash_command"
+                ? {}
+                : { threadTimestamp: entry.slackThreadTs ?? entry.slackMessageTs }),
+            }),
         text: slackAdmissionFailureText(error),
       });
     }
@@ -662,21 +732,49 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     sessionId: session.id,
   });
   if (!bound) throw new Error("Slack route could not bind its durable session");
+  const boundClient = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: entry.accountId,
+    workspaceId: entry.workspaceId,
+    connectionId: entry.connectionId,
+    subjectId: grant.subjectId,
+    sessionId: session.id,
+  });
+  await acknowledgeSlackSession(deps, boundClient, bound, entry);
+}
+
+async function acknowledgeSlackSession(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  interaction: SlackInteraction,
+  entry: SlackInteractionInboxEntry,
+) {
+  if (!interaction.sessionId) {
+    throw new Error("Slack acknowledgement requires a bound session");
+  }
+  const directMessageShortcut = isDirectMessageShortcut(entry);
   const ack = await client.postMessage({
     operationId: deterministicUuid(`slack-ack:${interaction.id}`),
-    channelId: entry.slackChannelId,
-    ...(entry.triggerKind === "slash_command"
-      ? {}
-      : { threadTimestamp: entry.slackThreadTs ?? entry.slackMessageTs }),
-    text: `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, session.id)} Reply in this thread to continue, or reply \`stop\` to stop. Start a new top-level DM or invoke /opengeni again for a new session.`,
+    ...(directMessageShortcut
+      ? { userId: entry.slackUserId }
+      : {
+          channelId: entry.slackChannelId,
+          ...(entry.triggerKind === "slash_command"
+            ? {}
+            : { threadTimestamp: entry.slackThreadTs ?? entry.slackMessageTs }),
+        }),
+    text: directMessageShortcut
+      ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this bot-DM thread to continue, or reply \`stop\` to stop. The source DM was not opened to the bot or made workspace-visible.`
+      : `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this thread to continue, or reply \`stop\` to stop. Start a new top-level DM or invoke /opengeni again for a new session.`,
   });
-  if (entry.triggerKind === "slash_command") {
-    await rekeySlackInteractionRoute(deps.db, {
+  if (entry.triggerKind === "slash_command" || directMessageShortcut) {
+    const rekeyed = await rekeySlackInteractionRoute(deps.db, {
       ...interaction,
-      routeKey: slackRouteKey(entry.slackChannelId, ack.timestamp),
+      routeKey: slackRouteKey(ack.channelId, ack.timestamp),
+      slackChannelId: ack.channelId,
       slackThreadTs: ack.timestamp,
       ackSlackMessageTs: ack.timestamp,
     });
+    if (!rekeyed) throw new Error("Slack acknowledgement could not rekey its durable route");
   }
 }
 
@@ -1405,6 +1503,12 @@ export function verifySlackUserLinkToken(
 
 function slackRouteKey(channelId: string, threadTs: string) {
   return `${channelId}:${threadTs}`;
+}
+
+function isDirectMessageShortcut(
+  entry: Pick<SlackInteractionInboxEntry, "triggerKind" | "slackChannelId">,
+) {
+  return entry.triggerKind === "message_shortcut" && entry.slackChannelId.startsWith("D");
 }
 
 function deterministicUuid(value: string) {

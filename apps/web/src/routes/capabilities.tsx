@@ -1123,7 +1123,11 @@ export function CapabilitiesRoute({
                     </div>
                     <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
                       Install a separate bot principal for first-party Slack tools and explicitly
-                      bound scheduled tasks. It never uses a person's Slack OAuth grant.
+                      bound scheduled tasks. Linked users can mention @OpenGeni in a member channel,
+                      run /opengeni, DM the bot, or use the Open in OpenGeni message shortcut. A
+                      shortcut from a human DM creates a private task and continues in the invoking
+                      user's bot DM; it never joins or exposes workspace output in the source DM. It
+                      never uses a person's Slack OAuth grant.
                     </p>
                   </div>
                 </div>

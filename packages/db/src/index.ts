@@ -6104,6 +6104,7 @@ export async function rekeySlackInteractionRoute(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
     routeKey: string;
+    slackChannelId?: string;
     slackThreadTs: string;
     ackSlackMessageTs: string;
   },
@@ -6113,11 +6114,18 @@ export async function rekeySlackInteractionRoute(
       .update(schema.slackInteractions)
       .set({
         routeKey: input.routeKey,
+        ...(input.slackChannelId ? { slackChannelId: input.slackChannelId } : {}),
         slackThreadTs: input.slackThreadTs,
         ackSlackMessageTs: input.ackSlackMessageTs,
         updatedAt: sql`now()`,
       })
-      .where(eq(schema.slackInteractions.id, input.id))
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      )
       .returning();
     return row ? mapSlackInteraction(row) : null;
   });
