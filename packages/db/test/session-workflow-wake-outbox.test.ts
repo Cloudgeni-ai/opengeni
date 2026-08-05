@@ -575,7 +575,18 @@ describe("transactional session workflow wake outbox", () => {
       temporalWorkflowRunId: workflowRunId,
       temporalActivityId: activityId,
     });
-    expect(quiescenceEvents).toHaveLength(1);
+    expect(quiescenceEvents).toEqual([
+      expect.objectContaining({
+        type: "session.queue.changed",
+        clientEventId: `opengeni:attempt-quiesced:${attemptId}`,
+        payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+      }),
+      expect.objectContaining({
+        type: "session.status.changed",
+        clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
+        payload: expect.objectContaining({ status: "idle", reason: "paused_recovery_settled" }),
+      }),
+    ]);
     await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
         mutateSessionControlInTransaction(tx as typeof db, {
