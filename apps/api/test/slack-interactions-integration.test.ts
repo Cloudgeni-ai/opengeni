@@ -3070,12 +3070,19 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and inbox.connection_id = interaction.connection_id
         and inbox.provider_event_id = ${`shortcut:${firstTriggerId}`}
       where interaction.workspace_id = ${value.owner.workspaceId}`;
-    expect(failedCreator).toMatchObject({
-      interaction_id: expect.any(String),
-      session_reservation_id: expect.any(String),
+    if (!failedCreator) throw new Error("expected the failed shortcut creator route");
+    const interactionId = failedCreator.interaction_id;
+    const sessionReservationId = failedCreator.session_reservation_id;
+    const firstInboxId = failedCreator.inbox_id;
+    expect(typeof interactionId).toBe("string");
+    expect(typeof sessionReservationId).toBe("string");
+    expect(typeof firstInboxId).toBe("string");
+    expect(failedCreator).toEqual({
+      interaction_id: interactionId,
+      session_reservation_id: sessionReservationId,
       session_id: null,
       triggering_provider_event_id: `shortcut:${firstTriggerId}`,
-      inbox_id: expect.any(String),
+      inbox_id: firstInboxId,
       inbox_status: "pending",
     });
     expect(value.slack.posts).toHaveLength(0);
@@ -3084,7 +3091,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       set status = 'failed', claim_holder_id = null, claim_expires_at = null,
         retry_at = null, last_error_code = 'fixture_failed_creator',
         processed_at = now(), updated_at = now()
-      where id = ${failedCreator!.inbox_id}`;
+      where id = ${firstInboxId}`;
 
     const secondTriggerId = `shortcut-success-${crypto.randomUUID()}`;
     expect((await shortcut(secondTriggerId)).status).toBe(200);
@@ -3146,13 +3153,16 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         on inbox.workspace_id = interaction.workspace_id
         and inbox.connection_id = interaction.connection_id
         and inbox.provider_event_id = ${`shortcut:${secondTriggerId}`}
-      where interaction.id = ${failedCreator!.interaction_id}`;
-    expect(afterBindFailure).toMatchObject({
-      interaction_id: failedCreator!.interaction_id,
-      session_reservation_id: failedCreator!.session_reservation_id,
+      where interaction.id = ${interactionId}`;
+    if (!afterBindFailure) throw new Error("expected the durable unbound shortcut session");
+    const secondInboxId = afterBindFailure.inbox_id;
+    expect(typeof secondInboxId).toBe("string");
+    expect(afterBindFailure).toEqual({
+      interaction_id: interactionId,
+      session_reservation_id: sessionReservationId,
       session_id: null,
       triggering_provider_event_id: `shortcut:${firstTriggerId}`,
-      inbox_id: expect.any(String),
+      inbox_id: secondInboxId,
       inbox_status: "pending",
       session_count: 1,
       message_count: 1,
@@ -3162,7 +3172,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await shared!.admin`
       update slack_interaction_inbox
       set retry_at = now()
-      where id = ${afterBindFailure!.inbox_id}`;
+      where id = ${secondInboxId}`;
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
 
     const [repaired] = await shared!.admin<
@@ -3201,15 +3211,16 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         on inbox.workspace_id = interaction.workspace_id
         and inbox.connection_id = interaction.connection_id
         and inbox.provider_event_id = ${`shortcut:${secondTriggerId}`}
-      where interaction.id = ${failedCreator!.interaction_id}`;
+      where interaction.id = ${interactionId}`;
+    if (!repaired) throw new Error("expected the repaired private shortcut route");
     const acknowledgement = value.slack.posts[0]!;
     expect(acknowledgement).toMatchObject({
       channel: `D_${value.ownerSlackUserId}`,
       threadTimestamp: null,
     });
     expect(repaired).toMatchObject({
-      session_reservation_id: failedCreator!.session_reservation_id,
-      session_id: failedCreator!.session_reservation_id,
+      session_reservation_id: sessionReservationId,
+      session_id: sessionReservationId,
       triggering_provider_event_id: `shortcut:${firstTriggerId}`,
       route_key: `${acknowledgement.channel}:${acknowledgement.timestamp}`,
       slack_channel_id: acknowledgement.channel,
@@ -3232,7 +3243,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       set status = 'pending', claim_holder_id = null, claim_expires_at = null,
         retry_at = now(), last_error_code = 'forced_retry', processed_at = null,
         updated_at = now()
-      where id = ${afterBindFailure!.inbox_id}`;
+      where id = ${secondInboxId}`;
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
     expect(value.slack.posts).toHaveLength(1);
     const [afterReplay] = await shared!.admin<{ sessions: number; messages: number }[]>`
@@ -3241,7 +3252,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           where workspace_id = ${value.owner.workspaceId}) as sessions,
         (select count(*)::int from session_events
           where workspace_id = ${value.owner.workspaceId}
-            and session_id = ${repaired!.session_reservation_id}
+            and session_id = ${sessionReservationId}
             and type = 'user.message') as messages`;
     expect(afterReplay).toEqual({ sessions: 1, messages: 1 });
 
@@ -3249,7 +3260,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       await getSessionForSubject(
         client.db,
         value.owner.workspaceId,
-        repaired!.session_reservation_id,
+        sessionReservationId,
         value.owner.subjectId,
       ),
     ).not.toBeNull();
@@ -3257,7 +3268,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       await getSessionForSubject(
         client.db,
         value.owner.workspaceId,
-        repaired!.session_reservation_id,
+        sessionReservationId,
         value.otherSubjectId,
       ),
     ).toBeNull();
@@ -3283,7 +3294,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       select count(*)::int as messages
       from session_events
       where workspace_id = ${value.owner.workspaceId}
-        and session_id = ${repaired!.session_reservation_id}
+        and session_id = ${sessionReservationId}
         and type = 'user.message'`;
     expect(afterContinuation).toEqual({ messages: 2 });
   }, 60_000);
