@@ -572,7 +572,12 @@ describe("transactional session workflow wake outbox", () => {
       temporalWorkflowRunId: workflowRunId,
       temporalActivityId: activityId,
     });
-    expect(quiescenceEvents).toHaveLength(1);
+    expect(quiescenceEvents).toContainEqual(
+      expect.objectContaining({
+        type: "session.queue.changed",
+        payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+      }),
+    );
     await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
         mutateSessionControlInTransaction(tx as typeof db, {
