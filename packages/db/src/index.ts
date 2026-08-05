@@ -45173,3 +45173,4 @@ export {
 } from "./connection-token-resolver";
 
 export * from "./workspace-artifacts";
+export * from "./transcription-recordings";
