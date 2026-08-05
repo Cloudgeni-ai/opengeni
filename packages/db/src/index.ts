@@ -3287,6 +3287,16 @@ export type UpdateConnectionInput = {
   updatedBySubjectId?: string | null;
 };
 
+export type UpdateSlackBotDocumentDestinationInput = {
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  visibleToSubjectId: string;
+  expectedVersion: number;
+  metadata: Record<string, unknown>;
+  updatedBySubjectId: string;
+};
+
 export type TransitionConnectionStateInput = {
   workspaceId: string;
   connectionId: string;
@@ -5175,6 +5185,57 @@ export async function updateConnection(
     input.workspaceId,
     input.visibleToSubjectId,
     async (scopedDb) => await updateConnectionInScope(scopedDb, input),
+  );
+}
+
+async function updateSlackBotDocumentDestinationInScope(
+  db: Database,
+  input: UpdateSlackBotDocumentDestinationInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const [row] = await db
+    .update(schema.connections)
+    .set({
+      metadata: input.metadata,
+      version: sql`${schema.connections.version} + 1`,
+      // The install-verification trigger intentionally invalidates proof when
+      // metadata or version changes without a deliberate proof transition.
+      // Carry the proof to the exact new CAS generation in the same statement.
+      verifiedInstallVersion: sql`${schema.connections.version} + 1`,
+      updatedBySubjectId: input.updatedBySubjectId,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.connections.accountId, input.accountId),
+        eq(schema.connections.workspaceId, input.workspaceId),
+        eq(schema.connections.id, input.connectionId),
+        connectionSubjectVisibility(input.visibleToSubjectId),
+        isNull(schema.connections.subjectId),
+        eq(schema.connections.providerDomain, "slack.com"),
+        eq(schema.connections.kind, "app_install"),
+        eq(schema.connections.version, input.expectedVersion),
+        eq(schema.connections.verifiedInstallVersion, input.expectedVersion),
+        isNotNull(schema.connections.verifiedInstallAt),
+      ),
+    )
+    .returning(connectionMetadataColumns);
+  return row ? mapConnectionMetadata(row) : null;
+}
+
+/**
+ * Updates only pre-validated workspace Slack-bot destination metadata while
+ * atomically advancing its install proof to the new connection generation.
+ * A stale version or already-invalid proof returns null without writing.
+ */
+export async function updateSlackBotDocumentDestination(
+  db: Database,
+  input: UpdateSlackBotDocumentDestinationInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.visibleToSubjectId,
+    async (scopedDb) => await updateSlackBotDocumentDestinationInScope(scopedDb, input),
   );
 }
 

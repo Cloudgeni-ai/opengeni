@@ -11,6 +11,10 @@ import {
   UpdateConnectionRequest,
 } from "@opengeni/contracts";
 import {
+  bindConnectorDocumentDestination,
+  ConnectorDocumentDestinationSelection,
+} from "@opengeni/contracts/connector-destinations";
+import {
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GoogleDriveConnectionMetadata,
   GoogleDriveDisconnectRequest,
@@ -41,6 +45,7 @@ import {
   SlackBotLifecycleSuccessAuditError,
   updateConnection,
   updateConnectionWithSlackBotSuccessAudit,
+  updateSlackBotDocumentDestination,
   type SlackBotInstallCallbackFailureReason,
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
@@ -380,7 +385,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const { grant } = authorization;
     const payload = UpdateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
     const existing = await getConnectionMetadata(
@@ -390,9 +401,69 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       grant.subjectId,
     );
     if (existing && isOpenGeniSlackBotConnection(existing)) {
-      throw new HTTPException(422, {
-        message: "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
+      const destination = ConnectorDocumentDestinationSelection.safeParse(
+        payload.metadata?.documentDestination,
+      );
+      const destinationOnlyUpdate =
+        payload.metadata !== undefined &&
+        Object.keys(payload.metadata).length === 1 &&
+        payload.providerDomain === undefined &&
+        payload.subjectId === undefined &&
+        payload.kind === undefined &&
+        payload.status === undefined &&
+        payload.credential === undefined &&
+        payload.grantedScopes === undefined &&
+        payload.expiresAt === undefined;
+      if (!destination.success || !destinationOnlyUpdate) {
+        throw new HTTPException(422, {
+          message: "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
+        });
+      }
+      const destinationSelection = destination.data;
+      if (
+        destinationSelection.authorityKind === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") !== true
+      ) {
+        throw new HTTPException(403, { message: "missing permission: account:admin" });
+      }
+      if (
+        destinationSelection.authorityKind === "workspace" &&
+        !hasPermission(grant.permissions, "workspace:admin")
+      ) {
+        throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+      }
+      if (
+        destinationSelection.authorityKind === "personal" &&
+        (!authorization.contextIntegrity ||
+          authorization.authenticatedSubjectId !== grant.subjectId)
+      ) {
+        throw new HTTPException(403, {
+          message: "personal destination requires the exact actor",
+        });
+      }
+      const metadata = {
+        ...existing.metadata,
+        documentDestination: bindConnectorDocumentDestination(destinationSelection, {
+          accountId: grant.accountId,
+          workspaceId,
+          initiatingSubjectId: grant.subjectId,
+        }),
+      };
+      const connection = await updateSlackBotDocumentDestination(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        connectionId: existing.id,
+        visibleToSubjectId: grant.subjectId,
+        expectedVersion: existing.version,
+        metadata,
+        updatedBySubjectId: grant.subjectId,
       });
+      if (!connection) {
+        throw new HTTPException(409, {
+          message: "Slack bot connection changed; reload before saving its destination",
+        });
+      }
+      return c.json(ConnectionResponse.parse({ connection }));
     }
     if (existing && GoogleDriveConnectionMetadata.safeParse(existing.metadata).success) {
       throw new HTTPException(422, {
