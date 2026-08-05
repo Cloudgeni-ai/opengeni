@@ -5,8 +5,10 @@ import { ChatComposer } from "../src/components/chat-composer";
 import { appendFinalTranscript } from "../src/hooks/use-transcription";
 import {
   VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
+  VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
   VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS,
   VOICE_RECORDING_TIMESLICE_MILLISECONDS,
+  transcriptionRecoveryMutationDelayMilliseconds,
   useVoiceInput,
 } from "../src/hooks/use-voice-input";
 import {
@@ -360,6 +362,7 @@ function resumableRecordingResponse(
     state: "segmenting" | "ready" | "transcribing" | "failed" | "complete" | "discarded";
     segmentCount?: number;
     completedSegmentCount?: number;
+    retryAfterMilliseconds?: number;
     retryable?: boolean;
     errorCode?: "provider" | null;
     transcriptText?: string | null;
@@ -388,6 +391,9 @@ function resumableRecordingResponse(
       expiresAt: "2026-08-05T07:00:00.000Z",
     },
     segments: [],
+    ...(input.retryAfterMilliseconds === undefined
+      ? {}
+      : { retryAfterMilliseconds: input.retryAfterMilliseconds }),
   };
 }
 
@@ -1265,6 +1271,28 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
+  test("bounds recovery mutation requests over a 15-minute active lease", () => {
+    let elapsed = 0;
+    let attempts = 0;
+    let maximumDelay = 0;
+    while (elapsed < 15 * 60 * 1_000) {
+      const delay = transcriptionRecoveryMutationDelayMilliseconds(5_000, attempts, () => 0);
+      elapsed += delay;
+      maximumDelay = Math.max(maximumDelay, delay);
+      attempts += 1;
+    }
+
+    expect(attempts).toBeLessThan(40);
+    expect(maximumDelay).toBeLessThanOrEqual(
+      VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
+    );
+    expect(transcriptionRecoveryMutationDelayMilliseconds(5_000, 0, () => 0)).toBe(5_000);
+    expect(transcriptionRecoveryMutationDelayMilliseconds(5_000, 1, () => 0)).toBe(10_000);
+    expect(transcriptionRecoveryMutationDelayMilliseconds(5_000, 99, () => 0)).toBe(30_000);
+    expect(transcriptionRecoveryMutationDelayMilliseconds(5_000, 0, () => 0.5)).toBe(5_500);
+    expect(transcriptionRecoveryMutationDelayMilliseconds(60_001, 0, () => 0)).toBe(5_000);
+  });
+
   test("re-enters process-next after a claimed-segment crash and repeated stale polling", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
@@ -1275,6 +1303,7 @@ describe("useVoiceInput", () => {
     const transcribing = resumableRecordingResponse(manifest, {
       state: "transcribing",
       segmentCount: 1,
+      retryAfterMilliseconds: 500,
     });
     const complete = resumableRecordingResponse(manifest, {
       state: "complete",
@@ -1334,7 +1363,7 @@ describe("useVoiceInput", () => {
 
     await act(async () => {
       hook.result.current.retry();
-      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
       await settle(30);
     });
 
@@ -1344,6 +1373,73 @@ describe("useVoiceInput", () => {
     expect(processNextCalls).toBe(3);
     expect(discardCalls).toBe(1);
     expect(draft).toBe("existing recovered after crash");
+    expect(hook.result.current.status).toBe("idle");
+    expect(store.manifests.has(recordingId)).toBe(false);
+    await hook.unmount();
+  });
+
+  test("uses cheap status reads before a hinted recovery mutation is due", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    const recordingId = "recording-cheap-recovery-poll";
+    await seedStoppedRecording(store, recordingId, "2026-08-04T07:00:00.000Z");
+    const manifest = store.manifests.get(recordingId);
+    if (!manifest) throw new Error("missing cheap recovery polling manifest");
+    const transcribing = resumableRecordingResponse(manifest, {
+      state: "transcribing",
+      segmentCount: 1,
+      retryAfterMilliseconds: 3_000,
+    });
+    const ready = resumableRecordingResponse(manifest, { state: "ready" });
+    const complete = resumableRecordingResponse(manifest, {
+      state: "complete",
+      transcriptText: "recovered after status polling",
+    });
+    let draft = "";
+    let getCalls = 0;
+    let processNextCalls = 0;
+    const hook = await renderRecoveredResumableRecording({
+      client: {
+        transcribeAudio: async () => ({ text: "wrong path", languages: [] }),
+        createTranscriptionRecording: async () => transcribing,
+        getTranscriptionRecording: async () => {
+          getCalls += 1;
+          return getCalls === 1 ? transcribing : ready;
+        },
+        uploadTranscriptionRecordingChunk: async () => {
+          throw new Error("claimed recordings must not re-upload chunks");
+        },
+        finalizeTranscriptionRecording: async () => transcribing,
+        processNextTranscriptionRecordingSegment: async () => {
+          processNextCalls += 1;
+          return complete;
+        },
+        discardTranscriptionRecording: async () =>
+          resumableRecordingResponse(manifest, { state: "discarded" }),
+      },
+      store,
+      value: draft,
+      setValue: (value) => {
+        draft = value;
+      },
+      ownerId: "cheap-recovery-poll-owner",
+    });
+
+    await act(async () => {
+      hook.result.current.retry();
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      await settle(10);
+    });
+    expect(getCalls).toBe(1);
+    expect(processNextCalls).toBe(0);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_700));
+      await settle(20);
+    });
+    expect(getCalls).toBe(2);
+    expect(processNextCalls).toBe(1);
+    expect(draft).toBe("recovered after status polling");
     expect(hook.result.current.status).toBe("idle");
     expect(store.manifests.has(recordingId)).toBe(false);
     await hook.unmount();
@@ -1359,6 +1455,7 @@ describe("useVoiceInput", () => {
     const segmenting = resumableRecordingResponse(manifest, {
       state: "segmenting",
       segmentCount: 0,
+      retryAfterMilliseconds: 500,
     });
     const ready = resumableRecordingResponse(manifest, { state: "ready" });
     const complete = resumableRecordingResponse(manifest, {
@@ -1401,7 +1498,7 @@ describe("useVoiceInput", () => {
 
     await act(async () => {
       hook.result.current.retry();
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
       await settle(20);
     });
 

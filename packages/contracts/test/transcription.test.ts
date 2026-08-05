@@ -324,6 +324,20 @@ describe("native voice input contracts", () => {
     expect(TranscriptionRecordingResponse.safeParse({ recording, segments: [] }).success).toBe(
       true,
     );
+    expect(
+      TranscriptionRecordingResponse.safeParse({
+        recording,
+        segments: [],
+        retryAfterMilliseconds: 5_000,
+      }).success,
+    ).toBe(true);
+    expect(
+      TranscriptionRecordingResponse.safeParse({
+        recording,
+        segments: [],
+        retryAfterMilliseconds: 60_001,
+      }).success,
+    ).toBe(false);
     expect(TranscriptionRecordingListResponse.safeParse({ recordings: [recording] }).success).toBe(
       true,
     );

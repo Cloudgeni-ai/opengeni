@@ -3819,6 +3819,11 @@ function isTranscriptionRecordingResponse(value: unknown): value is Transcriptio
     typeof recording.createdAt === "string" &&
     typeof recording.updatedAt === "string" &&
     typeof recording.expiresAt === "string" &&
+    (response.retryAfterMilliseconds === undefined ||
+      (typeof response.retryAfterMilliseconds === "number" &&
+        Number.isInteger(response.retryAfterMilliseconds) &&
+        response.retryAfterMilliseconds > 0 &&
+        response.retryAfterMilliseconds <= 60_000)) &&
     Array.isArray(response.segments)
   );
 }

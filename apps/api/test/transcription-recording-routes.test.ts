@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   signDelegatedAccessToken,
+  TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
   type Permission,
   type TranscriptionRecording,
   type TranscriptionRecordingResponse,
@@ -360,7 +361,10 @@ describe("resumable transcription recording routes", () => {
     );
 
     expect(result.status).toBe(202);
-    expect(await result.json()).toMatchObject({ recording: { state: "transcribing" } });
+    expect(await result.json()).toMatchObject({
+      recording: { state: "transcribing" },
+      retryAfterMilliseconds: TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
+    });
     expect(transcribe).not.toHaveBeenCalled();
     expect(claimSegment).toHaveBeenCalledWith(
       expect.anything(),

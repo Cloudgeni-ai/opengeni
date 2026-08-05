@@ -4,6 +4,7 @@ import {
   FinalizeTranscriptionRecordingRequest,
   resolveWorkspaceVoiceInputEnabled,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
   type TranscriptionRecordingErrorCode,
   type TranscriptionRecordingResponse,
   type UploadTranscriptionRecordingChunkResponse,
@@ -111,7 +112,9 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         ...authority,
         recordingId: uuidParam(c, "recordingId"),
       });
-      return c.json(await cleanupTerminalObjects(deps, authority, response));
+      return c.json(
+        withRecoveryRetryHint(await cleanupTerminalObjects(deps, authority, response)),
+      );
     } catch (error) {
       return routeError(c, error);
     }
@@ -221,8 +224,9 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         });
         generation = claim.generation;
         if (!claim.claimed) {
+          const response = withRecoveryRetryHint(claim.recording);
           return c.json(
-            claim.recording,
+            response,
             claim.recording.recording.state === "segmenting" ? 202 : 200,
           );
         }
@@ -356,7 +360,10 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         });
         if (!claim.claimed || !claim.segment) {
           const cleaned = await cleanupTerminalObjects(deps, authority, claim.recording);
-          return c.json(cleaned, cleaned.recording.state === "transcribing" ? 202 : 200);
+          return c.json(
+            withRecoveryRetryHint(cleaned),
+            cleaned.recording.state === "transcribing" ? 202 : 200,
+          );
         }
         segmentNumber = claim.segment.segmentNumber;
         const stored = await deps.objectStorage?.getObjectBytes(claim.segment.objectKey);
@@ -428,6 +435,18 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
       return routeError(c, error);
     }
   });
+}
+
+function withRecoveryRetryHint(
+  response: TranscriptionRecordingResponse,
+): TranscriptionRecordingResponse {
+  if (response.recording.state === "segmenting" || response.recording.state === "transcribing") {
+    return {
+      ...response,
+      retryAfterMilliseconds: TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
+    };
+  }
+  return response;
 }
 
 async function requireRecordingAuthority(

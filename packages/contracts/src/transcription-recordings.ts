@@ -139,6 +139,7 @@ export const TranscriptionRecordingResponse = z
   .object({
     recording: TranscriptionRecording,
     segments: z.array(TranscriptionRecordingSegment).max(1_000),
+    retryAfterMilliseconds: z.number().int().positive().max(60_000).optional(),
   })
   .strict();
 export type TranscriptionRecordingResponse = z.infer<typeof TranscriptionRecordingResponse>;
@@ -164,4 +165,5 @@ export const TRANSCRIPTION_RECORDING_MAX_DURATION_SECONDS = 2 * 60 * 60;
 export const TRANSCRIPTION_RECORDING_MAX_SIZE_BYTES = 512 * 1024 * 1024;
 export const TRANSCRIPTION_RECORDING_MAX_CHUNK_SIZE_BYTES = 8 * 1024 * 1024;
 export const TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS = 50;
+export const TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS = 5_000;
 export const TRANSCRIPTION_RECORDING_RETENTION_SECONDS = 24 * 60 * 60;

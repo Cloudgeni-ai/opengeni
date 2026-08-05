@@ -2641,6 +2641,7 @@ export type TranscriptionRecording = {
 export type TranscriptionRecordingResponse = {
   recording: TranscriptionRecording;
   segments: TranscriptionRecordingSegment[];
+  retryAfterMilliseconds?: number;
 };
 
 export type TranscriptionRecordingListResponse = {

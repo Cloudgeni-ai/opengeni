@@ -11,6 +11,17 @@ import type { ActivityServices } from "./types";
 export const FILE_UPLOAD_CLEANUP_GRACE_MS = 60 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_BATCH_SIZE = 100;
+const SAFE_CLEANUP_ERROR_CATEGORIES = new Set([
+  "aborted",
+  "conflict",
+  "invalid_response",
+  "network",
+  "not_found",
+  "permission_denied",
+  "provider",
+  "timeout",
+  "unavailable",
+]);
 
 function cleanupErrorAttributes(error: unknown): {
   errorCategory: string;
@@ -20,8 +31,10 @@ function cleanupErrorAttributes(error: unknown): {
   let errorStatus: number | undefined;
   if (error && typeof error === "object") {
     const rawCode = (error as { code?: unknown }).code;
-    if (typeof rawCode === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/.test(rawCode)) {
+    if (typeof rawCode === "string" && SAFE_CLEANUP_ERROR_CATEGORIES.has(rawCode)) {
       errorCategory = rawCode;
+    } else if (rawCode !== undefined) {
+      errorCategory = "unknown";
     }
     const rawStatus = Number(
       (error as { status?: unknown; statusCode?: unknown }).status ??

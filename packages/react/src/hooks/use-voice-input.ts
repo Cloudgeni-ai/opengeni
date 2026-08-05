@@ -1,4 +1,5 @@
 import type { ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
+import { TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS } from "@opengeni/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IndexedDbVoiceRecordingStore,
@@ -83,10 +84,42 @@ export const VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS = 5_000;
 export const VOICE_RECORDING_OWNER_STALE_MILLISECONDS = 30_000;
 export const VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS = 600;
 export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60;
+export const VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS = 2_000;
+export const VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS = 30_000;
 
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const createDefaultVoiceRecordingId = () => crypto.randomUUID();
 const currentDate = () => new Date();
+
+export function transcriptionRecoveryMutationDelayMilliseconds(
+  retryAfterMilliseconds: number | undefined,
+  attempt: number,
+  random: () => number = Math.random,
+): number {
+  const hint =
+    typeof retryAfterMilliseconds === "number" &&
+    Number.isInteger(retryAfterMilliseconds) &&
+    retryAfterMilliseconds > 0
+      ? retryAfterMilliseconds
+      : TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS;
+  const boundedHint = Math.max(
+    500,
+    Math.min(hint, VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS),
+  );
+  const exponent = Math.max(0, Math.min(Math.floor(attempt), 6));
+  const exponential = Math.min(
+    VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
+    boundedHint * 2 ** exponent,
+  );
+  const sampledJitter = random();
+  const jitterRatio = Number.isFinite(sampledJitter)
+    ? Math.max(0, Math.min(1, sampledJitter))
+    : 0;
+  return Math.min(
+    VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
+    Math.ceil(exponential * (1 + jitterRatio * 0.2)),
+  );
+}
 
 export function useVoiceInput({
   client,
@@ -1166,6 +1199,25 @@ async function transcribePersistedRecording(input: {
     finalizeInput,
   );
 
+  let recoveryMutationAttempt = 0;
+  let recoveryMutationDueAt = 0;
+  const scheduleRecoveryMutation = (response: typeof remote): void => {
+    if (
+      response.recording.state !== "segmenting" &&
+      response.recording.state !== "transcribing"
+    ) {
+      return;
+    }
+    recoveryMutationDueAt =
+      Date.now() +
+      transcriptionRecoveryMutationDelayMilliseconds(
+        response.retryAfterMilliseconds,
+        recoveryMutationAttempt,
+      );
+    recoveryMutationAttempt += 1;
+  };
+  scheduleRecoveryMutation(remote);
+
   for (;;) {
     if (input.signal.aborted) throw new DOMException("Aborted", "AbortError");
     switch (remote.recording.state) {
@@ -1181,6 +1233,7 @@ async function transcribePersistedRecording(input: {
           input.manifest.recordingId,
           { signal: input.signal },
         );
+        scheduleRecoveryMutation(remote);
         break;
       case "failed": {
         if (!remote.recording.retryable) {
@@ -1202,6 +1255,7 @@ async function transcribePersistedRecording(input: {
           throw { code: retried.recording.errorCode ?? "unknown" };
         }
         remote = retried;
+        scheduleRecoveryMutation(remote);
         break;
       }
       case "discarded":
@@ -1212,26 +1266,43 @@ async function transcribePersistedRecording(input: {
           input.manifest.recordingId,
           finalizeInput,
         );
+        scheduleRecoveryMutation(remote);
         break;
       case "segmenting":
-        await abortableDelay(500, input.signal);
-        // Re-enter the server-authoritative assembly claim so a stale segmenting
-        // owner can be reclaimed after a handler/process restart.
-        remote = await client.finalizeTranscriptionRecording(
-          input.workspaceId,
-          input.manifest.recordingId,
-          finalizeInput,
-        );
-        break;
       case "transcribing":
-        await abortableDelay(500, input.signal);
-        // Re-enter the server-authoritative segment claim so a stale attempt is
-        // reclaimed instead of leaving the client in GET-only polling forever.
-        remote = await client.processNextTranscriptionRecordingSegment(
-          input.workspaceId,
-          input.manifest.recordingId,
-          { signal: input.signal },
-        );
+        if (Date.now() < recoveryMutationDueAt) {
+          await abortableDelay(
+            Math.min(
+              recoveryMutationDueAt - Date.now(),
+              VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS,
+            ),
+            input.signal,
+          );
+          remote = await client.getTranscriptionRecording(
+            input.workspaceId,
+            input.manifest.recordingId,
+            { signal: input.signal },
+          );
+          break;
+        }
+        if (remote.recording.state === "segmenting") {
+          // Re-enter the server-authoritative assembly claim only when its
+          // durable recovery schedule is due.
+          remote = await client.finalizeTranscriptionRecording(
+            input.workspaceId,
+            input.manifest.recordingId,
+            finalizeInput,
+          );
+        } else {
+          // Re-enter the server-authoritative segment claim only when its
+          // durable recovery schedule is due.
+          remote = await client.processNextTranscriptionRecordingSegment(
+            input.workspaceId,
+            input.manifest.recordingId,
+            { signal: input.signal },
+          );
+        }
+        scheduleRecoveryMutation(remote);
         break;
     }
   }

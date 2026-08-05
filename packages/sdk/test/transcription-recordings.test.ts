@@ -186,5 +186,18 @@ describe("OpenGeniClient resumable transcription recordings", () => {
     await expect(client.listTranscriptionRecordings(WORKSPACE_ID)).rejects.toBeInstanceOf(
       OpenGeniApiError,
     );
+
+    const invalidRetryHintClient = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () =>
+        json({
+          recording: initialRecording(),
+          segments: [],
+          retryAfterMilliseconds: 60_001,
+        }),
+    });
+    await expect(
+      invalidRetryHintClient.getTranscriptionRecording(WORKSPACE_ID, RECORDING_ID),
+    ).rejects.toBeInstanceOf(OpenGeniApiError);
   });
 });

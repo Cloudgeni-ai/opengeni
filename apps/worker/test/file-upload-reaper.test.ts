@@ -88,4 +88,48 @@ describe("transcription recording object reaper", () => {
       limit: 10,
     });
   });
+
+  test("maps private provider codes to an allowlisted category", async () => {
+    const warn = mock(() => undefined);
+    const fileUpload = {
+      uploadId: "55555555-5555-4555-8555-555555555555",
+      accountId: claim.accountId,
+      workspaceId: claim.workspaceId,
+      fileId: "66666666-6666-4666-8666-666666666666",
+      objectKey: "private-upload-key",
+    };
+    const reaper = createFileUploadReaperActivities(services(warn), {
+      graceMs: 0,
+      claimTimeoutMs: 0,
+      batchSize: 10,
+      claimFileUploads: async () => [fileUpload],
+      completeFileUpload: async () => true,
+      claimTranscriptionObjects: async () => [],
+      completeTranscriptionObject: async () => true,
+      purgeTranscriptionRecordings: async () => 0,
+      deleteObject: async () => {
+        throw Object.assign(new Error("private provider details"), {
+          code: "transcription-recordings/account/workspace/secret",
+          status: 700,
+        });
+      },
+    });
+
+    expect(await reaper.reapExpiredFileUploads()).toEqual({
+      claimed: 1,
+      deleted: 0,
+      failed: 1,
+    });
+    const warningAttributes = warn.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(warningAttributes).toMatchObject({
+      workspaceId: fileUpload.workspaceId,
+      uploadId: fileUpload.uploadId,
+      fileId: fileUpload.fileId,
+      errorCategory: "unknown",
+    });
+    expect(warningAttributes).not.toHaveProperty("errorStatus");
+    expect(JSON.stringify(warningAttributes)).not.toContain(fileUpload.objectKey);
+    expect(JSON.stringify(warningAttributes)).not.toContain("private provider details");
+    expect(JSON.stringify(warningAttributes)).not.toContain("transcription-recordings/account");
+  });
 });
