@@ -1,174 +1,217 @@
-import { deserialize, serialize } from "node:v8";
+const JSON_STRING_PREFIX = "opengeni_lossless_json_string_v2_81f06e15:";
+const JSON_KEY_PREFIX = "opengeni_lossless_json_key_v2_7ca6071d:";
+const TEXT_PREFIX = "opengeni_lossless_text_v2_c4100a62:";
+const MAX_JSON_DEPTH = 512;
 
-const CANONICAL_MAGIC = Buffer.from("opengeni-canonical-v8-v1\0", "utf8");
-export const LOSSLESS_JSON_ENVELOPE_KEY =
+export const LEGACY_LOSSLESS_JSON_ENVELOPE_KEY =
   "$opengeniCanonicalV8_6d9b6f48_2a3e_4d8a_9e33_7611d9d08985";
-const LOSSLESS_TEXT_PREFIX = "opengeni-canonical-text-v1:";
-const MAX_NATIVE_JSON_SCAN_NODES = 16_384;
-const MAX_NATIVE_JSON_SCAN_DEPTH = 128;
-
-type LosslessJsonEnvelope = {
-  [LOSSLESS_JSON_ENVELOPE_KEY]: {
-    version: 1;
-    data: string;
-  };
-};
+export const LEGACY_LOSSLESS_TEXT_PREFIX = "opengeni-canonical-text-v1:";
+export const LOSSLESS_JSON_STRING_PREFIX = JSON_STRING_PREFIX;
+export const LOSSLESS_TEXT_PREFIX = TEXT_PREFIX;
 
 export class UnsupportedCanonicalValueError extends TypeError {
   override readonly name = "UnsupportedCanonicalValueError";
 }
 
-/** Encode one accepted JS value without JSON's string, graph, or numeric loss. */
-export function serializeCanonicalValue(value: unknown): Buffer {
-  assertCanonicalValueSupported(value);
-  const encoded = Buffer.from(serialize(value));
-  return Buffer.concat([CANONICAL_MAGIC, encoded]);
+type TransformResult = { value: unknown; changed: boolean };
+
+/**
+ * Preserve JSON structure and SQL-queryable control keys. Only strings that
+ * PostgreSQL cannot represent (or that collide with this unshipped v2 tag) are
+ * encoded. Non-JSON graph values are rejected instead of silently rewritten.
+ */
+export function toPostgresLosslessJson(value: unknown): unknown {
+  return encodeJsonValue(value, new Set<object>(), 0).value;
 }
 
-/** Restore a value encoded by serializeCanonicalValue. */
-export function deserializeCanonicalValue(value: Uint8Array): unknown {
-  const bytes = Buffer.from(value);
-  if (
-    bytes.byteLength <= CANONICAL_MAGIC.byteLength ||
-    !bytes.subarray(0, CANONICAL_MAGIC.byteLength).equals(CANONICAL_MAGIC)
-  ) {
-    throw new TypeError("Unsupported canonical value encoding");
-  }
-  return deserialize(bytes.subarray(CANONICAL_MAGIC.byteLength));
+/** Restore the exact accepted JSON value after a PostgreSQL read. */
+export function fromPostgresLosslessJson(value: unknown): unknown {
+  return decodeJsonValue(value, 0).value;
 }
 
 /**
- * Keep ordinary JSONB rows queryable. Values JSONB cannot represent exactly are
- * stored in a closed structured-clone envelope and decoded by the Drizzle type.
+ * Lossless text-column boundary for NUL, lone UTF-16, and v2-prefix text.
+ * Only the unrepresentable code unit is tagged, with SQL-visible spaces around
+ * the tag, so ordinary surrounding words retain their full-text-search shape.
  */
-export function toPostgresLosslessJson(value: unknown): unknown {
-  if (isNativePostgresJson(value)) return value;
-  return {
-    [LOSSLESS_JSON_ENVELOPE_KEY]: {
-      version: 1,
-      data: serializeCanonicalValue(value).toString("base64"),
-    },
-  } satisfies LosslessJsonEnvelope;
-}
-
-/** Decode only the exact closed envelope emitted by toPostgresLosslessJson. */
-export function fromPostgresLosslessJson(value: unknown): unknown {
-  if (!isLosslessJsonEnvelope(value)) return value;
-  return deserializeCanonicalValue(Buffer.from(value[LOSSLESS_JSON_ENVELOPE_KEY].data, "base64"));
-}
-
-/** Lossless text-column boundary for NUL, lone UTF-16, and reserved-prefix text. */
 export function toPostgresLosslessText(value: string): string {
-  if (isPostgresSafeString(value) && !value.startsWith(LOSSLESS_TEXT_PREFIX)) return value;
-  return `${LOSSLESS_TEXT_PREFIX}${serializeCanonicalValue(value).toString("base64")}`;
+  if (isPostgresSafeString(value) && !value.includes(TEXT_PREFIX)) return value;
+  let stored = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (value.startsWith(TEXT_PREFIX, index)) {
+      stored += encodeTextCodeUnit(code);
+      continue;
+    }
+    if (code === 0 || (code >= 0xdc00 && code <= 0xdfff)) {
+      stored += encodeTextCodeUnit(code);
+      continue;
+    }
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+      if (next < 0xdc00 || next > 0xdfff) {
+        stored += encodeTextCodeUnit(code);
+        continue;
+      }
+      stored += value.slice(index, index + 2);
+      index += 1;
+      continue;
+    }
+    stored += value[index];
+  }
+  return stored;
 }
 
+/**
+ * Decode only the v2 encoding introduced by this migration. The unshipped v1
+ * prefix is intentionally ordinary legacy content and is never interpreted.
+ */
 export function fromPostgresLosslessText(value: string): string {
-  if (!value.startsWith(LOSSLESS_TEXT_PREFIX)) return value;
-  const encoded = value.slice(LOSSLESS_TEXT_PREFIX.length);
-  const decoded = deserializeCanonicalValue(Buffer.from(encoded, "base64"));
-  if (typeof decoded !== "string") throw new TypeError("Canonical text encoding was not a string");
-  return decoded;
-}
-
-function isLosslessJsonEnvelope(value: unknown): value is LosslessJsonEnvelope {
-  if (!isPlainObject(value)) return false;
-  const keys = Object.keys(value);
-  if (keys.length !== 1 || keys[0] !== LOSSLESS_JSON_ENVELOPE_KEY) return false;
-  const envelope = value[LOSSLESS_JSON_ENVELOPE_KEY];
-  if (!isPlainObject(envelope)) return false;
-  const envelopeKeys = Object.keys(envelope).sort();
-  return (
-    envelopeKeys.length === 2 &&
-    envelopeKeys[0] === "data" &&
-    envelopeKeys[1] === "version" &&
-    envelope.version === 1 &&
-    typeof envelope.data === "string" &&
-    /^[A-Za-z0-9+/]*={0,2}$/.test(envelope.data)
+  return value.replaceAll(
+    new RegExp(` ${TEXT_PREFIX}([0-9a-f]{4}); `, "g"),
+    (_match, encoded: string) => String.fromCharCode(Number.parseInt(encoded, 16)),
   );
 }
 
-function isNativePostgresJson(root: unknown): boolean {
-  const seen = new WeakSet<object>();
-  const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
-  let visited = 0;
-
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    const value = current.value;
-    visited += 1;
-    if (visited > MAX_NATIVE_JSON_SCAN_NODES || current.depth > MAX_NATIVE_JSON_SCAN_DEPTH) {
-      return false;
-    }
-    if (value === null || typeof value === "boolean") continue;
-    if (typeof value === "string") {
-      if (!isPostgresSafeString(value)) return false;
-      continue;
-    }
-    if (typeof value === "number") {
-      if (!Number.isFinite(value) || Object.is(value, -0)) return false;
-      continue;
-    }
-    if (typeof value === "undefined" || typeof value === "bigint") return false;
-    if (typeof value === "function" || typeof value === "symbol") {
-      throw new UnsupportedCanonicalValueError(`Canonical JSON cannot contain ${typeof value}`);
-    }
-    if (typeof value !== "object") return false;
-    if (seen.has(value)) return false;
-    seen.add(value);
-
-    if (Array.isArray(value)) {
-      for (let index = 0; index < value.length; index += 1) {
-        if (!Object.prototype.hasOwnProperty.call(value, index)) return false;
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        if (!descriptor || !("value" in descriptor)) {
-          throw new UnsupportedCanonicalValueError("Canonical arrays cannot contain accessors");
-        }
-        stack.push({ value: descriptor.value, depth: current.depth + 1 });
-      }
-      continue;
-    }
-
-    if (!isPlainObject(value)) return false;
-    const symbolKeys = Object.getOwnPropertySymbols(value);
-    if (symbolKeys.length > 0) {
-      throw new UnsupportedCanonicalValueError("Canonical JSON cannot contain symbol keys");
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (Object.prototype.hasOwnProperty.call(descriptors, LOSSLESS_JSON_ENVELOPE_KEY)) return false;
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (!descriptor.enumerable) continue;
-      if (!("value" in descriptor)) {
-        throw new UnsupportedCanonicalValueError("Canonical objects cannot contain accessors");
-      }
-      if (!isPostgresSafeString(key)) return false;
-      stack.push({ value: descriptor.value, depth: current.depth + 1 });
-    }
-  }
-  return true;
+function encodeTextCodeUnit(code: number): string {
+  return ` ${TEXT_PREFIX}${code.toString(16).padStart(4, "0")}; `;
 }
 
-function assertCanonicalValueSupported(root: unknown): void {
-  const seen = new WeakSet<object>();
-  const stack: unknown[] = [root];
-  while (stack.length > 0) {
-    const value = stack.pop();
-    if (typeof value === "function" || typeof value === "symbol") {
-      throw new UnsupportedCanonicalValueError(`Canonical values cannot contain ${typeof value}`);
-    }
-    if (!value || typeof value !== "object" || seen.has(value)) continue;
-    seen.add(value);
-    if (Object.getOwnPropertySymbols(value).length > 0) {
-      throw new UnsupportedCanonicalValueError("Canonical values cannot contain symbol keys");
-    }
-    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-      if (!descriptor.enumerable) continue;
-      if (!("value" in descriptor)) {
-        throw new UnsupportedCanonicalValueError("Canonical values cannot contain accessors");
-      }
-      stack.push(descriptor.value);
-    }
+function encodeJsonValue(value: unknown, ancestors: Set<object>, depth: number): TransformResult {
+  if (depth > MAX_JSON_DEPTH) {
+    throw new UnsupportedCanonicalValueError(
+      `Canonical JSON exceeds the maximum supported depth of ${MAX_JSON_DEPTH}`,
+    );
   }
+  if (value === null || typeof value === "boolean") return { value, changed: false };
+  if (typeof value === "string") {
+    if (isPostgresSafeString(value) && !value.startsWith(JSON_STRING_PREFIX)) {
+      return { value, changed: false };
+    }
+    return { value: `${JSON_STRING_PREFIX}${encodeUtf16(value)}`, changed: true };
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new UnsupportedCanonicalValueError(
+        "Canonical JSON requires finite non-negative-zero numbers",
+      );
+    }
+    return { value, changed: false };
+  }
+  if (
+    typeof value === "undefined" ||
+    typeof value === "bigint" ||
+    typeof value === "function" ||
+    typeof value === "symbol"
+  ) {
+    throw new UnsupportedCanonicalValueError(`Canonical JSON cannot contain ${typeof value}`);
+  }
+  if (!isPlainObject(value) && !Array.isArray(value)) {
+    throw new UnsupportedCanonicalValueError("Canonical JSON requires arrays and plain objects");
+  }
+  if (ancestors.has(value)) {
+    throw new UnsupportedCanonicalValueError("Canonical JSON cannot contain cyclic references");
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new UnsupportedCanonicalValueError("Canonical JSON cannot contain symbol keys");
+  }
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const output: unknown[] = [];
+      let changed = false;
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+          throw new UnsupportedCanonicalValueError(
+            "Canonical JSON arrays cannot contain holes, accessors, or hidden elements",
+          );
+        }
+        const encoded = encodeJsonValue(descriptor.value, ancestors, depth + 1);
+        output.push(encoded.value);
+        changed ||= encoded.changed;
+      }
+      return changed ? { value: output, changed: true } : { value, changed: false };
+    }
+
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const output: Record<string, unknown> = {};
+    let changed = false;
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (!descriptor.enumerable || !("value" in descriptor)) {
+        throw new UnsupportedCanonicalValueError(
+          "Canonical JSON objects cannot contain accessors or hidden properties",
+        );
+      }
+      const encodedKey =
+        isPostgresSafeString(key) && !key.startsWith(JSON_KEY_PREFIX)
+          ? key
+          : `${JSON_KEY_PREFIX}${encodeUtf16(key)}`;
+      if (Object.prototype.hasOwnProperty.call(output, encodedKey)) {
+        throw new UnsupportedCanonicalValueError("Canonical JSON key encoding collided");
+      }
+      const encodedValue = encodeJsonValue(descriptor.value, ancestors, depth + 1);
+      output[encodedKey] = encodedValue.value;
+      changed ||= encodedKey !== key || encodedValue.changed;
+    }
+    return changed ? { value: output, changed: true } : { value, changed: false };
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function decodeJsonValue(value: unknown, depth: number): TransformResult {
+  if (depth > MAX_JSON_DEPTH) return { value, changed: false };
+  if (typeof value === "string") {
+    const decoded = decodeTaggedString(value, JSON_STRING_PREFIX);
+    return decoded === null ? { value, changed: false } : { value: decoded, changed: true };
+  }
+  if (!value || typeof value !== "object") return { value, changed: false };
+  if (Array.isArray(value)) {
+    const output: unknown[] = [];
+    let changed = false;
+    for (const entry of value) {
+      const decoded = decodeJsonValue(entry, depth + 1);
+      output.push(decoded.value);
+      changed ||= decoded.changed;
+    }
+    return changed ? { value: output, changed: true } : { value, changed: false };
+  }
+  if (!isPlainObject(value)) return { value, changed: false };
+
+  const output: Record<string, unknown> = {};
+  let changed = false;
+  for (const [key, entry] of Object.entries(value)) {
+    const decodedKey = decodeTaggedString(key, JSON_KEY_PREFIX) ?? key;
+    if (Object.prototype.hasOwnProperty.call(output, decodedKey)) {
+      return { value, changed: false };
+    }
+    const decodedValue = decodeJsonValue(entry, depth + 1);
+    output[decodedKey] = decodedValue.value;
+    changed ||= decodedKey !== key || decodedValue.changed;
+  }
+  return changed ? { value: output, changed: true } : { value, changed: false };
+}
+
+function encodeUtf16(value: string): string {
+  const bytes = Buffer.allocUnsafe(value.length * 2);
+  for (let index = 0; index < value.length; index += 1) {
+    bytes.writeUInt16LE(value.charCodeAt(index), index * 2);
+  }
+  return bytes.toString("base64");
+}
+
+function decodeTaggedString(value: string, prefix: string): string | null {
+  if (!value.startsWith(prefix)) return null;
+  const encoded = value.slice(prefix.length);
+  if (encoded.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.byteLength % 2 !== 0 || bytes.toString("base64") !== encoded) return null;
+  let decoded = "";
+  for (let offset = 0; offset < bytes.byteLength; offset += 2) {
+    decoded += String.fromCharCode(bytes.readUInt16LE(offset));
+  }
+  return decoded;
 }
 
 function isPostgresSafeString(value: string): boolean {

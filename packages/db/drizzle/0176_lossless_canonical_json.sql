@@ -42,8 +42,18 @@ ALTER TABLE session_realtime_entries
 COMMENT ON COLUMN session_events.payload IS
   'Canonical lossless event payload. Explicit read/transport projections apply their own byte bounds.';
 COMMENT ON COLUMN session_history_items.item IS
-  'Canonical lossless model/history item; unsafe PostgreSQL JSON strings and graphs use the application codec envelope.';
+  'Canonical model/history item. PostgreSQL-unsafe string code units use a reversible per-string encoding that leaves structural JSON keys queryable.';
 COMMENT ON COLUMN rig_changes.payload IS
   'Canonical lossless rig-change payload; public summaries are separate projections.';
 COMMENT ON COLUMN rig_changes.verification IS
   'Canonical lossless rig-verification result; public summaries are separate projections.';
+COMMENT ON COLUMN session_pending_tool_calls.call_item IS
+  'Canonical pending SDK call item; structural JSON keys remain SQL-queryable.';
+COMMENT ON COLUMN session_pending_tool_calls.result_item IS
+  'Canonical pending SDK result item; structural JSON keys remain SQL-queryable.';
+COMMENT ON COLUMN session_system_updates.payload IS
+  'Canonical machine-input payload; public monitoring projections are separate.';
+COMMENT ON COLUMN knowledge_memories.text IS
+  'Canonical exact memory text; PostgreSQL-unsafe code units use the application text codec.';
+COMMENT ON COLUMN audit_events.metadata IS
+  'Canonical audit metadata; value-bearing secret audit fields remain prohibited by their domain contract.';

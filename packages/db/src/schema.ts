@@ -11,6 +11,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -21,14 +22,8 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
-  customType,
 } from "drizzle-orm/pg-core";
-import {
-  fromPostgresLosslessJson,
-  fromPostgresLosslessText,
-  toPostgresLosslessJson,
-  toPostgresLosslessText,
-} from "./lossless-json";
+import { losslessJsonb, losslessText } from "./lossless-columns";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -36,30 +31,6 @@ const vector = customType<{ data: number[]; driverData: string }>({
   },
   toDriver(value) {
     return `[${value.join(",")}]`;
-  },
-});
-
-const losslessJsonb = customType<{ data: unknown; driverData: unknown }>({
-  dataType() {
-    return "jsonb";
-  },
-  toDriver(value) {
-    return toPostgresLosslessJson(value);
-  },
-  fromDriver(value) {
-    return fromPostgresLosslessJson(value);
-  },
-});
-
-const losslessText = customType<{ data: string; driverData: string }>({
-  dataType() {
-    return "text";
-  },
-  toDriver(value) {
-    return toPostgresLosslessText(value);
-  },
-  fromDriver(value) {
-    return fromPostgresLosslessText(value);
   },
 });
 
@@ -1401,7 +1372,7 @@ export const sessions = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("queued"),
-    initialMessage: text("initial_message").notNull(),
+    initialMessage: losslessText("initial_message").notNull(),
     // Invisible host context frozen with the winning session create. The
     // initial turn copies this value so an idempotent repair can never adopt a
     // retrying caller's different instructions.
@@ -2402,7 +2373,7 @@ export const knowledgeMemories = pgTable(
     status: text("status").notNull().default("proposed"),
     kind: text("kind").notNull().default("semantic"),
     scope: text("scope").notNull().default("workspace"),
-    text: text("text").notNull(),
+    text: losslessText("text").notNull(),
     sourceRefs: jsonb("source_refs").$type<unknown[]>().notNull().default([]),
     confidence: integer("confidence").notNull().default(50),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
@@ -2513,7 +2484,7 @@ export const sessionTurns = pgTable(
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
     position: bigint("position", { mode: "number" }).notNull(),
-    prompt: text("prompt").notNull(),
+    prompt: losslessText("prompt").notNull(),
     // Host context for this exact turn. System-level at runtime and deliberately
     // separate from the visible prompt/event payload.
     turnInstructions: text("turn_instructions"),
@@ -3172,8 +3143,8 @@ export const sessionSystemUpdates = pgTable(
     classification: text("classification").notNull().default("info"),
     sourceId: text("source_id").notNull(),
     dedupeKey: text("dedupe_key").notNull(),
-    summary: text("summary").notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    summary: losslessText("summary").notNull(),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Private immutable authority frozen when this machine input is accepted.
     // Public projections intentionally omit connection ids and owner subjects.
@@ -3257,8 +3228,8 @@ export const sessionSystemUpdateOutbox = pgTable(
     kind: text("kind").notNull(),
     classification: text("classification").notNull(),
     sourceId: text("source_id").notNull(),
-    summary: text("summary").notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    summary: losslessText("summary").notNull(),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Exact private authority copied from the causal parent turn in the source
     // terminal transaction. Delivery retries cannot replace this snapshot.
@@ -3573,8 +3544,8 @@ export const agentRunStates = pgTable("agent_run_states", {
     onDelete: "set null",
   }),
   stateVersion: integer("state_version").notNull(),
-  serializedRunState: text("serialized_run_state").notNull(),
-  pendingApprovals: jsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
+  serializedRunState: losslessText("serialized_run_state").notNull(),
+  pendingApprovals: losslessJsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
   // Exact provider rejection marks the latest current-turn receipt only when it
   // was part of the rejected request. The serialized receipt remains durable;
   // recovery builds a temporary view without unusable opaque artifacts.
@@ -3750,9 +3721,9 @@ export const sessionPendingToolCalls = pgTable(
     attemptId: uuid("attempt_id").notNull(),
     callId: text("call_id").notNull(),
     callType: text("call_type").notNull(),
-    callItem: jsonb("call_item").$type<Record<string, unknown>>().notNull(),
+    callItem: losslessJsonb("call_item").$type<Record<string, unknown>>().notNull(),
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
-    resultItem: jsonb("result_item").$type<Record<string, unknown>>(),
+    resultItem: losslessJsonb("result_item").$type<Record<string, unknown>>(),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3791,7 +3762,7 @@ export const sandboxSessionEnvelopes = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    envelope: jsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelope: losslessJsonb("envelope").$type<Record<string, unknown>>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -5560,7 +5531,7 @@ export const hostExportDeadLetters = pgTable(
     exportCursor: bigint("export_cursor", { mode: "bigint" }).notNull(),
     sourceId: uuid("source_id").notNull(),
     reason: text("reason").notNull(),
-    envelope: jsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelope: losslessJsonb("envelope").$type<Record<string, unknown>>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -5661,7 +5632,7 @@ export const auditEvents = pgTable(
     action: text("action").notNull(),
     targetType: text("target_type"),
     targetId: text("target_id"),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    metadata: losslessJsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -1873,10 +1873,13 @@ export function maskKnownPublicEvidenceValues(
   value: string,
   knownSecretValues: readonly string[],
 ): string {
-  const secrets = [...new Set(knownSecretValues.filter((secret) => secret.length > 0))].sort(
+  const secrets = [...new Set(knownSecretValues.filter((candidate) => candidate.length > 0))].sort(
     (left, right) => right.length - left.length,
   );
-  return secrets.reduce((result, secret) => result.replaceAll(secret, "[masked]"), value);
+  return secrets.reduce(
+    (result, knownSecretValue) => result.replaceAll(knownSecretValue, "[masked]"),
+    value,
+  );
 }
 
 export function captureApiRegionalProbeEnvironment(
