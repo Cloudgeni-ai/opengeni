@@ -1,5 +1,13 @@
 # @opengeni/db
 
+## 0.28.1
+
+### Patch Changes
+
+- 55f6ad0: Use one terminal-response ordinal for provider context binding, and clear the
+  durable input-token signal when the latest provider response supplies no usable
+  usage instead of retaining an older response's count.
+
 ## 0.28.0
 
 ### Minor Changes
