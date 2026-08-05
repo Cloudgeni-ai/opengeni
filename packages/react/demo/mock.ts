@@ -166,6 +166,8 @@ export class MockOpenGeniClient implements SessionClientLike {
   private pausedSessions = new Set<string>();
   private drafts = new Map<string, ComposerDraft>();
   private scripted = false;
+  private managerScript: Promise<void> | null = null;
+  private responseQueues = new Map<string, Promise<void>>();
 
   bus(sessionId: string): SessionBus {
     let bus = this.buses.get(sessionId);
@@ -369,8 +371,22 @@ export class MockOpenGeniClient implements SessionClientLike {
   ): Promise<SessionEvent> {
     const bus = this.bus(sessionId);
     const text = typeof message === "string" ? message : message.text;
+    // The managed API accepts the message and clears the matching durable
+    // composer draft atomically. Mirror that ordering before publishing the
+    // user.message invalidation so a reconciliation read cannot resurrect the
+    // just-submitted text and leave the Send action enabled.
+    const currentDraft = await this.getComposerDraft(_workspaceId, sessionId);
+    this.drafts.set(sessionId, {
+      ...currentDraft,
+      revision: currentDraft.revision + 1,
+      text: "",
+      resources: [],
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
     const event = bus.append("user.message", { text });
-    void this.respond(bus, text);
+    this.queueResponse(bus, text);
     return event;
   }
 
@@ -398,7 +414,16 @@ export class MockOpenGeniClient implements SessionClientLike {
     const bus = this.bus(sessionId);
     if (sessionId === MANAGER_SESSION_ID && !this.scripted) {
       this.scripted = true;
-      void runOpsChannelScript(bus);
+      const script = runOpsChannelScript(bus);
+      this.managerScript = script;
+      void script.then(
+        () => {
+          if (this.managerScript === script) this.managerScript = null;
+        },
+        () => {
+          if (this.managerScript === script) this.managerScript = null;
+        },
+      );
     }
     options.onStateChange?.("live");
     return bus.stream(options.after ?? 0, options.signal);
@@ -1621,6 +1646,31 @@ export class MockOpenGeniClient implements SessionClientLike {
       updatedAt: now,
       ...overrides,
     };
+  }
+
+  /** Keep the scripted narrative and interactive turns ordered per session. */
+  private queueResponse(bus: SessionBus, text: string): void {
+    const previous = this.responseQueues.get(bus.sessionId) ?? Promise.resolve();
+    const script = bus.sessionId === MANAGER_SESSION_ID ? this.managerScript : null;
+    const queued = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await script?.catch(() => undefined);
+        await this.respond(bus, text);
+      });
+    this.responseQueues.set(bus.sessionId, queued);
+    void queued.then(
+      () => {
+        if (this.responseQueues.get(bus.sessionId) === queued) {
+          this.responseQueues.delete(bus.sessionId);
+        }
+      },
+      () => {
+        if (this.responseQueues.get(bus.sessionId) === queued) {
+          this.responseQueues.delete(bus.sessionId);
+        }
+      },
+    );
   }
 
   /** Canned manager acknowledgment for anything typed into the composer. */
