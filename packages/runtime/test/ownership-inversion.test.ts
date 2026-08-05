@@ -475,6 +475,28 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     ).toBe(true);
   });
 
+  test("unix_local's exact missing-workspace proof is NotFound for both backend ID shapes", () => {
+    const missingWorkspace = new Error(
+      "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+    );
+    expect(isProviderSandboxNotFoundError("local", missingWorkspace)).toBe(true);
+    expect(isProviderSandboxNotFoundError("unix_local", missingWorkspace)).toBe(true);
+    expect(
+      isProviderSandboxNotFoundError(
+        "unix_local",
+        new Error("UnixLocal sandbox workspace is temporarily unavailable."),
+      ),
+    ).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError(
+        "docker",
+        new Error(
+          "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+        ),
+      ),
+    ).toBe(false);
+  });
+
   test("transient typed evidence dominates nested NotFound prose", () => {
     expect(
       isProviderSandboxNotFoundError("modal", {
