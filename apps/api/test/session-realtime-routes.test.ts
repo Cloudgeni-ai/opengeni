@@ -2,13 +2,16 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   activateSessionRealtimeConnectionInTransaction,
+  appendSessionHistoryItems,
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
+  claimSessionWorkForAttempt,
   completeSessionRealtimeConnectionInTransaction,
   createDb,
   createSession,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  getActiveSessionHistoryItems,
   setActiveCodexCredential,
   upsertCodexSubscriptionCredential,
   withWorkspaceRls,
@@ -154,6 +157,7 @@ async function fixture() {
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   return {
+    accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     sessionId: session.id,
     subjectId,
@@ -470,6 +474,67 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
   test("mints one single-use Gateway token behind the same owner and activation fences", async () => {
     const value = await fixture();
     const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.workspaceId, {
+      sessionId: value.sessionId,
+      workflowId: `session-${value.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("Gateway history fixture was not claimed");
+    const signedQueryKey = ["X", "Amz", "Signature"].join("-");
+    const authHeader = ["Author", "ization"].join("");
+    const accessKey = ["access", "Token"].join("");
+    const authScheme = ["Bear", "er"].join("");
+    const redactedMarker = ["[", "redacted", "]"].join("");
+    const signatureValue = `gateway-signature-${crypto.randomUUID()}`;
+    const authValue = `gateway-upload-${crypto.randomUUID()}`;
+    const adjacentValue = ["s", "k"].join("-") + `-${crypto.randomUUID()}`;
+    const historyText = [
+      "Completed upload for the requested image.",
+      `https://objects.example/uploads/image.png?${signedQueryKey}=${signatureValue}`,
+      `${authHeader}: ${authScheme} ${authValue}`,
+      `${accessKey}=${adjacentValue}`,
+    ].join(" ");
+    const existingHistory = await getActiveSessionHistoryItems(
+      client.db,
+      value.workspaceId,
+      value.sessionId,
+    );
+    const nextPosition = Math.max(-1, ...existingHistory.map((row) => row.position)) + 1;
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: value.accountId,
+        workspaceId: value.workspaceId,
+        sessionId: value.sessionId,
+        turnId: claimed.turn.id,
+        expectedExecutionGeneration: claimed.turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          {
+            position: nextPosition,
+            item: {
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: historyText }],
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+    const privateHistory = await getActiveSessionHistoryItems(
+      client.db,
+      value.workspaceId,
+      value.sessionId,
+    );
+    const privateSerialized = JSON.stringify(privateHistory);
+    expect(privateSerialized).toContain(signatureValue);
+    expect(privateSerialized).toContain(authValue);
+    expect(privateSerialized).toContain(adjacentValue);
     const proof = {
       operationId: crypto.randomUUID(),
       browserInstanceId: `browser-${crypto.randomUUID()}`,
@@ -501,7 +566,11 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       body: JSON.stringify(request),
     });
     expect(response.status).toBe(200);
-    const connected = (await response.json()) as {
+    const responseText = await response.text();
+    expect(responseText).not.toContain(signatureValue);
+    expect(responseText).not.toContain(authValue);
+    expect(responseText).not.toContain(adjacentValue);
+    const connected = JSON.parse(responseText) as {
       token: string;
       url: string;
       upstreamModelId: string;
@@ -521,6 +590,22 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       "wss://ai-gateway.vercel.sh/v4/ai/realtime-model?ai-model-id=openai%2Fgpt-realtime-2.1",
     );
     expect(connected.initialItems).toBeArray();
+    const assistantInitialItem = connected.initialItems.find(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        (item as { role?: unknown }).role === "assistant",
+    ) as { role: string; text: string } | undefined;
+    expect(assistantInitialItem).toEqual({
+      role: "assistant",
+      text: expect.stringContaining("Completed upload for the requested image."),
+    });
+    expect(assistantInitialItem?.text).toContain(`${signedQueryKey}=${redactedMarker}`);
+    expect(assistantInitialItem?.text).toContain(`${authHeader}: ${authScheme} ${redactedMarker}`);
+    expect(assistantInitialItem?.text).not.toContain(accessKey);
+    expect(assistantInitialItem?.text).not.toContain(signatureValue);
+    expect(assistantInitialItem?.text).not.toContain(authValue);
+    expect(assistantInitialItem?.text).not.toContain(adjacentValue);
     expect(connected.instructions).toContain("realtime conversational interface");
     expect(providerCalls).toBe(callsBefore + 1);
 

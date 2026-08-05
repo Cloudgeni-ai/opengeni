@@ -4,7 +4,11 @@ import {
   resolveAiGatewayRealtimeModel,
   type Settings,
 } from "@opengeni/config";
-import type { GatewayRealtimeInitialItem, SessionRealtimeModel } from "@opengeni/contracts";
+import {
+  createSecretRedactor,
+  type GatewayRealtimeInitialItem,
+  type SessionRealtimeModel,
+} from "@opengeni/contracts";
 import {
   getActiveSessionHistoryItems,
   getSessionRealtimeContinuityEntries,
@@ -14,6 +18,8 @@ import {
 
 import { openGeniRealtimeInstructions } from "./codex-realtime";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
+
+const redactGatewayRealtimePublicData = createSecretRedactor([]);
 
 export class GatewayRealtimeBrokerError extends Error {
   constructor(
@@ -38,6 +44,16 @@ export type GatewayRealtimeConnectionSecret = {
   initialItems: GatewayRealtimeInitialItem[];
   instructions: string;
 };
+
+/**
+ * Gateway startup items cross into browser-owned JSON, so they use the strict
+ * public profile after private/server-side history has been projected.
+ */
+export function redactGatewayRealtimeInitialItems(
+  initialItems: readonly GatewayRealtimeInitialItem[],
+): GatewayRealtimeInitialItem[] {
+  return redactGatewayRealtimePublicData(initialItems) as GatewayRealtimeInitialItem[];
+}
 
 export async function createGatewayRealtimeConnectionSecret(input: {
   db: Database;
@@ -79,7 +95,9 @@ export async function createGatewayRealtimeConnectionSecret(input: {
   return {
     ...minted,
     upstreamModelId: resolved.upstreamModelId,
-    initialItems: projectSessionRealtimeInitialItems(history, continuity),
+    initialItems: redactGatewayRealtimeInitialItems(
+      projectSessionRealtimeInitialItems(history, continuity),
+    ),
     instructions: openGeniRealtimeInstructions(),
   };
 }

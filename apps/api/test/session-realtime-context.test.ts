@@ -3,6 +3,7 @@ import {
   CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT,
   CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS,
 } from "@opengeni/codex";
+import { redactGatewayRealtimeInitialItems } from "../src/gateway-realtime";
 import { projectSessionRealtimeInitialItems } from "../src/session-realtime-context";
 
 describe("ordinary-session realtime context projection", () => {
@@ -92,6 +93,53 @@ describe("ordinary-session realtime context projection", () => {
     expect(projected[1]?.text).toContain("Remain completely silent when this session starts.");
     expect(projected[1]?.text).toContain("USER: What happened?");
     expect(projected[1]?.text).toContain("ASSISTANT: I delegated the check.");
+  });
+
+  test("keeps private capability text for server history but strictly redacts Gateway startup JSON", () => {
+    const signedQueryKey = ["X", "Amz", "Signature"].join("-");
+    const authHeader = ["Author", "ization"].join("");
+    const accessKey = ["access", "Token"].join("");
+    const authScheme = ["Bear", "er"].join("");
+    const redactedMarker = ["[", "redacted", "]"].join("");
+    const signatureValue = `gateway-signature-${crypto.randomUUID()}`;
+    const authValue = `gateway-upload-${crypto.randomUUID()}`;
+    const adjacentValue = ["s", "k"].join("-") + `-${crypto.randomUUID()}`;
+    const privateText = [
+      "Completed upload for the requested image.",
+      `https://objects.example/uploads/image.png?${signedQueryKey}=${signatureValue}`,
+      `${authHeader}: ${authScheme} ${authValue}`,
+      `${accessKey}=${adjacentValue}`,
+    ].join(" ");
+
+    const privateItems = projectSessionRealtimeInitialItems([
+      {
+        position: 0,
+        item: { type: "message", role: "user", content: "Keep the normal request." },
+      },
+      {
+        position: 1,
+        item: { type: "message", role: "assistant", content: privateText },
+      },
+    ]);
+    expect(privateItems).toEqual([
+      { role: "user", text: "Keep the normal request." },
+      { role: "assistant", text: privateText },
+    ]);
+
+    const browserItems = redactGatewayRealtimeInitialItems(privateItems);
+    expect(browserItems).toEqual([
+      { role: "user", text: "Keep the normal request." },
+      {
+        role: "assistant",
+        text: expect.stringContaining("Completed upload for the requested image."),
+      },
+    ]);
+    expect(browserItems[1]?.text).toContain(`${signedQueryKey}=${redactedMarker}`);
+    expect(browserItems[1]?.text).toContain(`${authHeader}: ${authScheme} ${redactedMarker}`);
+    expect(browserItems[1]?.text).not.toContain(accessKey);
+    expect(browserItems[1]?.text).not.toContain(signatureValue);
+    expect(browserItems[1]?.text).not.toContain(authValue);
+    expect(browserItems[1]?.text).not.toContain(adjacentValue);
   });
 
   test("keeps the newest complete tail under exact upstream limits", () => {
