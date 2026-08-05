@@ -3022,4 +3022,97 @@ describe("OpenGeni Slack bot connection", () => {
     expect(successCount?.count).toBe(1);
     expect(JSON.stringify(retried)).not.toContain("audit rollback fixture");
   });
+
+  test("persists authorized Slack knowledge destinations and exposes the saved destination UI", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const connected = await connectBot(workspace, fakeSlack().fetch);
+    const connectionId = connected.body.connection.id;
+    const endpoint = `/v1/workspaces/${workspace.workspaceId}/connections/${connectionId}`;
+
+    const personal = await app(fakeSlack().fetch).request(endpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        metadata: {
+          documentDestination: { authorityKind: "personal", collectionId: null },
+        },
+      }),
+    });
+    expect(personal.status).toBe(200);
+    const personalBody = (await personal.json()) as {
+      connection: { metadata: Record<string, unknown> };
+    };
+    expect(personalBody.connection.metadata.documentDestination).toEqual({
+      authorityKind: "personal",
+      authorityAccountId: workspace.accountId,
+      authorityWorkspaceId: workspace.workspaceId,
+      authoritySubjectId: "subject-a",
+      collectionId: null,
+    });
+
+    const deniedWorkspace = await app(fakeSlack().fetch).request(endpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        metadata: {
+          documentDestination: { authorityKind: "workspace", collectionId: null },
+        },
+      }),
+    });
+    expect(deniedWorkspace.status).toBe(403);
+
+    await shared!.admin`
+      update workspace_memberships
+      set permissions = ${shared!.admin.json([
+        "connections:read",
+        "connections:write",
+        "workspace:admin",
+      ])}
+      where workspace_id = ${workspace.workspaceId}
+        and subject_id = 'subject-a'`;
+    const allowedWorkspace = await app(fakeSlack().fetch).request(endpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", [
+          "connections:write",
+          "workspace:admin",
+        ]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        metadata: {
+          documentDestination: { authorityKind: "workspace", collectionId: null },
+        },
+      }),
+    });
+    expect(allowedWorkspace.status).toBe(200);
+    const persisted = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connectionId,
+      null,
+    );
+    expect(persisted?.metadata.documentDestination).toEqual({
+      authorityKind: "workspace",
+      authorityAccountId: workspace.accountId,
+      authorityWorkspaceId: workspace.workspaceId,
+      authoritySubjectId: null,
+      collectionId: null,
+    });
+
+    const capabilitiesSource = await Bun.file(
+      new URL("../../web/src/routes/capabilities.tsx", import.meta.url),
+    ).text();
+    expect(capabilitiesSource).toContain("Slack knowledge destination");
+    expect(capabilitiesSource).toContain("slackBotDestinationLabel");
+    expect(capabilitiesSource).toContain("collectionId: null");
+    expect(capabilitiesSource).toContain("No user-created collection is required");
+  });
 });
