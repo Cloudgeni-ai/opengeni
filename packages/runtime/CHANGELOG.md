@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.18.18
+
+### Patch Changes
+
+- 41f7ae3: Treat the SDK's exact UnixLocal missing-workspace proof as provider loss so stale local leases can recover or drain cleanly, and expose ordinary sandbox-operation availability separately from live attach/swap readiness.
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
 ## 0.18.17
 
 ### Patch Changes
