@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.27.12
+
+### Patch Changes
+
+- cbf165a: Reconcile settled attempt quiescence while session control remains paused so ancestor sessions do not stay stuck in a stopping transition.
+
 ## 0.27.11
 
 ### Patch Changes
