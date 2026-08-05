@@ -95,7 +95,7 @@ export function ComposerMobilePlus(props: {
           size="icon-xs"
           disabled={props.disabled}
           aria-label="More composer actions"
-          className="size-8 shrink-0 rounded-full border border-border text-fg-muted hover:text-fg sm:hidden pointer-coarse:size-9"
+          className="size-11 shrink-0 rounded-full border border-border text-fg-muted hover:text-fg sm:hidden"
         >
           <PlusIcon className="size-4" />
         </Button>

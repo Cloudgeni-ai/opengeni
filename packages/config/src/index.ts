@@ -249,7 +249,7 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.8"),
+    .default("0.1.9"),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
@@ -370,6 +370,35 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(25 * 1024 * 1024),
+  // Durable long-form capture uploads bounded chunks to object storage, then
+  // normalizes them into provider-safe segments. It is advertised only when
+  // object storage and the configured ffmpeg executable are both available.
+  voiceInputResumableEnabled: EnvBoolean.default(true),
+  voiceInputResumableMaxDurationSeconds: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(8 * 60 * 60)
+    .default(2 * 60 * 60),
+  voiceInputResumableMaxSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(512 * 1024 * 1024)
+    .default(512 * 1024 * 1024),
+  voiceInputResumableMaxChunkSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(25 * 1024 * 1024)
+    .default(8 * 1024 * 1024),
+  voiceInputResumableRetentionSeconds: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(7 * 24 * 60 * 60)
+    .default(24 * 60 * 60),
+  voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Codex subscription STT is preferred by default when subscription routing is
   // enabled; operators can put openai/azure-openai first explicitly.
@@ -415,9 +444,11 @@ const SettingsSchema = z.object({
   // flag non-mandatory selected MCP tools `defer_loading:true` (dropping their
   // schemas from model context) and add one client-executed tool_search tool
   // that BM25-discloses bounded matches. The mandatory OpenGeni tools stay
-  // eager. Default OFF — a codex turn is byte-for-byte unchanged until enabled.
+  // eager. Default ON so selected connector catalogues do not consume every
+  // Codex turn's context. Operators may explicitly disable it for emergency
+  // compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
-  codexToolSearchEnabled: EnvBoolean.default(false),
+  codexToolSearchEnabled: EnvBoolean.default(true),
   // credential allocator atomic, workspace-local credential allocation. Default OFF is a
   // deliberate rolling-deploy fence: migrate + roll every worker first, then
   // enable. Turning it off restores the legacy sticky selector without a schema
@@ -1778,6 +1809,18 @@ export function getSettings(): Settings {
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
+    voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
+    voiceInputResumableMaxDurationSeconds: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_DURATION_SECONDS",
+    ),
+    voiceInputResumableMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_RESUMABLE_MAX_SIZE_BYTES"),
+    voiceInputResumableMaxChunkSizeBytes: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_CHUNK_SIZE_BYTES",
+    ),
+    voiceInputResumableRetentionSeconds: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
+    ),
+    voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),

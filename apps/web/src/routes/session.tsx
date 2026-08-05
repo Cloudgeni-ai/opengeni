@@ -198,19 +198,29 @@ export function SessionRoute({
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
-  const { setSession: setContextSession, setConnectionState: setContextConnectionState } = context;
+  const {
+    setSession: setContextSession,
+    setConnectionState: setContextConnectionState,
+    sessionEventFeedStore,
+  } = context;
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
+  useEffect(() => {
+    sessionEventFeedStore.set({ sessionId, events });
+  }, [events, sessionId, sessionEventFeedStore]);
   useEffect(
     () => () => {
       setContextSession(null);
       setContextConnectionState("idle");
+      if (sessionEventFeedStore.getSnapshot()?.sessionId === sessionId) {
+        sessionEventFeedStore.set(null);
+      }
     },
-    [setContextConnectionState, setContextSession],
+    [sessionId, sessionEventFeedStore, setContextConnectionState, setContextSession],
   );
   useEffect(() => {
     if (streamError && !isApiErrorStatus(streamError, 404)) {
@@ -504,7 +514,7 @@ function SessionDock(props: {
           size="icon-sm"
           aria-label="Open navigation"
           onClick={props.onOpenNavigation}
-          className="pointer-coarse:size-10"
+          className="size-11"
         >
           <MenuIcon className="size-4" />
         </Button>

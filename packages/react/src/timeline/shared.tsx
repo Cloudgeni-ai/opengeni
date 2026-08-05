@@ -154,9 +154,9 @@ export function ActivityDisclosure({
   const rowClass = cn(
     "group/disclosure flex w-full min-w-0 items-center gap-2 rounded-og-sm px-1.5 py-1.5 text-left text-og-base",
     "text-og-fg-muted transition-colors duration-150",
-    // A tool row is a touch target on coarse pointers: grow its padding so the
-    // hit area clears the 40px minimum without loosening the dense desktop rail.
-    "pointer-coarse:py-2.5",
+    // A tool row is a touch target on coarse pointers: grow its hit area to the
+    // 44px mobile minimum without loosening the dense desktop rail.
+    "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
   );
   // The chevron rotates to point down when open; it tracks `data-state` on this
   // same row (the Trigger), so the affordance never freezes.

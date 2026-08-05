@@ -1004,8 +1004,67 @@ The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, optional Ter
 
 The stack wrapper may install upstream charts as a convenience layer. That
 keeps lifecycle commands visible and reversible without making those charts
-OpenGeni chart dependencies. For managed cloud profiles, the generated stack
-plan includes:
+OpenGeni chart dependencies.
+
+### Shared Prometheus and Grafana distribution
+
+`deploy/observability` is the optional public observability wrapper. It pins
+`kube-prometheus-stack` exactly, provisions persistent Prometheus,
+Alertmanager, and Grafana defaults, and renders the canonical dashboard
+ConfigMaps directly from `deploy/observability/dashboards`. The dashboard JSON
+therefore has one source for self-hosted and managed installations; environment
+overlays add ingress, credentials, alert receivers, remote-write targets, and
+environment-only rules without copying the canonical boards.
+
+Print the ordered install plan with:
+
+```bash
+bun run deployment:observability -- --profile single-node
+```
+
+The wrapper plan installs only the monitoring platform; it never reconciles
+OpenGeni workloads and never runs application hooks. After it is ready, include
+`deploy/observability/opengeni.values.example.yaml` in the next ordinary
+application release using that release's exact chart version and complete
+authoritative values. The application chart deliberately renders
+`ServiceMonitor` and `PrometheusRule` only after the Prometheus Operator CRDs
+exist. Both the wrapper's Prometheus selectors and the application integration
+resources use
+`opengeni.ai/monitoring=enabled`; the same label is required on the application
+and observability namespaces, limiting cross-namespace discovery. Grafana reads
+dashboard ConfigMaps only in the wrapper namespace through
+`grafana_dashboard=1` and the `grafana_folder` annotation; its dashboard sidecar
+does not watch Secrets or every namespace.
+
+The default profile is a persistent, non-HA single-node stack. The committed
+production example increases retention, storage, and resources and requires an
+existing Grafana administrator Secret, but it is not a substitute for an
+environment-specific storage, backup, HA, ingress, and alert-routing review.
+Clusters that already run a compatible monitoring platform can set
+`kube-prometheus-stack.enabled=false` and consume only the canonical dashboard
+ConfigMaps and application integration labels.
+
+After installation, run the live receipt:
+
+```bash
+bun run deployment:observability-verify -- \
+  --namespace observability \
+  --release opengeni-observability \
+  --app-namespace opengeni
+```
+
+The receipt binds dashboard bytes to their hashes and source revision, checks
+the application monitoring resources, confirms required rules through the live
+Prometheus API, requires healthy discovered targets for every OpenGeni
+`ServiceMonitor`, and verifies Grafana health plus the dashboard provisioner
+files. Existing Kubernetes monitoring platforms can pass explicit Prometheus
+and Grafana URLs plus the Grafana pod selector, sidecar container, namespace,
+and dashboard directory. `--skip-live-apis` is only an object-level diagnostic
+and leaves an explicit consumption gap. Full values, security, capacity,
+existing-platform, upgrade, and uninstall guidance lives in
+`deploy/observability/README.md`.
+
+For managed cloud profiles, the generated stack plan includes:
 
 - upstream NATS from `https://nats-io.github.io/k8s/helm/charts`, release
   `opengeni-nats` in namespace `opengeni-platform`;
@@ -1071,7 +1130,7 @@ Use this boundary when building a production cluster:
 | Postgres | Managed cloud Postgres, existing database, or CloudNativePG from `https://cloudnative-pg.github.io/charts` | `postgres.enabled=false` plus `OPENGENI_DATABASE_URL` |
 | Secrets | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery | `externalSecret.enabled=true` or `secret.existingSecret` |
 | TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
-| Observability | OpenTelemetry Collector/Operator, Prometheus Operator CRDs, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule` |
+| Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels |
 
 The runtime secret must provide values such as:
 
@@ -1237,7 +1296,7 @@ for other OS/arch assets and the self-update channel. Route these paths (and an
 optional `get.<domain>` host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.8`).
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.9`).
 `OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
 back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move

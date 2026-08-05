@@ -9419,6 +9419,7 @@ export async function listScheduledTasks(
   db: Database,
   workspaceId: string,
   limit = 100,
+  offset = 0,
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -9426,7 +9427,8 @@ export async function listScheduledTasks(
       .from(schema.scheduledTasks)
       .where(eq(schema.scheduledTasks.workspaceId, workspaceId))
       .orderBy(desc(schema.scheduledTasks.createdAt))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
     return rows.map(mapScheduledTask);
   });
 }
@@ -17432,6 +17434,18 @@ async function lockSessionCreateIdempotencyKey(
   );
 }
 
+async function lockAgentSessionCreate(tx: Database, input: SessionCreateInput): Promise<void> {
+  const actorSessionId = input.createdByActor?.sessionId;
+  if (!actorSessionId) return;
+  // Agent-originated child creation first reads the parent under FOR SHARE,
+  // then verifies the live attempt under FOR UPDATE. Serialize creates from
+  // the same parent session so concurrent tool calls cannot deadlock while
+  // upgrading that row lock. Unrelated sessions retain full concurrency.
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`agent-session-create:${input.workspaceId}:${actorSessionId}`}, 0))`,
+  );
+}
+
 async function existingSpawnDenialForKey(
   tx: Database,
   workspaceId: string,
@@ -17536,6 +17550,8 @@ async function createSessionInTransaction(
       };
     }
   }
+
+  await lockAgentSessionCreate(tx, input);
 
   const decision = await resolveSessionDepthDecision(tx, input, id, workspace, deploymentPolicy);
   if (decision.denied) {
@@ -21953,7 +21969,6 @@ export async function applyContextCompaction(
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
     summaryItem: Record<string, unknown>;
-    replacementInputTokens: number;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
@@ -22042,7 +22057,10 @@ export async function applyContextCompaction(
         await tx
           .update(schema.sessions)
           .set({
-            lastInputTokens: Math.max(0, Math.floor(input.replacementInputTokens)),
+            // The active model input changed without an ordinary provider call.
+            // Keep this field provider-only and let the first successful
+            // post-compaction response install the next authoritative count.
+            lastInputTokens: null,
             ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
             ...(insertedEvents.length > 0
               ? {
@@ -22265,8 +22283,9 @@ export async function nextSessionHistoryPosition(
 }
 
 /**
- * Record the actual input-token count of the most recent turn's final model
- * call, for the next turn's pre-read compaction trigger.
+ * Replace the input-token count for the most recent authoritative terminal
+ * response. Null means that response supplied no usable final-call count, so
+ * the next turn must not reuse an older response's value for compaction.
  */
 export async function setSessionLastInputTokensForTurnAttempt(
   db: Database,
@@ -22276,7 +22295,7 @@ export async function setSessionLastInputTokensForTurnAttempt(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
-    lastInputTokens: number;
+    lastInputTokens: number | null;
   },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
@@ -22334,8 +22353,8 @@ export class SessionContextBusyError extends Error {
  *      reserved for an approval that paused mid-turn, and the API forbids a
  *      clear while such an approval or active turn exists.
  *
- * Also resets last_input_tokens to 0 so the next turn's compaction trigger
- * starts fresh against the now-short context.
+ * Also clears last_input_tokens because no provider has observed the new
+ * context yet.
  *
  * Idempotent: a re-run supersedes the (now sole, already-marker) active row,
  * inserts another marker at the next position. The post-condition (one active
@@ -22427,7 +22446,7 @@ export async function clearSessionContext(
 
         await tx
           .update(schema.sessions)
-          .set({ lastInputTokens: 0, updatedAt: new Date() })
+          .set({ lastInputTokens: null, updatedAt: new Date() })
           .where(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
@@ -29153,67 +29172,87 @@ async function verifyWorkspaceMutationSettlementForAuthority(
   },
 ): Promise<void> {
   const operation = normalizeWorkspaceMutationOperation(input.operation);
-  const settlement: SandboxWorkspaceMutationSettlementResult = await withRlsContext(
-    db,
+  const settleOnce = async (): Promise<SandboxWorkspaceMutationSettlementResult> =>
+    await withRlsContext(
+      db,
+      {
+        accountId: authorityInput.accountId,
+        workspaceId: authorityInput.workspaceId,
+      },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          // Admission and settlement must take the same canonical ownership
+          // prefix before either touches the lease. The former order
+          // (admission row -> authority -> lease) deadlocked a completed
+          // parallel exec settlement against retained-process promotion
+          // (admission row -> lease -> authority). PostgreSQL then rolled
+          // back the losing admission settlement and permanently blocked
+          // checkpoint capture.
+          //
+          // Preserve physical-settlement semantics when mutable authority
+          // is stale: retain the typed fence, settle the exact immutable
+          // admission below, commit, and only then reject its output.
+          let authority: LockedWorkspaceMutationAuthority | null = null;
+          let authorityFailure: SandboxWorkspaceMutationSettlementResult | null = null;
+          try {
+            authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+          } catch (error) {
+            const failure = workspaceMutationAuthorityFailure(error);
+            if (!failure) throw error;
+            authorityFailure = failure;
+          }
+
+          const actorKind = authorityInput.kind;
+          const actorId =
+            authorityInput.kind === "turn"
+              ? authorityInput.attemptId
+              : authorityInput.kind === "direct"
+                ? authorityInput.requestId
+                : authorityInput.processId;
+          const admission = await selectExactAdmissionForUpdate(tx, {
+            accountId: authorityInput.accountId,
+            workspaceId: authorityInput.workspaceId,
+            admissionId: input.admission.id,
+            actorKind,
+            actorId,
+            sessionId: authorityInput.sessionId,
+            admittedWorkspaceGeneration: input.admission.workspaceGeneration,
+            operation,
+          });
+          if (
+            !admission ||
+            !admissionMatchesSnapshot(admission, input.admission) ||
+            !admissionSnapshotMatchesAuthorityInput(input.admission, authorityInput) ||
+            admission.provider_outcome === "retained" ||
+            (admission.provider_outcome && admission.provider_outcome !== input.outcome)
+          ) {
+            return {
+              failure: "admission_fenced" as const,
+              detail: "Workspace mutation settlement did not match its exact durable admission",
+            };
+          }
+          if (!admission.settled_at) {
+            await tx.execute(sql`
+              update sandbox_workspace_mutation_admissions set
+                provider_outcome = ${input.outcome}, settled_at = now()
+              where id = ${input.admission.id} and settled_at is null
+            `);
+          }
+          if (input.outcome === "rejected") return { failure: null };
+          if (authorityFailure) return authorityFailure;
+          if (!authority) {
+            throw new Error("Workspace mutation settlement lost its locked authority");
+          }
+          return await verifyResolvedAdmissionAuthority(tx, authority, admission);
+        }),
+    );
+  const settlement = await runIdempotentPersistenceTransaction(
     {
-      accountId: authorityInput.accountId,
-      workspaceId: authorityInput.workspaceId,
+      stage: "sandbox_workspace_mutation_settlement",
+      maxAttempts: 5,
     },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const actorKind = authorityInput.kind;
-        const actorId =
-          authorityInput.kind === "turn"
-            ? authorityInput.attemptId
-            : authorityInput.kind === "direct"
-              ? authorityInput.requestId
-              : authorityInput.processId;
-        const admission = await selectExactAdmissionForUpdate(tx, {
-          accountId: authorityInput.accountId,
-          workspaceId: authorityInput.workspaceId,
-          admissionId: input.admission.id,
-          actorKind,
-          actorId,
-          sessionId: authorityInput.sessionId,
-          admittedWorkspaceGeneration: input.admission.workspaceGeneration,
-          operation,
-        });
-        if (
-          !admission ||
-          !admissionMatchesSnapshot(admission, input.admission) ||
-          !admissionSnapshotMatchesAuthorityInput(input.admission, authorityInput) ||
-          admission.provider_outcome === "retained" ||
-          (admission.provider_outcome && admission.provider_outcome !== input.outcome)
-        ) {
-          return {
-            failure: "admission_fenced" as const,
-            detail: "Workspace mutation settlement did not match its exact durable admission",
-          };
-        }
-        if (!admission.settled_at) {
-          await tx.execute(sql`
-            update sandbox_workspace_mutation_admissions set
-              provider_outcome = ${input.outcome}, settled_at = now()
-            where id = ${input.admission.id} and settled_at is null
-          `);
-        }
-        if (input.outcome === "rejected") return { failure: null };
-        // The provider has already returned. Lock and settle its immutable
-        // admission before consulting mutable turn/route/process authority, so
-        // a stale-authority rejection cannot roll the physical settlement back
-        // and strand archive capture. Only authority-fence errors are converted
-        // to a post-commit rejection; database failures still abort normally.
-        let authority: LockedWorkspaceMutationAuthority;
-        try {
-          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
-        } catch (error) {
-          const failure = workspaceMutationAuthorityFailure(error);
-          if (failure) return failure;
-          throw error;
-        }
-        return await verifyResolvedAdmissionAuthority(tx, authority, admission);
-      }),
+    settleOnce,
   );
   if (settlement.failure !== null) {
     throw new SandboxWorkspaceMutationFencedError(settlement.failure, settlement.detail);
@@ -29412,6 +29451,19 @@ export async function retainWorkspaceMutationProcess(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        // Use the same ownership prefix as mutation admission and settlement.
+        // A stale authority still cannot strand a provider process: remember
+        // the fence, durably promote the exact process, then reject its output
+        // after this transaction commits.
+        let authority: LockedWorkspaceMutationAuthority | null = null;
+        let authorityFailure: SandboxWorkspaceMutationSettlementResult | null = null;
+        try {
+          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+        } catch (error) {
+          const failure = workspaceMutationAuthorityFailure(error);
+          if (!failure) throw error;
+          authorityFailure = failure;
+        }
         const actorKind = authorityInput.kind;
         const actorId =
           authorityInput.kind === "turn" ? authorityInput.attemptId : authorityInput.requestId;
@@ -29572,16 +29624,13 @@ export async function retainWorkspaceMutationProcess(
         }
 
         // A yielded provider process is already a physical outcome. Persist its
-        // exact route and non-TTL holder before consulting mutable authority, so
-        // a route/turn race cannot leave an untracked process or open parent
-        // admission. Report staleness only after this transaction commits.
-        let authority: LockedWorkspaceMutationAuthority;
-        try {
-          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
-        } catch (error) {
-          const failure = workspaceMutationAuthorityFailure(error);
-          if (failure) return { process: mapRetainedProcess(process!), failure };
-          throw error;
+        // exact route and non-TTL holder even when the earlier authority check
+        // found a stale route/turn, then report staleness after commit.
+        if (authorityFailure) {
+          return { process: mapRetainedProcess(process!), failure: authorityFailure };
+        }
+        if (!authority) {
+          throw new Error("Retained process promotion lost its locked authority");
         }
         const identity = await verifyResolvedAdmissionAuthority(tx, authority, admission);
         return { process: mapRetainedProcess(process!), failure: identity };
@@ -36568,6 +36617,8 @@ export type InitializeSessionStartResult = {
   turn: SessionTurn | null;
   temporalWorkflowId: string;
   workflowWakeRevision: number | null;
+  /** True when this call installed/repaired start state or committed a new wake revision. */
+  changed: boolean;
 };
 
 /**
@@ -36616,9 +36667,11 @@ export async function initializeSessionStartAtomically(
             turn: null,
             temporalWorkflowId,
             workflowWakeRevision: null,
+            changed: false,
           };
         }
 
+        let insertedGoal = false;
         let [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -36644,6 +36697,7 @@ export async function initializeSessionStartAtomically(
             })
             .returning();
           if (!goal) throw new Error("Failed to create initial session goal");
+          insertedGoal = true;
         }
 
         if (input.deferInitialTurn) {
@@ -36702,20 +36756,26 @@ export async function initializeSessionStartAtomically(
               .returning();
             initializedNow = true;
           }
-          await tx
-            .update(schema.sessions)
-            .set({
-              temporalWorkflowId,
-              lastSequence: sequence,
-              ...(initializedNow && session.status === "queued" ? { status: "idle" } : {}),
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                eq(schema.sessions.id, session.id),
-              ),
-            );
+          const sessionNeedsRepair =
+            session.temporalWorkflowId !== temporalWorkflowId ||
+            session.lastSequence !== sequence ||
+            (initializedNow && session.status === "queued");
+          if (sessionNeedsRepair) {
+            await tx
+              .update(schema.sessions)
+              .set({
+                temporalWorkflowId,
+                lastSequence: sequence,
+                ...(initializedNow && session.status === "queued" ? { status: "idle" } : {}),
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.id, session.id),
+                ),
+              );
+          }
           if (initializedNow && input.consumeNewSessionDraft) {
             await setSubjectRlsContext(
               tx as unknown as Database,
@@ -36732,6 +36792,7 @@ export async function initializeSessionStartAtomically(
             turn: null,
             temporalWorkflowId,
             workflowWakeRevision: null,
+            changed: insertedGoal || insertedEvents.length > 0 || sessionNeedsRepair,
           };
         }
 
@@ -36925,26 +36986,33 @@ export async function initializeSessionStartAtomically(
         }
 
         const turnNeedsWake = turn.status === "queued" && runnable;
-        await tx
-          .update(schema.sessions)
-          .set({
-            temporalWorkflowId,
-            lastSequence: sequence,
-            ...(insertedTurn
-              ? {
-                  queueVersion: session.queueVersion + 1,
-                  queueTailPosition,
-                }
-              : {}),
-            ...(turn.status === "queued" ? { status: publicQueuedStatus } : {}),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, session.id),
-            ),
-          );
+        const sessionNeedsRepair =
+          session.temporalWorkflowId !== temporalWorkflowId ||
+          session.lastSequence !== sequence ||
+          insertedTurn ||
+          (turn.status === "queued" && session.status !== publicQueuedStatus);
+        if (sessionNeedsRepair) {
+          await tx
+            .update(schema.sessions)
+            .set({
+              temporalWorkflowId,
+              lastSequence: sequence,
+              ...(insertedTurn
+                ? {
+                    queueVersion: session.queueVersion + 1,
+                    queueTailPosition,
+                  }
+                : {}),
+              ...(turn.status === "queued" ? { status: publicQueuedStatus } : {}),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, session.id),
+              ),
+            );
+        }
         const workflowWakeRevision = turnNeedsWake
           ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
               accountId: session.accountId,
@@ -36965,11 +37033,18 @@ export async function initializeSessionStartAtomically(
             expectedRevision: input.consumeNewSessionDraft.expectedRevision,
           });
         }
+        const changed =
+          insertedGoal ||
+          insertedEvents.length > 0 ||
+          insertedTurn ||
+          sessionNeedsRepair ||
+          workflowWakeRevision !== null;
         return {
           events: insertedEvents.map(mapEvent),
           turn: mapSessionTurn(turn),
           temporalWorkflowId,
           workflowWakeRevision,
+          changed,
         };
       }),
   );
@@ -38679,6 +38754,108 @@ export async function markSessionAttemptQuiesced(
       );
     }
 
+    const projectPausedRecovery = async (
+      events: SessionEvent[],
+      lastSequence: number,
+    ): Promise<{
+      events: SessionEvent[];
+      effectiveControl: Awaited<ReturnType<typeof evaluateSessionControl>>;
+    }> => {
+      const effectiveControl = await evaluateSessionControl(
+        scopedDb,
+        input.workspaceId,
+        input.sessionId,
+        { workspaceControl: prefix.control ?? undefined },
+      );
+      if (
+        effectiveControl.state !== "paused" ||
+        effectiveControl.settlement !== null ||
+        !settledQuiescence ||
+        attempt.outcome !== "interrupted_recoverable" ||
+        session.status !== "recovering" ||
+        session.activeTurnId !== turn.id ||
+        turn.status !== "recovering" ||
+        turn.activeAttemptId !== null
+      ) {
+        return { events, effectiveControl };
+      }
+
+      const clientEventId = `opengeni:paused-recovery-settled:${input.attemptId}`;
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.clientEventId, clientEventId),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        // A pre-fix/partially repaired row can retain the old recovering
+        // projection even though the exact idempotent status event exists.
+        // Repair only the projection; the preserved active turn remains the
+        // same recovering logical turn for Resume.
+        await scopedDb
+          .update(schema.sessions)
+          .set({ status: "idle", updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.status, "recovering"),
+              eq(schema.sessions.activeTurnId, turn.id),
+            ),
+          );
+        return {
+          events: events.some((event) => event.id === existing.id)
+            ? events
+            : [...events, mapEvent(existing)],
+          effectiveControl,
+        };
+      }
+
+      const now = new Date();
+      const sequence = lastSequence + 1;
+      const [parked] = await scopedDb
+        .update(schema.sessions)
+        .set({
+          status: "idle",
+          lastSequence: sequence,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            eq(schema.sessions.status, "recovering"),
+            eq(schema.sessions.activeTurnId, turn.id),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      if (!parked) return { events, effectiveControl };
+      const [statusEvent] = await scopedDb
+        .insert(schema.sessionEvents)
+        .values({
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sequence,
+          type: "session.status.changed",
+          payload: sanitizeEventPayload({ status: "idle", reason: "paused_recovery_settled" }),
+          clientEventId,
+          turnId: turn.id,
+          turnGeneration: attempt.executionGeneration,
+          turnAttemptId: attempt.id,
+          turnAssociation: null,
+          occurredAt: now,
+        })
+        .returning();
+      if (!statusEvent) throw new Error("Paused recovery status event was not inserted");
+      return { events: [...events, mapEvent(statusEvent)], effectiveControl };
+    };
+
     const clientEventId = `opengeni:attempt-quiesced:${input.attemptId}`;
     if (attempt.quiescedAt) {
       const [existing] = await scopedDb
@@ -38692,14 +38869,14 @@ export async function markSessionAttemptQuiesced(
           ),
         )
         .limit(1);
-      if (!existing) {
-        // Migration 0065 seeds quiesced_at for interrupted attempts that were
-        // already closed before queue-event receipts existed. A replaying
-        // workflow may still execute this idempotent fallback after rollout;
-        // there is nothing new to publish and admission is already safely open.
-        return [];
-      }
-      return [mapEvent(existing)];
+      // Migration 0065 seeds quiesced_at for interrupted attempts that were
+      // already closed before queue-event receipts existed. A replaying
+      // workflow may still execute this idempotent fallback after rollout. It
+      // has no queue receipt to republish, but paused recovery projection still
+      // converges through the same exact-attempt transaction.
+      return (
+        await projectPausedRecovery(existing ? [mapEvent(existing)] : [], session.lastSequence)
+      ).events;
     }
 
     const now = new Date();
@@ -38752,12 +38929,8 @@ export async function markSessionAttemptQuiesced(
           eq(schema.sessions.id, input.sessionId),
         ),
       );
-    const effectiveControl = await evaluateSessionControl(
-      scopedDb,
-      input.workspaceId,
-      input.sessionId,
-      { workspaceControl: prefix.control ?? undefined },
-    );
+    const projected = await projectPausedRecovery([mapEvent(event)], event.sequence);
+    const effectiveControl = projected.effectiveControl;
     if (effectiveControl.state === "active") {
       await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
         accountId: session.accountId,
@@ -38767,7 +38940,7 @@ export async function markSessionAttemptQuiesced(
         reason: "attempt_quiesced",
       });
     }
-    return [mapEvent(event)];
+    return projected.events;
   });
 }
 
@@ -38944,7 +39117,29 @@ export async function reconcileSessionAttemptQuiescence(
     return { action: "stale", events: [] };
   }
   if (eligibility.quiesced_at) {
-    return { action: "quiesced", events: [] };
+    // The receipt may predate the paused-session projection fix. Re-enter the
+    // exact idempotent receipt transaction only when the work peeker proves
+    // this same paused recovery still needs projection. Ordinary idempotent
+    // reconciliations retain their established event-free result.
+    const peek = await peekSessionWork(db, input.workspaceId, input.sessionId);
+    if (peek.kind !== "cancellation-wait" || peek.attemptId !== input.attemptId) {
+      return { action: "quiesced", events: [] };
+    }
+    const events = await markSessionAttemptQuiesced(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      temporalWorkflowId: input.temporalWorkflowId,
+      temporalWorkflowRunId: input.temporalWorkflowRunId,
+      temporalActivityId: input.temporalActivityId,
+    });
+    return {
+      action: "quiesced",
+      events: events.filter(
+        (event) => event.clientEventId === `opengeni:paused-recovery-settled:${input.attemptId}`,
+      ),
+    };
   }
   if (!input.activitySettled || eligibility.writer_pending) {
     return { action: "pending", events: [] };
@@ -39355,6 +39550,54 @@ async function nextSessionAttemptAwaitingQuiescence(
   return row ?? null;
 }
 
+/**
+ * Return the exact current recovering turn's newest interrupted attempt when
+ * its physical receipt is already durable but a pre-fix/partial workflow left
+ * the paused session projected as recovering. This is DB-only settlement work:
+ * the turn remains recovering for a later Resume and no claim is admitted.
+ */
+async function pausedSessionAttemptAwaitingRecoveryProjection(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  activeTurnId: string,
+): Promise<{ attemptId: string } | null> {
+  const [row] = await db
+    .select({ attemptId: schema.sessionTurnAttempts.id })
+    .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+        eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+      ),
+    )
+    .innerJoin(
+      schema.sessionAttemptInterruptions,
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
+        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, sessionId),
+        eq(schema.sessionTurnAttempts.turnId, activeTurnId),
+        eq(schema.sessionTurnAttempts.state, "closed"),
+        eq(schema.sessionTurnAttempts.outcome, "interrupted_recoverable"),
+        isNotNull(schema.sessionTurnAttempts.quiescedAt),
+        eq(schema.sessionTurns.status, "recovering"),
+        isNull(schema.sessionTurns.activeAttemptId),
+        inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+      ),
+    )
+    .orderBy(desc(schema.sessionTurnAttempts.startedAt), desc(schema.sessionTurnAttempts.id))
+    .limit(1);
+  return row ?? null;
+}
+
 async function latestSessionAttemptInterruption(
   db: Database,
   workspaceId: string,
@@ -39480,8 +39723,10 @@ export async function peekSessionWork(
         attemptId: interruption.attemptId,
       };
     }
-    if (effectiveControl.state !== "active") return { kind: "idle" };
-
+    // Physical quiescence finishes an already-accepted interruption; it is not
+    // new session work. Reconcile the missing receipt even while control stays
+    // paused, otherwise the pause itself can strand this session and every
+    // ancestor behind a permanent `settlement: stopping` projection.
     const awaitingQuiescence = await nextSessionAttemptAwaitingQuiescence(
       scopedDb,
       workspaceId,
@@ -39492,6 +39737,33 @@ export async function peekSessionWork(
         kind: "cancellation-wait",
         attemptId: awaitingQuiescence.attemptId,
       };
+    }
+
+    if (effectiveControl.state !== "active") {
+      // A receipt may already be durable while an older workflow/image left
+      // the paused session's public status at `recovering`. Route that exact
+      // attempt through the same DB-only reconciliation activity. The activity
+      // skips Temporal inspection for a quiesced receipt, parks only the
+      // session projection, and preserves the logical turn for Resume.
+      if (
+        effectiveControl.settlement === null &&
+        session.status === "recovering" &&
+        session.activeTurnId
+      ) {
+        const awaitingProjection = await pausedSessionAttemptAwaitingRecoveryProjection(
+          scopedDb,
+          workspaceId,
+          sessionId,
+          session.activeTurnId,
+        );
+        if (awaitingProjection) {
+          return {
+            kind: "cancellation-wait",
+            attemptId: awaitingProjection.attemptId,
+          };
+        }
+      }
+      return { kind: "idle" };
     }
 
     const [capacityWait] = await scopedDb
@@ -45123,3 +45395,4 @@ export {
 } from "./connection-token-resolver";
 
 export * from "./workspace-artifacts";
+export * from "./transcription-recordings";

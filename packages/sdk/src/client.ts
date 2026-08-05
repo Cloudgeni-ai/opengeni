@@ -189,6 +189,9 @@ import type {
   PtyCloseRequest,
   ToolRef,
   TranscribeAudioResponse,
+  TranscriptionRecordingListResponse,
+  TranscriptionRecordingResponse,
+  UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
@@ -329,6 +332,28 @@ export type TranscribeAudioInput = {
   signal?: AbortSignal | undefined;
 };
 
+export type CreateTranscriptionRecordingInput = {
+  recordingId: string;
+  mimeType: string;
+  signal?: AbortSignal | undefined;
+};
+
+export type UploadTranscriptionRecordingChunkInput = {
+  audio: Blob | File | Uint8Array;
+  mimeType: string;
+  sha256: string;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  signal?: AbortSignal | undefined;
+};
+
+export type FinalizeTranscriptionRecordingInput = {
+  chunkCount: number;
+  totalBytes: number;
+  totalDurationMilliseconds: number;
+  signal?: AbortSignal | undefined;
+};
+
 /**
  * Typed client for the OpenGeni public API. Framework-agnostic: only needs
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
@@ -338,6 +363,8 @@ export class OpenGeniClient {
   private readonly baseUrl: string;
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
+  private readonly readInFlight = new Map<string, Promise<unknown>>();
+  private readonly readTrailing = new Map<string, Promise<unknown>>();
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -402,6 +429,153 @@ export class OpenGeniClient {
     return body;
   }
 
+  async createTranscriptionRecording(
+    workspaceId: string,
+    input: CreateTranscriptionRecordingInput,
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings`,
+        { recordingId: input.recordingId, mimeType: input.mimeType },
+        {},
+        input.signal ? { signal: input.signal } : {},
+      ),
+    );
+  }
+
+  async getTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "GET",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
+        undefined,
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
+
+  async listTranscriptionRecordings(
+    workspaceId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingListResponse> {
+    const body = await this.requestJson<unknown>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/transcription-recordings`,
+      undefined,
+      {},
+      options.signal ? { signal: options.signal } : {},
+    );
+    if (!isTranscriptionRecordingListResponse(body)) {
+      throw new OpenGeniApiError(502, "Invalid transcription recording list response.", {
+        code: "invalid_response",
+      });
+    }
+    return body;
+  }
+
+  async uploadTranscriptionRecordingChunk(
+    workspaceId: string,
+    recordingId: string,
+    chunkNumber: number,
+    input: UploadTranscriptionRecordingChunkInput,
+  ): Promise<UploadTranscriptionRecordingChunkResponse> {
+    const correlationId = crypto.randomUUID();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        this.url(
+          `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/chunks/${chunkNumber}`,
+        ),
+        {
+          method: "PUT",
+          headers: {
+            ...this.headers(correlationId),
+            Accept: "application/json",
+            "Content-Type": input.mimeType,
+            "x-opengeni-chunk-sha256": input.sha256,
+            "x-opengeni-chunk-start-milliseconds": String(input.startMilliseconds),
+            "x-opengeni-chunk-duration-milliseconds": String(input.durationMilliseconds),
+          },
+          body: input.audio instanceof Uint8Array ? Uint8Array.from(input.audio) : input.audio,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+      );
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      throw mutationTransportError(correlationId);
+    }
+    assertApiContractResponse(response);
+    if (!response.ok) throw await apiErrorFromResponse(response, { method: "PUT", correlationId });
+    await assertJsonResponse(response, { method: "PUT", correlationId });
+    const body = await response.json().catch(() => null);
+    if (!isUploadTranscriptionRecordingChunkResponse(body)) {
+      throw new OpenGeniApiError(response.status, "Invalid transcription chunk response.", {
+        code: "invalid_response",
+        mutation: true,
+        correlationId,
+      });
+    }
+    return body;
+  }
+
+  async finalizeTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    input: FinalizeTranscriptionRecordingInput,
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/finalize`,
+        {
+          chunkCount: input.chunkCount,
+          totalBytes: input.totalBytes,
+          totalDurationMilliseconds: input.totalDurationMilliseconds,
+        },
+        {},
+        input.signal ? { signal: input.signal } : {},
+      ),
+    );
+  }
+
+  async processNextTranscriptionRecordingSegment(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/process-next`,
+        {},
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
+
+  async discardTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "DELETE",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
+        undefined,
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
+
   async createSession(
     workspaceId: string,
     request: CreateSessionRequest,
@@ -431,11 +605,13 @@ export class OpenGeniClient {
     );
   }
 
-  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
-    return await this.requestJson<Session>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
-    );
+  async getSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<Session> {
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    return await this.singleFlightRead(path, () => this.requestJson<Session>("GET", path), options);
   }
 
   async updateSession(
@@ -582,10 +758,38 @@ export class OpenGeniClient {
   }
 
   async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
-    return await this.requestJson<SessionLineageResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionLineageResponse>("GET", path),
     );
+  }
+
+  private singleFlightRead<T>(
+    key: string,
+    read: () => Promise<T>,
+    options: { fresh?: boolean } = {},
+  ): Promise<T> {
+    const existing = this.readInFlight.get(key);
+    if (existing) {
+      if (!options.fresh) return existing as Promise<T>;
+      const queued = this.readTrailing.get(key);
+      if (queued) return queued as Promise<T>;
+      const trailing = existing.then(
+        () => this.singleFlightRead(key, read),
+        () => this.singleFlightRead(key, read),
+      );
+      this.readTrailing.set(key, trailing);
+      const clear = () => {
+        if (this.readTrailing.get(key) === trailing) this.readTrailing.delete(key);
+      };
+      void trailing.then(clear, clear);
+      return trailing;
+    }
+    const promise = read().finally(() => {
+      if (this.readInFlight.get(key) === promise) this.readInFlight.delete(key);
+    });
+    this.readInFlight.set(key, promise);
+    return promise;
   }
 
   /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
@@ -1178,9 +1382,9 @@ export class OpenGeniClient {
   // --- Turn queue ------------------------------------------------------------
 
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionQueueSnapshot>("GET", path),
     );
   }
 
@@ -1442,10 +1646,8 @@ export class OpenGeniClient {
 
   /** The session's goal. 404s when the session never had one. */
   async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
-    return await this.requestJson<SessionGoal>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
-    );
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
+    return await this.singleFlightRead(path, () => this.requestJson<SessionGoal>("GET", path));
   }
 
   async updateGoal(
@@ -3592,6 +3794,86 @@ function isTranscribeAudioResponse(value: unknown): value is TranscribeAudioResp
     typeof record.text === "string" &&
     Array.isArray(record.languages) &&
     record.languages.every((language) => typeof language === "string")
+  );
+}
+
+function isUploadTranscriptionRecordingChunkResponse(
+  value: unknown,
+): value is UploadTranscriptionRecordingChunkResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (!isTranscriptionRecordingResponse({ recording: record.recording, segments: [] })) {
+    return false;
+  }
+  if (!record.chunk || typeof record.chunk !== "object" || Array.isArray(record.chunk)) {
+    return false;
+  }
+  const chunk = record.chunk as Record<string, unknown>;
+  return (
+    typeof chunk.chunkNumber === "number" &&
+    typeof chunk.byteLength === "number" &&
+    typeof chunk.sha256 === "string" &&
+    typeof chunk.startMilliseconds === "number" &&
+    typeof chunk.durationMilliseconds === "number" &&
+    typeof chunk.deduplicated === "boolean"
+  );
+}
+
+function isTranscriptionRecordingResponse(value: unknown): value is TranscriptionRecordingResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  if (
+    !response.recording ||
+    typeof response.recording !== "object" ||
+    Array.isArray(response.recording)
+  ) {
+    return false;
+  }
+  const recording = response.recording as Record<string, unknown>;
+  return (
+    typeof recording.id === "string" &&
+    typeof recording.workspaceId === "string" &&
+    typeof recording.mimeType === "string" &&
+    typeof recording.state === "string" &&
+    typeof recording.nextChunkNumber === "number" &&
+    typeof recording.chunkCount === "number" &&
+    typeof recording.totalBytes === "number" &&
+    typeof recording.totalDurationMilliseconds === "number" &&
+    typeof recording.segmentCount === "number" &&
+    typeof recording.completedSegmentCount === "number" &&
+    (recording.transcriptText === null || typeof recording.transcriptText === "string") &&
+    Array.isArray(recording.languages) &&
+    (recording.errorCode === null || typeof recording.errorCode === "string") &&
+    typeof recording.retryable === "boolean" &&
+    typeof recording.objectsCleaned === "boolean" &&
+    typeof recording.createdAt === "string" &&
+    typeof recording.updatedAt === "string" &&
+    typeof recording.expiresAt === "string" &&
+    (response.retryAfterMilliseconds === undefined ||
+      (typeof response.retryAfterMilliseconds === "number" &&
+        Number.isInteger(response.retryAfterMilliseconds) &&
+        response.retryAfterMilliseconds > 0 &&
+        response.retryAfterMilliseconds <= 60_000)) &&
+    Array.isArray(response.segments)
+  );
+}
+
+function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
+  if (isTranscriptionRecordingResponse(value)) return value;
+  throw new OpenGeniApiError(502, "Invalid transcription recording response.", {
+    code: "invalid_response",
+  });
+}
+
+function isTranscriptionRecordingListResponse(
+  value: unknown,
+): value is TranscriptionRecordingListResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const recordings = (value as Record<string, unknown>).recordings;
+  return (
+    Array.isArray(recordings) &&
+    recordings.length <= 50 &&
+    recordings.every((recording) => isTranscriptionRecordingResponse({ recording, segments: [] }))
   );
 }
 

@@ -11,6 +11,8 @@ export { HumanInputSurface } from "./components/human-input-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
+export type { UserMessageBodyProps } from "./components/user-message-body";
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS } from "./timeline/turn-summary";
 export type {
   BuiltInTurnSummaryFacetId,

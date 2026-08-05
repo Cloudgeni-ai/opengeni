@@ -2,5 +2,5 @@ apiVersion: v2
 name: opengeni
 description: OpenGeni API, web, worker, and migration workloads.
 type: application
-version: 0.22.70
-appVersion: "0.22.70"
+version: 0.22.80
+appVersion: "0.22.80"

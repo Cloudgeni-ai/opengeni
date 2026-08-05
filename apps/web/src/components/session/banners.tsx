@@ -9,7 +9,11 @@ import {
   AudioLinesIcon,
   TerminalIcon,
 } from "lucide-react";
-import { useLightboxOptional, type UserMessageItem } from "@opengeni/react";
+import {
+  UserMessageBody as CollapsibleUserMessageBody,
+  useLightboxOptional,
+  type UserMessageItem,
+} from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -298,7 +302,9 @@ export function UserMessageBody({
         </div>
       ) : null}
 
-      <MarkdownText text={item.text} compact />
+      <CollapsibleUserMessageBody messageId={item.id} text={item.text}>
+        <MarkdownText text={item.text} compact />
+      </CollapsibleUserMessageBody>
 
       {item.presentation ? (
         <details className="group mt-2 border-t border-border/60 pt-1.5 text-xs text-fg-muted">

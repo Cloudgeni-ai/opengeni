@@ -70,6 +70,7 @@ import {
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
@@ -80,6 +81,7 @@ import {
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
+  isMcpTransportConnectivityError,
   projectModelInputForCapabilities,
   projectModelInputForImageSupport,
   prefixedMcpToolName,
@@ -87,6 +89,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  safeMcpTransportError,
   serializeApprovals,
   serializeHumanInputRequests,
   refreshToolspaceTokenFile,
@@ -171,6 +174,41 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
       connectTimeoutMs: 5,
     }),
   ).rejects.toThrow("MCP server connect timed out after 5ms");
+});
+
+test("sanitizes nested MCP connectivity failures into an allowlisted marker", () => {
+  const raw = new Error("MCP connect failed for https://private.example/token-value");
+  raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+    code: "ECONNREFUSED",
+  });
+
+  const sanitized = safeMcpTransportError(raw);
+
+  expect(isMcpTransportConnectivityError(raw)).toBe(false);
+  expect(isMcpTransportConnectivityError(sanitized)).toBe(true);
+  expect(sanitized).toMatchObject({
+    name: "McpTransportError",
+    message: "MCP transport operation failed (Error)",
+    mcpTransportFailureKind: "connectivity_unavailable",
+  });
+  expect(JSON.stringify(sanitized)).not.toContain("private.example");
+  expect(JSON.stringify(sanitized)).not.toContain("token-value");
+  expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+});
+
+test("does not turn MCP client failures or arbitrary codes into connectivity recovery", () => {
+  const clientFailure = Object.assign(new Error("request rejected"), {
+    status: 401,
+    cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+  });
+  const arbitrary = Object.assign(new Error("provider-specific failure"), {
+    code: "CONNECTION_REFUSED_BY_POLICY",
+  });
+
+  expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
+  expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
+  expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -378,6 +416,22 @@ describe("runtime event normalization", () => {
       },
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("recognizes a terminal response when the provider omitted usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage" },
+      },
+    } as any;
+
+    expect(modelTerminalResponseFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
   });
 
   test("extracts raw Responses usage without manufacturing a durable event", () => {
@@ -6590,7 +6644,7 @@ describe("provider item id stripping", () => {
     }
   });
 
-  test("a delayed provider usage signal cannot bind to a newer model request", async () => {
+  test("a delayed provider usage signal cannot bind or force estimated compaction", async () => {
     let signal: { revision: number; totalTokens: number } | null = null;
     const filter = contextRobustnessFilterForSettings(
       testSettings({
@@ -6631,21 +6685,16 @@ describe("provider item id stripping", () => {
       },
       { type: "message", role: "user", content: "continue again" },
     ] as any;
-    try {
-      await filter({
+    await expect(
+      filter({
         modelData: { input: third, instructions: "system" },
         agent: {} as any,
         context: undefined,
-      });
-      throw new Error("expected the complete estimate to trigger compaction");
-    } catch (error) {
-      expect(error).toBeInstanceOf(CompactionNeededError);
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
-      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
-    }
+      }),
+    ).resolves.toMatchObject({ input: third });
   });
 
-  test("first-call accounting includes instructions and tool schemas", async () => {
+  test("a first call never compacts from estimated instructions and tool schemas", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 10_000,
@@ -6672,10 +6721,12 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
-  test("first-call accounting does not discount a multilingual tool schema", async () => {
+  test("a first call never compacts from an estimated multilingual tool schema", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 12_000,
@@ -6705,7 +6756,9 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
   test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
@@ -6797,7 +6850,7 @@ describe("provider item id stripping", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(CompactionNeededError);
       expect((error as CompactionNeededError).trigger).toBe("operator");
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
+      expect((error as CompactionNeededError).signalSource).toBe("operator");
     }
     expect(polls).toBe(2);
   });

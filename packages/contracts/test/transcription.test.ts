@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   ClientConfig,
+  ClientResumableVoiceInputConfig,
   ClientVoiceInputConfig,
+  FinalizeTranscriptionRecordingRequest,
   OPENGENI_API_CONTRACT_REVISION,
   resolveWorkspaceVoiceInputEnabled,
   TranscribeAudioResponse,
+  TranscriptionRecordingListResponse,
+  TranscriptionRecordingResponse,
   TranscriptionEvent,
   TranscriptionResultMetadata,
   UpdateWorkspaceSettingsRequest,
@@ -259,6 +263,95 @@ describe("native voice input contracts", () => {
       voiceInput: capability,
     });
     expect(config.voiceInput.available).toBe(true);
+  });
+
+  test("projects strict resumable limits and accepts 30+ minute finalization metadata", () => {
+    const resumable = ClientResumableVoiceInputConfig.parse({
+      maxDurationSeconds: 2 * 60 * 60,
+      maxSizeBytes: 512 * 1024 * 1024,
+      maxChunkSizeBytes: 8 * 1024 * 1024,
+      providerSegmentSeconds: 50,
+    });
+    expect(
+      ClientVoiceInputConfig.parse({
+        available: true,
+        maxDurationSeconds: 60,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+        resumable,
+      }).resumable,
+    ).toEqual(resumable);
+    expect(
+      ClientResumableVoiceInputConfig.safeParse({
+        ...resumable,
+        maxDurationSeconds: 8 * 60 * 60 + 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      FinalizeTranscriptionRecordingRequest.parse({
+        chunkCount: 361,
+        totalBytes: 361,
+        totalDurationMilliseconds: 1_805_000,
+      }),
+    ).toEqual({
+      chunkCount: 361,
+      totalBytes: 361,
+      totalDurationMilliseconds: 1_805_000,
+    });
+  });
+
+  test("keeps recording and list responses strict and bounded", () => {
+    const recording = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      mimeType: "audio/webm",
+      state: "ready",
+      nextChunkNumber: 1,
+      chunkCount: 1,
+      totalBytes: 3,
+      totalDurationMilliseconds: 1_805_000,
+      segmentCount: 37,
+      completedSegmentCount: 0,
+      transcriptText: null,
+      languages: [],
+      errorCode: null,
+      retryable: false,
+      objectsCleaned: false,
+      createdAt: "2026-08-04T07:00:00.000Z",
+      updatedAt: "2026-08-04T07:00:00.000Z",
+      expiresAt: "2026-08-05T07:00:00.000Z",
+    } as const;
+    expect(TranscriptionRecordingResponse.safeParse({ recording, segments: [] }).success).toBe(
+      true,
+    );
+    expect(
+      TranscriptionRecordingResponse.safeParse({
+        recording,
+        segments: [],
+        retryAfterMilliseconds: 5_000,
+      }).success,
+    ).toBe(true);
+    expect(
+      TranscriptionRecordingResponse.safeParse({
+        recording,
+        segments: [],
+        retryAfterMilliseconds: 60_001,
+      }).success,
+    ).toBe(false);
+    expect(TranscriptionRecordingListResponse.safeParse({ recordings: [recording] }).success).toBe(
+      true,
+    );
+    expect(
+      TranscriptionRecordingListResponse.safeParse({
+        recordings: [recording],
+        provider: "openai",
+      }).success,
+    ).toBe(false);
+    expect(
+      TranscriptionRecordingListResponse.safeParse({
+        recordings: Array.from({ length: 51 }, () => recording),
+      }).success,
+    ).toBe(false);
   });
 
   test("keeps transcription response text-only", () => {

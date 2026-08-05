@@ -6,6 +6,7 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "./client";
+import { usePageLiveActivity } from "./hooks/internal";
 import { OpenGeniContext } from "./session-context";
 
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
@@ -40,6 +41,9 @@ export function OpenGeniProvider({
   );
   const callbackRef = useRef(onWorkspaceControlEvent);
   const reconcilersRef = useRef(new Map<string, Map<string, () => Promise<void>>>());
+  const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
+  const workspaceControlSequencesRef = useRef(new Map<string, number>());
+  const pageLive = usePageLiveActivity();
   callbackRef.current = onWorkspaceControlEvent;
 
   const verifyApiContract = useCallback(async (): Promise<void> => {
@@ -76,31 +80,57 @@ export function OpenGeniProvider({
   );
   const reconcileSession = useMemo(
     () =>
-      async (sessionId: string): Promise<void> => {
+      (sessionId: string): Promise<void> => {
+        const existing = reconcileInFlightRef.current.get(sessionId);
+        if (existing) return existing;
         // This read also crosses the exact API-contract handshake before stale
         // state can be presented as live after a deployment.
-        await verifyApiContract();
-        const callbacks = [...(reconcilersRef.current.get(sessionId)?.values() ?? [])];
-        await Promise.all(callbacks.map((reconcile) => reconcile()));
+        const promise = (async () => {
+          await withTimeout(verifyApiContract(), 10_000, "API contract reconciliation");
+          const callbacks = [...(reconcilersRef.current.get(sessionId)?.values() ?? [])];
+          await withTimeout(
+            Promise.all(callbacks.map((reconcile) => reconcile())).then(() => undefined),
+            15_000,
+            "session reconciliation",
+          );
+        })().finally(() => {
+          if (reconcileInFlightRef.current.get(sessionId) === promise) {
+            reconcileInFlightRef.current.delete(sessionId);
+          }
+        });
+        reconcileInFlightRef.current.set(sessionId, promise);
+        return promise;
       },
     [verifyApiContract],
   );
 
   useEffect(() => {
+    if (!pageLive) {
+      setWorkspaceControlConnectionState("idle");
+      return;
+    }
     const controller = new AbortController();
-    setWorkspaceControlEvent(null);
     setWorkspaceControlConnectionState("connecting");
     void (async () => {
       try {
         await verifyApiContract();
         const workspace = await client.getWorkspace(workspaceId);
+        const resumeAfter = Math.max(
+          workspaceControlSequencesRef.current.get(workspaceId) ?? 0,
+          workspace.inferenceControl.revision,
+        );
+        workspaceControlSequencesRef.current.set(workspaceId, resumeAfter);
         const stream = client.streamWorkspaceControlEvents(workspaceId, {
-          after: workspace.inferenceControl.revision,
+          after: resumeAfter,
           signal: controller.signal,
           onStateChange: setWorkspaceControlConnectionState,
         });
         for await (const event of stream) {
           if (controller.signal.aborted) return;
+          workspaceControlSequencesRef.current.set(
+            workspaceId,
+            Math.max(workspaceControlSequencesRef.current.get(workspaceId) ?? 0, event.sequence),
+          );
           setWorkspaceControlEvent((current) =>
             !current || event.sequence > current.sequence ? event : current,
           );
@@ -115,7 +145,7 @@ export function OpenGeniProvider({
       }
     })();
     return () => controller.abort();
-  }, [client, verifyApiContract, workspaceId]);
+  }, [client, pageLive, verifyApiContract, workspaceId]);
 
   const value = useMemo(
     () => ({
@@ -141,6 +171,21 @@ export function OpenGeniProvider({
       {contractMismatch ? <ApiContractMismatchScreen mismatch={contractMismatch} /> : null}
     </OpenGeniContext.Provider>
   );
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 function ApiContractMismatchScreen({ mismatch }: { mismatch: OpenGeniApiContractMismatchError }) {

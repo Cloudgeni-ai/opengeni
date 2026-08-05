@@ -166,7 +166,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#markSessionAttemptQuiesced": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
   },
   "packages/db/src/index.ts#settleSessionAttemptInterruptions": {

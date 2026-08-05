@@ -98,6 +98,16 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("Codex progressive tool disclosure", () => {
+  test("is enabled by default and supports an explicit emergency opt-out", () => {
+    expect(withEnv({}, () => getSettings()).codexToolSearchEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_CODEX_TOOL_SEARCH_ENABLED: "false" }, () => getSettings())
+        .codexToolSearchEnabled,
+    ).toBe(false);
+  });
+});
+
 describe("Google Drive integration settings", () => {
   test("loads the split localhost browser and API origins", () => {
     const settings = withEnv(
@@ -171,7 +181,7 @@ describe("Docker workspace materialization", () => {
 
 describe("agent stable release selection", () => {
   test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.8");
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.9");
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");

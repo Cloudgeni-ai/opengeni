@@ -108,6 +108,12 @@ function hasModalTerminalSandboxMessage(signals: ErrorSignals): boolean {
   );
 }
 
+function hasUnixLocalTerminalWorkspaceMessage(signals: ErrorSignals): boolean {
+  return signals.messages.includes(
+    "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+  );
+}
+
 /** Typed transport evidence always dominates nested/string NotFound text. */
 export function classifyProviderSandboxFailure(
   backendId: string,
@@ -138,6 +144,25 @@ export function classifyProviderSandboxFailure(
         diagnostic === "unclassified_provider_failure"
           ? "modal_terminal_message"
           : `${diagnostic} modal_terminal_message`,
+    };
+  }
+
+  // The SDK emits this exact UserError only after resolving one serialized
+  // unix_local session and proving that both its process-local workspace and
+  // its persisted fallback are absent. That is authoritative provider loss:
+  // on resume it licenses a fresh local workspace, and on drain it licenses
+  // the lease's provider-missing cold transition. Generic "unavailable" prose
+  // remains fail-closed.
+  if (
+    (backendId === "local" || backendId === "unix_local") &&
+    hasUnixLocalTerminalWorkspaceMessage(signals)
+  ) {
+    return {
+      kind: "not_found",
+      diagnostic:
+        diagnostic === "unclassified_provider_failure"
+          ? "unix_local_workspace_missing"
+          : `${diagnostic} unix_local_workspace_missing`,
     };
   }
 

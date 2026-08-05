@@ -1,5 +1,46 @@
 # @opengeni/runtime
 
+## 0.18.18
+
+### Patch Changes
+
+- 41f7ae3: Treat the SDK's exact UnixLocal missing-workspace proof as provider loss so stale local leases can recover or drain cleanly, and expose ordinary sandbox-operation availability separately from live attach/swap readiness.
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
+## 0.18.17
+
+### Patch Changes
+
+- 55f6ad0: Use one terminal-response ordinal for provider context binding, and clear the
+  durable input-token signal when the latest provider response supplies no usable
+  usage instead of retaining an older response's count.
+- 18eea76: Apply the configured Modal snapshot timeout to new sandboxes, rebind legacy resume envelopes to the current operational timeout without changing provider identity, and normalize durable SDK backend identifiers before product-provider lookup.
+
+## 0.18.16
+
+### Patch Changes
+
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
+## 0.18.15
+
+### Patch Changes
+
+- Updated dependencies [8135dbb]
+  - @opengeni/config@0.10.14
+
+## 0.18.14
+
+### Patch Changes
+
+- c6c9acb: Recover required MCP setup when a transient socket failure is wrapped by the MCP SDK, while preserving only secret-safe transport classification.
+
 ## 0.18.13
 
 ### Patch Changes

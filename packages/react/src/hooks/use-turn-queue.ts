@@ -12,6 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
+  usePageLiveActivity,
   useSessionEventTrigger,
   type SessionEventFeedOptions,
 } from "./internal";
@@ -91,6 +92,7 @@ export function useTurnQueue(
     useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
+  const pageLive = usePageLiveActivity();
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [loading, setLoading] = useState(enabled);
@@ -174,24 +176,34 @@ export function useTurnQueue(
   );
 
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || !pageLive) {
       setLoading(false);
       return;
     }
     setLoading(true);
-    void load();
     const pollIntervalMs = options.pollIntervalMs;
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
+      void load();
       return () => {
         readGeneration.current += 1;
       };
     }
-    const timer = setInterval(() => void load(), pollIntervalMs);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (cancelled) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void load().finally(schedule);
+      }, pollIntervalMs);
+    };
+    void load().finally(schedule);
     return () => {
-      clearInterval(timer);
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
       readGeneration.current += 1;
     };
-  }, [load, enabled, options.pollIntervalMs]);
+  }, [load, enabled, pageLive, options.pollIntervalMs]);
 
   useEffect(() => {
     if (enabled && workspaceControlEvent) void load();

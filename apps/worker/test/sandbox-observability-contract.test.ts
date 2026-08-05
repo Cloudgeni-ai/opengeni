@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
+import { OPENGENI_OBSERVABILITY_DISTRIBUTION } from "@opengeni/observability";
 
 const dashboardsDir = "deploy/observability/dashboards";
 const rulePath = "deploy/helm/opengeni/templates/prometheusrule.yaml";
@@ -22,6 +23,74 @@ describe("sandbox observability contract", () => {
       const ids = value.panels.map(({ id }) => id);
       expect(new Set(ids).size, `${value.uid} has duplicate panel IDs`).toBe(ids.length);
     }
+  });
+
+  test("the optional wrapper pins one durable, single-source monitoring stack", async () => {
+    const chart = Bun.YAML.parse(await Bun.file("deploy/observability/Chart.yaml").text()) as {
+      dependencies?: Array<{
+        name?: string;
+        repository?: string;
+        version?: string;
+        condition?: string;
+      }>;
+    };
+    expect(chart.dependencies).toEqual([
+      {
+        name: "kube-prometheus-stack",
+        repository: "https://prometheus-community.github.io/helm-charts",
+        version: "87.16.1",
+        condition: "kube-prometheus-stack.enabled",
+      },
+    ]);
+
+    const values = Bun.YAML.parse(await Bun.file("deploy/observability/values.yaml").text()) as any;
+    const stack = values["kube-prometheus-stack"];
+    expect(stack.enabled).toBe(true);
+    expect(stack.prometheus.prometheusSpec.retention).toBe("7d");
+    expect(
+      stack.prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests
+        .storage,
+    ).toBe("8Gi");
+    expect(
+      stack.alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.resources.requests
+        .storage,
+    ).toBe("2Gi");
+    expect(stack.grafana.persistence).toMatchObject({ enabled: true, size: "2Gi" });
+    expect(stack.grafana.sidecar.dashboards.provider.foldersFromFilesStructure).toBe(true);
+    expect(values.opengeni.dashboards.folder).toBe("/tmp/dashboards/OpenGeni");
+    const monitoringSelector = {
+      [OPENGENI_OBSERVABILITY_DISTRIBUTION.monitoringNamespaceLabel]:
+        OPENGENI_OBSERVABILITY_DISTRIBUTION.monitoringNamespaceLabelValue,
+    };
+    expect(stack.prometheus.prometheusSpec.serviceMonitorSelector.matchLabels).toEqual({
+      "opengeni.ai/monitoring": "enabled",
+    });
+    expect(stack.prometheus.prometheusSpec.ruleSelector.matchLabels).toEqual({
+      "opengeni.ai/monitoring": "enabled",
+    });
+    expect(stack.prometheus.prometheusSpec.serviceMonitorNamespaceSelector.matchLabels).toEqual(
+      monitoringSelector,
+    );
+    expect(stack.prometheus.prometheusSpec.ruleNamespaceSelector.matchLabels).toEqual(
+      monitoringSelector,
+    );
+    expect(stack.grafana.sidecar.dashboards.label).toBe(
+      OPENGENI_OBSERVABILITY_DISTRIBUTION.grafanaDashboardLabel,
+    );
+    expect(stack.grafana.sidecar.dashboards.labelValue).toBe(
+      OPENGENI_OBSERVABILITY_DISTRIBUTION.grafanaDashboardLabelValue,
+    );
+    expect(stack.grafana.sidecar.dashboards.searchNamespace).toBe("");
+    expect(stack.grafana.sidecar.dashboards.resource).toBe("configmap");
+    expect(stack.grafana.sidecar.datasources.resource).toBe("configmap");
+    expect(stack.grafana.rbac.namespaced).toBe(true);
+
+    const template = await Bun.file(
+      "deploy/observability/templates/dashboard-configmaps.yaml",
+    ).text();
+    expect(template).toContain('.Files.Glob "dashboards/*.json"');
+    expect(template).toContain("opengeni.ai/content-sha256");
+    expect(template).not.toContain("streaming-health.json:");
   });
 
   test("the canonical sandbox board covers every operational lifecycle plane", async () => {

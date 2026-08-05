@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
+  axeManualContrastSelector,
   assertFixtureCapture,
   assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
@@ -30,6 +31,17 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("admits only concrete single-selector Axe targets to the manual contrast audit", () => {
+    expect(axeManualContrastSelector(['button[class="bg-primary"]'])).toBe(
+      'button[class="bg-primary"]',
+    );
+    expect(axeManualContrastSelector(["  div[data-description]  "])).toBe("div[data-description]");
+    expect(axeManualContrastSelector([])).toBeNull();
+    expect(axeManualContrastSelector([".host", ".shadow-child"])).toBeNull();
+    expect(axeManualContrastSelector([""])).toBeNull();
+    expect(axeManualContrastSelector(".bg-primary")).toBeNull();
+  });
+
   test("ignores only expected browser-cancelled background reads", () => {
     const path = "/v1/workspaces/workspace/sessions/session/workspace/capture/file";
     expect(isExpectedBrowserCancellation(path, "net::ERR_ABORTED")).toBe(true);
@@ -138,6 +150,7 @@ describe("workbench live acceptance preflight", () => {
       isVisible: async () => false,
     };
     const tree = {
+      waitFor: async () => {},
       focus: async () => {},
       press: async (key: string) => {
         presses.push(key);
@@ -163,6 +176,7 @@ describe("workbench live acceptance preflight", () => {
         const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
         return {
           waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
           getAttribute: async (name: string) => {
             if (name === "aria-level") return rows[index] === "api" ? "1" : "2";
             if (name === "aria-expanded") return rows[index] === "api" ? "true" : null;
@@ -187,6 +201,7 @@ describe("workbench live acceptance preflight", () => {
     let expanded = false;
     const rows = ["README.md", "api", "base.txt"];
     const tree = {
+      waitFor: async () => {},
       focus: async () => {},
       press: async (key: string) => {
         presses.push(key);
@@ -215,6 +230,7 @@ describe("workbench live acceptance preflight", () => {
         const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
         return {
           waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
           getAttribute: async (name: string) => {
             if (name === "aria-level") return rows[index] === "base.txt" ? "2" : "1";
             if (name === "aria-expanded") {
@@ -233,6 +249,218 @@ describe("workbench live acceptance preflight", () => {
     await selectTreeFile(page, "api", "base.txt");
 
     expect(presses).toEqual(["Home", "ArrowDown", "ArrowRight", "ArrowDown", "Enter"]);
+  });
+
+  test("waits for a cold virtualized tree to expose an active descendant", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let hydrated = false;
+    let readinessWaits = 0;
+    const rows = ["api", "server.ts"];
+    const tree = {
+      waitFor: async (options: { state?: string; timeout?: number }) => {
+        expect(options).toEqual({ state: "visible", timeout: 20_000 });
+      },
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home" && hydrated) active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return hydrated ? `tree-item-${active}` : null;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[role="tree"][aria-activedescendant]:not([aria-activedescendant=""])') {
+          return {
+            first: () => ({
+              waitFor: async (options: { state?: string; timeout?: number }) => {
+                expect(options).toEqual({ state: "visible", timeout: 20_000 });
+                readinessWaits += 1;
+                hydrated = true;
+              },
+            }),
+          };
+        }
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows[index] === "api" ? "true" : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(readinessWaits).toBe(1);
+    expect(presses).toEqual(["Home", "Home", "ArrowDown", "Enter"]);
+  });
+
+  test("waits for an expanded lazy directory to finish hydrating its children", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let expanded = false;
+    let busy = false;
+    let loaded = false;
+    let hydrationWaits = 0;
+    const rows = () => (loaded ? ["api", "server.ts"] : ["api"]);
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowRight") {
+          expanded = true;
+          busy = true;
+        }
+        if (key === "ArrowDown") active = Math.min(active + 1, rows().length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[id="tree-item-0"][aria-expanded="true"]:not([aria-busy="true"])') {
+          return {
+            waitFor: async (options: { state?: string; timeout?: number }) => {
+              expect(options).toEqual({ state: "visible", timeout: 20_000 });
+              expect(expanded).toBe(true);
+              expect(busy).toBe(true);
+              hydrationWaits += 1;
+              busy = false;
+              loaded = true;
+            },
+          };
+        }
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows()[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows()[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows()[index] === "api" ? String(expanded) : null;
+            if (name === "aria-busy") return rows()[index] === "api" ? String(busy) : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows()[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(hydrationWaits).toBe(1);
+    expect(presses).toEqual(["Home", "ArrowRight", "ArrowDown", "Enter"]);
+  });
+
+  test("reports bounded tree observations when a target directory is absent", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    const rows = Array.from(
+      { length: 10 },
+      (_, index) => `root-${String(index).padStart(2, "0")}-${"x".repeat(120)}`,
+    );
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return "1";
+            if (name === "aria-expanded") return "false";
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    let failure: unknown;
+    try {
+      await selectTreeFile(page, "api", "server.ts");
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(
+      "file tree could not select api/server.ts: navigation stalled at the tree boundary",
+    );
+    expect((failure as Error).message).not.toContain("root-00");
+    expect((failure as Error).message).not.toContain("root-01");
+    expect((failure as Error).message).toContain('"label":"root-02-');
+    expect((failure as Error).message).toContain('"label":"root-09-');
+    expect((failure as Error).message).toContain('"level":1');
+    expect(presses).toEqual(["Home", ...Array.from({ length: 10 }, () => "ArrowDown")]);
+    expect((failure as Error).message.length).toBeLessThan(2_000);
   });
 
   test("accepts repository evidence from the compact changed-file picker", async () => {

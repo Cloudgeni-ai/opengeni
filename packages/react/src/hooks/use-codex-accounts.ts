@@ -15,7 +15,7 @@ import {
 
 /** Events that change which Codex account a session runs on (or just ran). */
 export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type === "codex.account.switched" || event.type === "turn.started";
+  return event.type === "codex.account.switched";
 }
 
 /**
@@ -104,7 +104,7 @@ const EMPTY_STATE: CodexAccountsState = {
  * The workspace's Codex accounts + the per-workspace active pointer + (when
  * session-scoped) the session pin and last-ran-on account. Composed like
  * `useMachines`: slow polling (the realtime work is done by the
- * `codex.account.switched` / `turn.started` event trigger) + a `pin` mutation.
+ * `codex.account.switched` event trigger) + a `pin` mutation.
  * Dual-consumer safe via the structural `CodexAccountsClientLike` surface.
  */
 export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCodexAccountsResult {
@@ -141,8 +141,8 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   const { run: runUsageMutation, mutating: refreshingUsage } = useMutationRunner();
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
 
-  // Live flip: a manual switch (P1) or a failover (P3) emits codex.account.switched;
-  // turn.started covers the case where the worker recorded the actual account.
+  // Refresh only after the durable post-selection event. `turn.started` is
+  // emitted before account selection settles and races this authoritative read.
   useSessionEventTrigger(
     client,
     workspaceId,

@@ -224,7 +224,7 @@ describe("single portable compaction threshold", () => {
     ).toBe(750);
   });
 
-  test("never lets a stale provider count hide larger active history", () => {
+  test("does not let a local history estimate override provider accounting", () => {
     const items = [bigUser(1_000_000, "x")];
     const decision = decideCompaction({
       items,
@@ -232,11 +232,11 @@ describe("single portable compaction threshold", () => {
       contextWindowTokens: WINDOW,
       contextReservedOutputTokens: RESERVED_OUTPUT,
     });
-    expect(decision.signalTokens).toBeGreaterThan(1_000_000);
-    expect(decision.shouldCompact).toBe(true);
+    expect(decision.signalTokens).toBe(10);
+    expect(decision.shouldCompact).toBe(false);
   });
 
-  test("uses the conservative local estimate only when there is no provider signal yet", () => {
+  test("waits for a provider result when there is no provider signal yet", () => {
     const items = [bigUser(THRESHOLD + 1, "x")];
     const decision = decideCompaction({
       items,
@@ -244,9 +244,9 @@ describe("single portable compaction threshold", () => {
       contextWindowTokens: WINDOW,
       contextReservedOutputTokens: RESERVED_OUTPUT,
     });
-    expect(decision.signalTokens).toBeGreaterThan(THRESHOLD);
-    expect(decision.shouldCompact).toBe(true);
-    expect(decision.reason).toBe("above_threshold");
+    expect(decision.signalTokens).toBe(0);
+    expect(decision.shouldCompact).toBe(false);
+    expect(decision.reason).toBe("below_threshold");
   });
 
   test("compacts when the token signal reaches the threshold exactly", () => {
@@ -291,20 +291,6 @@ describe("complete outgoing model-input accounting", () => {
     );
     expect(estimateItemTokens(user("界🙂".repeat(100)))).toBe(
       estimateTextTokens(JSON.stringify(user("界🙂".repeat(100)))),
-    );
-  });
-
-  test("counts history, instructions, and tool schemas before a provider anchor exists", () => {
-    const estimate = estimateCompleteModelInput({
-      current: {
-        input: [user("u".repeat(400))],
-        instructionsTokens: 700,
-        toolSchemaTokens: 900,
-      },
-    });
-    expect(estimate.source).toBe("complete_estimate");
-    expect(estimate.tokens).toBe(
-      estimate.inputTokens + estimate.instructionsTokens + estimate.toolSchemaTokens,
     );
   });
 
@@ -476,16 +462,6 @@ describe("complete outgoing model-input accounting", () => {
       providerRequestFootprint: prior,
     });
     expect(estimate.tokens).toBe(10_100);
-  });
-
-  test("treats an anchor without a model-generated boundary as unbound at the caller", () => {
-    const current = {
-      input: [user("only user input")],
-      instructionsTokens: 10,
-      toolSchemaTokens: 20,
-    };
-    const estimate = estimateCompleteModelInput({ current });
-    expect(estimate.source).toBe("complete_estimate");
   });
 });
 

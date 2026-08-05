@@ -2,11 +2,59 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>@opengeni/react — component harness</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d1016'/%3E%3Cpath d='M9 10h14v4H13v8H9z' fill='%2375a7ff'/%3E%3Cpath d='M15 16h8v6h-4v-2h-4z' fill='%23e9eef8'/%3E%3C/svg%3E"
+    />
+    <title>OpenGeni React demo — durable agent sessions</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        min-height: 100%;
+        background: #0d1016;
+        color: #e9eef8;
+      }
+
+      .demo-boot {
+        box-sizing: border-box;
+        display: grid;
+        min-height: 100dvh;
+        place-items: center;
+        padding: max(1.5rem, env(safe-area-inset-top)) 1.5rem
+          max(1.5rem, env(safe-area-inset-bottom));
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      }
+
+      .demo-boot__copy {
+        max-width: 22rem;
+        text-align: center;
+      }
+
+      .demo-boot__title {
+        margin: 0;
+        font-size: 0.875rem;
+        font-weight: 600;
+      }
+
+      .demo-boot__status {
+        margin: 0.375rem 0 0;
+        color: #969ca8;
+        font-size: 0.75rem;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="demo-boot" aria-busy="true" aria-label="Loading OpenGeni React demo">
+        <div class="demo-boot__copy">
+          <p class="demo-boot__title">OpenGeni React demo</p>
+          <p class="demo-boot__status">Loading the scripted manager session…</p>
+        </div>
+      </main>
+    </div>
     <script type="module" src="/main.tsx"></script>
   </body>
 </html>

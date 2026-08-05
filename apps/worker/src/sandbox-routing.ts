@@ -44,6 +44,7 @@ import {
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   resolveModalCheckpointProviderBindingForSession,
+  sandboxBackendForSdkBackendId,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -322,7 +323,8 @@ async function resolveCurrentHomeBackend(
   }
 
   const resumeState = lease.resumeState;
-  const resumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  const durableResumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  const resumeBackend = sandboxBackendForSdkBackendId(durableResumeBackend) ?? durableResumeBackend;
   if (
     !resumeState ||
     resumeBackend !== ids.backend ||
@@ -377,7 +379,8 @@ async function resolveCurrentHomeBackend(
   // The provider identity must agree with the exact durable lease row before
   // any caller can publish or route through this rebound handle. A mismatch is
   // unverifiable local state, not permission to try the old handle.
-  if (rebound.instanceId !== lease.instanceId || rebound.backendId !== resumeBackend) {
+  const reboundBackend = sandboxBackendForSdkBackendId(rebound.backendId) ?? rebound.backendId;
+  if (rebound.instanceId !== lease.instanceId || reboundBackend !== resumeBackend) {
     throw homeRouteRecoveryError(lease, lease.leaseEpoch);
   }
   services.onHomeSandboxRebound?.({

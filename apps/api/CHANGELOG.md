@@ -1,5 +1,112 @@
 # @opengeni/api-router
 
+## 0.22.3
+
+### Patch Changes
+
+- 5d1d0c2: Make browser live streams visibility-aware, share one routed session feed,
+  bound reconciliation and heartbeat recovery, coalesce overlapping reads, and
+  expose the append, publish, and SSE connection lifecycle in metrics.
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [110d255]
+- Updated dependencies [41f7ae3]
+- Updated dependencies [5d1d0c2]
+- Updated dependencies [ce823ce]
+  - @opengeni/db@0.28.2
+  - @opengeni/core@0.21.3
+  - @opengeni/runtime@0.18.18
+  - @opengeni/events@0.3.81
+  - @opengeni/contracts@0.39.1
+  - @opengeni/documents@0.5.11
+  - @opengeni/config@0.11.1
+  - @opengeni/github@0.4.32
+  - @opengeni/observability@0.5.1
+  - @opengeni/storage@0.2.69
+
+## 0.22.2
+
+### Patch Changes
+
+- Updated dependencies [33166b0]
+  - @opengeni/observability@0.5.0
+  - @opengeni/core@0.21.2
+
+## 0.22.1
+
+### Patch Changes
+
+- Updated dependencies [55f6ad0]
+- Updated dependencies [18eea76]
+  - @opengeni/db@0.28.1
+  - @opengeni/runtime@0.18.17
+  - @opengeni/core@0.21.1
+  - @opengeni/documents@0.5.10
+  - @opengeni/events@0.3.80
+
+## 0.22.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 49c7f9c: Prevent deadlocks between sandbox mutation settlement and retained-process promotion, retry idempotent settlement transactions after transient database conflicts, and clarify that an idle session sandbox can be restored when the next operation needs it.
+- Updated dependencies [49c7f9c]
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+- Updated dependencies [5b6d36e]
+  - @opengeni/db@0.28.0
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+  - @opengeni/core@0.21.0
+  - @opengeni/runtime@0.18.16
+  - @opengeni/documents@0.5.9
+  - @opengeni/events@0.3.79
+  - @opengeni/github@0.4.31
+  - @opengeni/storage@0.2.68
+  - @opengeni/observability@0.4.17
+
+## 0.21.15
+
+### Patch Changes
+
+- Updated dependencies [cbf165a]
+  - @opengeni/db@0.27.12
+  - @opengeni/core@0.20.17
+  - @opengeni/documents@0.5.8
+  - @opengeni/events@0.3.78
+
+## 0.21.14
+
+### Patch Changes
+
+- Updated dependencies [8135dbb]
+- Updated dependencies [17643a5]
+  - @opengeni/config@0.10.14
+  - @opengeni/db@0.27.11
+  - @opengeni/core@0.20.16
+  - @opengeni/documents@0.5.7
+  - @opengeni/github@0.4.30
+  - @opengeni/runtime@0.18.15
+  - @opengeni/storage@0.2.67
+  - @opengeni/events@0.3.77
+
+## 0.21.13
+
+### Patch Changes
+
+- Updated dependencies [c6c9acb]
+  - @opengeni/runtime@0.18.14
+  - @opengeni/core@0.20.15
+
 ## 0.21.12
 
 ### Patch Changes

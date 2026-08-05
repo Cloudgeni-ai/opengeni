@@ -89,7 +89,7 @@ import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
   modelResponseServiceTierFromSdkEvent,
-  modelResponseUsageFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
   normalizeModelCallUsage,
   normalizeSdkEvent,
   projectHistoryForProvider,
@@ -122,9 +122,11 @@ import {
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   isMcpRequestTimeoutError,
+  isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
   WorkspaceArchiveIntegrityError,
+  sdkBackendIdForSandboxBackend,
   swapTargetEstablishability,
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
@@ -321,6 +323,8 @@ import {
   recordCreditMicros,
   recordModelCacheTokens,
   recordModelInputTokens,
+  recordSessionEventAppendLatency,
+  recordSessionEventPublishLatency,
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
@@ -463,7 +467,8 @@ export function providerRecoveryResult(input: {
     input.failureCode === "provider_rate_limited"
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
-          input.failureCode === "upstream_connectivity_unavailable"
+          input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "mcp_transport_unavailable"
         ? Math.max(
             providerDelay ?? 0,
             PROVIDER_CONNECTIVITY_BACKOFF_MS[
@@ -1121,10 +1126,9 @@ type TurnEventPublisher = (
   immediate?: boolean,
 ) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
 
-export type ModelResponseUsageEventState = {
-  responseUsageCount: number;
-  providerContextRevision: number;
-  lastProviderContextTokensObserved: number | null;
+export type ModelResponseEventState = {
+  responseCount: number;
+  contextSignal: { revision: number; totalTokens: number } | null;
   claimedSourceKeys: Set<string>;
 };
 
@@ -1133,13 +1137,12 @@ export type CompactionModelUsageEventState = {
   claimedSourceKeys: Set<string>;
 };
 
-export function createModelResponseUsageEventState(
+export function createModelResponseEventState(
   claimedSourceKeys: Set<string> = new Set<string>(),
-): ModelResponseUsageEventState {
+): ModelResponseEventState {
   return {
-    responseUsageCount: 0,
-    providerContextRevision: 0,
-    lastProviderContextTokensObserved: null,
+    responseCount: 0,
+    contextSignal: null,
     claimedSourceKeys,
   };
 }
@@ -1150,15 +1153,10 @@ export function createCompactionModelUsageEventState(
   return { usageCount: 0, claimedSourceKeys };
 }
 
-export function modelResponseUsageContextSignal(
-  state: ModelResponseUsageEventState,
+export function modelResponseContextSignal(
+  state: ModelResponseEventState,
 ): { revision: number; totalTokens: number } | null {
-  return state.lastProviderContextTokensObserved === null
-    ? null
-    : {
-        revision: state.providerContextRevision,
-        totalTokens: state.lastProviderContextTokensObserved,
-      };
+  return state.contextSignal;
 }
 
 export function assertModelResponseLatencyMode(input: {
@@ -1193,19 +1191,20 @@ export function assertModelResponseLatencyMode(input: {
 }
 
 /**
- * Process one SDK stream event through the exact production usage path.
+ * Process one SDK terminal-response event through the production authority path.
  *
  * The pinned Responses SDK mirrors one provider terminal response as both a
  * normalized `response_done` and a raw `model/response.completed` event. Claim
- * the stable response/source key before lease renewal or any usage side effect,
- * and advance the positional ordinal only for a newly claimed response. The
- * durable `agent.model.usage` source-key fence remains the cross-restart
- * authority: a replay may retry the idempotent billing write, but it cannot
- * advance process-local metrics, provider context, or attempt-owned signals.
+ * the stable response/source key before lease renewal or any side effect, and
+ * use that one positional ordinal for both response identity and same-run
+ * context binding. A response without usage still clears attempt-owned token
+ * state. When usage exists, the durable `agent.model.usage` source-key fence
+ * remains the cross-restart authority: a replay may retry the idempotent billing
+ * write, but it cannot advance metrics, context, or attempt-owned signals.
  */
-export async function processModelResponseUsageEvent(input: {
-  event: Parameters<typeof modelResponseUsageFromSdkEvent>[0];
-  state: ModelResponseUsageEventState;
+export async function processModelResponseTerminalEvent(input: {
+  event: Parameters<typeof modelTerminalResponseFromSdkEvent>[0];
+  state: ModelResponseEventState;
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -1228,20 +1227,25 @@ export async function processModelResponseUsageEvent(input: {
   renewLease: () => Promise<void>;
   leaseLost: () => boolean;
   leaseLostMessage: string;
-  setLastInputTokens: (tokens: number) => Promise<void>;
+  setLastInputTokens: (tokens: number | null) => Promise<void>;
 }): Promise<
-  | { status: "not_usage" }
+  | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
-  | { status: "processed"; sourceKey: string; authoritative: boolean }
+  | {
+      status: "processed";
+      sourceKey: string;
+      authoritative: boolean;
+      usageReported: boolean;
+    }
 > {
-  const responseUsage = modelResponseUsageFromSdkEvent(input.event);
-  if (!responseUsage) {
-    return { status: "not_usage" };
+  const terminal = modelTerminalResponseFromSdkEvent(input.event);
+  if (!terminal) {
+    return { status: "not_response" };
   }
 
-  const responseOrdinal = input.state.responseUsageCount + 1;
+  const responseOrdinal = input.state.responseCount + 1;
   const sourceKey = modelUsageSourceKey({
-    responseId: responseUsage.responseId,
+    responseId: terminal.responseId,
     dispatchId: input.dispatchId,
     positionalKey: `response-${responseOrdinal}`,
   });
@@ -1249,20 +1253,25 @@ export async function processModelResponseUsageEvent(input: {
     return { status: "duplicate", sourceKey };
   }
   input.state.claimedSourceKeys.add(sourceKey);
-  input.state.responseUsageCount = responseOrdinal;
+  input.state.responseCount = responseOrdinal;
 
-  const normalizedUsage = normalizeModelCallUsage(responseUsage.usage);
+  const responseUsage = terminal.usage;
+
+  const normalizedUsage = normalizeModelCallUsage(responseUsage?.usage);
   const accountContext = modelCallAccountContext({
     servingCredentialId: input.servingCredentialId,
     priorSessionCredentialId: input.priorSessionCredentialId,
     isFirstCallOfTurn: responseOrdinal === 1,
   });
-  let authoritative = false;
+  // A terminal response without usage still authoritatively replaces the
+  // attempt-owned context signal. There is simply no billing event to claim.
+  let authoritative = responseUsage === null;
   await recordCompletedModelCallBeforeOwnershipFences({
     renewLease: input.renewLease,
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
+      if (!responseUsage) return;
       const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -1320,17 +1329,22 @@ export async function processModelResponseUsageEvent(input: {
     recordAttemptSignals: async () => {
       if (!authoritative) return;
       const observedTotal = normalizedUsage.totalTokens;
-      if (observedTotal !== null) {
-        input.state.lastProviderContextTokensObserved = observedTotal;
-        input.state.providerContextRevision += 1;
-      }
+      input.state.contextSignal =
+        observedTotal !== null && observedTotal > 0
+          ? { revision: responseOrdinal, totalTokens: observedTotal }
+          : null;
       const observedInput = normalizedUsage.telemetry.inputTokens;
-      if (observedInput !== null && observedInput > 0) {
-        await input.setLastInputTokens(observedInput);
-      }
+      await input.setLastInputTokens(
+        observedInput !== null && observedInput > 0 ? observedInput : null,
+      );
     },
   });
-  return { status: "processed", sourceKey, authoritative };
+  return {
+    status: "processed",
+    sourceKey,
+    authoritative,
+    usageReported: responseUsage !== null,
+  };
 }
 
 /**
@@ -2270,10 +2284,6 @@ export function createTurnSandboxProvisioner<T>(
   };
 }
 
-function sdkBackendIdForSandboxBackend(backend: Settings["sandboxBackend"]): string {
-  return backend === "local" ? "unix_local" : backend;
-}
-
 /**
  * Decide whether THIS turn may send OpenAI's `prompt_cache_key` request field.
  *
@@ -2452,7 +2462,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
     let redispatchesAtDispatch = 0;
-    const setLastInputTokensFenced = async (lastInputTokens: number): Promise<void> => {
+    const setLastInputTokensFenced = async (lastInputTokens: number | null): Promise<void> => {
       if (!turnId || executionGeneration <= 0) {
         throw new Error("Turn attempt was not initialized before token accounting");
       }
@@ -3383,6 +3393,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           executionGeneration,
           input.attemptId,
           inputs,
+          {
+            onAppend: ({ durationSeconds }) =>
+              recordSessionEventAppendLatency(observability, { durationSeconds }),
+            onPublish: ({ durationSeconds }) =>
+              recordSessionEventPublishLatency(observability, { durationSeconds }),
+          },
         );
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");
@@ -6507,10 +6523,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               attemptId: input.attemptId,
             },
             // Never reuse the persisted prior-turn signal for recovery. Proactive
-            // guards provide their exact current signal; provider overflows do not,
-            // so null derives decision metadata from active history. Forced
-            // recovery proves progress separately by comparing the replacement
-            // with the current active-history estimate in maybeCompactContext.
+            // guards provide their exact current provider-based signal; provider
+            // overflows do not, so their diagnostic signal stays unknown/zero.
+            // Forced recovery proves progress separately by comparing the
+            // replacement with the current active-history estimate.
             recoverySignalTokens,
             compactSummarizer,
             {
@@ -6533,13 +6549,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return outcome;
       };
 
-      // Keep response usage identity across every stream attempt in this
+      // Keep response identity across every stream attempt in this
       // activity. Context compaction retries the same logical dispatch by
       // calling runStreamAttempt again; resetting this state there would reuse
       // the first no-response-ID fallback key and suppress a real model call.
-      const modelResponseUsageState = createModelResponseUsageEventState(
-        claimedModelUsageSourceKeys,
-      );
+      const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
       const runStreamAttempt = async (): Promise<RunAgentTurnResult> => {
         if (!runInput) {
           throw new Error("Run input was not prepared");
@@ -6553,6 +6567,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // schema or compatibility state.
         let currentToolBatchCallIds = new Set<string>();
         let currentToolBatchCompletedCallIds = new Set<string>();
+        let streamSawPerResponseUsage = false;
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         throwIfWorkerShuttingDown();
@@ -6669,7 +6684,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     : {}),
                 }
               : {}),
-            contextCompactionSignal: () => modelResponseUsageContextSignal(modelResponseUsageState),
+            contextCompactionSignal: () => modelResponseContextSignal(modelResponseState),
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
             callModelInputFilter: secretRedactionModelInputFilter((value) => redact(value)),
@@ -6710,9 +6725,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
-            const responseUsageResult = await processModelResponseUsageEvent({
+            const responseResult = await processModelResponseTerminalEvent({
               event: next.value,
-              state: modelResponseUsageState,
+              state: modelResponseState,
               dispatchId: modelUsageDispatchId,
               settings,
               db,
@@ -6743,7 +6758,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               model: turn.model,
               ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
             });
-            if (responseUsageResult.status === "processed") {
+            if (responseResult.status === "processed") {
+              streamSawPerResponseUsage ||= responseResult.usageReported;
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
@@ -6882,7 +6898,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           stream.completed.catch(() => undefined),
           cancellationSignal,
         );
-        if (modelResponseUsageState.responseUsageCount === 0) {
+        if (!streamSawPerResponseUsage) {
           const aggregateUsage = stream.state.usage;
           const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
           const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
@@ -6893,8 +6909,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           if (!claimedModelUsageSourceKeys.has(aggregateSourceKey)) {
             claimedModelUsageSourceKeys.add(aggregateSourceKey);
-            // The single aggregate frame is this turn's only model-usage record, so
-            // it is the first (account-switch surfaces here just like a first response).
+            // The aggregate frame is only a billing fallback when no terminal
+            // response exposed usage. It is not final-request context authority.
             const aggregateAccountCtx = modelCallAccountContext({
               servingCredentialId: effectiveCodexCredentialId,
               priorSessionCredentialId: priorSessionCodexCredentialId,
@@ -6961,14 +6977,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
               recordAttemptSignals: async () => {
                 if (!aggregateAuthoritative) return;
-                if (normalizedAggregateUsage.totalTokens !== null) {
-                  modelResponseUsageState.lastProviderContextTokensObserved =
-                    normalizedAggregateUsage.totalTokens;
-                  modelResponseUsageState.providerContextRevision += 1;
-                }
-                if (aggregateInput !== null && aggregateInput > 0) {
-                  await setLastInputTokensFenced(aggregateInput);
-                }
+                // Stream aggregates can cover multiple requests and therefore
+                // cannot identify the final request that compaction must bind.
+                // They remain billing/telemetry fallback data only.
+                modelResponseState.contextSignal = null;
+                await setLastInputTokensFenced(null);
               },
             });
           }
@@ -9002,6 +9015,14 @@ export function agentRunFailurePayload(
       ...(mcpTimeout.detail || mcpTimeout.message
         ? { detail: mcpTimeout.detail ?? mcpTimeout.message }
         : {}),
+    };
+  }
+  if (isMcpTransportConnectivityError(error)) {
+    return {
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
     };
   }
   if (
