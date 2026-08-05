@@ -112,9 +112,7 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         ...authority,
         recordingId: uuidParam(c, "recordingId"),
       });
-      return c.json(
-        withRecoveryRetryHint(await cleanupTerminalObjects(deps, authority, response)),
-      );
+      return c.json(withRecoveryRetryHint(await cleanupTerminalObjects(deps, authority, response)));
     } catch (error) {
       return routeError(c, error);
     }
@@ -225,10 +223,7 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         generation = claim.generation;
         if (!claim.claimed) {
           const response = withRecoveryRetryHint(claim.recording);
-          return c.json(
-            response,
-            claim.recording.recording.state === "segmenting" ? 202 : 200,
-          );
+          return c.json(response, claim.recording.recording.state === "segmenting" ? 202 : 200);
         }
         for (const key of claim.staleObjectKeys) {
           try {

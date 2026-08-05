@@ -1,5 +1,4 @@
 import type { ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
-import { TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS } from "@opengeni/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IndexedDbVoiceRecordingStore,
@@ -86,6 +85,7 @@ export const VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS = 600;
 export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60;
 export const VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS = 2_000;
 export const VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS = 30_000;
+const TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS = 5_000;
 
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const createDefaultVoiceRecordingId = () => crypto.randomUUID();
@@ -112,9 +112,7 @@ export function transcriptionRecoveryMutationDelayMilliseconds(
     boundedHint * 2 ** exponent,
   );
   const sampledJitter = random();
-  const jitterRatio = Number.isFinite(sampledJitter)
-    ? Math.max(0, Math.min(1, sampledJitter))
-    : 0;
+  const jitterRatio = Number.isFinite(sampledJitter) ? Math.max(0, Math.min(1, sampledJitter)) : 0;
   return Math.min(
     VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
     Math.ceil(exponential * (1 + jitterRatio * 0.2)),
@@ -1202,10 +1200,7 @@ async function transcribePersistedRecording(input: {
   let recoveryMutationAttempt = 0;
   let recoveryMutationDueAt = 0;
   const scheduleRecoveryMutation = (response: typeof remote): void => {
-    if (
-      response.recording.state !== "segmenting" &&
-      response.recording.state !== "transcribing"
-    ) {
+    if (response.recording.state !== "segmenting" && response.recording.state !== "transcribing") {
       return;
     }
     recoveryMutationDueAt =

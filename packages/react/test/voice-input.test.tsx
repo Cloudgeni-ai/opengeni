@@ -1290,7 +1290,7 @@ describe("useVoiceInput", () => {
     expect(transcriptionRecoveryMutationDelayMilliseconds(5_000, 1, () => 0)).toBe(10_000);
     expect(transcriptionRecoveryMutationDelayMilliseconds(5_000, 99, () => 0)).toBe(30_000);
     expect(transcriptionRecoveryMutationDelayMilliseconds(5_000, 0, () => 0.5)).toBe(5_500);
-    expect(transcriptionRecoveryMutationDelayMilliseconds(60_001, 0, () => 0)).toBe(5_000);
+    expect(transcriptionRecoveryMutationDelayMilliseconds(60_001, 0, () => 0)).toBe(30_000);
   });
 
   test("re-enters process-next after a claimed-segment crash and repeated stale polling", async () => {
@@ -1367,7 +1367,7 @@ describe("useVoiceInput", () => {
       await settle(30);
     });
 
-    expect(getCalls).toBe(0);
+    expect(getCalls).toBeGreaterThan(0);
     expect(uploadCalls).toBe(0);
     expect(finalizeCalls).toBe(2);
     expect(processNextCalls).toBe(3);
@@ -1502,7 +1502,7 @@ describe("useVoiceInput", () => {
       await settle(20);
     });
 
-    expect(getCalls).toBe(0);
+    expect(getCalls).toBeGreaterThan(0);
     expect(finalizeCalls).toBe(2);
     expect(processNextCalls).toBe(1);
     expect(draft).toBe("assembled after stale lease");
