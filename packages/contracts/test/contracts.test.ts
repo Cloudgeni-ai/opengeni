@@ -25,6 +25,9 @@ import {
   GitCredentialBindingId,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  gitRemoteIdentity,
+  gitRemotePathAliases,
+  gitRemoteUriAliases,
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
@@ -60,6 +63,7 @@ import {
   defaultRepositoryMountPath,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
   readTurnExecutionPolicyV1,
   resourceMountPath,
@@ -598,17 +602,17 @@ describe("contracts", () => {
   });
 
   test("derives portable host-aware repository mount paths", () => {
-    expect(defaultRepositoryMountPath("https://github.com/acme/app.git")).toBe(
+    expect(defaultRepositoryMountPath("https://github.com/acme/app.git", "github")).toBe(
       "repos/github.com/acme/app",
     );
-    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git")).toBe(
+    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git", "gitlab")).toBe(
       "repos/gitlab.com/acme/app",
     );
-    expect(defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app")).toBe(
-      "repos/dev.azure.com/acme/project/_git/app",
-    );
+    expect(
+      defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app.git", "azure_devops"),
+    ).toBe("repos/dev.azure.com/acme/project/_git/app.git");
     expect(defaultRepositoryMountPath("https://git.example.com:8443/acme/app.git")).toBe(
-      "repos/git.example.com%3A8443/acme/app",
+      "repos/git.example.com%3A8443/acme/app.git",
     );
     expect(() => defaultRepositoryMountPath("ssh://git.example.com/acme/app.git")).toThrow(
       "invalid repository URI",
@@ -622,12 +626,38 @@ describe("contracts", () => {
     expect(resourceMountPathCollisionKey("repos/example.com/acme/caf\u00e9")).toBe(
       resourceMountPathCollisionKey("repos/example.com/acme/cafe\u0301"),
     );
-    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git")).toThrow(
+    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git", "github")).toThrow(
       "invalid resource mount path",
     );
     expect(normalizeResourceMountPath("repos/github.com/acme/aux-repository")).toBe(
       "repos/github.com/acme/aux-repository",
     );
+  });
+
+  test("preserves transport paths and applies only provider-declared aliases", () => {
+    expect(normalizeRepositoryTransportUri("https://bot@GIT.EXAMPLE/acme/repo")).toBe(
+      "https://git.example/acme/repo",
+    );
+    expect(gitRemoteUriAliases("https://github.com/acme/repo.git", "github")).toEqual([
+      "https://github.com/acme/repo.git",
+      "https://github.com/acme/repo",
+    ]);
+    expect(gitRemotePathAliases("https://gitlab.com/acme/repo", "gitlab")).toEqual([
+      "acme/repo",
+      "acme/repo.git",
+    ]);
+    expect(
+      gitRemoteUriAliases("https://dev.azure.com/acme/project/_git/repo.git", "azure_devops"),
+    ).toEqual(["https://dev.azure.com/acme/project/_git/repo.git"]);
+    expect(gitRemoteUriAliases("https://git.example/acme/repo.git", null)).toEqual([
+      "https://git.example/acme/repo.git",
+    ]);
+    expect(gitRemoteIdentity("https://github.com/acme/repo.git", "github")).toBe(
+      "https://github.com/acme/repo",
+    );
+    expect(
+      gitRemoteIdentity("https://dev.azure.com/acme/project/_git/repo.git", "azure_devops"),
+    ).toBe("https://dev.azure.com/acme/project/_git/repo.git");
   });
 
   test("keeps uploaded files in the private OpenGeni workspace directory by default", () => {

@@ -38,7 +38,7 @@ Session responses and session events expose only metadata:
 ```
 
 Create, list/get, session-event, and ordinary SDK/React projections expose only
-metadata. The approved release-held OPE-97 follow-up adds a separate tenant-
+metadata. The approved release-held follow-up adds a separate tenant-
 scoped exact-plaintext operation requiring the owning resource permission plus
 `secrets:read`, with metadata-only audit. That dedicated operation is not
 implemented in the current emergency head and is never inferred from an

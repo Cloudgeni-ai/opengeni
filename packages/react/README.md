@@ -368,7 +368,7 @@ state remains application-owned; durable draft and session state remain in
   fleet/manager views (optional polling).
 - `useVariableSets()` — workspace variable sets with metadata-only generic
   reads and create/update/remove/set/delete operations. Dedicated permissioned
-  exact-value reveal is part of the held OPE-97 React/UI train rather than an
+  exact-value reveal is part of the held React/UI train rather than an
   implicit field on ordinary reads.
 - `usePacks()` — capability packs + installations with
   register/enable/remove and `installationFor(packId)`.

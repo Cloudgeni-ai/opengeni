@@ -254,6 +254,14 @@ but are workspace-relative, separator-normalized, traversal-free, portable to
 case-insensitive filesystems, and collision-checked before sandbox execution.
 The normalized path is returned on the session resource and is the same value
 used by the manifest, clone hook, agent filesystem, and workbench.
+Repository URI normalization preserves the provider-defined HTTPS clone path;
+OpenGeni never manufactures or removes a trailing `.git` suffix. Credential
+routing and resource identity use an exhaustive provider capability policy:
+GitHub and GitLab explicitly declare `.git` and suffix-free paths equivalent,
+while Azure DevOps and provider-neutral remotes use exact paths. Adding a Git
+provider therefore requires choosing its path semantics rather than silently
+inheriting GitHub behavior. Mount-path and display-name derivation are separate
+from the clone transport URI.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain

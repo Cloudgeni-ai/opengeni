@@ -42,7 +42,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     uri: string,
     resource: Parameters<typeof repositoryCloneCommand>[0][number] = {
       kind: "repository",
-      uri,
+      uri: "https://github.com/opengeni/test-fixture.git",
       ref: "main",
       githubInstallationId: 123,
       githubRepositoryId: 456,
@@ -126,6 +126,57 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         },
       ]),
     ).toThrow("claimed by multiple credential bindings");
+  });
+
+  test("keeps exact-path provider remotes distinct when one name ends in .git", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/repo",
+        ref: "main",
+        provider: "azure_devops",
+        credentialBindingId: "azure-one",
+      },
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/repo.git",
+        ref: "main",
+        provider: "azure_devops",
+        credentialBindingId: "azure-two",
+      },
+    ]);
+
+    expect(command).toContain("https://dev.azure.com/acme/project/_git/repo");
+    expect(command).toContain("https://dev.azure.com/acme/project/_git/repo.git");
+  });
+
+  test("keeps provider-neutral credential-helper paths exact", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://git.example/acme/repo",
+        ref: "main",
+        mountPath: "repos/plain",
+      },
+      {
+        kind: "repository",
+        uri: "https://git.example/acme/repo.git",
+        ref: "main",
+        mountPath: "repos/dot-git",
+      },
+    ]);
+    const lines = command.split("\n");
+
+    expect(
+      lines.filter((line) =>
+        line.includes("'https|git.example|acme/repo') username='x-access-token'"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      lines.filter((line) =>
+        line.includes("'https|git.example|acme/repo.git') username='x-access-token'"),
+      ),
+    ).toHaveLength(1);
   });
 
   test("fails closed on an unsupported credential transport", () => {

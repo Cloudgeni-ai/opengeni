@@ -72,6 +72,7 @@ describe("API helpers", () => {
         kind: "repository",
         uri: "https://github.com/OpenAI/example.git",
         ref: "main",
+        provider: "github",
         subpath: "/infra/",
       },
     ]);
@@ -80,6 +81,7 @@ describe("API helpers", () => {
       kind: "repository",
       uri: "https://github.com/OpenAI/example.git",
       ref: "main",
+      provider: "github",
       subpath: "infra",
       mountPath: "repos/github.com/OpenAI/example",
     });
@@ -104,7 +106,12 @@ describe("API helpers", () => {
   test("keeps same-name repositories on different providers collision-free", () => {
     expect(
       normalizeResources([
-        { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/app.git",
+          ref: "main",
+          provider: "github",
+        },
         {
           kind: "repository",
           uri: "https://gitlab.com/acme/app.git",

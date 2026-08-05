@@ -510,17 +510,12 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         authenticationAttempt === 0 ? requestId : `${requestId}:auth-${authenticationAttempt}`,
       );
       if (process.env.CODEX_DEBUG) {
-        let keys: string[] = [];
-        if (typeof nextInit.body === "string") {
-          try {
-            keys = Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>);
-          } catch {
-            /* an unparseable body is already passed through unchanged above */
-          }
-        }
-        console.error(
-          `[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`,
-        );
+        console.error("[codex-debug] request dispatched", {
+          method: "POST",
+          origin: "codex-subscription",
+          route: "codex_responses",
+          stream: callerWantsStream,
+        });
       }
       let res: Response;
       transportAttempt += 1;
@@ -587,12 +582,13 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         ctx.onUsageHeaders?.(usage);
       }
       if (process.env.CODEX_DEBUG && !res.ok) {
-        // Never log provider bodies: they can contain request-derived content or
-        // account details. Status + request id is sufficient to correlate with
-        // the structured worker failure telemetry.
-        console.error(
-          `[codex-debug] <- ${res.status} requestId=${res.headers.get("x-request-id") ?? "unknown"}`,
-        );
+        // Never log provider bodies, identifiers, or headers: they can contain
+        // request-derived or account content. A bounded status is sufficient.
+        console.error("[codex-debug] request failed", {
+          origin: "codex-subscription",
+          route: "codex_responses",
+          status: res.status,
+        });
       }
       // The codex backend leaves the terminal event's response.output empty and
       // delivers the assistant items via output_item.done events instead. The

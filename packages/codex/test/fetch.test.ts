@@ -100,6 +100,46 @@ describe("Codex encrypted artifact rejection classifier", () => {
 });
 
 describe("codexSubscriptionFetch", () => {
+  test("CODEX_DEBUG request logs omit rewritten URLs, query values, and body keys", async () => {
+    const sentinel = "SECRET_SENTINEL_123_query_and_body_key";
+    const { base } = baseRecorder();
+    const errors: unknown[][] = [];
+    const originalDebug = process.env.CODEX_DEBUG;
+    const originalError = console.error;
+    process.env.CODEX_DEBUG = "1";
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const url = new URL("https://chatgpt.com/backend-api/responses");
+      url.searchParams.set("credential", sentinel);
+      await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(base)(url, {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: true,
+            [sentinel]: "exact internal request content",
+          }),
+        }),
+      );
+    } finally {
+      console.error = originalError;
+      if (originalDebug === undefined) delete process.env.CODEX_DEBUG;
+      else process.env.CODEX_DEBUG = originalDebug;
+    }
+
+    expect(errors[0]).toEqual([
+      "[codex-debug] request dispatched",
+      {
+        method: "POST",
+        origin: "codex-subscription",
+        route: "codex_responses",
+        stream: true,
+      },
+    ]);
+    expect(JSON.stringify(errors)).not.toContain(sentinel);
+    expect(JSON.stringify(errors)).not.toContain("chatgpt.com");
+  });
+
   test("rewrites /responses, swaps headers, normalizes the body", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);

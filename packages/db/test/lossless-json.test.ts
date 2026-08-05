@@ -179,5 +179,21 @@ describe("lossless PostgreSQL content boundaries", () => {
       get: () => "not invoked",
     });
     expect(() => toPostgresLosslessJson(accessor)).toThrow(UnsupportedCanonicalValueError);
+
+    const arrayWithExtraProperty = ["safe\u0000value"] as unknown[] & {
+      sourceKey?: string;
+    };
+    arrayWithExtraProperty.sourceKey = "must-not-disappear";
+    expect(() => toPostgresLosslessJson(arrayWithExtraProperty)).toThrow(
+      UnsupportedCanonicalValueError,
+    );
+
+    const arrayWithHiddenProperty = Object.defineProperty(["safe"], "hidden", {
+      value: "must-not-disappear",
+      enumerable: false,
+    });
+    expect(() => toPostgresLosslessJson(arrayWithHiddenProperty)).toThrow(
+      UnsupportedCanonicalValueError,
+    );
   });
 });

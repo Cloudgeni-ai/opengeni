@@ -169,10 +169,26 @@ function encodeJsonValue(value: unknown, ancestors: Set<object>, depth: number):
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const propertyNames = Object.getOwnPropertyNames(descriptors);
+      const indexNames = propertyNames.filter((name) => name !== "length");
+      if (
+        indexNames.length !== value.length ||
+        indexNames.some((name) => {
+          const index = Number(name);
+          return (
+            !Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== name
+          );
+        })
+      ) {
+        throw new UnsupportedCanonicalValueError(
+          "Canonical JSON arrays cannot contain non-index properties or holes",
+        );
+      }
       const output: unknown[] = [];
       let changed = false;
       for (let index = 0; index < value.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        const descriptor = descriptors[String(index)];
         if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
           throw new UnsupportedCanonicalValueError(
             "Canonical JSON arrays cannot contain holes, accessors, or hidden elements",

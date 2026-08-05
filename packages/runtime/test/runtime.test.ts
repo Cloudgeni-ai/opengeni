@@ -229,6 +229,34 @@ test("does not turn MCP client failures or arbitrary codes into connectivity rec
   );
 });
 
+test("fails closed on pathological MCP transport error wrappers", () => {
+  let deeplyWrapped: Record<string, unknown> = { code: "ECONNREFUSED" };
+  for (let depth = 0; depth < 10; depth += 1) {
+    deeplyWrapped = { cause: deeplyWrapped };
+  }
+  const throwingWrapper = {
+    code: "ECONNRESET",
+    get cause(): unknown {
+      throw new Error("unsafe transport getter");
+    },
+  };
+  const throwingFields = {
+    get code(): unknown {
+      throw new Error("unsafe code getter");
+    },
+  };
+
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(deeplyWrapped))).toBe(
+    false,
+  );
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingWrapper))).toBe(
+    false,
+  );
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingFields))).toBe(
+    false,
+  );
+});
+
 describe("structured human-input runtime boundary", () => {
   const interruption = {
     name: HUMAN_INPUT_TOOL_NAME,
@@ -2966,7 +2994,7 @@ describe("runtime event normalization", () => {
     expect(sessions).toHaveLength(2);
   });
 
-  test("keeps repository resources as git repo manifest entries", () => {
+  test("keeps exact repository transport URIs in git repo manifest entries", () => {
     const manifest = buildManifest(testSettings(), [
       {
         kind: "repository",
@@ -2974,10 +3002,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/app",
+      repo: "https://github.com/acme/app.git",
       ref: "main",
     });
   });
@@ -2988,16 +3015,19 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        provider: "github",
       },
       {
         kind: "repository",
         uri: "https://gitlab.com/acme/app.git",
         ref: "main",
+        provider: "gitlab",
       },
       {
         kind: "repository",
         uri: "https://dev.azure.com/acme/project/_git/app",
         ref: "main",
+        provider: "azure_devops",
       },
     ]);
     expect(Object.keys(manifest.entries).sort()).toEqual([
@@ -3015,10 +3045,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "git.example.com:8443",
-      repo: "acme/app",
+      repo: "https://git.example.com:8443/acme/app.git",
     });
   });
 
@@ -3620,8 +3649,7 @@ describe("runtime event normalization", () => {
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/private",
+      repo: "https://github.com/acme/private.git",
       ref: "main",
       subpath: "README.md",
     });
@@ -3658,7 +3686,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -3830,7 +3858,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -3896,7 +3924,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/github.com/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {
@@ -5079,6 +5107,69 @@ describe("runtime event normalization", () => {
       expect(exactSourceError.message).toContain(sentinel);
       expect(exactSourceError.responseBody).toEqual({ sentinel });
       expect(exactSourceError.cause).toEqual({ exact: sentinel });
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("SDK MCP lifecycle status projection tolerates hostile proxies without replacing exact errors", async () => {
+    const sentinel = "synthetic-mcp-hostile-status-proxy-123456";
+    const source = new Error(`connect failed: ${sentinel}`);
+    const exactSourceError = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile public status getter: ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const facade = new PrefixedMcpServer(
+      {
+        name: `inner-${sentinel}`,
+        cacheToolsList: false,
+        async connect() {
+          throw exactSourceError;
+        },
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      `registry-${sentinel}`,
+    );
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const result = await connectMcpServersInBatches([facade], { strict: false });
+      expect(result.errors.get(facade)).toBe(exactSourceError);
+      await result.close();
+      const lifecycleErrors = [...warnings, ...errors]
+        .flat()
+        .filter((value): value is Error => value instanceof Error);
+      const renderedLogs = [...warnings, ...errors]
+        .flat()
+        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) => JSON.stringify(value))
+        .join("\n");
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).not.toContain(sentinel);
+      expect(lifecycleErrors).toContainEqual(
+        expect.objectContaining({
+          name: "McpLifecycleError",
+          code: "mcp_connect_failed",
+          origin: "runtime",
+        }),
+      );
+      expect(lifecycleErrors.some((error) => "status" in error)).toBe(false);
     } finally {
       console.warn = originalWarn;
       console.error = originalError;

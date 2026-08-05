@@ -288,6 +288,49 @@ describe("sandbox git credentials", () => {
     expect(Object.values(result.environment)).not.toContain("azure_devops-token");
   });
 
+  test("mints distinct bindings for exact-path remotes that differ only by .git", async () => {
+    const calls: GitCredentialsRequest[] = [];
+    const result = await mintRunGitCredentials(
+      provisionedSettings(),
+      [
+        {
+          kind: "repository",
+          uri: "https://dev.azure.com/acme/project/_git/repo",
+          ref: "main",
+          provider: "azure_devops",
+          credentialBindingId: "azure-one",
+        },
+        {
+          kind: "repository",
+          uri: "https://dev.azure.com/acme/project/_git/repo.git",
+          ref: "main",
+          provider: "azure_devops",
+          credentialBindingId: "azure-two",
+        },
+      ],
+      {
+        scope,
+        authority,
+        gitCredentials: async (input) => {
+          calls.push(input);
+          return {
+            token: `token-${input.credentialBindingId}`,
+            workspaceId: input.workspaceId,
+            provider: input.provider,
+            credentialBindingId: input.credentialBindingId,
+            providerHost: input.providerHost,
+          };
+        },
+      },
+    );
+
+    expect(calls.map((call) => call.credentialBindingId)).toEqual(["azure-one", "azure-two"]);
+    expect(result?.bindings.map((binding) => binding.credentialBindingId)).toEqual([
+      "azure-one",
+      "azure-two",
+    ]);
+  });
+
   test("accepts an exact HTTPS smart-Git broker without creating provider-token aliases", async () => {
     const resources: ResourceRef[] = [
       {

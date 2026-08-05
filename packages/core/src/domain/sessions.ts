@@ -1766,14 +1766,24 @@ export async function createSessionForRequestWithOutcome(
         origin: creationInitiator.actor ? "system" : "user",
         idempotencyKey: `agent_run.created:${workspaceId}:${createOutcome.session.id}`,
       });
-    } catch {
+    } catch (error) {
       usageRecording = "failed";
-      console.warn(
-        `[sessions] usage recording failed after committed session create ${workspaceId}/${createOutcome.session.id}; returning committed outcome`,
-      );
+      reportSessionUsageRecordingFailure(error);
     }
   }
   return { ...createOutcome, usageRecording };
+}
+
+/** @internal Fixed public projection; the committed session outcome remains authoritative. */
+export function reportSessionUsageRecordingFailure(_error: unknown): void {
+  console.warn(
+    "[sessions] usage recording failed after committed session create; returning committed outcome",
+    {
+      errorClass: "UsageRecordingError",
+      errorCode: "session_create_usage_recording_failed",
+      origin: "core",
+    },
+  );
 }
 
 /** Backward-compatible entity-returning request path for REST and core callers. */
