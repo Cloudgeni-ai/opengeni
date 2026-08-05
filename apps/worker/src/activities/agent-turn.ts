@@ -7357,7 +7357,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await reconcileConversationTruth({ requireDurable: true });
           }
           checkpointDurable = true;
-        } catch (checkpointError) {
+        } catch {
           observability.warn("Codex lease-loss checkpoint failed; refusing automatic turn replay", {
             errorClass: "CodexCheckpointOperationError",
             errorCode: "codex_lease_loss_checkpoint_failed",
@@ -7468,7 +7468,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await flushRuntimeBatcher();
           await reconcileConversationTruth({ requireDurable: true });
           checkpointDurable = true;
-        } catch (checkpointError) {
+        } catch {
           observability.incrementCounter({
             name: "opengeni_codex_failover_checkpoints_total",
             help: "Durable Codex failover checkpoint attempts by outcome.",

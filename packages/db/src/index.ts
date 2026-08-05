@@ -39318,20 +39318,26 @@ export async function markSessionAttemptQuiesced(
       if (!parked) return { events, effectiveControl };
       const [statusEvent] = await scopedDb
         .insert(schema.sessionEvents)
-        .values({
-          accountId: session.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          sequence,
-          type: "session.status.changed",
-          payload: sanitizeEventPayload({ status: "idle", reason: "paused_recovery_settled" }),
-          clientEventId,
-          turnId: turn.id,
-          turnGeneration: attempt.executionGeneration,
-          turnAttemptId: attempt.id,
-          turnAssociation: null,
-          occurredAt: now,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence,
+              type: "session.status.changed",
+              payload: { status: "idle", reason: "paused_recovery_settled" },
+              clientEventId,
+              turnId: turn.id,
+              turnGeneration: attempt.executionGeneration,
+              turnAttemptId: attempt.id,
+              turnAssociation: null,
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       if (!statusEvent) throw new Error("Paused recovery status event was not inserted");
       return { events: [...events, mapEvent(statusEvent)], effectiveControl };

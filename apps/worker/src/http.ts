@@ -101,7 +101,7 @@ export async function runReadinessChecks(
         try {
           await withTimeout(Promise.resolve().then(check), timeoutMs);
           return [name, { ok: true }] as const;
-        } catch (error) {
+        } catch {
           return [name, { ok: false, error: "dependency_unavailable" }] as const;
         }
       },

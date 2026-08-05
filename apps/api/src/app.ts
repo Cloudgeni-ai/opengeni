@@ -836,7 +836,7 @@ async function runReadinessChecks<const Checks extends Readonly<Record<string, R
       try {
         await withTimeout(Promise.resolve().then(check), timeoutMs);
         return [name, { ok: true }] as const;
-      } catch (error) {
+      } catch {
         return [
           name,
           {

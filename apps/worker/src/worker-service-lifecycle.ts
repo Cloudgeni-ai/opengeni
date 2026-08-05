@@ -85,7 +85,7 @@ export function createWorkerServiceLifecycle(input: {
       });
       try {
         input.worker.shutdown();
-      } catch (error) {
+      } catch {
         input.observability.warn("worker shutdown request failed", {
           errorClass: "WorkerLifecycleOperationError",
           errorCode: "worker_shutdown_request_failed",

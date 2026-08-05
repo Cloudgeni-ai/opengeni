@@ -2010,19 +2010,13 @@ function registerMemoryTools(
             : undefined,
           timestamp: result.memory.updatedAt,
           idempotency: { status: "not_supported" },
-          warnings: [
-            ...(result.redactionCount > 0
-              ? [`Redacted ${result.redactionCount} sensitive value(s) before committing memory.`]
-              : []),
-            ...(!result.embedded
-              ? ["Memory committed without a vector embedding; keyword search remains available."]
-              : []),
-          ],
+          warnings: !result.embedded
+            ? ["Memory committed without a vector embedding; keyword search remains available."]
+            : [],
           facts: {
             deduped: result.deduped,
             dedupeReason: result.dedupeReason,
             updatedInPlace: result.updated,
-            redactionCount: result.redactionCount,
             embedded: result.embedded,
           },
         }),
