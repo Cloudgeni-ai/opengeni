@@ -5,8 +5,10 @@ import {
 import { type ApiRouteDeps, requireAccessGrant, TranscriptionServiceError } from "@opengeni/core";
 import { getWorkspace } from "@opengeni/db";
 import type { Hono } from "hono";
+import { registerResumableTranscriptionRoutes } from "./transcription-recordings";
 
 export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
+  registerResumableTranscriptionRoutes(app, deps);
   app.post("/v1/workspaces/:workspaceId/transcriptions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");

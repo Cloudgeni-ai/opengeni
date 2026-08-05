@@ -1,5 +1,48 @@
 # @opengeni/events
 
+## 0.3.81
+
+### Patch Changes
+
+- 5d1d0c2: Make browser live streams visibility-aware, share one routed session feed,
+  bound reconciliation and heartbeat recovery, coalesce overlapping reads, and
+  expose the append, publish, and SSE connection lifecycle in metrics.
+- Updated dependencies [110d255]
+- Updated dependencies [ce823ce]
+  - @opengeni/db@0.28.2
+  - @opengeni/contracts@0.39.1
+
+## 0.3.80
+
+### Patch Changes
+
+- Updated dependencies [55f6ad0]
+  - @opengeni/db@0.28.1
+
+## 0.3.79
+
+### Patch Changes
+
+- Updated dependencies [49c7f9c]
+- Updated dependencies [6eb0b23]
+- Updated dependencies [5b6d36e]
+  - @opengeni/db@0.28.0
+  - @opengeni/contracts@0.39.0
+
+## 0.3.78
+
+### Patch Changes
+
+- Updated dependencies [cbf165a]
+  - @opengeni/db@0.27.12
+
+## 0.3.77
+
+### Patch Changes
+
+- Updated dependencies [17643a5]
+  - @opengeni/db@0.27.11
+
 ## 0.3.76
 
 ### Patch Changes

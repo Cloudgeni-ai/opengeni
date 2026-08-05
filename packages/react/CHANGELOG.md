@@ -1,5 +1,54 @@
 # @opengeni/react
 
+## 0.46.2
+
+### Patch Changes
+
+- 5d1d0c2: Make browser live streams visibility-aware, share one routed session feed,
+  bound reconciliation and heartbeat recovery, coalesce overlapping reads, and
+  expose the append, publish, and SSE connection lifecycle in metrics.
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [5d1d0c2]
+  - @opengeni/sdk@0.46.2
+
+## 0.46.1
+
+### Patch Changes
+
+- 2bfbfcc: Keep compact desktop controls while giving mobile model, voice, navigation,
+  composer, and session controls full-size touch targets.
+
+## 0.46.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [6eb0b23]
+  - @opengeni/sdk@0.46.0
+
+## 0.45.1
+
+### Patch Changes
+
+- ca7d125: Improve mobile touch targets and responsive session interactions across the React surfaces.
+
+## 0.45.0
+
+### Minor Changes
+
+- 7faf6a9: Add a lossless `UserMessageBody` disclosure for very tall sent messages, including per-message expansion memory and timeline-owned scroll anchoring.
+
 ## 0.44.6
 
 ### Patch Changes

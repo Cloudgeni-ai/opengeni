@@ -746,11 +746,11 @@ export function RealtimeVoiceControl(props: {
                 title={`Voice model: ${selectedModel.label}`}
                 disabled={props.selectionDisabled}
                 className={cn(
-                  // ≥24px wide so WCAG 2.2 target-size passes when the chevron is shown.
-                  "inline-flex h-8 w-6 items-center justify-center rounded-r-og-md outline-none",
+                  // Keep the split trigger compact on desktop while preserving a
+                  // full 44px mobile target independent of pointer-media support.
+                  "inline-flex h-11 w-11 items-center justify-center rounded-r-og-md outline-none sm:h-8 sm:w-6",
                   "transition-[background-color,border-color,color] duration-200 ease-og-out",
                   "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
-                  "pointer-coarse:h-11 pointer-coarse:w-7",
                   desktopOnlyModelMenu && "hidden sm:inline-flex",
                   voiceChevronTone(status.phase),
                 )}

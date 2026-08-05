@@ -1350,26 +1350,31 @@ export function CodexSubscriptionsCard({
                         </span>
                       </span>
                     </label>
-                    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5 py-1.5">
-                      <div className="min-w-0">
-                        <div className="text-xs font-medium">Use for Codex Apps</div>
-                        <div className="text-2xs text-fg-subtle">
-                          Independent of inference, usage limits, rotation, and active selection.
+                    {data?.apps?.available ? (
+                      <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5 py-1.5">
+                        <div className="min-w-0">
+                          <div className="text-xs font-medium">Use for Codex Apps</div>
+                          <div className="text-2xs text-fg-subtle">
+                            Independent of inference, usage limits, rotation, and active selection.
+                          </div>
                         </div>
-                      </div>
-                      <input
-                        type="checkbox"
-                        className="size-4 shrink-0 accent-brand"
-                        checked={account.appsDesignated}
-                        disabled={
-                          busy ||
-                          !data?.apps ||
-                          (account.appsDesignated ? !data.apps.canDisable : !account.canEnableApps)
-                        }
-                        aria-label={`Use ${accountDisplay(account)} for Codex Apps`}
-                        onChange={(event) => void setAppsCredential(account, event.target.checked)}
-                      />
-                    </label>
+                        <input
+                          type="checkbox"
+                          className="size-4 shrink-0 accent-brand"
+                          checked={account.appsDesignated}
+                          disabled={
+                            busy ||
+                            (account.appsDesignated
+                              ? !data.apps.canDisable
+                              : !account.canEnableApps)
+                          }
+                          aria-label={`Use ${accountDisplay(account)} for Codex Apps`}
+                          onChange={(event) =>
+                            void setAppsCredential(account, event.target.checked)
+                          }
+                        />
+                      </label>
+                    ) : null}
                     {needsRelogin ? (
                       <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
                         <TriangleAlertIcon className="size-3.5" />{" "}
@@ -1445,11 +1450,12 @@ export function CodexSubscriptionsCard({
               </>
             )}
           </p>
-          <p>
-            {data?.apps?.available
-              ? "Codex Apps uses only the separately marked Apps subscription. With none marked, Apps tools are unavailable."
-              : "Codex Apps is disabled for this deployment."}
-          </p>
+          {data?.apps?.available ? (
+            <p>
+              Codex Apps uses only the separately marked Apps subscription. With none marked, Apps
+              tools are unavailable.
+            </p>
+          ) : null}
         </div>
       ) : null}
       <ConfirmDialog

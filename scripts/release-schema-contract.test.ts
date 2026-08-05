@@ -185,19 +185,25 @@ describe("release schema contract", () => {
         (migrations.has("0167_document_index_replay_authority.sql") ? 1 : 0) +
         (migrations.has("0168_workspace_instruction_policy_operation_receipts.sql") ? 1 : 0) +
         (migrations.has("0169_workspace_instruction_policy_onboarding_proposals.sql") ? 1 : 0) +
+        (migrations.has("0170_resumable_transcription_recordings.sql") ? 1 : 0) +
         (migrations.has("0170_session_control_wake_revision.sql") ? 1 : 0) +
         (migrations.has("0171_social_connection_subject_ownership.sql") ? 1 : 0) +
         (migrations.has("0172_retire_model_visible_github_token.sql") ? 1 : 0) +
         (migrations.has("0173_codex_auth_boundaries.sql") ? 1 : 0) +
         (migrations.has("0174_session_wake_live_interruption.sql") ? 1 : 0) +
-        (migrations.has("0175_connected_machine_removal.sql") ? 1 : 0),
+        (migrations.has("0175_resumable_transcription_provider_deadline.sql") ? 1 : 0) +
+        (migrations.has("0176_connected_machine_removal.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "4e36226e80f90b3c1b4292204536a8722f6fd9c63909103dd9f8aaf6809bfebe",
+      "6d00791839f8b2984521f7aea97593e923d9e01f332b49f4e72b0e98f1d1b96a",
     );
-    expect(contract.latestMigration).toBe("0175_connected_machine_removal.sql");
+    expect(contract.latestMigration).toBe("0176_connected_machine_removal.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0175_resumable_transcription_provider_deadline.sql")).toMatchObject({
+      sha256: "8e91b37db947c1430b5d12ed17a19038d14788ff581e9e36f68461d807db28cb",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0174_session_wake_live_interruption.sql")).toMatchObject({
@@ -216,7 +222,11 @@ describe("release schema contract", () => {
       sha256: "cec3593e377f1cdc6aac3441b89d57e7c19d7377ff31991f340e14af1e64453d",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0175_connected_machine_removal.sql")).toMatchObject({
+    expect(migrations.get("0170_resumable_transcription_recordings.sql")).toMatchObject({
+      sha256: "b75688206e0f2d7c431fdfc7a465d4680fde59a129a090b2e532dd5b1c896bbd",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0176_connected_machine_removal.sql")).toMatchObject({
       sha256: "c933a0781ac3c78272c5049637e3718299382e93272ea04095077f8ce7148f0a",
       deploymentMode: "rolling",
     });

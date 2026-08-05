@@ -45,6 +45,27 @@ function timelineEvent(
   };
 }
 
+describe("context compaction rendering", () => {
+  test("labels before and after values as estimated history tokens", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            estimatedTokensBefore: 59_471,
+            estimatedTokensAfter: 2_858,
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain(
+      "Conversation history compacted · ~59,471 → ~2,858 estimated history tokens",
+    );
+    await r.unmount();
+  });
+});
+
 describe("provider MCP unavailable rendering", () => {
   test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
     let reconnects = 0;

@@ -404,6 +404,9 @@ jobs:
         id: queue_surface_browser
         run: bun scripts/run-browser-e2e.ts ./test/e2e/queue-surface.browser.e2e.ts
 
+      - name: Long user-message disclosure browser acceptance
+        run: bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts
+
       - name: Public realtime SDK demo browser acceptance
         env:
           OPENGENI_REALTIME_DEMO_EVIDENCE_DIR: /tmp/opengeni-realtime-demo-evidence
@@ -652,10 +655,28 @@ jobs:
 
       - name: Validate Helm chart
         run: |
-          if grep -R -nE '(:|tag:[[:space:]]*"?)latest($|")' docker-compose.yml deploy/helm/opengeni; then
+          if grep -R -nE '(:|tag:[[:space:]]*"?)latest($|")' docker-compose.yml deploy/helm/opengeni deploy/observability; then
             echo "floating latest tag found in deployment manifests" >&2
             exit 1
           fi
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm dependency build deploy/observability
+          helm lint deploy/observability
+          helm template opengeni-observability deploy/observability \
+            --namespace observability \
+            --set-string opengeni.sourceRevision=ci \
+            >/tmp/opengeni-observability-rendered.yaml
+          bun run check:observability-render -- \
+            --manifest /tmp/opengeni-observability-rendered.yaml \
+            --source-revision ci
+          helm template opengeni-observability-production deploy/observability \
+            --namespace observability \
+            --values deploy/observability/values.production.example.yaml \
+            --set-string opengeni.sourceRevision=ci \
+            >/tmp/opengeni-observability-production-rendered.yaml
+          bun run check:observability-render -- \
+            --manifest /tmp/opengeni-observability-production-rendered.yaml \
+            --source-revision ci
           helm lint deploy/helm/opengeni
           helm template opengeni deploy/helm/opengeni \
             --namespace opengeni \
@@ -702,6 +723,11 @@ jobs:
             --namespace opengeni \
             -f deploy/helm/opengeni/values.single-node.example.yaml \
             >/tmp/opengeni-single-rendered.yaml
+          helm template opengeni-observed deploy/helm/opengeni \
+            --namespace opengeni \
+            --api-versions monitoring.coreos.com/v1 \
+            -f deploy/observability/opengeni.values.example.yaml \
+            >/tmp/opengeni-observed-rendered.yaml
           if grep -qE '^kind: (HorizontalPodAutoscaler|PodDisruptionBudget)$' /tmp/opengeni-single-rendered.yaml; then
             echo "single-node profile rendered an autoscaler or disruption budget" >&2
             exit 1

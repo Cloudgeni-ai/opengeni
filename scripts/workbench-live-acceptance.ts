@@ -12,7 +12,7 @@ import {
   type WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
 import { assertScreenshotPainted } from "@opengeni/testing";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 
 import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
 
@@ -39,10 +39,19 @@ const OPTIONAL_ANALYTICS_CHUNK_PATH = /^\/assets\/analytics-consent-[A-Za-z0-9_-
 const MANAGED_SESSION_PATH = /^\/v1\/auth\/get-session$/;
 const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
 const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
+const FILE_TREE_READY_SELECTOR =
+  '[role="tree"][aria-activedescendant]:not([aria-activedescendant=""])';
+const FILE_TREE_MAX_NAVIGATION_STEPS = 4_096;
+const FILE_TREE_MAX_DIAGNOSTIC_ROWS = 8;
+const FILE_TREE_DIAGNOSTIC_FIELD_LENGTH = 80;
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
   "p95",
+);
+const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
+  "performance.control-cancellation",
+  "worst",
 );
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -1281,7 +1290,7 @@ async function runLiveWorkspaceFlow(input: {
     pass(
       checks,
       "performance.control-cancellation",
-      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget 2000ms).`,
+      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
     );
 
     assertNoProblems(problems, false);
@@ -1424,16 +1433,18 @@ async function proveLiveSteerCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
-    "replacement turn start inside the 2s physical-cancellation budget",
+    "replacement turn start inside the physical-cancellation budget",
   );
   const controlCancellationMs = controlCancellationDurationMs(
     committedAt,
     Date.parse(replacementStarted.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
-    throw new Error(`Steer replacement took ${controlCancellationMs}ms; budget is 2000ms`);
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
+    throw new Error(
+      `Steer replacement took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+    );
   }
   const renderedStoppingState = await stoppingVisible;
   if (controlCancellationMs > 100 && !renderedStoppingState) {
@@ -1615,7 +1626,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.control.paused" &&
       isRecord(event.payload) &&
@@ -1627,7 +1638,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     pauseRequested.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.queue.changed" &&
       event.turnId === predecessorTurnId &&
@@ -1639,9 +1650,9 @@ async function proveLivePauseCancellation(input: {
     committedAt,
     Date.parse(quiesced.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
-      `Pause physical cancellation took ${controlCancellationMs}ms; budget is 2000ms`,
+      `Pause physical cancellation took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
   const renderedStoppingState = await stoppingState;
@@ -2094,6 +2105,69 @@ async function selectChangesTab(page: Page): Promise<void> {
   });
 }
 
+type FileTreeObservation = {
+  id: string;
+  label: string;
+  level: number | null;
+  expanded: boolean | null;
+};
+
+function normalizeFileTreeLabel(value: string | null): string {
+  return (value ?? "").replace(/\s+/g, " ").trim().slice(0, FILE_TREE_DIAGNOSTIC_FIELD_LENGTH);
+}
+
+async function readActiveFileTreeItem(
+  page: Page,
+  tree: Locator,
+): Promise<{ activeId: string; item: Locator; observation: FileTreeObservation } | undefined> {
+  const activeId = await tree.getAttribute("aria-activedescendant");
+  if (!activeId) return undefined;
+
+  const item = page.locator(`[id=${JSON.stringify(activeId)}]`);
+  await item.waitFor({ state: "visible", timeout: 2_000 });
+  const rawLevel = await item.getAttribute("aria-level");
+  const level = Number(rawLevel);
+  const rawExpanded = await item.getAttribute("aria-expanded");
+  return {
+    activeId,
+    item,
+    observation: {
+      id: activeId.slice(0, FILE_TREE_DIAGNOSTIC_FIELD_LENGTH),
+      label: normalizeFileTreeLabel(await item.textContent()),
+      level: Number.isInteger(level) && level >= 1 ? level : null,
+      expanded: rawExpanded === null ? null : rawExpanded === "true",
+    },
+  };
+}
+
+function rememberFileTreeObservation(
+  observations: FileTreeObservation[],
+  observation: FileTreeObservation,
+): void {
+  const previous = observations[observations.length - 1];
+  if (
+    previous?.id === observation.id &&
+    previous.label === observation.label &&
+    previous.level === observation.level &&
+    previous.expanded === observation.expanded
+  ) {
+    return;
+  }
+  observations.push(observation);
+  if (observations.length > FILE_TREE_MAX_DIAGNOSTIC_ROWS) observations.shift();
+}
+
+function fileTreeSelectionError(
+  directory: string,
+  file: string,
+  reason: string,
+  observations: readonly FileTreeObservation[],
+): Error {
+  return new Error(
+    `file tree could not select ${directory}/${file}: ${reason}; observations=${JSON.stringify(observations)}`,
+  );
+}
+
 export async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
   const directoryItem = page.getByRole("treeitem").filter({ hasText: directory }).first();
   const directoryVisible = await directoryItem.isVisible();
@@ -2113,52 +2187,124 @@ export async function selectTreeFile(page: Page, directory: string, file: string
   }
 
   const tree = page.getByRole("tree").first();
+  await tree.waitFor({ state: "visible", timeout: 20_000 });
   await tree.focus();
   await tree.press("Home");
 
+  if (!(await tree.getAttribute("aria-activedescendant"))) {
+    // A cold Files tab can mount the composite before its async capture rows
+    // hydrate. Wait on the ARIA readiness contract rather than sleeping or
+    // assuming the first virtual row already exists.
+    await page.locator(FILE_TREE_READY_SELECTOR).first().waitFor({
+      state: "visible",
+      timeout: 20_000,
+    });
+    await tree.focus();
+    await tree.press("Home");
+  }
+
+  const observations: FileTreeObservation[] = [];
   let directoryLevel: number | undefined;
-  for (let index = 0; index < 4_096; index += 1) {
-    const activeId = await tree.getAttribute("aria-activedescendant");
-    if (!activeId) throw new Error("file tree has no active descendant");
-    const activeItem = page.locator(`[id=${JSON.stringify(activeId)}]`);
-    await activeItem.waitFor({ state: "visible", timeout: 2_000 });
-    if ((await activeItem.getByText(directory, { exact: true }).count()) > 0) {
-      const rawLevel = await activeItem.getAttribute("aria-level");
-      directoryLevel = Number(rawLevel);
-      if (!Number.isInteger(directoryLevel) || directoryLevel < 1) {
-        throw new Error(`file tree directory ${directory} has no valid aria-level`);
-      }
-      if ((await activeItem.getAttribute("aria-expanded")) !== "true") {
-        await tree.press("ArrowRight");
-      }
-      await tree.press("ArrowDown");
+  let directoryFailureReason = `directory traversal exceeded ${FILE_TREE_MAX_NAVIGATION_STEPS} steps`;
+  for (let index = 0; index < FILE_TREE_MAX_NAVIGATION_STEPS; index += 1) {
+    const active = await readActiveFileTreeItem(page, tree);
+    if (!active) {
+      directoryFailureReason = "the tree lost its active descendant during directory traversal";
       break;
     }
+    rememberFileTreeObservation(observations, active.observation);
+    if ((await active.item.getByText(directory, { exact: true }).count()) > 0) {
+      if (active.observation.level === null) {
+        throw fileTreeSelectionError(
+          directory,
+          file,
+          `directory ${directory} has no valid aria-level`,
+          observations,
+        );
+      }
+      directoryLevel = active.observation.level;
+      if (active.observation.expanded !== true) {
+        await tree.press("ArrowRight");
+      }
+      await page
+        .locator(
+          `[id=${JSON.stringify(active.activeId)}][aria-expanded="true"]:not([aria-busy="true"])`,
+        )
+        .waitFor({ state: "visible", timeout: 20_000 });
+      await tree.press("ArrowDown");
+      const childId = await tree.getAttribute("aria-activedescendant");
+      if (!childId) {
+        throw fileTreeSelectionError(
+          directory,
+          file,
+          `directory ${directory} lost the active descendant after expansion`,
+          observations,
+        );
+      }
+      if (childId === active.activeId) {
+        throw fileTreeSelectionError(
+          directory,
+          file,
+          `directory ${directory} exposed no navigable child after expansion`,
+          observations,
+        );
+      }
+      break;
+    }
+
     await tree.press("ArrowDown");
+    const nextActiveId = await tree.getAttribute("aria-activedescendant");
+    if (!nextActiveId) {
+      directoryFailureReason = "the tree lost its active descendant during directory traversal";
+      break;
+    }
+    if (nextActiveId === active.activeId) {
+      directoryFailureReason = "navigation stalled at the tree boundary";
+      break;
+    }
   }
 
   if (directoryLevel === undefined) {
-    throw new Error(`file tree did not expose directory ${directory}`);
+    throw fileTreeSelectionError(directory, file, directoryFailureReason, observations);
   }
 
-  for (let index = 0; index < 4_096; index += 1) {
-    const activeId = await tree.getAttribute("aria-activedescendant");
-    if (!activeId) throw new Error("file tree has no active descendant");
-    const activeItem = page.locator(`[id=${JSON.stringify(activeId)}]`);
-    await activeItem.waitFor({ state: "visible", timeout: 2_000 });
-    const rawLevel = await activeItem.getAttribute("aria-level");
-    const activeLevel = Number(rawLevel);
-    if (!Number.isInteger(activeLevel) || activeLevel < 1) {
-      throw new Error("file tree item has no valid aria-level");
+  let fileFailureReason = `file traversal exceeded ${FILE_TREE_MAX_NAVIGATION_STEPS} steps`;
+  for (let index = 0; index < FILE_TREE_MAX_NAVIGATION_STEPS; index += 1) {
+    const active = await readActiveFileTreeItem(page, tree);
+    if (!active) {
+      fileFailureReason = "the tree lost its active descendant during file traversal";
+      break;
     }
-    if (activeLevel <= directoryLevel) break;
-    if ((await activeItem.getByText(file, { exact: true }).count()) > 0) {
+    rememberFileTreeObservation(observations, active.observation);
+    if (active.observation.level === null) {
+      throw fileTreeSelectionError(
+        directory,
+        file,
+        `tree item ${active.observation.id} has no valid aria-level`,
+        observations,
+      );
+    }
+    if (active.observation.level <= directoryLevel) {
+      fileFailureReason = `navigation left the ${directory} subtree`;
+      break;
+    }
+    if ((await active.item.getByText(file, { exact: true }).count()) > 0) {
       await tree.press("Enter");
       return;
     }
+
     await tree.press("ArrowDown");
+    const nextActiveId = await tree.getAttribute("aria-activedescendant");
+    if (!nextActiveId) {
+      fileFailureReason = "the tree lost its active descendant during file traversal";
+      break;
+    }
+    if (nextActiveId === active.activeId) {
+      fileFailureReason = `navigation stalled inside the ${directory} subtree`;
+      break;
+    }
   }
-  throw new Error(`file tree did not expose ${directory}/${file}`);
+  throw fileTreeSelectionError(directory, file, fileFailureReason, observations);
 }
 
 async function assertColdReview(page: Page, marker: string): Promise<void> {
@@ -2216,6 +2362,14 @@ async function assertAccessibility(page: Page): Promise<void> {
   const report = await new AxeBuilder({ page: page as never })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
+  const manuallyAuditedContrastTargets = new Set(
+    await markIncompleteContrastTargetsForManualAudit(
+      page,
+      report.incomplete
+        .filter((rule) => rule.id === "color-contrast")
+        .flatMap((rule) => rule.nodes.map((node) => node.target)),
+    ),
+  );
   const manual = await manualAccessibilityAudit(page);
   if (report.violations.length > 0) {
     throw new Error(
@@ -2229,6 +2383,7 @@ async function assertAccessibility(page: Page): Promise<void> {
         if (rule.id === "aria-valid-attr-value") return false;
         if (rule.id === "color-contrast") {
           return (
+            !manuallyAuditedContrastTargets.has(target) &&
             !target.includes("diffs-container") &&
             !target.includes("data-line-number-content") &&
             !target.includes("data-contrast-audited") &&
@@ -2258,6 +2413,49 @@ async function assertAccessibility(page: Page): Promise<void> {
   if (manual.minimumContrast !== null && manual.minimumContrast < 4.5) {
     throw new Error(`manual text contrast ${manual.minimumContrast} is below WCAG AA 4.5:1`);
   }
+}
+
+export function axeManualContrastSelector(target: unknown): string | null {
+  if (!Array.isArray(target) || target.length !== 1 || typeof target[0] !== "string") return null;
+  const selector = target[0].trim();
+  return selector.length > 0 ? selector : null;
+}
+
+async function markIncompleteContrastTargetsForManualAudit(
+  page: Page,
+  targets: readonly unknown[],
+): Promise<string[]> {
+  const candidates = targets.flatMap((target) => {
+    const selector = axeManualContrastSelector(target);
+    return selector ? [{ selector, serializedTarget: JSON.stringify(target) }] : [];
+  });
+  return page.evaluate((browserCandidates) => {
+    const audited: string[] = [];
+    for (const { selector, serializedTarget } of browserCandidates) {
+      try {
+        const visibleMatches = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(
+          (element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          },
+        );
+        if (visibleMatches.length === 0) continue;
+        for (const element of visibleMatches) {
+          element.setAttribute("data-contrast-audited", "");
+        }
+        audited.push(serializedTarget);
+      } catch {
+        // Invalid or non-DOM Axe target paths remain unresolved and fail below.
+      }
+    }
+    return audited;
+  }, candidates);
 }
 
 async function assertTouchTargets(page: Page, mobile: boolean): Promise<void> {

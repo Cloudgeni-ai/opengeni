@@ -1255,7 +1255,9 @@ describe("useSessionMcpApprovalPolicy", () => {
     await flushing(async () => {
       await hook.result.current.update(["write_record"]);
     });
-    expect(reads).toBe(2);
+    // The authoritative post-mutation read queues behind the older read rather
+    // than overlapping it. The mutation response remains the visible truth.
+    expect(reads).toBe(1);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {
@@ -1265,6 +1267,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         mcpServers: [metadata(false)],
       });
     });
+    expect(reads).toBe(2);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {

@@ -1,12 +1,16 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
+import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import { testSettings } from "@opengeni/testing";
 import { ModalClient } from "modal";
 import {
+  OpenGeniModalSandboxClient,
   installOpenGeniModalSnapshotPolicy,
   isModalExecAlreadyCompletedError,
+  modalProvider,
 } from "../src/sandbox/providers/modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
@@ -107,6 +111,43 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       timeoutMs: 120_000,
       ttlMs: null,
     });
+  });
+
+  test("current configuration replaces a legacy resume-envelope snapshot timeout", async () => {
+    const resumed = fakeSession("snapshot_filesystem", {
+      snapshotFilesystem: async () => ({ imageId: "im-resumed" }),
+    });
+    const resume = spyOn(ModalSandboxClient.prototype, "resume").mockResolvedValue(
+      resumed as never,
+    );
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalAppName: "opengeni-test",
+      modalTokenId: "test-token-id",
+      modalTokenSecret: "test-token-secret",
+      sandboxSnapshotTimeoutMs: 600_000,
+    });
+    const client = modalProvider.build({
+      settings,
+      environment: {},
+      exposedPorts: [],
+    }) as OpenGeniModalSandboxClient;
+    const legacyState = {
+      snapshotFilesystemTimeoutMs: 60_000,
+      durableIdentity: "preserve-me",
+    };
+
+    try {
+      await client.resume(legacyState as never);
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(resume.mock.calls[0]?.[0]).toEqual({
+        snapshotFilesystemTimeoutMs: 600_000,
+        durableIdentity: "preserve-me",
+      });
+      expect(legacyState.snapshotFilesystemTimeoutMs).toBe(60_000);
+    } finally {
+      resume.mockRestore();
+    }
   });
 
   test("passes snapshot_directory timeout and disables provider expiry", async () => {

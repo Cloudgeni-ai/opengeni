@@ -10,10 +10,12 @@ const testFiles =
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
         "./test/e2e/codex-overview.e2e.ts",
         "./test/e2e/queue-surface.browser.e2e.ts",
+        "./test/e2e/react-demo-mobile.browser.e2e.ts",
         "./test/e2e/realtime-demo.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
         "./test/e2e/timeline-scroll.browser.e2e.ts",
+        "./test/e2e/user-message-disclosure.browser.e2e.ts",
         "./test/e2e/workbench.browser.e2e.ts",
       ];
 

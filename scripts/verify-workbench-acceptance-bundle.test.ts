@@ -293,17 +293,24 @@ describe("workbench acceptance bundle", () => {
     const capture = slow.results.find(
       (item) => item.requirementId === "performance.capture-api-response",
     )!;
-    capture.measurement!.p95 = 201;
-    expect(() => validate(slow)).toThrow("exceeds 200 ms");
+    capture.measurement!.p95 = 401;
+    expect(() => validate(slow)).toThrow("exceeds 400 ms");
 
     const slowWorkbench = validBundle();
     const workbench = slowWorkbench.results.find(
       (item) => item.requirementId === "performance.capture-usable-workbench",
     )!;
-    workbench.measurement!.p95 = 5_001;
-    workbench.measurement!.p99 = 5_001;
-    workbench.measurement!.worst = 5_001;
-    expect(() => validate(slowWorkbench)).toThrow("exceeds 5000 ms");
+    workbench.measurement!.p95 = 10_001;
+    workbench.measurement!.p99 = 10_001;
+    workbench.measurement!.worst = 10_001;
+    expect(() => validate(slowWorkbench)).toThrow("exceeds 10000 ms");
+
+    const slowCancellation = validBundle();
+    const cancellation = slowCancellation.results.find(
+      (item) => item.requirementId === "performance.control-cancellation",
+    )!;
+    cancellation.measurement!.worst = 4_001;
+    expect(() => validate(slowCancellation)).toThrow("exceeds 4000 ms");
 
     const secret = validBundle() as any;
     secret.cookie = "session=not-allowed";

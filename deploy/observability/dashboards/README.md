@@ -5,7 +5,7 @@ different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
 | --- | --- | --- |
-| `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model (TTFT + inter-delta gaps), the durable write path (append latency), or delivery (publish latency + batcher shape)? |
+| `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model, durable append, NATS publish, batching, or SSE connection/reconnect path? |
 | `connected-machines.json` | **OpenGeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
 | `worker-fleet.json` | **OpenGeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
 | `sandbox-health.json` | **OpenGeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
@@ -32,9 +32,17 @@ providers:
       foldersFromFilesStructure: true
 ```
 
-**Kubernetes sidecar (kube-prometheus-stack / Grafana Helm)** — wrap each file in a
-ConfigMap carrying the sidecar's discovery label (default `grafana_dashboard: "1"`);
-the sidecar imports it automatically. Example:
+**OpenGeni Kubernetes observability wrapper** — install the chart rooted at
+`deploy/observability`. It renders one deterministic ConfigMap per file directly
+from this directory, labels it for the Grafana sidecar, records the content hash
+and source revision, and installs the pinned Prometheus/Grafana stack. See
+[`../README.md`](../README.md).
+
+**Existing Kubernetes sidecar** — if the cluster already has a compatible Grafana
+sidecar, wrap each file in a ConfigMap carrying the sidecar's discovery label
+(default `grafana_dashboard: "1"`). The wrapper chart can provision only these
+ConfigMaps with `kube-prometheus-stack.enabled=false`; manual creation remains a
+fallback for non-Helm installations. Example:
 
 ```bash
 kubectl create configmap opengeni-streaming-health \
@@ -59,6 +67,8 @@ observability:
 App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_stream_inter_delta_gap_seconds`, `opengeni_stream_batch_flush_*`,
 `opengeni_session_event_append_seconds`, `opengeni_session_event_publish_seconds`,
+`opengeni_sse_connections_*`, `opengeni_sse_delivery_bound_events_total`,
+`opengeni_http_request_duration_seconds`,
 `opengeni_model_input_tokens`, `opengeni_context_compactions_total`,
 `opengeni_machine_op_*`, `opengeni_turns_*`, `opengeni_sandbox_leases`,
 `opengeni_sandbox_operations_total`, `opengeni_sandbox_operation_duration_seconds`,

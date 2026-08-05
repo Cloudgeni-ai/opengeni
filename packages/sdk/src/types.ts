@@ -2570,6 +2570,98 @@ export type ClientVoiceInputConfig = {
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
+  resumable?: ClientResumableVoiceInputConfig | undefined;
+};
+
+export type ClientResumableVoiceInputConfig = {
+  maxDurationSeconds: number;
+  maxSizeBytes: number;
+  maxChunkSizeBytes: number;
+  providerSegmentSeconds: number;
+};
+
+export type TranscriptionRecordingErrorCode =
+  | "permission_denied"
+  | "not_supported"
+  | "network"
+  | "provider"
+  | "policy_blocked"
+  | "timeout"
+  | "cancelled"
+  | "unavailable"
+  | "too_large"
+  | "invalid_audio"
+  | "unknown";
+
+export type TranscriptionRecordingState =
+  | "uploading"
+  | "segmenting"
+  | "ready"
+  | "transcribing"
+  | "complete"
+  | "failed"
+  | "discarded";
+
+export type TranscriptionRecordingSegmentState =
+  | "preparing"
+  | "pending"
+  | "transcribing"
+  | "complete"
+  | "failed";
+
+export type TranscriptionRecordingSegment = {
+  segmentNumber: number;
+  state: TranscriptionRecordingSegmentState;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  byteLength: number;
+  errorCode: TranscriptionRecordingErrorCode | null;
+  retryable: boolean;
+};
+
+export type TranscriptionRecording = {
+  id: string;
+  workspaceId: string;
+  mimeType: string;
+  state: TranscriptionRecordingState;
+  nextChunkNumber: number;
+  chunkCount: number;
+  totalBytes: number;
+  totalDurationMilliseconds: number;
+  segmentCount: number;
+  completedSegmentCount: number;
+  transcriptText: string | null;
+  languages: string[];
+  errorCode: TranscriptionRecordingErrorCode | null;
+  retryable: boolean;
+  objectsCleaned: boolean;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+};
+
+export type TranscriptionRecordingResponse = {
+  recording: TranscriptionRecording;
+  segments: TranscriptionRecordingSegment[];
+  retryAfterMilliseconds?: number;
+};
+
+export type TranscriptionRecordingListResponse = {
+  recordings: TranscriptionRecording[];
+};
+
+export type TranscriptionRecordingChunk = {
+  chunkNumber: number;
+  byteLength: number;
+  sha256: string;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  deduplicated: boolean;
+};
+
+export type UploadTranscriptionRecordingChunkResponse = {
+  recording: TranscriptionRecording;
+  chunk: TranscriptionRecordingChunk;
 };
 
 /** Response from POST /v1/workspaces/:workspaceId/transcriptions. */

@@ -1,0 +1,32 @@
+{{- if .Values.opengeni.dashboards.enabled }}
+{{- $root := . }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+{{- $filename := base $path }}
+{{- $dashboardName := trimSuffix ".json" $filename }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-%s" (include "opengeni-observability.fullname" $root) $dashboardName | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "opengeni-observability.labels" $root | nindent 4 }}
+    {{ $root.Values.opengeni.dashboards.labelKey }}: {{ $root.Values.opengeni.dashboards.labelValue | quote }}
+    opengeni.ai/dashboard-source: canonical
+    {{- with $root.Values.opengeni.dashboards.extraLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{ $root.Values.opengeni.dashboards.folderAnnotation }}: {{ $root.Values.opengeni.dashboards.folder | quote }}
+    opengeni.ai/content-sha256: {{ $root.Files.Get $path | sha256sum | quote }}
+    {{- with $root.Values.opengeni.sourceRevision }}
+    opengeni.ai/source-revision: {{ . | quote }}
+    {{- end }}
+    {{- with $root.Values.opengeni.dashboards.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  {{ $filename }}: |
+    {{- $root.Files.Get $path | nindent 4 }}
+{{- end }}
+{{- end }}

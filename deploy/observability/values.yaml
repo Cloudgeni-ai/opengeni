@@ -1,0 +1,160 @@
+# Portable defaults for a durable, single-node OpenGeni observability stack.
+# Managed and larger installations should layer values.production.example.yaml
+# plus their private ingress, authentication, and Alertmanager configuration.
+
+opengeni:
+  sourceRevision: ""
+  dashboards:
+    enabled: true
+    labelKey: grafana_dashboard
+    labelValue: "1"
+    folderAnnotation: grafana_folder
+    folder: /tmp/dashboards/OpenGeni
+    extraLabels: {}
+    extraAnnotations: {}
+
+kube-prometheus-stack:
+  enabled: true
+  commonLabels:
+    opengeni.ai/monitoring: enabled
+
+  # These control-plane endpoints are commonly unavailable on compact and
+  # managed clusters. Operators can re-enable the monitors in an overlay when
+  # their Kubernetes distribution exposes them.
+  kubeControllerManager:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+
+  prometheusOperator:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  prometheus:
+    prometheusSpec:
+      externalLabels:
+        environment: self-hosted
+      retention: 7d
+      retentionSize: 6GB
+      resources:
+        requests:
+          cpu: 250m
+          memory: 768Mi
+        limits:
+          cpu: 1500m
+          memory: 2Gi
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 8Gi
+      ruleSelectorNilUsesHelmValues: false
+      ruleSelector:
+        matchLabels:
+          opengeni.ai/monitoring: enabled
+      ruleNamespaceSelector:
+        matchLabels:
+          opengeni.ai/monitoring: enabled
+      serviceMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorSelector:
+        matchLabels:
+          opengeni.ai/monitoring: enabled
+      serviceMonitorNamespaceSelector:
+        matchLabels:
+          opengeni.ai/monitoring: enabled
+
+  alertmanager:
+    alertmanagerSpec:
+      retention: 120h
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+      storage:
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 2Gi
+
+  grafana:
+    rbac:
+      namespaced: true
+    serviceMonitor:
+      labels:
+        opengeni.ai/monitoring: enabled
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 768Mi
+    persistence:
+      enabled: true
+      type: pvc
+      accessModes:
+        - ReadWriteOnce
+      size: 2Gi
+      finalizers:
+        - kubernetes.io/pvc-protection
+    ingress:
+      enabled: false
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+        # Empty string preserves same-namespace discovery in both Helm 3 and Helm 4.
+        # A null override is coalesced back to the upstream ALL default by Helm 4.
+        searchNamespace: ""
+        resource: configmap
+        folderAnnotation: grafana_folder
+        provider:
+          allowUiUpdates: false
+          foldersFromFilesStructure: true
+      datasources:
+        resource: configmap
+
+  kube-state-metrics:
+    prometheus:
+      monitor:
+        additionalLabels:
+          opengeni.ai/monitoring: enabled
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+
+  prometheus-node-exporter:
+    prometheus:
+      monitor:
+        additionalLabels:
+          opengeni.ai/monitoring: enabled
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi

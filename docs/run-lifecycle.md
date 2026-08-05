@@ -345,12 +345,16 @@ For the Codex subscription catalog this means a 272,000-token raw window, a
 244,800 tokens (90%, reached with `>=`). Local checkpoint replacement retains
 only the newest real user messages that fit one cumulative 20,000-token budget,
 then appends the summary; internal resume notices are never retained as user
-intent. Complete-input estimation detects typed image items before generic JSON
-serialization. It uses retained detail/dimensions or bounded PNG/GIF/WebP/JPEG
-byte-prefix geometry, charges unknown geometry through one conservative bounded
-fallback; PNG geometry additionally requires a valid complete IHDR CRC32. It
-never counts typed inline image base64 as text. Ordinary textual
-data URLs remain text. See [`context-compaction.md`](context-compaction.md).
+intent. Automatic compaction uses provider-reported usage only: the durable
+prior-call input count at a turn boundary, or the immediately preceding
+same-activity provider total plus bounded newly appended input. With no bound
+provider count, OpenGeni sends the request and recovers from a genuine provider
+context overflow instead of compacting from a whole-request approximation.
+Each authoritative terminal response replaces the durable count with its usable
+input count or null; an omitted count never leaves an older response active.
+Local media-aware estimates remain confined to compaction-request fitting and
+history-only replacement reporting. See
+[`context-compaction.md`](context-compaction.md).
 
 Outside the explicit durable compaction transition, model-visible history is
 append-only. Given an unchanged canonical prefix and runtime settings, every
@@ -455,6 +459,11 @@ also enqueues one deduplicated `child_terminal_result` with status `cancelled`
 for its surviving parent and copies the causal parent-turn delegation snapshot;
 cancelled descendants do not notify parents inside the same terminal subtree.
 Only physical attempt quiescence can clear the stopping projection.
+When paused control remains authoritative after that receipt is durable, the
+session parks as `idle` while retaining the same `recovering` logical turn and
+active-turn pointer. This is projection settlement only: no claim, model/tool
+work, queue row, or parent-completion notice is created. Resume later admits
+that preserved turn with a new exact attempt.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
 Wake repair treats only an undelivered control revision, an actionable
@@ -552,6 +561,10 @@ or retained processes—elapsed time alone is never proof. Queue telemetry follo
 the latest live interruption and any exact predecessor referenced by a queued
 human/API Steer, so `stoppingPreviousAttempt` remains truthful without allowing
 unrelated historical attempts to contaminate current UI.
+The same DB-only reconciliation lane also repairs a paused pre-fix row whose
+receipt is already durable but whose session status still says `recovering`;
+that case skips Temporal liveness inspection and idempotently parks only the
+session projection.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
@@ -659,6 +672,13 @@ metrics; dashboard/PromQL integration is coordinated separately.
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when
 that set is proven closed and `archive_generation === workspace_generation`.
+Admission, ordinary settlement, and yielded-process promotion acquire the
+canonical workspace/session/attempt-or-process prefix before the admission and
+lease rows. A provider-terminal settlement retries only its idempotent database
+transaction on PostgreSQL deadlock/serialization failure; it never reissues the
+provider operation. This prevents one parallel completed command and one yielded
+command from deadlocking, rolling back one settlement, and freezing checkpoint
+capture behind an admission that is no longer physically running.
 Late, concurrent, or replayed requests either remain blockers or are admitted
 into a successor generation; no admitted operation is replayed after provider
 rejection, provider loss, or a failed acceptance fence.

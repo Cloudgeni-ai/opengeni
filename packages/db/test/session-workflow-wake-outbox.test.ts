@@ -163,6 +163,9 @@ describe("transactional session workflow wake outbox", () => {
     ]);
     expect(results.flatMap((result) => result.events)).toHaveLength(5);
     expect(results.map((result) => result.workflowWakeRevision).sort()).toEqual([1, 2]);
+    // Both concurrent callers own a committed wake revision, so neither may
+    // describe itself as a mutation-free replay.
+    expect(results.map((result) => result.changed).sort()).toEqual([true, true]);
 
     const events = await listSessionEvents(
       client.db,
@@ -572,7 +575,18 @@ describe("transactional session workflow wake outbox", () => {
       temporalWorkflowRunId: workflowRunId,
       temporalActivityId: activityId,
     });
-    expect(quiescenceEvents).toHaveLength(1);
+    expect(quiescenceEvents).toEqual([
+      expect.objectContaining({
+        type: "session.queue.changed",
+        clientEventId: `opengeni:attempt-quiesced:${attemptId}`,
+        payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+      }),
+      expect.objectContaining({
+        type: "session.status.changed",
+        clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
+        payload: expect.objectContaining({ status: "idle", reason: "paused_recovery_settled" }),
+      }),
+    ]);
     await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
         mutateSessionControlInTransaction(tx as typeof db, {

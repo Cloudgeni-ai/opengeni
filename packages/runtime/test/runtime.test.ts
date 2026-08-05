@@ -70,6 +70,7 @@ import {
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
@@ -208,6 +209,28 @@ test("does not turn MCP client failures or arbitrary codes into connectivity rec
   expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
   expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
   expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
+});
+
+test("fails closed on pathological MCP transport error wrappers", () => {
+  let deeplyWrapped: Record<string, unknown> = { code: "ECONNREFUSED" };
+  for (let depth = 0; depth < 10; depth += 1) {
+    deeplyWrapped = { cause: deeplyWrapped };
+  }
+  const throwingWrapper = {
+    code: "ECONNRESET",
+    get cause(): unknown {
+      throw new Error("unsafe transport getter");
+    },
+  };
+  const throwingFields = {
+    get code(): unknown {
+      throw new Error("unsafe code getter");
+    },
+  };
+
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(deeplyWrapped))).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingWrapper))).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingFields))).toBe(false);
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -415,6 +438,22 @@ describe("runtime event normalization", () => {
       },
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("recognizes a terminal response when the provider omitted usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage" },
+      },
+    } as any;
+
+    expect(modelTerminalResponseFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
   });
 
   test("extracts raw Responses usage without manufacturing a durable event", () => {
@@ -2934,7 +2973,7 @@ describe("runtime event normalization", () => {
     expect(sessions).toHaveLength(2);
   });
 
-  test("keeps repository resources as git repo manifest entries", () => {
+  test("keeps exact repository transport URIs in git repo manifest entries", () => {
     const manifest = buildManifest(testSettings(), [
       {
         kind: "repository",
@@ -2942,10 +2981,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/app",
+      repo: "https://github.com/acme/app.git",
       ref: "main",
     });
   });
@@ -2956,16 +2994,19 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        provider: "github",
       },
       {
         kind: "repository",
         uri: "https://gitlab.com/acme/app.git",
         ref: "main",
+        provider: "gitlab",
       },
       {
         kind: "repository",
         uri: "https://dev.azure.com/acme/project/_git/app",
         ref: "main",
+        provider: "azure_devops",
       },
     ]);
     expect(Object.keys(manifest.entries).sort()).toEqual([
@@ -2983,10 +3024,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "git.example.com:8443",
-      repo: "acme/app",
+      repo: "https://git.example.com:8443/acme/app.git",
     });
   });
 
@@ -3588,8 +3628,7 @@ describe("runtime event normalization", () => {
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/private",
+      repo: "https://github.com/acme/private.git",
       ref: "main",
       subpath: "README.md",
     });
@@ -3626,7 +3665,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -3798,7 +3837,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -3864,7 +3903,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/github.com/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {
@@ -6627,7 +6666,7 @@ describe("provider item id stripping", () => {
     }
   });
 
-  test("a delayed provider usage signal cannot bind to a newer model request", async () => {
+  test("a delayed provider usage signal cannot bind or force estimated compaction", async () => {
     let signal: { revision: number; totalTokens: number } | null = null;
     const filter = contextRobustnessFilterForSettings(
       testSettings({
@@ -6668,21 +6707,16 @@ describe("provider item id stripping", () => {
       },
       { type: "message", role: "user", content: "continue again" },
     ] as any;
-    try {
-      await filter({
+    await expect(
+      filter({
         modelData: { input: third, instructions: "system" },
         agent: {} as any,
         context: undefined,
-      });
-      throw new Error("expected the complete estimate to trigger compaction");
-    } catch (error) {
-      expect(error).toBeInstanceOf(CompactionNeededError);
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
-      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
-    }
+      }),
+    ).resolves.toMatchObject({ input: third });
   });
 
-  test("first-call accounting includes instructions and tool schemas", async () => {
+  test("a first call never compacts from estimated instructions and tool schemas", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 10_000,
@@ -6709,10 +6743,12 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
-  test("first-call accounting does not discount a multilingual tool schema", async () => {
+  test("a first call never compacts from an estimated multilingual tool schema", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 12_000,
@@ -6742,7 +6778,9 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
   test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
@@ -6834,7 +6872,7 @@ describe("provider item id stripping", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(CompactionNeededError);
       expect((error as CompactionNeededError).trigger).toBe("operator");
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
+      expect((error as CompactionNeededError).signalSource).toBe("operator");
     }
     expect(polls).toBe(2);
   });

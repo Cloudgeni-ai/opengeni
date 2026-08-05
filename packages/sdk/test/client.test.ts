@@ -239,6 +239,78 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("coalesces simultaneous identical session projection reads", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input) => {
+        requests += 1;
+        await gate;
+        return jsonResponse(
+          String(input).endsWith("/lineage")
+            ? { ancestors: [], children: [] }
+            : { id: SESSION_ID, workspaceId: WORKSPACE_ID },
+        );
+      },
+    });
+    const sessionReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+    ];
+    const lineageReads = [
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+    ];
+    const queueReads = [
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+    ];
+    const goalReads = [
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(4);
+    release();
+    await Promise.all([...sessionReads, ...lineageReads, ...queueReads, ...goalReads]);
+    expect(requests).toBe(4);
+  });
+
+  test("queues one fresh session read behind an existing projection read", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await gate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+    const initial = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const freshReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    release();
+    expect(((await initial) as Session & { request: number }).request).toBe(1);
+    const reconciled = await Promise.all(freshReads);
+    expect(requests).toBe(2);
+    expect(reconciled.map((session) => (session as Session & { request: number }).request)).toEqual(
+      [2, 2],
+    );
+  });
+
   test("updates an existing session MCP approval policy through the dedicated route", async () => {
     const response = {
       server: {

@@ -419,7 +419,7 @@ function WorkerRow({
         className={cn(
           "group/worker -mx-1.5 flex w-full items-start gap-2 rounded-og-sm px-1.5 py-1.5 text-left",
           "outline-none transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
-          "pointer-coarse:py-2.5",
+          "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
         )}
       >
         {inner}

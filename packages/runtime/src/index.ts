@@ -22,6 +22,9 @@ import {
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  gitRemoteIdentity,
+  gitRemotePathAliases,
+  gitRemoteUriAliases,
   isClearedRunStateBlob,
   normalizeRepositorySubpath,
   normalizeResourceMountPath,
@@ -250,11 +253,13 @@ export {
   ComputerUseCapability,
   computerUse,
   ComputerUnavailableError,
+  ScreenshotReadError,
   ComputerReadOnlyError,
   ComputerActionError,
   type SandboxComputerOptions,
   type ComputerUseArgs,
   type ComputerToolMode,
+  type ScreenshotReadErrorCode,
 } from "./sandbox-computer";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
@@ -400,6 +405,11 @@ export type ModelResponseUsage = {
       output_tokens_details?: Record<string, number>;
     }>;
   };
+};
+
+export type ModelTerminalResponse = {
+  responseId?: string;
+  usage: ModelResponseUsage | null;
 };
 
 type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
@@ -3008,6 +3018,7 @@ export function buildAgentCapabilities(
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
+      ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
       toolMode: options.computerToolMode ?? "disabled",
     });
@@ -3731,11 +3742,18 @@ function safeMcpErrorFields(error: unknown): {
   errorClass: string;
   status?: number;
 } {
-  const errorClass = error instanceof Error ? error.constructor.name : typeof error;
-  const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
+  let errorClass: string;
+  let raw: unknown;
+  let altRaw: unknown;
+  try {
+    errorClass = error instanceof Error ? error.constructor.name : typeof error;
+    raw = (error as { code?: unknown; status?: unknown } | null)?.code;
+    altRaw = (error as { status?: unknown } | null)?.status;
+  } catch {
+    return { errorClass: "unknown" };
+  }
   const status = typeof raw === "number" ? raw : undefined;
   if (status === undefined) {
-    const altRaw = (error as { status?: unknown } | null)?.status;
     return typeof altRaw === "number" ? { errorClass, status: altRaw } : { errorClass };
   }
   return { errorClass, status };
@@ -3754,40 +3772,106 @@ const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNREFUSED",
   "EPIPE",
 ]);
+const MCP_REQUEST_TIMEOUT_MESSAGES = new Set([
+  "Request timed out",
+  "MCP error -32001: Request timed out",
+  "Maximum total timeout exceeded",
+  "MCP error -32001: Maximum total timeout exceeded",
+]);
 
-function mcpTransportHttpStatuses(error: unknown, seen = new WeakSet<object>()): number[] {
-  if (!error || typeof error !== "object" || seen.has(error)) {
-    return [];
-  }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
+const MCP_TRANSPORT_ERROR_MAX_DEPTH = 8;
+const MCP_TRANSPORT_ERROR_MAX_NODES = 32;
+const MCP_TRANSPORT_ERROR_NESTED_KEYS = ["error", "cause", "response", "data"] as const;
+
+function inspectMcpTransportError(
+  error: unknown,
+  seen = new WeakSet<object>(),
+): {
+  complete: boolean;
+  hasConnectivityCode: boolean;
+  hasConnectivityMarker: boolean;
+  hasRequestTimeout: boolean;
+  statuses: number[];
+} {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
   const statuses: number[] = [];
-  for (const value of [record.status, record.statusCode, record.code]) {
-    if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
-      statuses.push(value);
+  let hasConnectivityCode = false;
+  let hasConnectivityMarker = false;
+  let hasRequestTimeout = false;
+  let inspectedNodes = 0;
+  let complete = true;
+
+  while (pending.length > 0 && inspectedNodes < MCP_TRANSPORT_ERROR_MAX_NODES) {
+    const current = pending.shift()!;
+    if (!current.value || typeof current.value !== "object" || seen.has(current.value)) {
+      continue;
+    }
+    seen.add(current.value);
+    inspectedNodes += 1;
+    const record = current.value as Record<string, unknown>;
+    let statusValues: unknown[];
+    let code: unknown;
+    let failureKind: unknown;
+    let message: unknown;
+    try {
+      statusValues = [record.status, record.statusCode, record.code];
+      code = record.code;
+      failureKind = record.mcpTransportFailureKind;
+      message = record.message;
+    } catch {
+      complete = false;
+      continue;
+    }
+    for (const value of statusValues) {
+      if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
+        statuses.push(value);
+      }
+    }
+    if (typeof code === "string" && MCP_CONNECTIVITY_ERROR_CODES.has(code.toUpperCase())) {
+      hasConnectivityCode = true;
+    }
+    if (failureKind === "connectivity_unavailable") {
+      hasConnectivityMarker = true;
+    }
+    const timeoutCode = typeof code === "number" ? code : statusValues[0];
+    if (
+      failureKind === "request_timeout" ||
+      (timeoutCode === -32_001 &&
+        typeof message === "string" &&
+        MCP_REQUEST_TIMEOUT_MESSAGES.has(message))
+    ) {
+      hasRequestTimeout = true;
+    }
+
+    for (const key of MCP_TRANSPORT_ERROR_NESTED_KEYS) {
+      let nested: unknown;
+      try {
+        nested = record[key];
+      } catch {
+        complete = false;
+        continue;
+      }
+      if (!nested || typeof nested !== "object" || seen.has(nested)) {
+        continue;
+      }
+      if (current.depth >= MCP_TRANSPORT_ERROR_MAX_DEPTH) {
+        complete = false;
+        continue;
+      }
+      pending.push({ depth: current.depth + 1, value: nested });
     }
   }
-  for (const key of ["error", "cause", "response", "data"]) {
-    statuses.push(...mcpTransportHttpStatuses(record[key], seen));
-  }
-  return statuses;
-}
 
-function hasMcpConnectivityErrorCode(error: unknown, seen = new WeakSet<object>()): boolean {
-  if (!error || typeof error !== "object" || seen.has(error)) {
-    return false;
+  if (pending.length > 0) {
+    complete = false;
   }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  if (
-    typeof record.code === "string" &&
-    MCP_CONNECTIVITY_ERROR_CODES.has(record.code.toUpperCase())
-  ) {
-    return true;
-  }
-  return ["error", "cause", "response", "data"].some((key) =>
-    hasMcpConnectivityErrorCode(record[key], seen),
-  );
+  return {
+    complete,
+    hasConnectivityCode,
+    hasConnectivityMarker,
+    hasRequestTimeout,
+    statuses,
+  };
 }
 
 /**
@@ -3800,17 +3884,20 @@ function isRawMcpTransportConnectivityError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  if ((error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable") {
+  const inspection = inspectMcpTransportError(error);
+  if (inspection.hasConnectivityMarker) {
     return true;
   }
-  const statuses = mcpTransportHttpStatuses(error);
-  if (statuses.some((status) => status >= 400 && status < 500)) {
+  if (!inspection.complete) {
     return false;
   }
-  if (statuses.some((status) => status >= 500 && status < 600)) {
+  if (inspection.statuses.some((status) => status >= 400 && status < 500)) {
+    return false;
+  }
+  if (inspection.statuses.some((status) => status >= 500 && status < 600)) {
     return true;
   }
-  return hasMcpConnectivityErrorCode(error);
+  return inspection.hasConnectivityCode;
 }
 
 /**
@@ -3833,31 +3920,7 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
  * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
  */
 export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  if (seen.has(error)) {
-    return false;
-  }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  if (record.mcpTransportFailureKind === "request_timeout") {
-    return true;
-  }
-  const code = typeof record.code === "number" ? record.code : record.status;
-  const message = typeof record.message === "string" ? record.message : "";
-  const sdkTimeoutMessages = new Set([
-    "Request timed out",
-    "MCP error -32001: Request timed out",
-    "Maximum total timeout exceeded",
-    "MCP error -32001: Maximum total timeout exceeded",
-  ]);
-  if (code === -32_001 && sdkTimeoutMessages.has(message)) {
-    return true;
-  }
-  return ["error", "cause", "response", "data"].some((key) =>
-    isMcpRequestTimeoutError(record[key], seen),
-  );
+  return inspectMcpTransportError(error, seen).hasRequestTimeout;
 }
 
 export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
@@ -4777,26 +4840,31 @@ export function contextRobustnessFilterForSettings(
         hasModelGeneratedItem(current.input)
           ? reported
           : null;
-      const estimate = estimateCompleteModelInput({
-        current,
-        provider: boundProvider,
-        providerRequestFootprint: boundProvider ? (previousRequest?.footprint ?? null) : null,
-      });
-      const signalTokens = estimate.tokens;
+      // Without an exact provider response bound to the immediately preceding
+      // request, do not turn a whole-request approximation into a compaction
+      // decision. Let the provider accept the request or return its typed
+      // context-window error, which the worker already compacts and retries.
+      const signalTokens = boundProvider
+        ? estimateCompleteModelInput({
+            current,
+            provider: boundProvider,
+            providerRequestFootprint: previousRequest!.footprint,
+          }).tokens
+        : 0;
       previousRequest = { revision: ++requestRevision, footprint: current };
       if (await options.contextCompactionRequested?.()) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: boundProvider ? "provider" : "estimate",
+          signalSource: boundProvider ? "provider" : "operator",
           trigger: "operator",
         });
       }
-      if (signalTokens >= thresholdTokens) {
+      if (boundProvider && signalTokens >= thresholdTokens) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: boundProvider ? "provider" : "estimate",
+          signalSource: "provider",
         });
       }
     }
@@ -6292,8 +6360,22 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
 }
 
 export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResponseUsage | null {
+  return modelTerminalResponseFromSdkEvent(event)?.usage ?? null;
+}
+
+/** Recognize a terminal response even when the provider omitted usage. */
+export function modelTerminalResponseFromSdkEvent(
+  event: RunStreamEvent,
+): ModelTerminalResponse | null {
   const response = modelResponseFromSdkEvent(event);
-  return modelResponseUsageFromResponse(response);
+  if (!response) {
+    return null;
+  }
+  const responseId = modelResponseIdFromResponse(response);
+  return {
+    ...(responseId ? { responseId } : {}),
+    usage: modelResponseUsageFromResponse(response),
+  };
 }
 
 /** Normalize usage from either a Responses or Chat Completions result. */
@@ -6302,12 +6384,7 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
   if (!usage) {
     return null;
   }
-  const responseId =
-    typeof (response as { id?: unknown } | null)?.id === "string"
-      ? (response as { id: string }).id
-      : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
-        ? (response as { responseId: string }).responseId
-        : undefined;
+  const responseId = modelResponseIdFromResponse(response);
   const serviceTier = modelResponseServiceTierFromResponse(response);
   const gatewayBilling = gatewayBillingFromResponse(response);
   return {
@@ -6316,6 +6393,14 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
     ...(gatewayBilling ? { gatewayBilling } : {}),
     usage,
   };
+}
+
+function modelResponseIdFromResponse(response: unknown): string | undefined {
+  return typeof (response as { id?: unknown } | null)?.id === "string"
+    ? (response as { id: string }).id
+    : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
+      ? (response as { responseId: string }).responseId
+      : undefined;
 }
 
 /** Extract only the bounded, non-secret Gateway billing facts we consume. */
@@ -6579,17 +6664,13 @@ export function buildManifest(
   );
   for (const resource of resources) {
     if (resource.kind === "repository") {
-      const url = new URL(resource.uri);
-      const host = url.host.toLowerCase();
-      const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
       const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
         entries[mountPath] = dir();
         continue;
       }
       entries[mountPath] = gitRepo({
-        host,
-        repo,
+        repo: resource.uri,
         ref: resource.ref,
         ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
       });
@@ -7298,6 +7379,7 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
 
 type RuntimeGitBindingDescriptor = {
   provider: GitCredentialProvider;
+  remotePathProvider: GitCredentialProvider | null;
   credentialBindingId: string;
   bindingHash: string;
   protocol: string;
@@ -7333,7 +7415,7 @@ function runtimeGitBindingDescriptors(
     const credentialBindingId =
       gitCredentialBindingIdForRepository(resource, credentialProvider) ?? provider;
     const path = url.pathname.replace(/^\/+|\/+$/g, "");
-    const remote = `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}/${path.replace(/\.git$/, "")}`;
+    const remote = gitRemoteIdentity(resource.uri, credentialProvider);
     const bindingKey = `${provider}\u0000${credentialBindingId}`;
     const boundProvider = bindingProviders.get(credentialBindingId);
     if (boundProvider && boundProvider !== provider) {
@@ -7351,6 +7433,7 @@ function runtimeGitBindingDescriptors(
     remoteBindings.set(remote, bindingKey);
     return {
       provider,
+      remotePathProvider: credentialProvider,
       credentialBindingId,
       bindingHash: gitCredentialBindingHash(credentialBindingId),
       protocol: url.protocol.replace(/:$/, "").toLowerCase(),
@@ -7543,11 +7626,7 @@ function gitCredentialHelperBindingCaseLines(
         ),
     )
     .flatMap((descriptor) => {
-      const paths = new Set([
-        descriptor.path,
-        descriptor.path.replace(/\.git$/, ""),
-        `${descriptor.path.replace(/\.git$/, "")}.git`,
-      ]);
+      const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
           `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
@@ -7559,15 +7638,9 @@ function gitCredentialHelperBrokerCaseLines(
   routes: RuntimeGitHttpBrokerRouteDescriptor[],
 ): string[] {
   return routes.flatMap((route) => {
-    const paths = new Set([
-      route.path,
-      route.path.replace(/\.git$/, ""),
-      `${route.path.replace(/\.git$/, "")}.git`,
-    ]);
-    return [...paths].map(
-      (path) =>
-        `  ${shellQuote(`${route.protocol}|${route.host}|${path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
-    );
+    return [
+      `  ${shellQuote(`${route.protocol}|${route.host}|${route.path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
+    ];
   });
 }
 
@@ -7718,8 +7791,7 @@ function gitCredentialHelperCommandLines(
     ...new Set(wrapperDescriptors.map((item) => `${item.provider}|${item.bindingHash}`)),
   ].map((key) => `    ${shellQuote(key)}) return 0 ;;`);
   const originWrapperHashes = wrapperDescriptors.flatMap((item) => {
-    const base = item.uri.replace(/\.git$/, "");
-    return [...new Set([item.uri, base, `${base}.git`])].map(
+    return gitRemoteUriAliases(item.uri, item.remotePathProvider).map(
       (uri) =>
         `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
     );
@@ -7740,8 +7812,7 @@ function gitCredentialHelperCommandLines(
           .map(([provider]) => provider)
       : [];
   const brokeredOriginCases = brokerRoutes.flatMap((route) => {
-    const base = route.repositoryUri.replace(/\.git$/, "");
-    return [...new Set([route.repositoryUri, base, `${base}.git`])].map(
+    return gitRemoteUriAliases(route.repositoryUri, route.provider).map(
       (uri) => `    ${shellQuote(`${route.provider}|${uri}`)}) return 0 ;;`,
     );
   });

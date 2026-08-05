@@ -1,5 +1,35 @@
 # @opengeni/config
 
+## 0.11.1
+
+### Patch Changes
+
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+
+## 0.11.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 5b6d36e: Enable progressive Codex MCP tool disclosure by default while retaining an explicit operator opt-out.
+- Updated dependencies [6eb0b23]
+  - @opengeni/contracts@0.39.0
+
+## 0.10.14
+
+### Patch Changes
+
+- 8135dbb: Promote the default stable Connected Machine agent release to 0.1.9.
+
 ## 0.10.13
 
 ### Patch Changes

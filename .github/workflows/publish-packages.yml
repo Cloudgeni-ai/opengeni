@@ -73,9 +73,11 @@ jobs:
             jq -e \
               --arg name "$name" \
               '[.check_runs[]
-                | select(.name == $name and .app.slug == "github-actions"
-                    and .status == "completed" and .conclusion == "success")]
-                | length == 1' \
+                | select(.name == $name and .app.slug == "github-actions")]
+                | if length == 0 then false
+                  else max_by(.id)
+                    | .status == "completed" and .conclusion == "success"
+                  end' \
               <<<"$checks" >/dev/null || {
                 echo "required exact-source check is not successful: $name" >&2
                 exit 1

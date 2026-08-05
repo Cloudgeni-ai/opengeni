@@ -25,6 +25,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
+import { usePageLiveActivity } from "@opengeni/react";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type {
@@ -79,6 +80,7 @@ export function resolveDocumentCollectionSelection(
 export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const client = context.client;
+  const pageLive = usePageLiveActivity();
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
   const [basesLoading, setBasesLoading] = useState(true);
@@ -187,22 +189,34 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     if (
+      !pageLive ||
       !selectedBaseId ||
       !documents.some((document) => document.status === "queued" || document.status === "indexing")
     ) {
       return;
     }
-    const timer = window.setInterval(() => {
-      void client
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const load = async () => {
+      await client
         .listDocuments(workspaceId, selectedBaseId)
         .then((next) => {
-          setDocuments(next);
-          setPollFailed(false);
+          if (!cancelled) {
+            setDocuments(next);
+            setPollFailed(false);
+          }
         })
-        .catch(() => setPollFailed(true));
-    }, 1200);
-    return () => window.clearInterval(timer);
-  }, [client, workspaceId, selectedBaseId, documents]);
+        .catch(() => {
+          if (!cancelled) setPollFailed(true);
+        });
+      if (!cancelled) timer = setTimeout(() => void load(), 1_200);
+    };
+    timer = setTimeout(() => void load(), 1_200);
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [client, workspaceId, selectedBaseId, documents, pageLive]);
 
   async function handleCreateBase() {
     const trimmed = name.trim();

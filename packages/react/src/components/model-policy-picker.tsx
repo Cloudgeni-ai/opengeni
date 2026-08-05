@@ -573,7 +573,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           disabled={props.disabled}
           aria-label={messages.label}
           className={cn(
-            "og-root inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-[var(--og-model-picker-trigger-height-mobile)] max-sm:max-w-[7.5rem] max-sm:px-2",
+            "og-root inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
             props.className,
           )}
         >

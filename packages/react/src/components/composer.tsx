@@ -957,7 +957,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
         paletteOpen ? `${controller.listboxId}-option-${controller.palette.highlight}` : undefined
       }
       className={cn(
-        "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-og-composer md:px-4 md:text-og-composer-wide",
+        "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-og-composer md:px-4 md:text-og-composer-wide pointer-coarse:min-h-11",
         "text-og-fg placeholder:text-og-fg-subtle focus:outline-none focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-60",
         className,
@@ -1095,7 +1095,7 @@ export const AttachButton = forwardRef<HTMLButtonElement, ComposerAttachButtonPr
             className={cn(
               "inline-flex size-8 items-center justify-center rounded-og-md",
               "text-og-fg-muted transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-              "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-9",
+              "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
               className,
             )}
           >
@@ -1167,7 +1167,7 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
           disabled={busy}
           aria-label={ariaLabel ?? controller.messages.pauseAriaLabel}
           className={cn(
-            "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-9",
+            "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
             "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
             "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
             "disabled:opacity-50",
@@ -1216,7 +1216,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
               : controller.messages.sendMessageAriaLabel)
           }
           className={cn(
-            "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-9",
+            "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
             "bg-og-accent text-og-accent-fg shadow-og-sm",
             "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
             "hover:bg-og-accent-strong active:scale-95",
