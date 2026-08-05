@@ -3414,6 +3414,15 @@ describe("useEnvironments", () => {
         log.push(`set:${environmentId}:${name}`);
         return { name, version: 1, createdAt: "", updatedAt: "" };
       },
+      getVariableSetVariable: async (_ws, environmentId, name) => {
+        log.push(`read:${environmentId}:${name}`);
+        return {
+          variableSetId: environmentId,
+          name,
+          version: 1,
+          value: `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`,
+        };
+      },
       deleteEnvironmentVariable: async (_ws, environmentId, name) => {
         log.push(`unset:${environmentId}:${name}`);
       },
@@ -3437,6 +3446,11 @@ describe("useEnvironments", () => {
     expect(hook.result.current.environments.map((environment) => environment.name)).toEqual([
       "staging",
     ]);
+    const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
+    expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
+    // Plaintext is returned directly to the caller and never triggers a
+    // metadata-cache refresh that could retain it.
+    expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");
     await flushing(async () => {
       await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
       await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
@@ -3446,6 +3460,7 @@ describe("useEnvironments", () => {
       "list",
       "create:staging",
       "list",
+      "read:env-1:EXAMPLE_TOKEN",
       "set:env-1:EXAMPLE_TOKEN",
       "list",
       "unset:env-1:EXAMPLE_TOKEN",

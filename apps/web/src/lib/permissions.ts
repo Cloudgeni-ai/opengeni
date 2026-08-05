@@ -22,8 +22,14 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "scheduled_tasks:run": "Scheduled tasks",
   "environments:manage": "Variable sets",
   "environments:use": "Variable sets",
+  "variable-sets:list": "Variable sets",
+  "variable-sets:read": "Variable sets",
+  "variable-sets:write": "Variable sets",
   "variable-sets:manage": "Variable sets",
   "variable-sets:use": "Variable sets",
+  "secrets:list": "Variable sets",
+  "secrets:read": "Variable sets",
+  "secrets:write": "Variable sets",
   "mcp_servers:attach": "Sessions",
   "github:manage": "GitHub",
   "github:use": "GitHub",
@@ -88,7 +94,11 @@ export const apiKeyPermissionGroups = buildApiKeyPermissionGroups();
 // delegate everything, any other grant only its own permissions.
 export function delegableApiKeyPermissions(grantPermissions: readonly string[]): Set<string> {
   if (grantPermissions.includes("workspace:admin")) {
-    return new Set<string>(Permission.options);
+    return new Set<string>(
+      Permission.options.filter(
+        (permission) => permission !== "secrets:read" || grantPermissions.includes("secrets:read"),
+      ),
+    );
   }
   return new Set<string>(
     Permission.options.filter((permission) => grantPermissions.includes(permission)),
@@ -186,9 +196,33 @@ export function hasWorkspacePermission(
   permission: string,
 ): boolean {
   const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  const legacyAliases: Partial<Record<string, string[]>> = {
+    "variable-sets:list": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use",
+      "environments:manage",
+    ],
+    "variable-sets:read": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use",
+      "environments:manage",
+    ],
+    "variable-sets:write": ["variable-sets:manage", "environments:manage"],
+    "secrets:list": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use",
+      "environments:manage",
+    ],
+    "secrets:write": ["variable-sets:manage", "environments:manage"],
+  };
   return Boolean(
     grant &&
-    (grant.permissions.includes(permission) || grant.permissions.includes("workspace:admin")),
+    (grant.permissions.includes(permission) ||
+      legacyAliases[permission]?.some((alias) => grant.permissions.includes(alias)) ||
+      (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
   );
 }
 

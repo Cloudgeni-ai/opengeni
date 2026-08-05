@@ -394,9 +394,27 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       page,
       page.getByRole("button", { name: `Rotate variable ${lastVariableName}` }),
     );
-    const writeOnlyValues = page.getByLabel("Value is write-only");
-    expect(await writeOnlyValues.count()).toBe(longVariableNames.length);
-    expect(await writeOnlyValues.first().textContent()).toContain("••••••");
+    const hiddenValues = page.getByLabel("Value hidden");
+    expect(await hiddenValues.count()).toBe(longVariableNames.length);
+    expect(await hiddenValues.first().textContent()).toContain("••••••");
+    expect(
+      await page.evaluate(
+        (sentinel) =>
+          (document.body.textContent ?? "").includes(sentinel) ||
+          [...document.querySelectorAll("input")].some((input) => input.value.includes(sentinel)),
+        secretSentinel,
+      ),
+    ).toBe(false);
+
+    await page.getByRole("button", { name: `Reveal variable ${longVariableName}` }).click();
+    const revealed = page.getByLabel(`Revealed value for ${longVariableName}`);
+    await revealed.waitFor();
+    expect(await revealed.textContent()).toContain(secretSentinel);
+    expect(
+      await page.getByRole("button", { name: `Copy variable ${longVariableName}` }).count(),
+    ).toBe(1);
+    await page.getByRole("button", { name: `Hide variable ${longVariableName}` }).click();
+    await revealed.waitFor({ state: "hidden" });
     expect(
       await page.evaluate(
         (sentinel) =>

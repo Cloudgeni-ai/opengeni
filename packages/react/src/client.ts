@@ -50,6 +50,7 @@ export type SessionClientLike = Pick<
   | "createFileDownloadUrl"
   // VariableSets
   | "listVariableSets"
+  | "getVariableSetVariable"
   | "createVariableSet"
   | "updateVariableSet"
   | "deleteVariableSet"
