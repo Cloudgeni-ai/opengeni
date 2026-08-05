@@ -37,6 +37,19 @@ export {
 } from "./artifacts";
 
 export {
+  MCP_MUTATION_RECEIPT_MAX_BYTES,
+  MCP_MUTATION_RECEIPT_VERSION,
+  McpMutationReceipt,
+  McpMutationReceiptIdempotencyStatus,
+  McpMutationReceiptOutcome,
+  McpMutationResource,
+  type McpMutationReceipt as McpMutationReceiptType,
+  type McpMutationReceiptIdempotencyStatus as McpMutationReceiptIdempotencyStatusType,
+  type McpMutationReceiptOutcome as McpMutationReceiptOutcomeType,
+  type McpMutationResource as McpMutationResourceType,
+} from "./mcp-receipts";
+
+export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   approximateSessionEventTokens,
   boundSessionEventPayload,

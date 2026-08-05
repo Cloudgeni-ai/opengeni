@@ -506,7 +506,22 @@ function validateSessionMcpCredentialUpdates(input: {
   return encryptedUpdates;
 }
 
-export async function createAndStartSession(input: {
+export type CreateSessionOutcome = {
+  session: CreateSessionResponse;
+  /** The committed create/start effect represented by this request. */
+  outcome: "created" | "repaired" | "replayed";
+  /** Backward-compatible replay flag for existing entity-oriented callers. */
+  replay: boolean;
+  /** True when the request created/repaired start state or committed a new wake revision. */
+  changed: boolean;
+};
+
+export type CreateSessionRequestOutcome = CreateSessionOutcome & {
+  /** Billing telemetry is recorded after the committed session start. */
+  usageRecording: "recorded" | "failed";
+};
+
+export async function createAndStartSessionWithOutcome(input: {
   requestedSessionId?: string;
   db: Database;
   bus: EventBus;
@@ -597,7 +612,7 @@ export async function createAndStartSession(input: {
   maxNestedAgentDepthOverride?: number | null;
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
-}): Promise<CreateSessionResponse> {
+}): Promise<CreateSessionOutcome> {
   const sessionMetadata = {
     ...input.metadata,
     model: input.model,
@@ -647,12 +662,24 @@ export async function createAndStartSession(input: {
     }
     const { session: keyed, created } = keyedResult;
     if (!created) {
-      return await finishStartSession(
+      const finished = await finishStartSession(
         keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
         keyed,
       );
+      return {
+        session: finished.session,
+        outcome: finished.changed ? "repaired" : "replayed",
+        replay: !finished.changed,
+        changed: finished.changed,
+      };
     }
-    return await finishStartSession(input, keyed);
+    const finished = await finishStartSession(input, keyed);
+    return {
+      session: finished.session,
+      outcome: "created",
+      replay: false,
+      changed: true,
+    };
   }
   let session: Session;
   try {
@@ -694,7 +721,20 @@ export async function createAndStartSession(input: {
     }
     throw error;
   }
-  return await finishStartSession(input, session);
+  const finished = await finishStartSession(input, session);
+  return {
+    session: finished.session,
+    outcome: "created",
+    replay: false,
+    changed: true,
+  };
+}
+
+/** Backward-compatible entity-returning create path used by existing callers. */
+export async function createAndStartSession(
+  input: Parameters<typeof createAndStartSessionWithOutcome>[0],
+): Promise<CreateSessionResponse> {
+  return (await createAndStartSessionWithOutcome(input)).session;
 }
 
 /**
@@ -730,7 +770,7 @@ async function finishStartSession(
     consumeNewSessionDraft?: { subjectId: string; expectedRevision: number } | null;
   },
   session: Session,
-): Promise<CreateSessionResponse> {
+): Promise<{ session: CreateSessionResponse; changed: boolean }> {
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
   // the atomic initial turn transaction, so the FIRST turn routes to the chosen
   // machine. swapActiveSandbox does
@@ -806,7 +846,10 @@ async function finishStartSession(
     started.turn?.id ??
     (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
     null;
-  return { ...persisted, initialTurnId };
+  return {
+    session: { ...persisted, initialTurnId },
+    changed: started.changed,
+  };
 }
 
 export function workflowIdForSession(sessionId: string): string {
@@ -997,7 +1040,7 @@ export async function postUserMessageTurn(input: {
   expectedDraftRevision?: number | null;
   reasoningEffortFallback?: Settings["openaiReasoningEffort"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-}): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+}): Promise<{ accepted: SessionEvent; turn: SessionTurn; replay: boolean }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
@@ -1109,7 +1152,7 @@ export async function postUserMessageTurn(input: {
       error,
     );
   }
-  return { accepted, turn };
+  return { accepted, turn, replay: result.replay };
 }
 
 /**
@@ -1121,12 +1164,12 @@ export async function postUserMessageTurn(input: {
  * trusted immediate parent, while explicit arrays (including []) win. A
  * top-level create with omitted tools applies workspace-default capability MCPs.
  */
-export async function createSessionForRequest(
+export async function createSessionForRequestWithOutcome(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   workspaceId: string,
   rawPayload: unknown,
-): Promise<Session> {
+): Promise<CreateSessionRequestOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
@@ -1621,9 +1664,9 @@ export async function createSessionForRequest(
     });
   }
   const creationInitiator = creationInitiatorForGrant(grant);
-  let session: CreateSessionResponse;
+  let createOutcome: CreateSessionOutcome;
   try {
-    session = await createAndStartSession({
+    createOutcome = await createAndStartSessionWithOutcome({
       ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
       db,
       bus,
@@ -1704,24 +1747,42 @@ export async function createSessionForRequest(
     }
     throw error;
   }
+  let usageRecording: CreateSessionRequestOutcome["usageRecording"] = "recorded";
   if (payload.startMode !== "realtime") {
-    await recordWorkspaceUsage(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      eventType: "agent_run.created",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "session",
-      sourceResourceId: session.id,
-      sessionId: session.id,
-      initiator: session.createdBy,
-      initiatorContext: session.createdByContext,
-      origin: creationInitiator.actor ? "system" : "user",
-      idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
-    });
+    try {
+      await recordWorkspaceUsage(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        eventType: "agent_run.created",
+        quantity: 1,
+        unit: "run",
+        sourceResourceType: "session",
+        sourceResourceId: createOutcome.session.id,
+        sessionId: createOutcome.session.id,
+        initiator: createOutcome.session.createdBy,
+        initiatorContext: createOutcome.session.createdByContext,
+        origin: creationInitiator.actor ? "system" : "user",
+        idempotencyKey: `agent_run.created:${workspaceId}:${createOutcome.session.id}`,
+      });
+    } catch {
+      usageRecording = "failed";
+      console.warn(
+        `[sessions] usage recording failed after committed session create ${workspaceId}/${createOutcome.session.id}; returning committed outcome`,
+      );
+    }
   }
-  return session;
+  return { ...createOutcome, usageRecording };
+}
+
+/** Backward-compatible entity-returning request path for REST and core callers. */
+export async function createSessionForRequest(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  rawPayload: unknown,
+): Promise<CreateSessionResponse> {
+  return (await createSessionForRequestWithOutcome(deps, grant, workspaceId, rawPayload)).session;
 }
 
 /**
@@ -1731,7 +1792,7 @@ export async function createSessionForRequest(
  * enqueue, and usage recording. `toolsProvided: false` durably preserves an
  * Tool selection is durable session state and never rides a follow-up prompt.
  */
-export async function acceptSessionUserMessage(
+export async function acceptSessionUserMessageWithOutcome(
   deps: AcceptSessionUserMessageDependencies,
   grant: AccessGrant,
   workspaceId: string,
@@ -1750,7 +1811,7 @@ export async function acceptSessionUserMessage(
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
   },
-): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+): Promise<{ accepted: SessionEvent; turn: SessionTurn; replay: boolean }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   await requireSessionAuthorization(deps, grant, {
     sessionId,
@@ -1822,7 +1883,7 @@ export async function acceptSessionUserMessage(
     source: personalConnectionDelegationSourceForGrant(grant),
   });
   const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
-  const { accepted, turn } = await postUserMessageTurn({
+  const { accepted, turn, replay } = await postUserMessageTurn({
     db,
     bus,
     workflowClient,
@@ -1878,6 +1939,24 @@ export async function acceptSessionUserMessage(
     origin: turn.source,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
+  return { accepted, turn, replay };
+}
+
+/** Backward-compatible entity-returning path used by existing REST callers. */
+export async function acceptSessionUserMessage(
+  deps: Parameters<typeof acceptSessionUserMessageWithOutcome>[0],
+  grant: Parameters<typeof acceptSessionUserMessageWithOutcome>[1],
+  workspaceId: Parameters<typeof acceptSessionUserMessageWithOutcome>[2],
+  sessionId: Parameters<typeof acceptSessionUserMessageWithOutcome>[3],
+  input: Parameters<typeof acceptSessionUserMessageWithOutcome>[4],
+): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  const { accepted, turn } = await acceptSessionUserMessageWithOutcome(
+    deps,
+    grant,
+    workspaceId,
+    sessionId,
+    input,
+  );
   return { accepted, turn };
 }
 

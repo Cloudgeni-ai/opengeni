@@ -565,7 +565,7 @@ export async function steerHumanQueuePrompt(
   return response;
 }
 
-export async function controlHumanSessionWorkstream(
+export async function controlHumanSessionWorkstreamWithOutcome(
   deps: {
     db: Database;
     bus: EventBus;
@@ -574,7 +574,7 @@ export async function controlHumanSessionWorkstream(
   },
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
-): Promise<SessionControlResponse> {
+): Promise<{ response: SessionControlResponse; replay: boolean }> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
@@ -607,7 +607,16 @@ export async function controlHumanSessionWorkstream(
   }
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   await requestControlWakeDispatch(deps, result.wakeCount);
-  return response;
+  return { response, replay: result.replay };
+}
+
+/** Backward-compatible response path used by the REST control route. */
+export async function controlHumanSessionWorkstream(
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
+  context: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[1],
+  input: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[2],
+): Promise<SessionControlResponse> {
+  return (await controlHumanSessionWorkstreamWithOutcome(deps, context, input)).response;
 }
 
 export async function controlHumanWorkspace(
