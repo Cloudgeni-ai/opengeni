@@ -39828,6 +39828,7 @@ export async function reconcileSessionAttemptQuiescence(
       const rows = await scopedDb.execute<{
         account_id: string;
         state: string;
+        outcome: string | null;
         quiesced_at: Date | string | null;
         temporal_workflow_id: string;
         temporal_workflow_run_id: string;
@@ -39840,6 +39841,7 @@ export async function reconcileSessionAttemptQuiescence(
         select
           attempt.account_id,
           attempt.state,
+          attempt.outcome,
           attempt.quiesced_at,
           attempt.temporal_workflow_id,
           attempt.temporal_workflow_run_id,
@@ -39921,7 +39923,8 @@ export async function reconcileSessionAttemptQuiescence(
     eligibility.temporal_workflow_run_id !== input.temporalWorkflowRunId ||
     eligibility.temporal_activity_id !== input.temporalActivityId ||
     eligibility.state !== "closed" ||
-    (!eligibility.interruption_settled && !eligibility.recovery_requested) ||
+    (!eligibility.interruption_settled &&
+      (!eligibility.recovery_requested || eligibility.outcome !== "interrupted_recoverable")) ||
     eligibility.interruption_pending
   ) {
     return { action: "stale", events: [] };
