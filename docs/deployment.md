@@ -1366,6 +1366,47 @@ Do not put provider credentials, model keys, storage keys, kubeconfigs, TLS priv
 
 OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
 
+### Out-of-band read-only health audit
+
+Run the frequent deployment audit from an operator host that has read-only
+`kubectl` access and can list the Helm release. It does not create Kubernetes
+resources, exec into pods, restart workloads, resume sessions, or run synthetic
+agent/storage checks. Internal API, worker, and relay endpoints are read through
+the Kubernetes Service proxy, so ClusterIP services do not need to be publicly
+exposed:
+
+```bash
+bun run deployment:health-audit -- \
+  --namespace opengeni \
+  --release opengeni \
+  --expected-revision "$DECLARED_SOURCE_REVISION" \
+  --upstream-revision "$OPTIONAL_CURRENT_MAIN"
+```
+
+The command always prints one bounded
+`opengeni.deployment-health-audit.v1` JSON document and uses stable exit codes:
+
+| Exit | Status | Meaning |
+| ---: | --- | --- |
+| `0` | `healthy` | Every requested read-only check passed. |
+| `1` | `degraded` | The deployment is serving, but recent restarts or warning events need observation. |
+| `2` | `incident` | A workload, endpoint, Helm release, PVC, or deployment-revision invariant failed. |
+| `3` | `audit_error` | The audit itself could not establish trustworthy evidence, for example because inventory JSON was unavailable or malformed. |
+
+`--upstream-revision` is context only. A coherent, intentionally pinned
+deployment behind upstream is healthy. `--expected-revision` is declarative
+authority: a mismatch between that value and the API/workers is an incident.
+Raw command stderr is never copied into the JSON result.
+
+Use `--verify-observability` only from the exact deployed OpenGeni source tree.
+It composes `scripts/verify-observability-stack.ts`, which compares canonical
+dashboard bytes and source annotations as well as live Prometheus/Grafana state.
+
+This read-only command is suitable for a frequent systemd timer, CI job, or
+external watchdog. Keep `deployment:conformance` on a slower cadence: that
+suite intentionally creates and cleans up temporary sessions, scheduled tasks,
+and storage objects, so it proves deeper behavior but is not a liveness probe.
+
 Service endpoints:
 
 - API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
