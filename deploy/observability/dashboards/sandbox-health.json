@@ -224,7 +224,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Routed operations by backend, op, and outcome",
-      "description": "One observation per physical provider-session method invocation. A fenced retry remains visible as a failed attempt followed by a new attempt.",
+      "description": "One observation per physical provider-session method invocation. Expected file/directory misses are labeled not_found; actual provider/control failures are labeled failed. A fenced retry remains visible as a failed attempt followed by a new attempt.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "options": {
@@ -311,7 +311,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "Operation failure ratio by backend",
-      "description": "Failed physical attempts divided by all physical attempts; absent when there is no traffic.",
+      "description": "Actual failed physical attempts divided by ok + failed attempts. Expected path misses (not_found) are excluded from both sides; absent when there is no relevant traffic.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
       "options": {
@@ -321,7 +321,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (backend) (rate(opengeni_sandbox_operations_total{outcome=\"failed\"}[$__rate_interval])) / sum by (backend) (rate(opengeni_sandbox_operations_total[$__rate_interval]))",
+          "expr": "sum by (backend) (rate(opengeni_sandbox_operations_total{outcome=\"failed\"}[$__rate_interval])) / sum by (backend) (rate(opengeni_sandbox_operations_total{outcome=~\"ok|failed\"}[$__rate_interval]))",
           "legendFormat": "{{backend}}",
           "editorMode": "code",
           "range": true
