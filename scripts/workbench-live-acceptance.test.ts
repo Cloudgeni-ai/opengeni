@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
+  axeManualContrastSelector,
   assertFixtureCapture,
   assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
@@ -30,6 +31,17 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("admits only concrete single-selector Axe targets to the manual contrast audit", () => {
+    expect(axeManualContrastSelector(['button[class="bg-primary"]'])).toBe(
+      'button[class="bg-primary"]',
+    );
+    expect(axeManualContrastSelector(["  div[data-description]  "])).toBe("div[data-description]");
+    expect(axeManualContrastSelector([])).toBeNull();
+    expect(axeManualContrastSelector([".host", ".shadow-child"])).toBeNull();
+    expect(axeManualContrastSelector([""])).toBeNull();
+    expect(axeManualContrastSelector(".bg-primary")).toBeNull();
+  });
+
   test("ignores only expected browser-cancelled background reads", () => {
     const path = "/v1/workspaces/workspace/sessions/session/workspace/capture/file";
     expect(isExpectedBrowserCancellation(path, "net::ERR_ABORTED")).toBe(true);
