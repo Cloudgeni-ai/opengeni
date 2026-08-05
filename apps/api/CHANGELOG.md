@@ -1,5 +1,29 @@
 # @opengeni/api-router
 
+## 0.22.4
+
+### Patch Changes
+
+- 7dbd057: Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
+- c3876d4: Preserve sliding managed-session renewal cookies on protected API responses so active browser sessions do not expire at their original sign-in boundary.
+- Updated dependencies [1fbb6e7]
+- Updated dependencies [7dbd057]
+- Updated dependencies [78a1577]
+- Updated dependencies [c3876d4]
+- Updated dependencies [1503151]
+- Updated dependencies [0b23696]
+- Updated dependencies [42c04ce]
+  - @opengeni/runtime@0.18.19
+  - @opengeni/contracts@0.39.2
+  - @opengeni/core@0.21.4
+  - @opengeni/observability@0.5.2
+  - @opengeni/db@0.28.3
+  - @opengeni/config@0.11.2
+  - @opengeni/documents@0.5.12
+  - @opengeni/events@0.3.82
+  - @opengeni/github@0.4.33
+  - @opengeni/storage@0.2.70
+
 ## 0.22.3
 
 ### Patch Changes

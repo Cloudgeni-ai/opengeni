@@ -1,5 +1,13 @@
 # @opengeni/observability
 
+## 0.5.2
+
+### Patch Changes
+
+- 78a1577: Separate expected sandbox path misses from actual provider-operation failures in metrics and alerts.
+- Updated dependencies [7dbd057]
+  - @opengeni/contracts@0.39.2
+
 ## 0.5.1
 
 ### Patch Changes
