@@ -571,17 +571,19 @@ describe("clean session control plane", () => {
     expect(claimed?.id).toBe(replacement.turn.id);
   });
 
-  test("Steer immediately supersedes an ownerless turn during its recovery wait", async () => {
+  test("Steer supersedes an ownerless recovery turn but waits for its physical receipt", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run the predecessor");
     const attemptId = crypto.randomUUID();
     const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
     const predecessor = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
       session.id,
       workflowId,
-      { attemptId },
+      { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
     expect(
@@ -600,6 +602,22 @@ describe("clean session control plane", () => {
     expect((await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id))?.status).toBe(
       "superseded",
     );
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    expect(
+      await reconcileSessionAttemptQuiescence(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        activitySettled: true,
+      }),
+    ).toMatchObject({ action: "quiesced" });
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "runnable",
     });
@@ -4032,16 +4050,19 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "quiesced" });
   });
 
-  test("worker death recovers the same compaction execution without entering the queue", async () => {
+  test("graceful worker shutdown waits for quiescence before recovering the same compaction", async () => {
     const { grant, session } = await fixture();
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
     const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
     const first = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
       session.id,
-      `session-${session.id}`,
-      { attemptId },
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
     );
     expect(
       await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -4053,11 +4074,36 @@ describe("clean session control plane", () => {
       }),
     ).toMatchObject({ action: "recovering" });
 
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    const quiescence = await reconcileSessionAttemptQuiescence(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      activitySettled: true,
+    });
+    expect(quiescence).toMatchObject({
+      action: "quiesced",
+      events: [
+        expect.objectContaining({
+          type: "session.queue.changed",
+          turnAttemptId: attemptId,
+          payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+        }),
+      ],
+    });
+
     const recovered = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
       session.id,
-      `session-${session.id}`,
+      workflowId,
     );
     expect(recovered).toMatchObject({
       id: first!.id,
@@ -4071,6 +4117,71 @@ describe("clean session control plane", () => {
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
+  });
+
+  test("a superseded historical recovery receipt stays off the next prompt's critical path", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the recoverable turn");
+    const workflowId = `session-${session.id}`;
+    const predecessorAttemptId = crypto.randomUUID();
+    const predecessorRunId = crypto.randomUUID();
+    const predecessorActivityId = `dispatch-${crypto.randomUUID()}`;
+    const turn = await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId, {
+      attemptId: predecessorAttemptId,
+      workflowRunId: predecessorRunId,
+      dispatchId: predecessorActivityId,
+    });
+    expect(turn).not.toBeNull();
+    await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId: predecessorAttemptId,
+      reason: "worker_shutdown",
+    });
+    await reconcileSessionAttemptQuiescence(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId: predecessorAttemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: predecessorRunId,
+      temporalActivityId: predecessorActivityId,
+      activitySettled: true,
+    });
+
+    const successorAttemptId = crypto.randomUUID();
+    const successor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId: successorAttemptId },
+    );
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: successor!.id,
+      triggerEventId: successor!.triggerEventId,
+      attemptId: successorAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+
+    // Recreate one of the 1,662 pre-fix historical rows found in production.
+    // The later admitted attempt proves this row is historical, not the current
+    // replacement boundary. Operator cleanup may still attach the old receipt,
+    // but an unrelated user prompt must not replay an unbounded backlog first.
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurnAttempts)
+        .set({ quiescedAt: null })
+        .where(eq(schema.sessionTurnAttempts.id, predecessorAttemptId));
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
   });
 
   test("a prompt queued during compaction makes settlement publish queued, not idle", async () => {
