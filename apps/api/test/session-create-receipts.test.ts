@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, McpMutationReceiptType } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  claimSessionWorkForAttempt,
+  createDb,
+  createSession,
+  type DbClient,
+} from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
@@ -116,12 +122,19 @@ async function withUsageInsertRevoked<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function markInitialTurnRunning(workspaceId: string, sessionId: string): Promise<void> {
-  await shared!.admin`
-    update session_turns
-    set status = 'running'
-    where workspace_id = ${workspaceId} and session_id = ${sessionId}
-  `;
+async function claimInitialTurnRunning(workspaceId: string, sessionId: string): Promise<void> {
+  const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(claim).toMatchObject({ action: "claimed" });
+  if (claim.action !== "claimed") {
+    throw new Error(`initial turn was not legally claimed: ${claim.reason}`);
+  }
 }
 
 beforeAll(async () => {
@@ -227,7 +240,16 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
 
     // Once the initial queued turn has advanced, the same key neither repairs
     // start state nor issues another wake and is therefore a true replay.
-    await markInitialTurnRunning(grant.workspaceId, seeded.id);
+    await claimInitialTurnRunning(grant.workspaceId, seeded.id);
+    const afterClaim = await durableCounts(grant.workspaceId, seeded.id);
+    expect(afterClaim).toMatchObject({
+      workspaceSessions: 1,
+      events: 4,
+      turns: 1,
+      wakeRows: 1,
+      wakeRevision: 2,
+      usageEvents: 1,
+    });
     const replayed = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
     expect(replayed).toMatchObject({
       outcome: "replayed",
@@ -245,7 +267,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       wakeRevision: 2,
       usageEvents: 1,
     });
-    expect(afterReplay.updatedAt.getTime()).toBe(afterRepair.updatedAt.getTime());
+    expect(afterReplay.updatedAt.getTime()).toBe(afterClaim.updatedAt.getTime());
     expect(workflow.wakeups).toHaveLength(2);
   });
 
@@ -321,7 +343,16 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
         partialFailure: { stage: "usage_recording", retryable: true },
         facts: { sessionCreateOutcome: "repaired" },
       });
-      await markInitialTurnRunning(grant.workspaceId, first.resource.id);
+      await claimInitialTurnRunning(grant.workspaceId, first.resource.id);
+      const afterClaim = await durableCounts(grant.workspaceId, first.resource.id);
+      expect(afterClaim).toMatchObject({
+        workspaceSessions: 1,
+        events: 4,
+        turns: 1,
+        wakeRows: 1,
+        wakeRevision: 2,
+        usageEvents: 0,
+      });
       const replay = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
       expect(replay).toMatchObject({
         committed: true,
@@ -338,7 +369,8 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       expect(wakeRepair.warnings).toEqual(first.warnings);
       expect(replay.warnings).toEqual(first.warnings);
       expect(workflow.wakeups).toHaveLength(2);
-      expect(await durableCounts(grant.workspaceId, first.resource.id)).toMatchObject({
+      const afterReplay = await durableCounts(grant.workspaceId, first.resource.id);
+      expect(afterReplay).toMatchObject({
         workspaceSessions: 1,
         events: 4,
         turns: 1,
@@ -346,6 +378,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
         wakeRevision: 2,
         usageEvents: 0,
       });
+      expect(afterReplay.updatedAt.getTime()).toBe(afterClaim.updatedAt.getTime());
     });
   });
 });

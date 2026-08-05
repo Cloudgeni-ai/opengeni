@@ -1874,28 +1874,6 @@ function registerPreferenceRegistryTools(
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
 
-function scheduledTaskMutableState(task: ScheduledTask): Record<string, unknown> {
-  return {
-    name: task.name,
-    status: task.status,
-    schedule: task.schedule,
-    runMode: task.runMode,
-    overlapPolicy: task.overlapPolicy,
-    agentConfig: task.agentConfig,
-    reusableSessionId: task.reusableSessionId,
-    variableSetId: task.variableSetId,
-    rigId: task.rigId,
-    metadata: task.metadata,
-  };
-}
-
-function scheduledTaskStateChanged(before: ScheduledTask, after: ScheduledTask): boolean {
-  return (
-    JSON.stringify(scheduledTaskMutableState(before)) !==
-    JSON.stringify(scheduledTaskMutableState(after))
-  );
-}
-
 function scheduledTaskReceipt(
   operation: string,
   task: ScheduledTask,

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { AccessGrant, McpMutationReceiptType, Permission } from "@opengeni/contracts";
+import type { AccessGrant, Permission } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
