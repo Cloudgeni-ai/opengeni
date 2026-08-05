@@ -22,6 +22,9 @@ import {
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  gitRemoteIdentity,
+  gitRemotePathAliases,
+  gitRemoteUriAliases,
   isClearedRunStateBlob,
   normalizeRepositorySubpath,
   normalizeResourceMountPath,
@@ -6606,17 +6609,13 @@ export function buildManifest(
   );
   for (const resource of resources) {
     if (resource.kind === "repository") {
-      const url = new URL(resource.uri);
-      const host = url.host.toLowerCase();
-      const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
       const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
         entries[mountPath] = dir();
         continue;
       }
       entries[mountPath] = gitRepo({
-        host,
-        repo,
+        repo: resource.uri,
         ref: resource.ref,
         ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
       });
@@ -7325,6 +7324,7 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
 
 type RuntimeGitBindingDescriptor = {
   provider: GitCredentialProvider;
+  remotePathProvider: GitCredentialProvider | null;
   credentialBindingId: string;
   bindingHash: string;
   protocol: string;
@@ -7360,7 +7360,7 @@ function runtimeGitBindingDescriptors(
     const credentialBindingId =
       gitCredentialBindingIdForRepository(resource, credentialProvider) ?? provider;
     const path = url.pathname.replace(/^\/+|\/+$/g, "");
-    const remote = `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}/${path.replace(/\.git$/, "")}`;
+    const remote = gitRemoteIdentity(resource.uri, credentialProvider);
     const bindingKey = `${provider}\u0000${credentialBindingId}`;
     const boundProvider = bindingProviders.get(credentialBindingId);
     if (boundProvider && boundProvider !== provider) {
@@ -7378,6 +7378,7 @@ function runtimeGitBindingDescriptors(
     remoteBindings.set(remote, bindingKey);
     return {
       provider,
+      remotePathProvider: credentialProvider,
       credentialBindingId,
       bindingHash: gitCredentialBindingHash(credentialBindingId),
       protocol: url.protocol.replace(/:$/, "").toLowerCase(),
@@ -7570,11 +7571,7 @@ function gitCredentialHelperBindingCaseLines(
         ),
     )
     .flatMap((descriptor) => {
-      const paths = new Set([
-        descriptor.path,
-        descriptor.path.replace(/\.git$/, ""),
-        `${descriptor.path.replace(/\.git$/, "")}.git`,
-      ]);
+      const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
           `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
@@ -7586,15 +7583,9 @@ function gitCredentialHelperBrokerCaseLines(
   routes: RuntimeGitHttpBrokerRouteDescriptor[],
 ): string[] {
   return routes.flatMap((route) => {
-    const paths = new Set([
-      route.path,
-      route.path.replace(/\.git$/, ""),
-      `${route.path.replace(/\.git$/, "")}.git`,
-    ]);
-    return [...paths].map(
-      (path) =>
-        `  ${shellQuote(`${route.protocol}|${route.host}|${path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
-    );
+    return [
+      `  ${shellQuote(`${route.protocol}|${route.host}|${route.path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
+    ];
   });
 }
 
@@ -7745,8 +7736,7 @@ function gitCredentialHelperCommandLines(
     ...new Set(wrapperDescriptors.map((item) => `${item.provider}|${item.bindingHash}`)),
   ].map((key) => `    ${shellQuote(key)}) return 0 ;;`);
   const originWrapperHashes = wrapperDescriptors.flatMap((item) => {
-    const base = item.uri.replace(/\.git$/, "");
-    return [...new Set([item.uri, base, `${base}.git`])].map(
+    return gitRemoteUriAliases(item.uri, item.remotePathProvider).map(
       (uri) =>
         `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
     );
@@ -7767,8 +7757,7 @@ function gitCredentialHelperCommandLines(
           .map(([provider]) => provider)
       : [];
   const brokeredOriginCases = brokerRoutes.flatMap((route) => {
-    const base = route.repositoryUri.replace(/\.git$/, "");
-    return [...new Set([route.repositoryUri, base, `${base}.git`])].map(
+    return gitRemoteUriAliases(route.repositoryUri, route.provider).map(
       (uri) => `    ${shellQuote(`${route.provider}|${uri}`)}) return 0 ;;`,
     );
   });

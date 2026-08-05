@@ -3394,7 +3394,8 @@ function repositoryWithScheduledTaskResource(
       kind: "repository",
       uri,
       ref: repository.defaultBranch,
-      mountPath: defaultRepositoryMountPath(uri),
+      provider: "github",
+      mountPath: defaultRepositoryMountPath(uri, "github"),
       ...(repository.private
         ? {
             githubInstallationId: repository.installationId,
