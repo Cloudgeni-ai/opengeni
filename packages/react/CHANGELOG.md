@@ -1,5 +1,22 @@
 # @opengeni/react
 
+## 0.46.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [6eb0b23]
+  - @opengeni/sdk@0.46.0
+
 ## 0.45.1
 
 ### Patch Changes

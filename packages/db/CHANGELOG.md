@@ -1,5 +1,25 @@
 # @opengeni/db
 
+## 0.28.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 49c7f9c: Prevent deadlocks between sandbox mutation settlement and retained-process promotion, retry idempotent settlement transactions after transient database conflicts, and clarify that an idle session sandbox can be restored when the next operation needs it.
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
 ## 0.27.12
 
 ### Patch Changes
