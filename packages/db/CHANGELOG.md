@@ -1,5 +1,17 @@
 # @opengeni/db
 
+## 0.28.2
+
+### Patch Changes
+
+- 110d255: Project paused sessions as idle after their interrupted attempt has quiesced, while preserving the recovering turn for Resume.
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
 ## 0.28.1
 
 ### Patch Changes
