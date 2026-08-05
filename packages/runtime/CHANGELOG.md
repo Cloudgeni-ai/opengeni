@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 0.18.16
+
+### Patch Changes
+
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
 ## 0.18.15
 
 ### Patch Changes
