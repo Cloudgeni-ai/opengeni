@@ -5,6 +5,7 @@ import {
   VoiceRecordingOwnedError,
   VoiceRecordingStorageUnavailableError,
   createVoiceRecordingManifest,
+  type VoiceRecordingChunk,
   type VoiceRecordingManifest,
   type VoiceRecordingStore,
 } from "../voice-recording-store";
@@ -25,7 +26,7 @@ export type VoiceInputStatus =
   | "error";
 
 export type UseVoiceInputOptions = {
-  client: Pick<OpenGeniClient, "transcribeAudio"> | null;
+  client: VoiceInputClient | null;
   workspaceId: string;
   capability: ClientVoiceInputConfig | null;
   enabled: boolean;
@@ -39,6 +40,19 @@ export type UseVoiceInputOptions = {
   createOwnerId?: (() => string) | undefined;
   now?: (() => Date) | undefined;
 };
+
+type ResumableVoiceInputClient = Pick<
+  OpenGeniClient,
+  | "createTranscriptionRecording"
+  | "getTranscriptionRecording"
+  | "uploadTranscriptionRecordingChunk"
+  | "finalizeTranscriptionRecording"
+  | "processNextTranscriptionRecordingSegment"
+  | "discardTranscriptionRecording"
+>;
+
+type VoiceInputClient = Pick<OpenGeniClient, "transcribeAudio"> &
+  Partial<ResumableVoiceInputClient>;
 
 export type UseVoiceInputResult = {
   status: VoiceInputStatus;
@@ -68,10 +82,42 @@ export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 5_000;
 export const VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS = 5_000;
 export const VOICE_RECORDING_OWNER_STALE_MILLISECONDS = 30_000;
 export const VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS = 600;
+export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60;
+export const VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS = 2_000;
+export const VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS = 30_000;
+const TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS = 5_000;
 
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const createDefaultVoiceRecordingId = () => crypto.randomUUID();
 const currentDate = () => new Date();
+
+export function transcriptionRecoveryMutationDelayMilliseconds(
+  retryAfterMilliseconds: number | undefined,
+  attempt: number,
+  random: () => number = Math.random,
+): number {
+  const hint =
+    typeof retryAfterMilliseconds === "number" &&
+    Number.isInteger(retryAfterMilliseconds) &&
+    retryAfterMilliseconds > 0
+      ? retryAfterMilliseconds
+      : TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS;
+  const boundedHint = Math.max(
+    500,
+    Math.min(hint, VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS),
+  );
+  const exponent = Math.max(0, Math.min(Math.floor(attempt), 6));
+  const exponential = Math.min(
+    VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
+    boundedHint * 2 ** exponent,
+  );
+  const sampledJitter = random();
+  const jitterRatio = Number.isFinite(sampledJitter) ? Math.max(0, Math.min(1, sampledJitter)) : 0;
+  return Math.min(
+    VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
+    Math.ceil(exponential * (1 + jitterRatio * 0.2)),
+  );
+}
 
 export function useVoiceInput({
   client,
@@ -322,8 +368,17 @@ export function useVoiceInput({
   const finalizePersistedRecording = useCallback(
     async (generation: number): Promise<void> => {
       const manifest = manifestRef.current;
-      const maxSizeBytes = capability?.maxSizeBytes;
-      if (!manifest || !client || !maxSizeBytes || manifest.workspaceId !== workspaceId) return;
+      const resumable =
+        capability?.resumable && isResumableVoiceInputClient(client) ? capability.resumable : null;
+      const maxSizeBytes = resumable?.maxSizeBytes ?? capability?.maxSizeBytes;
+      if (
+        !manifest ||
+        !client ||
+        !capability ||
+        !maxSizeBytes ||
+        manifest.workspaceId !== workspaceId
+      )
+        return;
       const controller = new AbortController();
       controllerRef.current?.abort();
       controllerRef.current = controller;
@@ -368,18 +423,12 @@ export function useVoiceInput({
           await preserveForRetry(retained, "invalid_audio", generation);
           return;
         }
-        const audio = new Blob(
-          chunks
-            .sort((left, right) => left.chunkNumber - right.chunkNumber)
-            .map((chunk) => chunk.audio),
-          { type: transcribing.mimeType },
-        );
-        if (!active()) return;
-        if (audio.size > maxSizeBytes) throw { code: "too_large" };
-        const response = await client.transcribeAudio(workspaceId, {
-          audio,
-          mimeType: audio.type,
-          durationSeconds: transcribing.totalDurationMilliseconds / 1_000,
+        const response = await transcribePersistedRecording({
+          client,
+          workspaceId,
+          capability,
+          manifest: transcribing,
+          chunks,
           signal: controller.signal,
         });
         if (!active()) return;
@@ -422,6 +471,14 @@ export function useVoiceInput({
         }
         if (!active()) return;
         rememberManifest(handedOff);
+        if (resumable && isResumableVoiceInputClient(client)) {
+          await client
+            .discardTranscriptionRecording(workspaceId, handedOff.recordingId, {
+              signal: controller.signal,
+            })
+            .catch(() => undefined);
+        }
+        if (!active()) return;
         await store
           .discard(handedOff.recordingId, ownerIdRef.current ?? undefined)
           .catch(() => undefined);
@@ -448,7 +505,7 @@ export function useVoiceInput({
       }
     },
     [
-      capability?.maxSizeBytes,
+      capability,
       clearVisibleRecording,
       client,
       ensureStore,
@@ -602,7 +659,11 @@ export function useVoiceInput({
             });
             if (!startAttemptIsCurrent()) return;
             rememberManifest(result.manifest);
-            if (result.manifest.totalBytes > capability.maxSizeBytes) {
+            const maxSizeBytes =
+              capability.resumable && isResumableVoiceInputClient(client)
+                ? capability.resumable.maxSizeBytes
+                : capability.maxSizeBytes;
+            if (result.manifest.totalBytes > maxSizeBytes) {
               attemptCaptureLimitError = "too_large";
               if (attemptOwnsSharedCapture()) captureLimitErrorRef.current = "too_large";
               if (recorder.state !== "inactive") recorder.stop();
@@ -675,8 +736,14 @@ export function useVoiceInput({
       setStatus("recording");
       timerRef.current = setTimeout(
         stop,
-        Math.min(capability.maxDurationSeconds, VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS) *
-          1_000,
+        Math.min(
+          capability.resumable && isResumableVoiceInputClient(client)
+            ? capability.resumable.maxDurationSeconds
+            : capability.maxDurationSeconds,
+          capability.resumable && isResumableVoiceInputClient(client)
+            ? VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS
+            : VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
+        ) * 1_000,
       );
       return true;
     } catch (reason) {
@@ -800,6 +867,12 @@ export function useVoiceInput({
       return;
     }
     if (generation !== generationRef.current) return;
+    if (capability?.resumable && isResumableVoiceInputClient(client)) {
+      await client
+        .discardTranscriptionRecording(workspaceId, handedOff.recordingId)
+        .catch(() => undefined);
+    }
+    if (generation !== generationRef.current) return;
     await store
       .discard(handedOff.recordingId, ownerIdRef.current ?? undefined)
       .catch(() => undefined);
@@ -811,6 +884,8 @@ export function useVoiceInput({
     await loadNextRecoverable(generation);
   }, [
     clearVisibleRecording,
+    capability?.resumable,
+    client,
     ensureStore,
     focusInput,
     loadNextRecoverable,
@@ -835,6 +910,12 @@ export function useVoiceInput({
     await captureSettled.catch(() => undefined);
     if (generation !== generationRef.current) return;
     if (manifest) {
+      if (capability?.resumable && isResumableVoiceInputClient(client)) {
+        await client
+          .discardTranscriptionRecording(workspaceId, manifest.recordingId)
+          .catch(() => undefined);
+      }
+      if (generation !== generationRef.current) return;
       try {
         await (await ensureStore()).discard(manifest.recordingId, ownerIdRef.current ?? undefined);
       } catch {
@@ -856,10 +937,13 @@ export function useVoiceInput({
   }, [
     clearCaptureRuntime,
     clearVisibleRecording,
+    capability?.resumable,
+    client,
     ensureStore,
     focusInput,
     loadNextRecoverable,
     rememberManifest,
+    workspaceId,
   ]);
 
   const cancel = useCallback(() => {
@@ -1030,6 +1114,223 @@ export function useVoiceInput({
     cancel,
     discard,
   };
+}
+
+async function transcribePersistedRecording(input: {
+  client: VoiceInputClient;
+  workspaceId: string;
+  capability: ClientVoiceInputConfig;
+  manifest: VoiceRecordingManifest;
+  chunks: VoiceRecordingChunk[];
+  signal: AbortSignal;
+}): Promise<{ text: string; languages: string[] }> {
+  const client = input.client;
+  const resumable = input.capability.resumable;
+  const ordered = [...input.chunks].sort((left, right) => left.chunkNumber - right.chunkNumber);
+  if (!resumable || !isResumableVoiceInputClient(client)) {
+    const audio = new Blob(
+      ordered.map((chunk) => chunk.audio),
+      { type: input.manifest.mimeType },
+    );
+    if (audio.size > input.capability.maxSizeBytes) throw { code: "too_large" };
+    return await client.transcribeAudio(input.workspaceId, {
+      audio,
+      mimeType: audio.type,
+      durationSeconds: input.manifest.totalDurationMilliseconds / 1_000,
+      signal: input.signal,
+    });
+  }
+
+  if (
+    input.manifest.totalBytes > resumable.maxSizeBytes ||
+    input.manifest.totalDurationMilliseconds > resumable.maxDurationSeconds * 1_000
+  ) {
+    throw { code: "too_large" };
+  }
+  if (
+    ordered.some((chunk, index) => chunk.chunkNumber !== index) ||
+    ordered.length !== input.manifest.chunkCount
+  ) {
+    throw { code: "invalid_audio" };
+  }
+
+  const finalizeInput = {
+    chunkCount: input.manifest.chunkCount,
+    totalBytes: input.manifest.totalBytes,
+    totalDurationMilliseconds: input.manifest.totalDurationMilliseconds,
+    signal: input.signal,
+  };
+
+  let remote = await client.createTranscriptionRecording(input.workspaceId, {
+    recordingId: input.manifest.recordingId,
+    mimeType: input.manifest.mimeType,
+    signal: input.signal,
+  });
+  for (const chunk of ordered) {
+    if (chunk.chunkNumber < remote.recording.nextChunkNumber) continue;
+    if (chunk.chunkNumber !== remote.recording.nextChunkNumber) {
+      throw { code: "invalid_audio" };
+    }
+    if (chunk.byteLength > resumable.maxChunkSizeBytes) throw { code: "too_large" };
+    const uploaded = await client.uploadTranscriptionRecordingChunk(
+      input.workspaceId,
+      input.manifest.recordingId,
+      chunk.chunkNumber,
+      {
+        audio: chunk.audio,
+        mimeType: input.manifest.mimeType,
+        sha256: chunk.sha256,
+        startMilliseconds: chunk.startMilliseconds,
+        durationMilliseconds: chunk.durationMilliseconds,
+        signal: input.signal,
+      },
+    );
+    remote = { recording: uploaded.recording, segments: remote.segments };
+  }
+  if (remote.recording.nextChunkNumber !== ordered.length) {
+    throw { code: "invalid_audio" };
+  }
+
+  remote = await client.finalizeTranscriptionRecording(
+    input.workspaceId,
+    input.manifest.recordingId,
+    finalizeInput,
+  );
+
+  let recoveryMutationAttempt = 0;
+  let recoveryMutationDueAt = 0;
+  const scheduleRecoveryMutation = (response: typeof remote): void => {
+    if (response.recording.state !== "segmenting" && response.recording.state !== "transcribing") {
+      return;
+    }
+    recoveryMutationDueAt =
+      Date.now() +
+      transcriptionRecoveryMutationDelayMilliseconds(
+        response.retryAfterMilliseconds,
+        recoveryMutationAttempt,
+      );
+    recoveryMutationAttempt += 1;
+  };
+  scheduleRecoveryMutation(remote);
+
+  for (;;) {
+    if (input.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    switch (remote.recording.state) {
+      case "complete":
+        if (remote.recording.transcriptText === null) throw { code: "invalid_audio" };
+        return {
+          text: remote.recording.transcriptText,
+          languages: remote.recording.languages,
+        };
+      case "ready":
+        remote = await client.processNextTranscriptionRecordingSegment(
+          input.workspaceId,
+          input.manifest.recordingId,
+          { signal: input.signal },
+        );
+        scheduleRecoveryMutation(remote);
+        break;
+      case "failed": {
+        if (!remote.recording.retryable) {
+          throw { code: remote.recording.errorCode ?? "unknown" };
+        }
+        const retried =
+          remote.recording.segmentCount === 0
+            ? await client.finalizeTranscriptionRecording(
+                input.workspaceId,
+                input.manifest.recordingId,
+                finalizeInput,
+              )
+            : await client.processNextTranscriptionRecordingSegment(
+                input.workspaceId,
+                input.manifest.recordingId,
+                { signal: input.signal },
+              );
+        if (retried.recording.state === "failed") {
+          throw { code: retried.recording.errorCode ?? "unknown" };
+        }
+        remote = retried;
+        scheduleRecoveryMutation(remote);
+        break;
+      }
+      case "discarded":
+        throw { code: "invalid_audio" };
+      case "uploading":
+        remote = await client.finalizeTranscriptionRecording(
+          input.workspaceId,
+          input.manifest.recordingId,
+          finalizeInput,
+        );
+        scheduleRecoveryMutation(remote);
+        break;
+      case "segmenting":
+      case "transcribing":
+        if (Date.now() < recoveryMutationDueAt) {
+          await abortableDelay(
+            Math.min(
+              recoveryMutationDueAt - Date.now(),
+              VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS,
+            ),
+            input.signal,
+          );
+          remote = await client.getTranscriptionRecording(
+            input.workspaceId,
+            input.manifest.recordingId,
+            { signal: input.signal },
+          );
+          break;
+        }
+        if (remote.recording.state === "segmenting") {
+          // Re-enter the server-authoritative assembly claim only when its
+          // durable recovery schedule is due.
+          remote = await client.finalizeTranscriptionRecording(
+            input.workspaceId,
+            input.manifest.recordingId,
+            finalizeInput,
+          );
+        } else {
+          // Re-enter the server-authoritative segment claim only when its
+          // durable recovery schedule is due.
+          remote = await client.processNextTranscriptionRecordingSegment(
+            input.workspaceId,
+            input.manifest.recordingId,
+            { signal: input.signal },
+          );
+        }
+        scheduleRecoveryMutation(remote);
+        break;
+    }
+  }
+}
+
+function isResumableVoiceInputClient(
+  client: VoiceInputClient | null,
+): client is VoiceInputClient & ResumableVoiceInputClient {
+  return Boolean(
+    client &&
+    client.createTranscriptionRecording &&
+    client.getTranscriptionRecording &&
+    client.uploadTranscriptionRecordingChunk &&
+    client.finalizeTranscriptionRecording &&
+    client.processNextTranscriptionRecordingSegment &&
+    client.discardTranscriptionRecording,
+  );
+}
+
+async function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function chooseMimeType(accepted: string[]): string | undefined {

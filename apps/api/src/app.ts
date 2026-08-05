@@ -13,6 +13,7 @@ import {
   OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
+  TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   type AccessGrant,
   type ErrorCode,
 } from "@opengeni/contracts";
@@ -77,6 +78,7 @@ import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
+import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 
 export type {
@@ -103,8 +105,15 @@ export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from
 export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 
 /** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
-export function apiRequestBodyLimitBytes(settings: { voiceInputMaxSizeBytes: number }): number {
-  return Math.max(API_MAX_REQUEST_BODY_BYTES, settings.voiceInputMaxSizeBytes + 64 * 1024);
+export function apiRequestBodyLimitBytes(settings: {
+  voiceInputMaxSizeBytes: number;
+  voiceInputResumableMaxChunkSizeBytes?: number;
+}): number {
+  return Math.max(
+    API_MAX_REQUEST_BODY_BYTES,
+    settings.voiceInputMaxSizeBytes + 64 * 1024,
+    (settings.voiceInputResumableMaxChunkSizeBytes ?? 0) + 64 * 1024,
+  );
 }
 const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
@@ -204,6 +213,12 @@ export function createAppComposition(deps: AppDependencies): {
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
         })
       : deps.transcription;
+  const transcriptionSegmenter =
+    deps.transcriptionSegmenter === undefined
+      ? createFfmpegTranscriptionSegmenter({
+          ffmpegPath: deps.settings.voiceInputFfmpegPath,
+        })
+      : deps.transcriptionSegmenter;
   const routeDeps: ApiRouteDeps = {
     ...deps,
     observability,
@@ -214,6 +229,7 @@ export function createAppComposition(deps: AppDependencies): {
     documentIndexer,
     getDocumentServices,
     transcription,
+    transcriptionSegmenter,
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
@@ -440,6 +456,24 @@ export function createAppComposition(deps: AppDependencies): {
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
           acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
+          ...(deps.settings.voiceInputResumableEnabled &&
+          objectStorage &&
+          transcription &&
+          transcriptionSegmenter &&
+          (await transcription.available()) &&
+          (await transcriptionSegmenter.available())
+            ? {
+                resumable: {
+                  maxDurationSeconds: deps.settings.voiceInputResumableMaxDurationSeconds,
+                  maxSizeBytes: deps.settings.voiceInputResumableMaxSizeBytes,
+                  maxChunkSizeBytes: deps.settings.voiceInputResumableMaxChunkSizeBytes,
+                  providerSegmentSeconds: Math.min(
+                    TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+                    deps.settings.voiceInputMaxDurationSeconds,
+                  ),
+                },
+              }
+            : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
         auth: clientAuthConfig(deps.settings),

@@ -49,6 +49,11 @@ EXPOSE 8080
 CMD ["bun", "run", "--cwd", "examples/northstar-support", "start"]
 
 FROM base AS api
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
+USER bun
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via

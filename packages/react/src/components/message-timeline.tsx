@@ -2184,12 +2184,12 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       : null;
   const title =
     item.phase === "started"
-      ? "Compacting conversation memory…"
+      ? "Compacting conversation history…"
       : item.phase === "compacted"
         ? before && after
-          ? `Conversation memory compacted · ~${before} → ~${after} tokens`
-          : "Conversation memory compacted"
-        : "Couldn’t compact conversation memory";
+          ? `Conversation history compacted · ~${before} → ~${after} estimated history tokens`
+          : "Conversation history compacted"
+        : "Couldn’t compact conversation history";
   const subtitle =
     item.phase === "compacted"
       ? "Chat history above is unchanged"

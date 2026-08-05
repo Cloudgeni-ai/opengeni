@@ -9,8 +9,9 @@ export function createOpenAiTranscriptionProvider(input: {
   const fetchImpl = input.fetch ?? fetch;
   return {
     id: "openai",
+    supportsServerDeadline: true,
     available: () => true,
-    async transcribe({ audio, mimeType, filename, signal }) {
+    async transcribe({ audio, mimeType, filename, requestId, signal }) {
       const form = new FormData();
       form.append("file", audioBlob(audio, mimeType), filename);
       form.append("model", input.model);
@@ -18,7 +19,11 @@ export function createOpenAiTranscriptionProvider(input: {
       try {
         response = await fetchImpl(`${input.baseUrl}/audio/transcriptions`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${input.apiKey}` },
+          headers: {
+            Authorization: `Bearer ${input.apiKey}`,
+            // Observability only; the upstream API is not treated as idempotent.
+            "x-opengeni-request-id": requestId,
+          },
           body: form,
           ...(signal ? { signal } : {}),
         });

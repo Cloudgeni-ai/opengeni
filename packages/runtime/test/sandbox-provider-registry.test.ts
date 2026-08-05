@@ -13,6 +13,8 @@ import {
   assertProviderRegistryInvariants,
   createSandboxClient,
   negotiateCapabilities,
+  sandboxBackendForSdkBackendId,
+  sdkBackendIdForSandboxBackend,
   selectBackend,
 } from "../src/sandbox";
 
@@ -53,6 +55,19 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
       // backendId == enum key for all but local (SDK reports "unix_local").
       expect(reg.descriptor.backendId).toBe(backend === "local" ? "unix_local" : backend);
     }
+  });
+
+  test("product and SDK backend identities round-trip through one canonical mapping", () => {
+    for (const backend of SandboxBackend.options) {
+      const sdkBackendId = sdkBackendIdForSandboxBackend(backend);
+      expect(sdkBackendId).toBe(CAPABILITY_DESCRIPTORS[backend].backendId);
+      expect(sandboxBackendForSdkBackendId(sdkBackendId)).toBe(backend);
+      expect(sandboxBackendForSdkBackendId(backend)).toBe(backend);
+    }
+    expect(sdkBackendIdForSandboxBackend("local")).toBe("unix_local");
+    expect(sandboxBackendForSdkBackendId("unix_local")).toBe("local");
+    expect(sandboxBackendForSdkBackendId("unknown-provider")).toBeNull();
+    expect(sandboxBackendForSdkBackendId("toString")).toBeNull();
   });
 });
 

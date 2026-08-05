@@ -70,6 +70,7 @@ import {
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
@@ -421,6 +422,22 @@ describe("runtime event normalization", () => {
       },
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("recognizes a terminal response when the provider omitted usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage" },
+      },
+    } as any;
+
+    expect(modelTerminalResponseFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
   });
 
   test("extracts raw Responses usage without manufacturing a durable event", () => {
@@ -6630,7 +6647,7 @@ describe("provider item id stripping", () => {
     }
   });
 
-  test("a delayed provider usage signal cannot bind to a newer model request", async () => {
+  test("a delayed provider usage signal cannot bind or force estimated compaction", async () => {
     let signal: { revision: number; totalTokens: number } | null = null;
     const filter = contextRobustnessFilterForSettings(
       testSettings({
@@ -6671,21 +6688,16 @@ describe("provider item id stripping", () => {
       },
       { type: "message", role: "user", content: "continue again" },
     ] as any;
-    try {
-      await filter({
+    await expect(
+      filter({
         modelData: { input: third, instructions: "system" },
         agent: {} as any,
         context: undefined,
-      });
-      throw new Error("expected the complete estimate to trigger compaction");
-    } catch (error) {
-      expect(error).toBeInstanceOf(CompactionNeededError);
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
-      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
-    }
+      }),
+    ).resolves.toMatchObject({ input: third });
   });
 
-  test("first-call accounting includes instructions and tool schemas", async () => {
+  test("a first call never compacts from estimated instructions and tool schemas", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 10_000,
@@ -6712,10 +6724,12 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
-  test("first-call accounting does not discount a multilingual tool schema", async () => {
+  test("a first call never compacts from an estimated multilingual tool schema", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 12_000,
@@ -6745,7 +6759,9 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
   test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
@@ -6837,7 +6853,7 @@ describe("provider item id stripping", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(CompactionNeededError);
       expect((error as CompactionNeededError).trigger).toBe("operator");
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
+      expect((error as CompactionNeededError).signalSource).toBe("operator");
     }
     expect(polls).toBe(2);
   });

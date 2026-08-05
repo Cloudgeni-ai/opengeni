@@ -6,6 +6,7 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
+import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
@@ -1155,6 +1156,7 @@ export const ClientVoiceInputConfig = z
       .positive()
       .max(25 * 1024 * 1024),
     acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+    resumable: ClientResumableVoiceInputConfig.optional(),
   })
   .strict();
 export type ClientVoiceInputConfig = z.infer<typeof ClientVoiceInputConfig>;
@@ -1183,6 +1185,8 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
   "audio/mp3",
   "audio/m4a",
 ] as const;
+
+export * from "./transcription-recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
@@ -6240,9 +6244,9 @@ export const Session = z.object({
   createIdempotencyKey: z.string().nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
-  // Actual input tokens of the last model call of the most recent turn; the
-  // pre-turn portable context-compaction trigger reads it as its budget
-  // signal. Null until a turn with usage has completed.
+  // Provider-reported input tokens of the latest authoritative terminal
+  // response. Null after a context transition or whenever that latest response
+  // supplied no usable count, so an older response can never drive compaction.
   lastInputTokens: z.number().int().nonnegative().nullable(),
   queueVersion: z.number().int().nonnegative(),
   queueHeadPosition: z.number().int(),
