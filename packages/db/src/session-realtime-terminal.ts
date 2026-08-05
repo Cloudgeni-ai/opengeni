@@ -3,6 +3,11 @@ import { createHash } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
+import {
+  fromPostgresLosslessJson,
+  fromPostgresLosslessText,
+  LOSSLESS_CONTENT_CODEC_VERSION,
+} from "./lossless-json";
 import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 import * as schema from "./schema";
 
@@ -149,8 +154,8 @@ function mapEntry(
     sourceUpdateId: row.sourceUpdateId,
     historyItemId: row.historyItemId,
     turnId: row.turnId,
-    text: row.text,
-    payload: row.payload,
+    text: row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion),
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
     clientAckedAt: row.clientAckedAt?.toISOString() ?? null,
     providerAckedAt: row.providerAckedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -295,7 +300,9 @@ export async function projectSessionRealtimeDelegationTerminalInTransaction(
       delegationItemId: call.delegationItemId,
       turnId: input.turnId,
       text: projected.text,
+      textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       payload,
+      payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       createdAt: now,
       updatedAt: now,
     })

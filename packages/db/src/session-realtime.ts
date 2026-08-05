@@ -9,6 +9,7 @@ import type {
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import type { Database } from "./database";
+import { LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
 import { flushSessionRealtimeTranscriptTailInTransaction } from "./session-realtime-context";
 import {
   evaluateSessionControl,
@@ -185,6 +186,7 @@ async function appendRealtimeLifecycleEvent(
       sequence,
       type,
       payload: payload,
+      payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       occurredAt: now,
     })
     .returning();

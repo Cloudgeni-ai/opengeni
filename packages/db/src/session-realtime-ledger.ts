@@ -4,6 +4,11 @@ import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengen
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
+import {
+  fromPostgresLosslessJson,
+  fromPostgresLosslessText,
+  LOSSLESS_CONTENT_CODEC_VERSION,
+} from "./lossless-json";
 import * as schema from "./schema";
 import {
   assertSessionRealtimeOwnerInTransaction,
@@ -258,8 +263,8 @@ function mapEntry(row: EntryRow): SessionRealtimeLedgerEntry {
     sourceUpdateId: row.sourceUpdateId,
     historyItemId: row.historyItemId,
     turnId: row.turnId,
-    text: row.text,
-    payload: row.payload,
+    text: row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion),
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
     clientAckedAt: row.clientAckedAt?.toISOString() ?? null,
     providerAckedAt: row.providerAckedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -1018,6 +1023,9 @@ function inboundReplayMatches(
   text: string | null,
   payload: Record<string, unknown>,
 ): boolean {
+  const storedText =
+    row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion);
+  const storedPayload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion);
   return (
     row.direction === "provider_in" &&
     row.kind === input.kind &&
@@ -1025,8 +1033,9 @@ function inboundReplayMatches(
     row.providerEventId === (input.providerEventId ?? null) &&
     row.delegationItemId === (input.delegationItemId ?? null) &&
     row.sourceUpdateId === null &&
-    row.text === text &&
-    JSON.stringify(canonicalJsonValue(row.payload)) === JSON.stringify(canonicalJsonValue(payload))
+    storedText === text &&
+    JSON.stringify(canonicalJsonValue(storedPayload)) ===
+      JSON.stringify(canonicalJsonValue(payload))
   );
 }
 
@@ -1054,10 +1063,12 @@ async function appendInvalidDelegationFailure(
     kind: "error",
     delegationItemId: incoming.delegationItemId ?? null,
     text: failure.message,
+    textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
     payload: {
       code: failure.code,
       callOperationId: incoming.operationId,
     },
+    payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
     createdAt: now,
     updatedAt: now,
   });
@@ -1188,7 +1199,11 @@ async function materializeRealtimeUpdates(
     )
     .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id))
     .limit(SESSION_REALTIME_LEDGER_MAX_OUTBOUND);
-  const updates = rows.map(({ update }) => update);
+  const updates = rows.map(({ update }) => ({
+    ...update,
+    summary: fromPostgresLosslessText(update.summary, update.summaryCodecVersion),
+    payload: fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+  }));
   if (updates.length === 0) return;
   await db.insert(schema.sessionRealtimeEntries).values(
     updates.map((update) => ({
@@ -1203,6 +1218,7 @@ async function materializeRealtimeUpdates(
       kind: "session_update",
       sourceUpdateId: update.id,
       text: update.summary,
+      textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       payload: boundedPayload({
         updateId: update.id,
         kind: update.kind,
@@ -1212,6 +1228,7 @@ async function materializeRealtimeUpdates(
         payload: update.payload,
         lineage: update.lineage,
       }),
+      payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       createdAt: now,
       updatedAt: now,
     })),
@@ -1403,7 +1420,9 @@ export async function syncSessionRealtimeLedgerInTransaction(
         delegationItemId: incoming.delegationItemId ?? null,
         historyItemId: null,
         text,
+        textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         payload,
+        payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         createdAt: now,
         updatedAt: now,
       })
@@ -1611,7 +1630,9 @@ export async function appendSessionRealtimeOutboundInTransaction(
       kind: input.kind,
       delegationItemId: input.delegationItemId,
       text,
+      textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       payload,
+      payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       createdAt: now,
       updatedAt: now,
     })
@@ -1756,6 +1777,7 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
         delegationItemId: call.delegationItemId,
         turnId: input.turnId,
         text: chunk,
+        textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         payload: boundedPayload({
           route: "delegation_context",
           channel: "commentary",
@@ -1771,6 +1793,7 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
           chunkIndex,
           chunkCount: chunks.length,
         }),
+        payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         createdAt: now,
         updatedAt: now,
       })),

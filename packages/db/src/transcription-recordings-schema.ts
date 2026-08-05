@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { losslessText } from "./lossless-columns";
+import { losslessCodecVersion, losslessText } from "./lossless-columns";
 import {
   boolean,
   check,
@@ -53,6 +53,7 @@ export const transcriptionRecordings = pgTable(
     segmentCount: integer("segment_count").notNull().default(0),
     completedSegmentCount: integer("completed_segment_count").notNull().default(0),
     transcriptText: losslessText("transcript_text"),
+    transcriptTextCodecVersion: losslessCodecVersion("transcript_text_codec_version"),
     languages: jsonb("languages").$type<string[]>().notNull().default([]),
     errorCode: text("error_code"),
     retryable: boolean("retryable").notNull().default(false),
@@ -211,6 +212,7 @@ export const transcriptionRecordingSegments = pgTable(
     attemptStartedAt: timestamp("attempt_started_at", { withTimezone: true }),
     attemptDeadlineAt: timestamp("attempt_deadline_at", { withTimezone: true }),
     transcriptText: losslessText("transcript_text"),
+    transcriptTextCodecVersion: losslessCodecVersion("transcript_text_codec_version"),
     languages: jsonb("languages").$type<string[]>().notNull().default([]),
     providerId: text("provider_id"),
     errorCode: text("error_code"),

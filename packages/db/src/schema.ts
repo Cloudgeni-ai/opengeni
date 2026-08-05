@@ -23,7 +23,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { losslessJsonb, losslessText } from "./lossless-columns";
+import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -1373,6 +1373,7 @@ export const sessions = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("queued"),
     initialMessage: losslessText("initial_message").notNull(),
+    initialMessageCodecVersion: losslessCodecVersion("initial_message_codec_version"),
     // Invisible host context frozen with the winning session create. The
     // initial turn copies this value so an idempotent repair can never adopt a
     // retrying caller's different instructions.
@@ -1827,7 +1828,9 @@ export const sessionRealtimeEntries = pgTable(
     // session.
     turnId: uuid("turn_id"),
     text: losslessText("text"),
+    textCodecVersion: losslessCodecVersion("text_codec_version"),
     payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
     providerAckedAt: timestamp("provider_acked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2374,6 +2377,7 @@ export const knowledgeMemories = pgTable(
     kind: text("kind").notNull().default("semantic"),
     scope: text("scope").notNull().default("workspace"),
     text: losslessText("text").notNull(),
+    textCodecVersion: losslessCodecVersion("text_codec_version"),
     sourceRefs: jsonb("source_refs").$type<unknown[]>().notNull().default([]),
     confidence: integer("confidence").notNull().default(50),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
@@ -2485,6 +2489,7 @@ export const sessionTurns = pgTable(
     source: text("source").notNull().default("user"),
     position: bigint("position", { mode: "number" }).notNull(),
     prompt: losslessText("prompt").notNull(),
+    promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
     // Host context for this exact turn. System-level at runtime and deliberately
     // separate from the visible prompt/event payload.
     turnInstructions: text("turn_instructions"),
@@ -3144,7 +3149,9 @@ export const sessionSystemUpdates = pgTable(
     sourceId: text("source_id").notNull(),
     dedupeKey: text("dedupe_key").notNull(),
     summary: losslessText("summary").notNull(),
+    summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
     payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Private immutable authority frozen when this machine input is accepted.
     // Public projections intentionally omit connection ids and owner subjects.
@@ -3229,7 +3236,9 @@ export const sessionSystemUpdateOutbox = pgTable(
     classification: text("classification").notNull(),
     sourceId: text("source_id").notNull(),
     summary: losslessText("summary").notNull(),
+    summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
     payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Exact private authority copied from the causal parent turn in the source
     // terminal transaction. Delivery retries cannot replace this snapshot.
@@ -3466,6 +3475,7 @@ export const sessionEvents = pgTable(
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
     payload: losslessJsonb("payload").$type<unknown>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     clientEventId: text("client_event_id"),
     producerId: text("producer_id"),
     producerSeq: integer("producer_seq"),
@@ -3545,7 +3555,9 @@ export const agentRunStates = pgTable("agent_run_states", {
   }),
   stateVersion: integer("state_version").notNull(),
   serializedRunState: losslessText("serialized_run_state").notNull(),
+  serializedRunStateCodecVersion: losslessCodecVersion("serialized_run_state_codec_version"),
   pendingApprovals: losslessJsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
+  pendingApprovalsCodecVersion: losslessCodecVersion("pending_approvals_codec_version"),
   // Exact provider rejection marks the latest current-turn receipt only when it
   // was part of the rejected request. The serialized receipt remains durable;
   // recovery builds a temporary view without unusable opaque artifacts.
@@ -3666,6 +3678,7 @@ export const sessionHistoryItems = pgTable(
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
     item: losslessJsonb("item").$type<Record<string, unknown>>().notNull(),
+    itemCodecVersion: losslessCodecVersion("item_codec_version"),
     // Live-row flag for client-side context compaction. The read path selects
     // only active rows; a compaction supersedes the summarized prefix (sets this
     // false — never deletes, so the full transcript stays as an audit trail) and
@@ -3722,8 +3735,10 @@ export const sessionPendingToolCalls = pgTable(
     callId: text("call_id").notNull(),
     callType: text("call_type").notNull(),
     callItem: losslessJsonb("call_item").$type<Record<string, unknown>>().notNull(),
+    callItemCodecVersion: losslessCodecVersion("call_item_codec_version"),
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: losslessJsonb("result_item").$type<Record<string, unknown>>(),
+    resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3763,6 +3778,7 @@ export const sandboxSessionEnvelopes = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     envelope: losslessJsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelopeCodecVersion: losslessCodecVersion("envelope_codec_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -4539,6 +4555,7 @@ export const sessionRecordings = pgTable(
     height: integer("height").notNull(),
 
     reason: losslessText("reason"),
+    reasonCodecVersion: losslessCodecVersion("reason_codec_version"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     finalizedAt: timestamp("finalized_at", { withTimezone: true }),
@@ -5532,6 +5549,7 @@ export const hostExportDeadLetters = pgTable(
     sourceId: uuid("source_id").notNull(),
     reason: text("reason").notNull(),
     envelope: losslessJsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelopeCodecVersion: losslessCodecVersion("envelope_codec_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -5633,6 +5651,7 @@ export const auditEvents = pgTable(
     targetType: text("target_type"),
     targetId: text("target_id"),
     metadata: losslessJsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    metadataCodecVersion: losslessCodecVersion("metadata_codec_version"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -6001,10 +6020,12 @@ export const rigChanges = pgTable(
     // 'setup_append' | 'definition_edit' (CHECK in migration 0047).
     kind: text("kind").notNull(),
     payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull(),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     // 'proposed' | 'verifying' | 'merged' | 'rejected' | 'failed' (CHECK in 0047).
     status: text("status").notNull().default("proposed"),
     proposedBy: text("proposed_by"),
     verification: losslessJsonb("verification").$type<Record<string, unknown>>(),
+    verificationCodecVersion: losslessCodecVersion("verification_codec_version"),
     resultVersionId: uuid("result_version_id").references(() => rigVersions.id, {
       onDelete: "set null",
     }),

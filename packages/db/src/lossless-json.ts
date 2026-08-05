@@ -3,6 +3,45 @@ const JSON_KEY_PREFIX = "opengeni_lossless_json_key_v2_7ca6071d:";
 const TEXT_PREFIX = "opengeni_lossless_text_v2_c4100a62:";
 const MAX_JSON_DEPTH = 512;
 
+/**
+ * Explicit out-of-band truth for values written by the lossless PostgreSQL
+ * compatibility codec. Historical rows have NULL in their companion version
+ * column and must never be decoded based on content shape alone.
+ */
+export const LOSSLESS_CONTENT_CODEC_VERSION = 1 as const;
+
+export function withLosslessContentWriteVersion<
+  const ContentKey extends string,
+  const VersionKey extends string,
+  Value extends object,
+>(
+  value: Value,
+  contentKey: ContentKey,
+  versionKey: VersionKey,
+): Value & Record<VersionKey, typeof LOSSLESS_CONTENT_CODEC_VERSION>;
+export function withLosslessContentWriteVersion<
+  const ContentKey extends string,
+  const VersionKey extends string,
+  Value extends object,
+>(
+  value: readonly Value[],
+  contentKey: ContentKey,
+  versionKey: VersionKey,
+): Array<Value & Record<VersionKey, typeof LOSSLESS_CONTENT_CODEC_VERSION>>;
+export function withLosslessContentWriteVersion(
+  value: Record<string, unknown> | readonly Record<string, unknown>[],
+  contentKey: string,
+  versionKey: string,
+): Record<string, unknown> | Record<string, unknown>[] {
+  const stamp = (entry: Record<string, unknown>) => {
+    if (!Object.hasOwn(entry, contentKey)) {
+      throw new Error(`Lossless content write omitted ${contentKey}`);
+    }
+    return { ...entry, [versionKey]: LOSSLESS_CONTENT_CODEC_VERSION };
+  };
+  return Array.isArray(value) ? value.map(stamp) : stamp(value as Record<string, unknown>);
+}
+
 export const LEGACY_LOSSLESS_JSON_ENVELOPE_KEY =
   "$opengeniCanonicalV8_6d9b6f48_2a3e_4d8a_9e33_7611d9d08985";
 export const LEGACY_LOSSLESS_TEXT_PREFIX = "opengeni-canonical-text-v1:";
@@ -24,9 +63,15 @@ export function toPostgresLosslessJson(value: unknown): unknown {
   return encodeJsonValue(value, new Set<object>(), 0).value;
 }
 
-/** Restore the exact accepted JSON value after a PostgreSQL read. */
-export function fromPostgresLosslessJson(value: unknown): unknown {
-  return decodeJsonValue(value, 0).value;
+/**
+ * Restore an explicitly versioned JSON value after a PostgreSQL read. A NULL
+ * version denotes literal legacy/old-writer data, including strings that happen
+ * to be valid active-marker encodings.
+ */
+export function fromPostgresLosslessJson<T>(value: T, codecVersion: number | null | undefined): T {
+  return codecVersion === LOSSLESS_CONTENT_CODEC_VERSION
+    ? (decodeJsonValue(value, 0).value as T)
+    : value;
 }
 
 /**
@@ -63,14 +108,19 @@ export function toPostgresLosslessText(value: string): string {
 }
 
 /**
- * Decode only the v2 encoding introduced by this migration. The unshipped v1
- * prefix is intentionally ordinary legacy content and is never interpreted.
+ * Decode only an explicitly versioned value introduced by this migration. The
+ * nullable companion column, not the producer string, is the codec truth.
  */
-export function fromPostgresLosslessText(value: string): string {
-  return value.replaceAll(
-    new RegExp(` ${TEXT_PREFIX}([0-9a-f]{4}); `, "g"),
-    (_match, encoded: string) => String.fromCharCode(Number.parseInt(encoded, 16)),
-  );
+export function fromPostgresLosslessText(
+  value: string,
+  codecVersion: number | null | undefined,
+): string {
+  return codecVersion === LOSSLESS_CONTENT_CODEC_VERSION
+    ? value.replaceAll(
+        new RegExp(` ${TEXT_PREFIX}([0-9a-f]{4}); `, "g"),
+        (_match, encoded: string) => String.fromCharCode(Number.parseInt(encoded, 16)),
+      )
+    : value;
 }
 
 function encodeTextCodeUnit(code: number): string {

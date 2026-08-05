@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LEGACY_LOSSLESS_JSON_ENVELOPE_KEY,
   LEGACY_LOSSLESS_TEXT_PREFIX,
+  LOSSLESS_CONTENT_CODEC_VERSION,
   LOSSLESS_JSON_STRING_PREFIX,
   LOSSLESS_TEXT_PREFIX,
   UnsupportedCanonicalValueError,
@@ -15,7 +16,7 @@ describe("lossless PostgreSQL content boundaries", () => {
   test("leaves ordinary queryable JSON unchanged", () => {
     const value = { type: "message", id: "call-synthetic", content: "ordinary 👩🏽‍💻" };
     expect(toPostgresLosslessJson(value)).toBe(value);
-    expect(fromPostgresLosslessJson(value)).toBe(value);
+    expect(fromPostgresLosslessJson(value, LOSSLESS_CONTENT_CODEC_VERSION)).toBe(value);
   });
 
   test("round-trips unsafe strings while preserving SQL-visible structural fields", () => {
@@ -41,7 +42,7 @@ describe("lossless PostgreSQL content boundaries", () => {
     expect(stored.code).toBe(value.code);
     expect(stored.type).toBe(value.type);
     expect(JSON.stringify(stored)).not.toContain("\\u0000");
-    expect(fromPostgresLosslessJson(stored)).toEqual(value);
+    expect(fromPostgresLosslessJson(stored, LOSSLESS_CONTENT_CODEC_VERSION)).toEqual(value);
   });
 
   test("preserves large and deep ordinary JSON without wrapping its SQL shape", () => {
@@ -66,23 +67,32 @@ describe("lossless PostgreSQL content boundaries", () => {
         data: "b3BlbmdlbmktcHJlZXhpc3RpbmctZGF0YQ==",
       },
     };
-    expect(fromPostgresLosslessJson(value)).toBe(value);
-    expect(fromPostgresLosslessJson(toPostgresLosslessJson(value))).toEqual(value);
+    expect(fromPostgresLosslessJson(value, null)).toBe(value);
+    expect(
+      fromPostgresLosslessJson(toPostgresLosslessJson(value), LOSSLESS_CONTENT_CODEC_VERSION),
+    ).toEqual(value);
   });
 
   test("escapes producer strings that begin with the active v2 markers", () => {
     const jsonValue = `${LOSSLESS_JSON_STRING_PREFIX}UVdWamFHVT0=`;
     const textValue = `${LOSSLESS_TEXT_PREFIX}UVdWamFHVT0=`;
-    expect(fromPostgresLosslessJson(toPostgresLosslessJson({ value: jsonValue }))).toEqual({
-      value: jsonValue,
-    });
-    expect(fromPostgresLosslessText(toPostgresLosslessText(textValue))).toBe(textValue);
+    expect(
+      fromPostgresLosslessJson(
+        toPostgresLosslessJson({ value: jsonValue }),
+        LOSSLESS_CONTENT_CODEC_VERSION,
+      ),
+    ).toEqual({ value: jsonValue });
+    expect(
+      fromPostgresLosslessText(toPostgresLosslessText(textValue), LOSSLESS_CONTENT_CODEC_VERSION),
+    ).toBe(textValue);
   });
 
   test("treats the legacy v1 text prefix as exact preexisting text", () => {
     const value = `${LEGACY_LOSSLESS_TEXT_PREFIX}UVdWamFHVT0=`;
-    expect(fromPostgresLosslessText(value)).toBe(value);
-    expect(fromPostgresLosslessText(toPostgresLosslessText(value))).toBe(value);
+    expect(fromPostgresLosslessText(value, null)).toBe(value);
+    expect(
+      fromPostgresLosslessText(toPostgresLosslessText(value), LOSSLESS_CONTENT_CODEC_VERSION),
+    ).toBe(value);
   });
 
   test("lossless text handles NUL and lone UTF-16 code units", () => {
@@ -91,8 +101,23 @@ describe("lossless PostgreSQL content boundaries", () => {
       `high${String.fromCharCode(0xd800)}value`,
       `low${String.fromCharCode(0xdc00)}value`,
     ]) {
-      expect(fromPostgresLosslessText(toPostgresLosslessText(value))).toBe(value);
+      expect(
+        fromPostgresLosslessText(toPostgresLosslessText(value), LOSSLESS_CONTENT_CODEC_VERSION),
+      ).toBe(value);
     }
+  });
+
+  test("never decodes valid marker-shaped legacy content without out-of-band version truth", () => {
+    const validJsonMarker = `${LOSSLESS_JSON_STRING_PREFIX}QQA=`;
+    const validTextMarker = ` ${LOSSLESS_TEXT_PREFIX}0000; `;
+    expect(fromPostgresLosslessJson(validJsonMarker, null)).toBe(validJsonMarker);
+    expect(fromPostgresLosslessText(validTextMarker, null)).toBe(validTextMarker);
+    expect(fromPostgresLosslessJson(validJsonMarker, LOSSLESS_CONTENT_CODEC_VERSION)).toBe(
+      `${String.fromCharCode(65)}${String.fromCharCode(0)}`,
+    );
+    expect(fromPostgresLosslessText(validTextMarker, LOSSLESS_CONTENT_CODEC_VERSION)).toBe(
+      String.fromCharCode(0),
+    );
   });
 
   test("rejects non-JSON graphs and executable/accessor values before persistence", () => {
