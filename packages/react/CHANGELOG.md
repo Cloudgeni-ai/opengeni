@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.45.1
+
+### Patch Changes
+
+- ca7d125: Improve mobile touch targets and responsive session interactions across the React surfaces.
+
 ## 0.45.0
 
 ### Minor Changes
