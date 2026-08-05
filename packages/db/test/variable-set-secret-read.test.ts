@@ -1,22 +1,17 @@
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  afterAll,
-  beforeAll,
-  describe,
-  expect,
-  setDefaultTimeout,
-  test,
-} from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
-import {
+  applySessionTurnSettlement,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
+  createSession,
   createVariableSet,
   decryptVariableSetValue,
   encryptVariableSetValue,
+  initializeSessionStartAtomically,
   readVariableSetSecretAtomically,
+  VariableSetSecretReadAuthorityError,
   type DbClient,
 } from "../src";
 
@@ -31,9 +26,7 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("variable-set-secret-read");
   if (!shared) {
     if (requireRealDatabase) {
-      throw new Error(
-        "OPENGENI_REQUIRE_REAL_DB=1 but the PostgreSQL harness is unavailable",
-      );
+      throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but the PostgreSQL harness is unavailable");
     }
     return;
   }
@@ -89,8 +82,7 @@ describe("permissioned variable-set plaintext reads", () => {
       variableSetId: variableSet.id,
       name: "EXACT_VALUE",
       actor: { kind: "subject" },
-      decrypt: (valueEncrypted) =>
-        decryptVariableSetValue(encryptionKey, valueEncrypted),
+      decrypt: (valueEncrypted) => decryptVariableSetValue(encryptionKey, valueEncrypted),
     });
 
     expect(secret).toEqual({
@@ -140,10 +132,7 @@ describe("permissioned variable-set plaintext reads", () => {
       variables: [
         {
           name: "BLOCKED_VALUE",
-          valueEncrypted: encryptVariableSetValue(
-            encryptionKey,
-            "must-not-return",
-          ),
+          valueEncrypted: encryptVariableSetValue(encryptionKey, "must-not-return"),
         },
       ],
     });
@@ -173,17 +162,14 @@ describe("permissioned variable-set plaintext reads", () => {
           variableSetId: variableSet.id,
           name: "BLOCKED_VALUE",
           actor: { kind: "subject" },
-          decrypt: (valueEncrypted) =>
-            decryptVariableSetValue(encryptionKey, valueEncrypted),
+          decrypt: (valueEncrypted) => decryptVariableSetValue(encryptionKey, valueEncrypted),
         });
       } catch (error) {
         failure = error;
       }
       expect(returned).toBeUndefined();
       expect(failure).toBeInstanceOf(Error);
-      expect((failure as Error).message).toContain(
-        'insert into "audit_events"',
-      );
+      expect((failure as Error).message).toContain('insert into "audit_events"');
       expect((failure as Error).message).not.toContain("must-not-return");
     } finally {
       await shared.admin.unsafe(`
@@ -204,10 +190,7 @@ describe("permissioned variable-set plaintext reads", () => {
       variables: [
         {
           name: "OWNER_VALUE",
-          valueEncrypted: encryptVariableSetValue(
-            encryptionKey,
-            "owner-secret",
-          ),
+          valueEncrypted: encryptVariableSetValue(encryptionKey, "owner-secret"),
         },
       ],
     });
@@ -220,9 +203,98 @@ describe("permissioned variable-set plaintext reads", () => {
         variableSetId: variableSet.id,
         name: "OWNER_VALUE",
         actor: { kind: "subject" },
-        decrypt: (valueEncrypted) =>
-          decryptVariableSetValue(encryptionKey, valueEncrypted),
+        decrypt: (valueEncrypted) => decryptVariableSetValue(encryptionKey, valueEncrypted),
       }),
     ).toBeNull();
+  });
+
+  test("rejects a settled agent attempt inside the same transaction as the plaintext read", async () => {
+    if (!shared || !client) return;
+    const { grant, subjectId } = await fixture("stale-attempt");
+    const variableSet = await createVariableSet(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "stale-attempt",
+      variables: [
+        {
+          name: "FENCED_VALUE",
+          valueEncrypted: encryptVariableSetValue(encryptionKey, "must-not-return"),
+        },
+      ],
+    });
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "read one configured value",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "secret-read-test",
+      sandboxBackend: "none",
+      subjectId,
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") {
+      throw new Error(`failed to claim secret-read fixture: ${claimed.reason}`);
+    }
+    await applySessionTurnSettlement(client.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "test settlement" } }],
+    });
+
+    let returned: unknown;
+    let failure: unknown;
+    try {
+      returned = await readVariableSetSecretAtomically(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId,
+        variableSetId: variableSet.id,
+        name: "FENCED_VALUE",
+        actor: {
+          kind: "agent_attempt",
+          sessionId: session.id,
+          turnId: claimed.turn.id,
+          attemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+        decrypt: (valueEncrypted) => decryptVariableSetValue(encryptionKey, valueEncrypted),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(returned).toBeUndefined();
+    expect(failure).toBeInstanceOf(VariableSetSecretReadAuthorityError);
+    expect((failure as Error).message).not.toContain("must-not-return");
+
+    const [audit] = await shared.admin<Array<{ count: string }>>`
+      select count(*)::text as count
+        from audit_events
+       where workspace_id = ${grant.workspaceId}
+         and target_id = ${variableSet.id}
+         and action = 'variable_set.variable.read'`;
+    expect(audit?.count).toBe("0");
   });
 });
