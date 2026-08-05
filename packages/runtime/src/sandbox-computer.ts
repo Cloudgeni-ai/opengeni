@@ -239,46 +239,21 @@ function computerPublicErrorFields(
   status?: number;
   origin: "sandbox-computer";
 } {
-  const rawClass = error instanceof Error ? error.constructor.name : fallbackClass;
-  const errorClass = publicComputerIdentifier(rawClass) ? rawClass : fallbackClass;
-  const rawCode =
-    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  const candidateCode =
-    typeof rawCode === "string" || typeof rawCode === "number" ? String(rawCode) : fallbackCode;
-  const errorCode = publicComputerIdentifier(candidateCode) ? candidateCode : fallbackCode;
   const fields: {
     errorClass: string;
     errorCode: string;
     status?: number;
     origin: "sandbox-computer";
-  } = { errorClass, errorCode, origin: "sandbox-computer" };
+  } = { errorClass: fallbackClass, errorCode: fallbackCode, origin: "sandbox-computer" };
   const status =
     error && typeof error === "object"
       ? Number(
           (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode ??
-            (typeof rawCode === "number" ? rawCode : undefined),
+            (error as { statusCode?: unknown }).statusCode,
         )
       : Number.NaN;
   if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
   return fields;
-}
-
-function publicComputerIdentifier(value: string): boolean {
-  if (value.length === 0 || value.length > 80) return false;
-  for (const character of value) {
-    const point = character.charCodeAt(0);
-    const allowed =
-      point === 45 ||
-      point === 46 ||
-      point === 58 ||
-      point === 95 ||
-      (point >= 48 && point <= 57) ||
-      (point >= 65 && point <= 90) ||
-      (point >= 97 && point <= 122);
-    if (!allowed) return false;
-  }
-  return true;
 }
 
 /**

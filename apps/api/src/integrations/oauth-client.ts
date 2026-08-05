@@ -1574,8 +1574,8 @@ function logOAuthVerificationWarning(
 }
 
 export type OAuthPublicErrorFields = {
-  errorClass: string;
-  errorCode?: string;
+  errorClass: "OAuthOperationError";
+  errorCode: "oauth_operation_failed";
   status?: number;
   origin: "oauth";
 };
@@ -1583,21 +1583,17 @@ export type OAuthPublicErrorFields = {
 /** Allowlisted projection for public telemetry; canonical OAuth errors stay exact. */
 export function oauthPublicErrorFields(error: unknown): OAuthPublicErrorFields {
   const fields: OAuthPublicErrorFields = {
-    errorClass: publicErrorClass(error),
+    errorClass: "OAuthOperationError",
+    errorCode: "oauth_operation_failed",
     origin: "oauth",
   };
-  const rawCode =
-    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  const errorCode = publicErrorCode(rawCode);
-  if (errorCode !== undefined) fields.errorCode = errorCode;
   const status =
     error instanceof HTTPException
       ? error.status
       : error && typeof error === "object"
         ? Number(
             (error as { status?: unknown; statusCode?: unknown }).status ??
-              (error as { statusCode?: unknown }).statusCode ??
-              (typeof rawCode === "number" ? rawCode : undefined),
+              (error as { statusCode?: unknown }).statusCode,
           )
         : Number.NaN;
   if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
@@ -1606,34 +1602,6 @@ export function oauthPublicErrorFields(error: unknown): OAuthPublicErrorFields {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function publicErrorClass(error: unknown): string {
-  const candidate = error instanceof Error ? error.constructor.name : typeof error;
-  return publicIdentifier(candidate) ? candidate : "Error";
-}
-
-function publicErrorCode(value: unknown): string | undefined {
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-  const candidate = String(value);
-  return publicIdentifier(candidate) ? candidate : undefined;
-}
-
-function publicIdentifier(value: string): boolean {
-  if (value.length === 0 || value.length > 80) return false;
-  for (const character of value) {
-    const point = character.charCodeAt(0);
-    const allowed =
-      point === 45 ||
-      point === 46 ||
-      point === 58 ||
-      point === 95 ||
-      (point >= 48 && point <= 57) ||
-      (point >= 65 && point <= 90) ||
-      (point >= 97 && point <= 122);
-    if (!allowed) return false;
-  }
-  return true;
 }
 
 async function oauthErrorFromResponse(

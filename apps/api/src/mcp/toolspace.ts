@@ -784,59 +784,36 @@ function exactErrorMessage(error: unknown): string {
 }
 
 export type ToolspacePublicErrorFields = {
-  errorClass: string;
-  errorCode?: string;
+  errorClass: "ToolspaceOperationError";
+  errorCode: ToolspacePublicFailureCode;
   status?: number;
   origin: "toolspace";
 };
 
+type ToolspacePublicFailureCode =
+  | "toolspace_operation_failed"
+  | "tool_list_too_large"
+  | "tool_result_too_large";
+
 /** Allowlisted projection for public telemetry; product data stays exact. */
 export function toolspacePublicErrorFields(
   error: unknown,
-  fallbackCode?: string,
+  errorCode: ToolspacePublicFailureCode = "toolspace_operation_failed",
 ): ToolspacePublicErrorFields {
-  const candidateClass = error instanceof Error ? error.constructor.name : typeof error;
   const fields: ToolspacePublicErrorFields = {
-    errorClass: publicToolspaceIdentifier(candidateClass) ? candidateClass : "Error",
+    errorClass: "ToolspaceOperationError",
+    errorCode,
     origin: "toolspace",
   };
-  const rawCode =
-    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  const errorCode = publicToolspaceCode(rawCode) ?? publicToolspaceCode(fallbackCode);
-  if (errorCode !== undefined) fields.errorCode = errorCode;
   const status =
     error && typeof error === "object"
       ? Number(
           (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode ??
-            (typeof rawCode === "number" ? rawCode : undefined),
+            (error as { statusCode?: unknown }).statusCode,
         )
       : Number.NaN;
   if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
   return fields;
-}
-
-function publicToolspaceCode(value: unknown): string | undefined {
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-  const candidate = String(value);
-  return publicToolspaceIdentifier(candidate) ? candidate : undefined;
-}
-
-function publicToolspaceIdentifier(value: string): boolean {
-  if (value.length === 0 || value.length > 80) return false;
-  for (const character of value) {
-    const point = character.charCodeAt(0);
-    const allowed =
-      point === 45 ||
-      point === 46 ||
-      point === 58 ||
-      point === 95 ||
-      (point >= 48 && point <= 57) ||
-      (point >= 65 && point <= 90) ||
-      (point >= 97 && point <= 122);
-    if (!allowed) return false;
-  }
-  return true;
 }
 
 type ToolspaceReservation =

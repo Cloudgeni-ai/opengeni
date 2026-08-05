@@ -200,10 +200,14 @@ async function publishAndWakeAgentCommand(
         ? { interruptionRequested: true }
         : {}),
     });
-  } catch (error) {
+  } catch {
     console.warn(
-      `[session-commands] immediate Agent command wake failed for ${input.workspaceId}/${input.sessionId}; durable outbox will retry`,
-      error,
+      "[session-commands] immediate Agent command wake failed; durable outbox will retry",
+      {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "agent_command_wake_failed",
+        origin: "core",
+      },
     );
   }
 }
@@ -222,10 +226,15 @@ async function requestControlWakeDispatch(
   if (wakeCount === 0) return;
   try {
     await deps.workflowClient.requestSessionWorkflowWakeDispatch();
-  } catch (error) {
+  } catch {
     console.warn(
-      `[session-commands] immediate control wake dispatch failed for ${wakeCount} committed revisions; durable outbox will retry`,
-      error,
+      "[session-commands] immediate control wake dispatch failed; durable outbox will retry",
+      {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "control_wake_dispatch_failed",
+        origin: "core",
+        wakeCount,
+      },
     );
   }
 }

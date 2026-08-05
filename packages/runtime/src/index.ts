@@ -3342,7 +3342,7 @@ export async function prepareAgentTools(
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
         "[mcp] optional server failed to connect/list tools; skipping it for this turn",
-        mcpErrorFields(error),
+        mcpErrorFields(error, "mcp_connect_failed"),
       );
     }
   }
@@ -3802,56 +3802,35 @@ function exactErrorMessage(error: unknown): string {
 }
 
 type McpPublicErrorFields = {
-  errorClass: string;
-  errorCode?: string;
+  errorClass: "McpOperationError";
+  errorCode: McpPublicFailureCode;
   status?: number;
   origin: "runtime";
 };
 
+type McpPublicFailureCode =
+  | "mcp_connect_failed"
+  | "mcp_close_failed"
+  | "mcp_transport_failed"
+  | "mcp_tools_list_failed"
+  | "mcp_tool_call_failed";
+
 /** Allowlisted projection for public SDK/console telemetry; internal errors stay exact. */
-function mcpErrorFields(error: unknown): McpPublicErrorFields {
-  const candidateClass = error instanceof Error ? error.constructor.name : typeof error;
+function mcpErrorFields(error: unknown, errorCode: McpPublicFailureCode): McpPublicErrorFields {
   const fields: McpPublicErrorFields = {
-    errorClass: publicMcpIdentifier(candidateClass) ? candidateClass : "Error",
+    errorClass: "McpOperationError",
+    errorCode,
     origin: "runtime",
   };
-  const rawCode =
-    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  const errorCode = publicMcpCode(rawCode);
-  if (errorCode !== undefined) fields.errorCode = errorCode;
   const status =
     error && typeof error === "object"
       ? Number(
           (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode ??
-            (typeof rawCode === "number" ? rawCode : undefined),
+            (error as { statusCode?: unknown }).statusCode,
         )
       : Number.NaN;
   if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
   return fields;
-}
-
-function publicMcpCode(value: unknown): string | undefined {
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-  const candidate = String(value);
-  return publicMcpIdentifier(candidate) ? candidate : undefined;
-}
-
-function publicMcpIdentifier(value: string): boolean {
-  if (value.length === 0 || value.length > 80) return false;
-  for (const character of value) {
-    const point = character.charCodeAt(0);
-    const allowed =
-      point === 45 ||
-      point === 46 ||
-      point === 58 ||
-      point === 95 ||
-      (point >= 48 && point <= 57) ||
-      (point >= 65 && point <= 90) ||
-      (point >= 97 && point <= 122);
-    if (!allowed) return false;
-  }
-  return true;
 }
 
 type McpTransportError = Error & {
@@ -3986,7 +3965,7 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
 }
 
 export function mcpTransportErrorWithRetryMetadata(error: unknown): McpTransportError {
-  const fields = mcpErrorFields(error);
+  const fields = mcpErrorFields(error, "mcp_transport_failed");
   const classified = new Error(exactErrorMessage(error), {
     cause: error,
   }) as McpTransportError;
@@ -4022,7 +4001,7 @@ function mcpTransportLogger(_serverId: string) {
         break;
       }
     }
-    console.warn("[mcp] transport operation failed", mcpErrorFields(error));
+    console.warn("[mcp] transport operation failed", mcpErrorFields(error, "mcp_transport_failed"));
   };
   return {
     namespace: "opengeni:mcp-transport",
@@ -4293,14 +4272,15 @@ type McpLifecycleFailure = {
 };
 
 function publicMcpLifecycleError(error: Error, phase: McpLifecyclePhase): Error {
-  const fields = mcpErrorFields(error);
+  const errorCode = phase === "connect" ? "mcp_connect_failed" : "mcp_close_failed";
+  const fields = mcpErrorFields(error, errorCode);
   const lifecycleError = new Error(`MCP lifecycle ${phase} failed`) as Error & {
     code?: string;
     status?: number;
     origin?: string;
   };
   lifecycleError.name = "McpLifecycleError";
-  lifecycleError.code = fields.errorCode ?? `mcp_${phase}_failed`;
+  lifecycleError.code = fields.errorCode;
   if (fields.status !== undefined) lifecycleError.status = fields.status;
   lifecycleError.origin = fields.origin;
   return lifecycleError;
@@ -4410,7 +4390,7 @@ export class PrefixedMcpServer implements MCPServer {
         this.loggedListToolsFailure = true;
         console.warn(
           "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          mcpErrorFields(error),
+          mcpErrorFields(error, "mcp_tools_list_failed"),
         );
       }
       this.releaseAggregateBudget();
@@ -4483,7 +4463,7 @@ export class PrefixedMcpServer implements MCPServer {
       if (this.bestEffort) {
         console.warn(
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
-          mcpErrorFields(error),
+          mcpErrorFields(error, "mcp_tool_call_failed"),
         );
         return {
           isError: true,

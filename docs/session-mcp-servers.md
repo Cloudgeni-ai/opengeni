@@ -18,7 +18,7 @@ credentials, without making those servers deployment-global.
   none, and a string array requires approval only for those unprefixed tool
   names. Selective policies are canonicalized as a sorted set and bounded to
   2,048 names, 256 KiB total UTF-8, and 1 KiB UTF-8 per name.
-- `headers`: write-only credential headers.
+- `headers`: configured credential headers, authenticated-encrypted at rest.
 - `connectionRef`: optional non-secret opaque connection pointer. Standalone
   deployments resolve it through OpenGeni's connection store; embedded hosts
   can resolve the same pointer through `ConnectionCredentialsPort.mcpCredentials`.
@@ -37,8 +37,12 @@ Session responses and session events expose only metadata:
 }
 ```
 
-Header values are never returned at create time, on list/get, in session events,
-or through the SDK/React surfaces.
+Create, list/get, session-event, and ordinary SDK/React projections expose only
+metadata. The approved release-held OPE-97 follow-up adds a separate tenant-
+scoped exact-plaintext operation requiring the owning resource permission plus
+`secrets:read`, with metadata-only audit. That dedicated operation is not
+implemented in the current emergency head and is never inferred from an
+unrelated session response.
 
 ## Permission
 
@@ -104,7 +108,7 @@ Credentials rotate through a `user.message` payload:
   "payload": {
     "text": "continue",
     "mcpCredentialUpdates": [
-      { "id": "crm", "headers": { "Authorization": "Bearer ..." } }
+      { "id": "crm", "headers": { "X-Synthetic-Key": "synthetic-test-value" } }
     ]
   }
 }
@@ -187,15 +191,22 @@ admission immediately before invocation, and commits completion or uncertainty
 afterward. This wrapper does not change tool selection, connector visibility,
 Toolspace exclusion rules, or Slack interaction progress delivery.
 
-## Never-return-values invariant
+## Dedicated-read invariant
 
-The no-value invariant has two layers:
+Configured credential values and canonical arbitrary content follow different
+paths:
 
-1. Core converts raw create/rotation inputs into encrypted DB rows plus safe
-   metadata before appending events or publishing.
-2. The DB event sanitizer defensively strips `mcpServers[].headers`,
-   `mcpServers[].headersEncrypted`, `mcpCredentialUpdates[].headers`, and
-   `mcpCredentialUpdates[].headersEncrypted` to header names if a future path
-   accidentally attempts to persist them.
+1. Core treats typed create/rotation fields as configured-secret writes and
+   atomically stores authenticated ciphertext plus metadata. It does not
+   regex-scan or rewrite arbitrary messages, tool results, errors, or source
+   content that happen to resemble headers or tokens.
+2. Ordinary session/event/list projections contain credential references,
+   header names, and versions, not a hidden masked substitute. The approved
+   release-held follow-up adds a dedicated tenant-scoped secret read that returns
+   exact plaintext only after the owning resource authorization plus
+   `secrets:read` succeeds and its metadata-only audit record commits; it is not
+   implemented in this emergency head.
 
-Do not add API, event, log, span, or audit paths that expose header values.
+Do not expose header values through unrelated API, event, log, span, or audit
+paths. When the dedicated authorized read ships, do not weaken it by masking,
+hashing, or rewriting the returned plaintext.

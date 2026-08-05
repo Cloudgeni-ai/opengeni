@@ -81,14 +81,15 @@ describe("workspace snapshot cancellation", () => {
   test("public snapshot diagnostics omit exact provider content", () => {
     const sentinel = "synthetic-snapshot-provider-value-123456";
     const error = Object.assign(new Error(`snapshot failed: ${sentinel}`), {
-      code: "SNAPSHOT_FAILED",
+      name: sentinel,
+      code: sentinel,
       status: 503,
       responseBody: sentinel,
     });
 
     expect(safeSnapshotError(error)).toEqual({
-      errorClass: "Error",
-      errorCode: "SNAPSHOT_FAILED",
+      errorClass: "SnapshotOperationError",
+      errorCode: "snapshot_operation_failed",
       status: 503,
       origin: "sandbox-resume",
     });

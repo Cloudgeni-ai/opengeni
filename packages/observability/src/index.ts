@@ -67,6 +67,49 @@ const SANDBOX_OPERATION_NAMES = new Set([
   "serializeSessionState",
 ]);
 
+/**
+ * External logs and OTLP are public/third-party projections, not canonical
+ * OpenGeni storage. These exact schema keys can carry tenant identifiers or
+ * arbitrary source/provider content and are therefore omitted at the sink
+ * boundary. This is key-based projection, never value inspection or rewriting.
+ */
+const PUBLIC_TELEMETRY_OMITTED_ATTRIBUTE_KEYS = new Set([
+  "accountId",
+  "account_id",
+  "opengeni.account_id",
+  "workspaceId",
+  "workspace_id",
+  "opengeni.workspace_id",
+  "sessionId",
+  "session_id",
+  "opengeni.session_id",
+  "turnId",
+  "turn_id",
+  "opengeni.turn_id",
+  "sourceKey",
+  "source_key",
+  "opengeni.source_key",
+  "consumerId",
+  "consumer_id",
+  "error",
+  "errorMessage",
+  "error_message",
+  "exception.message",
+  "exception.stacktrace",
+  "command",
+  "commandText",
+  "command_text",
+  "cmd",
+  "responseBody",
+  "response_body",
+  "url",
+  "url.full",
+  "url.path",
+  "endpoint",
+  "toolResult",
+  "tool_result",
+]);
+
 export type SandboxOperationMetricObservation = {
   backend: string;
   op: string;
@@ -151,14 +194,14 @@ export class Observability {
     message: string,
     attributes: Attributes = {},
   ): void {
+    const publicAttributes = projectPublicTelemetryAttributes(attributes);
     if (!this.settings.observabilityStructuredLogs) {
-      const line = attributes.error ? `${message}: ${String(attributes.error)}` : message;
       if (level === "warn") {
-        console.warn(line);
+        console.warn(message);
       } else if (level === "error") {
-        console.error(line);
+        console.error(message);
       } else {
-        console.log(line);
+        console.log(message);
       }
       return;
     }
@@ -169,7 +212,7 @@ export class Observability {
       service: this.settings.serviceName,
       environment: this.settings.environment,
       component: this.options.component,
-      ...cleanAttributes(attributes),
+      ...cleanAttributes(publicAttributes),
     };
     const serialized = JSON.stringify(record);
     if (level === "warn") {
@@ -206,9 +249,11 @@ export class Observability {
           startMs,
           endMs: this.now(),
           attributes: {
-            ...attributes,
-            ...input.attributes,
-            ...errorAttributes,
+            ...projectPublicTelemetryAttributes({
+              ...attributes,
+              ...input.attributes,
+              ...errorAttributes,
+            }),
           },
           ...(telemetryError ? { error: telemetryError } : {}),
         });
@@ -444,8 +489,12 @@ export class Observability {
       ],
     };
     void this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)).catch(
-      (error) => {
-        this.warn("OTLP span export failed", { error: errorMessage(error), endpoint });
+      () => {
+        this.warn("OTLP span export failed", {
+          errorClass: "TelemetryExportError",
+          errorCode: "otlp_export_failed",
+          origin: "observability",
+        });
       },
     );
   }
@@ -509,13 +558,14 @@ export function logStartupDependencyRetry(
   observability: Observability,
   event: StartupDependencyRetryEvent,
 ): void {
-  const message = event.error instanceof Error ? event.error.message : String(event.error);
   observability.warn("Startup dependency connection failed; retrying", {
     dependency: event.label,
     attempt: event.attempt,
     attempts: event.attempts,
     delayMs: event.delayMs,
-    error: message,
+    errorClass: "StartupDependencyError",
+    errorCode: "startup_dependency_retry",
+    origin: "observability",
   });
 }
 
@@ -538,6 +588,14 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
   ) as Record<string, string | number | boolean | null>;
 }
 
+function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
+  return Object.fromEntries(
+    Object.entries(attributes).filter(
+      ([key, value]) => value !== undefined && !PUBLIC_TELEMETRY_OMITTED_ATTRIBUTE_KEYS.has(key),
+    ),
+  );
+}
+
 type TelemetrySpanError = {
   type: string;
   statusCode?: number;
@@ -549,13 +607,9 @@ type TelemetrySpanError = {
  * metadata and never mutates canonical OpenGeni errors, events, or history.
  */
 function projectSpanErrorForTelemetry(error: unknown): TelemetrySpanError {
-  const type =
-    error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.name)
-      ? error.name
-      : "Error";
   const statusCode = errorStatusCode(error);
   return {
-    type,
+    type: "OperationError",
     ...(statusCode === undefined ? {} : { statusCode }),
     statusMessage: statusCode === undefined ? "operation failed" : `HTTP ${statusCode}`,
   };
@@ -581,10 +635,6 @@ function errorToAttributes(error: TelemetrySpanError): Attributes {
     "error.type": error.type,
     ...(error.statusCode === undefined ? {} : { "error.status_code": error.statusCode }),
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function otlpAttributes(

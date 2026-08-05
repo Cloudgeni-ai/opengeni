@@ -334,14 +334,15 @@ describe("turn exact-content boundaries", () => {
   test("public diagnostics exclude arbitrary bodies while internal failure events remain exact", () => {
     const error = Object.assign(new Error(`request rejected; detail=${syntheticValue}`), {
       status: 401,
-      code: "AUTH_REJECTED",
+      name: syntheticValue,
+      code: syntheticValue,
       cause: { responseBody: syntheticValue },
     });
     const diagnostic = safeErrorDiagnostic(error);
 
     expect(diagnostic).toEqual({
-      errorClass: "Error",
-      errorCode: "AUTH_REJECTED",
+      errorClass: "WorkerOperationError",
+      errorCode: "worker_operation_failed",
       status: 401,
       origin: "worker",
     });

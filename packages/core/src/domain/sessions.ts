@@ -1103,11 +1103,12 @@ export async function postUserMessageTurn(input: {
         ? { interruptionRequested: true }
         : {}),
     });
-  } catch (error) {
-    console.warn(
-      `[sessions] workflow wake failed for committed prompt ${workspaceId}/${sessionId}; durable outbox will retry`,
-      error,
-    );
+  } catch {
+    console.warn("[sessions] workflow wake failed; durable outbox will retry", {
+      errorClass: "WorkflowWakeOperationError",
+      errorCode: "session_workflow_wake_failed",
+      origin: "core",
+    });
   }
   return { accepted, turn };
 }

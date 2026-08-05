@@ -712,7 +712,7 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     expect((result.e as Error).message).toContain(sentinel);
     expect(JSON.stringify(warnings)).not.toContain(sentinel);
     expect(warnings[0]?.[1]).toEqual({
-      errorClass: "Error",
+      errorClass: "ComputerUnavailableError",
       errorCode: "screenshot_capture_failed",
       origin: "sandbox-computer",
     });

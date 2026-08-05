@@ -841,8 +841,8 @@ function compactionFailureReason(reason: string): string {
 }
 
 export type SafeErrorDiagnostic = {
-  errorClass: string;
-  errorCode?: string;
+  errorClass: "WorkerOperationError";
+  errorCode: "worker_operation_failed";
   status?: number;
   origin: "worker";
 };
@@ -854,24 +854,18 @@ export type SafeErrorDiagnostic = {
  * permission-controlled session event, not stdout or telemetry.
  */
 export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
-  const rawClass = error instanceof Error ? error.constructor.name : typeof error;
   const diagnostic: SafeErrorDiagnostic = {
-    errorClass: publicWorkerIdentifier(rawClass) ? rawClass : "Error",
+    errorClass: "WorkerOperationError",
+    errorCode: "worker_operation_failed",
     origin: "worker",
   };
   if (error && typeof error === "object") {
-    const rawCode = (error as { code?: unknown }).code;
     const status = Number(
       (error as { status?: unknown; statusCode?: unknown }).status ??
-        (error as { statusCode?: unknown }).statusCode ??
-        (typeof rawCode === "number" ? rawCode : undefined),
+        (error as { statusCode?: unknown }).statusCode,
     );
     if (Number.isInteger(status) && status >= 100 && status <= 599) {
       diagnostic.status = status;
-    }
-    if (typeof rawCode === "string" || typeof rawCode === "number") {
-      const code = String(rawCode);
-      if (publicWorkerIdentifier(code)) diagnostic.errorCode = code;
     }
   }
   return diagnostic;
@@ -885,27 +879,10 @@ function safeErrorForTelemetry(error: unknown): Error {
     origin?: string;
   };
   safe.name = "WorkerOperationError";
-  safe.code = diagnostic.errorCode ?? "worker_operation_failed";
+  safe.code = diagnostic.errorCode;
   if (diagnostic.status !== undefined) safe.status = diagnostic.status;
   safe.origin = diagnostic.origin;
   return safe;
-}
-
-function publicWorkerIdentifier(value: string): boolean {
-  if (value.length === 0 || value.length > 80) return false;
-  for (const character of value) {
-    const point = character.charCodeAt(0);
-    const allowed =
-      point === 45 ||
-      point === 46 ||
-      point === 58 ||
-      point === 95 ||
-      (point >= 48 && point <= 57) ||
-      (point >= 65 && point <= 90) ||
-      (point >= 97 && point <= 122);
-    if (!allowed) return false;
-  }
-  return true;
 }
 
 function compactionFailureReasonFromError(error: unknown): string {
@@ -3776,10 +3753,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             labels: codexFleetShadowErrorMetricLabelsV1(shadowResult),
           });
           observability.warn("Codex adaptive fleet shadow decision failed open", {
-            workspaceId: input.workspaceId,
             stage: shadowResult.stage,
             reason: shadowResult.reason,
-            errorName: shadowResult.errorName,
+            errorClass: "CodexFleetShadowOperationError",
+            errorCode: "codex_fleet_shadow_failed",
+            origin: "worker",
             payloadBytes: shadowResult.payloadBytes,
           });
         }
@@ -7373,9 +7351,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           checkpointDurable = true;
         } catch (checkpointError) {
           observability.warn("Codex lease-loss checkpoint failed; refusing automatic turn replay", {
-            workspaceId: input.workspaceId,
-            turnId: lostTurnId,
-            errorName: checkpointError instanceof Error ? checkpointError.name : "unknown",
+            errorClass: "CodexCheckpointOperationError",
+            errorCode: "codex_lease_loss_checkpoint_failed",
+            origin: "worker",
           });
         }
 
@@ -7489,9 +7467,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             labels: { workspace_key: codexWorkspaceKey, outcome: "failed" },
           });
           observability.warn("Codex failover checkpoint failed; refusing automatic replay", {
-            workspaceId: input.workspaceId,
-            turnId,
-            errorName: checkpointError instanceof Error ? checkpointError.name : "unknown",
+            errorClass: "CodexCheckpointOperationError",
+            errorCode: "codex_failover_checkpoint_failed",
+            origin: "worker",
           });
         }
 

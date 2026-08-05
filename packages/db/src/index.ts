@@ -197,8 +197,10 @@ import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
   LOSSLESS_CONTENT_CODEC_VERSION,
+  toPostgresLosslessText,
   withLosslessContentWriteVersion,
 } from "./lossless-json";
+export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
 import {
@@ -627,7 +629,7 @@ export async function claimHostExportBatch(
   },
 ): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
-  return await db.transaction(async (tx) => {
+  const rows = await db.transaction(async (tx) => {
     const transaction = tx as unknown as Database;
     const claimedRows = await rawRows<HostExportClaimRow>(
       transaction,
@@ -665,7 +667,7 @@ export async function claimHostExportBatch(
     const sidecarByExportCursor = new Map(
       sidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
     );
-    const rows = claimedRows.map((row): HostExportRow => {
+    const materializedRows = claimedRows.map((row): HostExportRow => {
       const cursor = hostExportCursor(row.export_cursor);
       const sidecar = sidecarByExportCursor.get(cursor);
       if (!sidecar) {
@@ -677,73 +679,46 @@ export async function claimHostExportBatch(
         payload_codec_version: sidecar.payload_codec_version,
       };
     });
-    const first = rows[0]!;
+    return materializedRows;
+  });
+  if (!rows) return null;
+  const first = rows[0]!;
 
-    if (input.kind === "session_event") {
-      const events = rows.map((row): HostEventExport => {
-        const parsed = HostEventExportContract.safeParse({
-          schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
-          cursor: hostExportCursor(row.export_cursor),
-          idempotencyKey: row.idempotency_key,
-          accountId: row.account_id,
-          workspaceId: row.workspace_id,
-          rootSessionId: row.root_session_id,
-          initiator: row.initiator,
-          initiatorContext: row.initiator_context,
-          origin: row.origin,
-          event: {
-            id: row.source_id,
-            workspaceId: row.workspace_id,
-            sessionId: row.session_id,
-            sequence: row.session_sequence,
-            type: row.event_type,
-            payload: fromPostgresLosslessJson(row.payload, row.payload_codec_version),
-            occurredAt: hostExportTimestamp(row.occurred_at),
-            clientEventId: row.client_event_id,
-            turnId: row.turn_id,
-            turnGeneration: row.turn_generation,
-            turnAttemptId: row.turn_attempt_id,
-            turnAssociation: row.turn_association,
-            duplicateOfEventId: row.duplicate_of_event_id,
-            duplicateReason: row.duplicate_reason,
-          },
-        });
-        if (!parsed.success) {
-          throw hostExportPayloadError(input, row, parsed.error.issues);
-        }
-        return parsed.data;
-      });
-      return HostEventExportBatchContract.parse({
-        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
-        consumerId: first.consumer_id,
-        leaseToken: first.lease_token,
-        checkpoint: hostExportCursor(first.checkpoint),
-        throughCursor: hostExportCursor(first.lease_through),
-        events,
-      });
-    }
-
-    const events = rows.map((row): HostUsageExport => {
-      const parsed = HostUsageExportContract.safeParse({
+  if (input.kind === "session_event") {
+    const events = rows.map((row): HostEventExport => {
+      const parsed = HostEventExportContract.safeParse({
         schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
         cursor: hostExportCursor(row.export_cursor),
+        idempotencyKey: row.idempotency_key,
         accountId: row.account_id,
         workspaceId: row.workspace_id,
-        sessionId: row.session_id,
         rootSessionId: row.root_session_id,
-        turnId: row.turn_id,
-        turnAttemptId: row.turn_attempt_id,
         initiator: row.initiator,
         initiatorContext: row.initiator_context,
         origin: row.origin,
-        usage: row.payload,
+        event: {
+          id: row.source_id,
+          workspaceId: row.workspace_id,
+          sessionId: row.session_id,
+          sequence: row.session_sequence,
+          type: row.event_type,
+          payload: fromPostgresLosslessJson(row.payload, row.payload_codec_version),
+          occurredAt: hostExportTimestamp(row.occurred_at),
+          clientEventId: row.client_event_id,
+          turnId: row.turn_id,
+          turnGeneration: row.turn_generation,
+          turnAttemptId: row.turn_attempt_id,
+          turnAssociation: row.turn_association,
+          duplicateOfEventId: row.duplicate_of_event_id,
+          duplicateReason: row.duplicate_reason,
+        },
       });
       if (!parsed.success) {
         throw hostExportPayloadError(input, row, parsed.error.issues);
       }
       return parsed.data;
     });
-    return HostUsageExportBatchContract.parse({
+    return HostEventExportBatchContract.parse({
       schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
       consumerId: first.consumer_id,
       leaseToken: first.lease_token,
@@ -751,6 +726,35 @@ export async function claimHostExportBatch(
       throughCursor: hostExportCursor(first.lease_through),
       events,
     });
+  }
+
+  const events = rows.map((row): HostUsageExport => {
+    const parsed = HostUsageExportContract.safeParse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      cursor: hostExportCursor(row.export_cursor),
+      accountId: row.account_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      rootSessionId: row.root_session_id,
+      turnId: row.turn_id,
+      turnAttemptId: row.turn_attempt_id,
+      initiator: row.initiator,
+      initiatorContext: row.initiator_context,
+      origin: row.origin,
+      usage: row.payload,
+    });
+    if (!parsed.success) {
+      throw hostExportPayloadError(input, row, parsed.error.issues);
+    }
+    return parsed.data;
+  });
+  return HostUsageExportBatchContract.parse({
+    schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+    consumerId: first.consumer_id,
+    leaseToken: first.lease_token,
+    checkpoint: hostExportCursor(first.checkpoint),
+    throughCursor: hostExportCursor(first.lease_through),
+    events,
   });
 }
 
@@ -805,7 +809,8 @@ export async function failHostExportBatch(
     sql`
       select opengeni_host_export.fail_host_export_batch(
         ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
-        ${input.error}, ${input.maxFailures ?? 20}
+        ${toPostgresLosslessText(input.error)}, ${input.maxFailures ?? 20},
+        ${LOSSLESS_CONTENT_CODEC_VERSION}
       ) as failures
     `,
   );
@@ -892,6 +897,7 @@ export async function getHostExportConsumerStatus(
     consecutive_failures: number;
     next_attempt_at: Date | string;
     last_error: string | null;
+    last_error_codec_version: number | null;
     last_error_at: Date | string | null;
     blocked_at: Date | string | null;
     lease_expires_at: Date | string | null;
@@ -902,9 +908,13 @@ export async function getHostExportConsumerStatus(
   }>(
     db,
     sql`
-      select * from opengeni_host_export.host_export_consumer_status(
+      select status.*, sidecar.last_error_codec_version
+      from opengeni_host_export.host_export_consumer_status(
         ${input.kind}, ${input.consumerId}
-      )
+      ) status
+      left join lateral opengeni_host_export.host_export_consumer_status_sidecar(
+        ${input.kind}, ${input.consumerId}
+      ) sidecar on true
     `,
   );
   if (!row) return null;
@@ -917,7 +927,10 @@ export async function getHostExportConsumerStatus(
     enabled: row.enabled,
     consecutiveFailures: Number(row.consecutive_failures),
     nextAttemptAt: hostExportTimestamp(row.next_attempt_at),
-    lastError: row.last_error,
+    lastError:
+      row.last_error === null
+        ? null
+        : fromPostgresLosslessText(row.last_error, row.last_error_codec_version),
     lastErrorAt: optionalTimestamp(row.last_error_at),
     blockedAt: optionalTimestamp(row.blocked_at),
     leaseExpiresAt: optionalTimestamp(row.lease_expires_at),

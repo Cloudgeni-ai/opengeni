@@ -72,20 +72,24 @@ export function createWorkerServiceLifecycle(input: {
       })();
       return runPromise;
     },
-    drain: (reason = "host request") => {
+    drain: (_reason = "host request") => {
       if (state === "draining" || state === "stopped" || state === "failed") {
         return;
       }
       state = "draining";
       input.observability.info("OpenGeni worker draining (graceful shutdown)", {
         role: input.role,
-        reason,
+        errorClass: "WorkerLifecycleOperation",
+        errorCode: "worker_draining",
+        origin: "worker-lifecycle",
       });
       try {
         input.worker.shutdown();
       } catch (error) {
         input.observability.warn("worker shutdown request failed", {
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "WorkerLifecycleOperationError",
+          errorCode: "worker_shutdown_request_failed",
+          origin: "worker-lifecycle",
         });
       }
     },

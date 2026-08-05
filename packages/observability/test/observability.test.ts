@@ -148,8 +148,13 @@ describe("observability", () => {
       },
     });
 
-    const span = obs.startSpan("worker.run_agent_segment", { "opengeni.session_id": "session-1" });
-    span.end({ attributes: { status: "idle" } });
+    const span = obs.startSpan("worker.run_agent_segment", {
+      "opengeni.session_id": "session-1",
+      workspaceId: "workspace-1",
+      turn_id: "turn-1",
+      sourceKey: "source-1",
+    });
+    span.end({ attributes: { status: "idle", account_id: "account-1" } });
     await Bun.sleep(0);
 
     expect(exported).toHaveLength(1);
@@ -158,6 +163,10 @@ describe("observability", () => {
     expect(exported[0]!.body.resourceSpans[0].scopeSpans[0].spans[0].name).toBe(
       "worker.run_agent_segment",
     );
+    const rendered = JSON.stringify(exported[0]!.body);
+    for (const identifier of ["session-1", "workspace-1", "turn-1", "source-1", "account-1"]) {
+      expect(rendered).not.toContain(identifier);
+    }
   });
 
   test("sanitizes and bounds span errors before OTLP export", async () => {
@@ -170,7 +179,11 @@ describe("observability", () => {
     });
     const error = Object.assign(
       new Error("PRIVATE proxy body Bearer super-secret-provider-token"),
-      { status: 502 },
+      {
+        name: "PRIVATE_ERROR_CLASS_SENTINEL",
+        code: "PRIVATE_ERROR_CODE_SENTINEL",
+        status: 502,
+      },
     );
 
     const span = obs.startSpan("HTTP POST /v1/sessions", {});
@@ -181,11 +194,12 @@ describe("observability", () => {
     const body = exported[0]!.body;
     expect(JSON.stringify(body)).not.toContain("PRIVATE");
     expect(JSON.stringify(body)).not.toContain("super-secret-provider-token");
+    expect(JSON.stringify(body)).not.toContain("PRIVATE_ERROR_CODE_SENTINEL");
     const spanBody = body.resourceSpans[0].scopeSpans[0].spans[0];
     expect(spanBody.status).toEqual({ code: 2, message: "HTTP 502" });
     expect(spanBody.attributes).toContainEqual({
       key: "error.type",
-      value: { stringValue: "Error" },
+      value: { stringValue: "OperationError" },
     });
     expect(spanBody.attributes).toContainEqual({
       key: "error.status_code",
@@ -221,8 +235,77 @@ describe("observability", () => {
       console.warn = originalWarn;
     }
 
-    expect(observed).toEqual([
-      "Startup dependency connection failed; retrying: temporarily unavailable",
-    ]);
+    expect(observed).toEqual(["Startup dependency connection failed; retrying"]);
+  });
+
+  test("public structured logs omit identifiers and arbitrary source fields", () => {
+    const sentinel = "PUBLIC_LOG_SENTINEL_93fbe7";
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("operation failed", {
+        accountId: `account-${sentinel}`,
+        workspace_id: `workspace-${sentinel}`,
+        "opengeni.session_id": `session-${sentinel}`,
+        turnId: `turn-${sentinel}`,
+        sourceKey: `source-${sentinel}`,
+        consumerId: `consumer-${sentinel}`,
+        error: `message-${sentinel}`,
+        command: `command-${sentinel}`,
+        responseBody: `body-${sentinel}`,
+        endpoint: `https://provider.example/${sentinel}`,
+        toolResult: `result-${sentinel}`,
+        errorClass: "OperationError",
+        errorCode: "operation_failed",
+        status: 503,
+        origin: "test",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toContain(sentinel);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "operation failed",
+      errorClass: "OperationError",
+      errorCode: "operation_failed",
+      status: 503,
+      origin: "test",
+    });
+  });
+
+  test("OTLP exporter failures expose only a fixed structural diagnostic", async () => {
+    const sentinel = "OTLP_EXPORT_SENTINEL_d3d7f1";
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, {
+        component: "worker",
+        exporter: async () => {
+          throw Object.assign(new Error(`collector body ${sentinel}`), {
+            name: sentinel,
+            code: sentinel,
+            endpoint: `https://collector.example/${sentinel}`,
+          });
+        },
+      });
+      obs.startSpan("worker.operation").end();
+      await Bun.sleep(0);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toContain(sentinel);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "OTLP span export failed",
+      errorClass: "TelemetryExportError",
+      errorCode: "otlp_export_failed",
+      origin: "observability",
+    });
   });
 });

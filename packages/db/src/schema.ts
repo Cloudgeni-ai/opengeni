@@ -5520,6 +5520,7 @@ export const hostExportConsumers = pgTable(
     consecutiveFailures: integer("consecutive_failures").notNull().default(0),
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
     lastError: text("last_error"),
+    lastErrorCodecVersion: losslessCodecVersion("last_error_codec_version"),
     lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
     blockedAt: timestamp("blocked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

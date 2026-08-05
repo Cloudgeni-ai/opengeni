@@ -30,6 +30,8 @@ ALTER TABLE session_events
   ADD COLUMN IF NOT EXISTS payload_codec_version integer;
 ALTER TABLE host_export_outbox
   ADD COLUMN IF NOT EXISTS payload_codec_version integer;
+ALTER TABLE host_export_consumers
+  ADD COLUMN IF NOT EXISTS last_error_codec_version integer;
 ALTER TABLE agent_run_states
   ADD COLUMN IF NOT EXISTS serialized_run_state_codec_version integer,
   ADD COLUMN IF NOT EXISTS pending_approvals_codec_version integer;
@@ -85,6 +87,9 @@ ALTER TABLE session_events
 ALTER TABLE host_export_outbox
   ADD CONSTRAINT host_export_outbox_payload_codec_version_chk
   CHECK (payload_codec_version IS NULL OR payload_codec_version = 1) NOT VALID;
+ALTER TABLE host_export_consumers
+  ADD CONSTRAINT host_export_consumers_last_error_codec_version_chk
+  CHECK (last_error_codec_version IS NULL OR last_error_codec_version = 1) NOT VALID;
 ALTER TABLE agent_run_states
   ADD CONSTRAINT agent_run_states_serialized_codec_version_chk
   CHECK (serialized_run_state_codec_version IS NULL OR serialized_run_state_codec_version = 1) NOT VALID,
@@ -195,6 +200,11 @@ BEGIN
         AND NEW.payload_codec_version IS NOT DISTINCT FROM OLD.payload_codec_version THEN
         NEW.payload_codec_version := NULL;
       END IF;
+    WHEN 'host_export_consumers' THEN
+      IF NEW.last_error IS DISTINCT FROM OLD.last_error
+        AND NEW.last_error_codec_version IS NOT DISTINCT FROM OLD.last_error_codec_version THEN
+        NEW.last_error_codec_version := NULL;
+      END IF;
     WHEN 'agent_run_states' THEN
       IF NEW.serialized_run_state IS DISTINCT FROM OLD.serialized_run_state
         AND NEW.serialized_run_state_codec_version IS NOT DISTINCT FROM OLD.serialized_run_state_codec_version THEN
@@ -299,6 +309,10 @@ FOR EACH ROW EXECUTE FUNCTION opengeni_private.fence_legacy_lossless_content_upd
 DROP TRIGGER IF EXISTS host_export_outbox_lossless_legacy_update_fence ON host_export_outbox;
 CREATE TRIGGER host_export_outbox_lossless_legacy_update_fence
 BEFORE UPDATE OF payload ON host_export_outbox
+FOR EACH ROW EXECUTE FUNCTION opengeni_private.fence_legacy_lossless_content_update();
+DROP TRIGGER IF EXISTS host_export_consumers_lossless_legacy_update_fence ON host_export_consumers;
+CREATE TRIGGER host_export_consumers_lossless_legacy_update_fence
+BEFORE UPDATE OF last_error ON host_export_consumers
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.fence_legacy_lossless_content_update();
 DROP TRIGGER IF EXISTS agent_run_states_lossless_legacy_update_fence ON agent_run_states;
 CREATE TRIGGER agent_run_states_lossless_legacy_update_fence
@@ -520,6 +534,135 @@ BEGIN
   $create$, target_schema);
 
   EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_host_export.ack_host_export_batch(
+      p_export_kind text, p_consumer_id text, p_lease_token uuid
+    ) RETURNS bigint
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    DECLARE v_checkpoint bigint;
+    BEGIN
+      UPDATE %1$I.host_export_consumers c
+      SET checkpoint = c.lease_through,
+          lease_token = NULL, lease_holder_id = NULL, lease_expires_at = NULL,
+          lease_from = NULL, lease_through = NULL,
+          consecutive_failures = 0, next_attempt_at = now(),
+          last_error = NULL, last_error_codec_version = NULL,
+          last_error_at = NULL, updated_at = now()
+      WHERE c.export_kind = p_export_kind AND c.consumer_id = p_consumer_id
+        AND c.lease_token = p_lease_token AND c.lease_through IS NOT NULL
+      RETURNING c.checkpoint INTO v_checkpoint;
+      IF v_checkpoint IS NULL THEN
+        RAISE EXCEPTION 'host export lease is stale' USING ERRCODE = '40001';
+      END IF;
+      RETURN v_checkpoint;
+    END $function$;
+  $create$, target_schema);
+
+  -- Keep the published five-argument function as the rolling old-writer
+  -- protocol. Its input is literal PostgreSQL text, so its companion remains
+  -- NULL even when the content happens to match the active codec marker.
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_host_export.fail_host_export_batch(
+      p_export_kind text, p_consumer_id text, p_lease_token uuid,
+      p_error text, p_max_failures integer
+    ) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    DECLARE v_failures integer;
+    BEGIN
+      UPDATE %1$I.host_export_consumers c
+      SET consecutive_failures = c.consecutive_failures + 1,
+          lease_token = NULL, lease_holder_id = NULL, lease_expires_at = NULL,
+          lease_from = NULL, lease_through = NULL,
+          next_attempt_at = now() + make_interval(
+            secs => least(300, greatest(1, power(2, least(c.consecutive_failures, 8))::integer))
+          ),
+          last_error = coalesce(p_error, 'host sink failed'),
+          last_error_codec_version = NULL,
+          last_error_at = now(),
+          blocked_at = CASE
+            WHEN c.consecutive_failures + 1 >= greatest(1, least(coalesce(p_max_failures, 20), 1000))
+            THEN now() ELSE NULL END,
+          updated_at = now()
+      WHERE c.export_kind = p_export_kind AND c.consumer_id = p_consumer_id
+        AND c.lease_token = p_lease_token
+      RETURNING c.consecutive_failures INTO v_failures;
+      IF v_failures IS NULL THEN
+        RAISE EXCEPTION 'host export lease is stale' USING ERRCODE = '40001';
+      END IF;
+      RETURN v_failures;
+    END $function$;
+  $create$, target_schema);
+
+  -- New writers encode the entire error in application code and stamp the
+  -- companion in this same SQL statement. PostgreSQL never implements or
+  -- infers the JavaScript lossless-text codec.
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_host_export.fail_host_export_batch(
+      p_export_kind text, p_consumer_id text, p_lease_token uuid,
+      p_error text, p_max_failures integer, p_error_codec_version integer
+    ) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    DECLARE v_failures integer;
+    BEGIN
+      IF p_error_codec_version IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'host export error codec version must be 1'
+          USING ERRCODE = '22023';
+      END IF;
+      UPDATE %1$I.host_export_consumers c
+      SET consecutive_failures = c.consecutive_failures + 1,
+          lease_token = NULL, lease_holder_id = NULL, lease_expires_at = NULL,
+          lease_from = NULL, lease_through = NULL,
+          next_attempt_at = now() + make_interval(
+            secs => least(300, greatest(1, power(2, least(c.consecutive_failures, 8))::integer))
+          ),
+          last_error = coalesce(p_error, 'host sink failed'),
+          last_error_codec_version = p_error_codec_version,
+          last_error_at = now(),
+          blocked_at = CASE
+            WHEN c.consecutive_failures + 1 >= greatest(1, least(coalesce(p_max_failures, 20), 1000))
+            THEN now() ELSE NULL END,
+          updated_at = now()
+      WHERE c.export_kind = p_export_kind AND c.consumer_id = p_consumer_id
+        AND c.lease_token = p_lease_token
+      RETURNING c.consecutive_failures INTO v_failures;
+      IF v_failures IS NULL THEN
+        RAISE EXCEPTION 'host export lease is stale' USING ERRCODE = '40001';
+      END IF;
+      RETURN v_failures;
+    END $function$;
+  $create$, target_schema);
+
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_host_export.resume_host_export_consumer(
+      p_export_kind text, p_consumer_id text
+    ) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    BEGIN
+      UPDATE %1$I.host_export_consumers c
+      SET blocked_at = NULL, consecutive_failures = 0, next_attempt_at = now(),
+          lease_token = NULL, lease_holder_id = NULL, lease_expires_at = NULL,
+          lease_from = NULL, lease_through = NULL,
+          last_error = NULL, last_error_codec_version = NULL,
+          last_error_at = NULL, updated_at = now()
+      WHERE c.export_kind = p_export_kind AND c.consumer_id = p_consumer_id;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'host export consumer not found' USING ERRCODE = 'P0002';
+      END IF;
+    END $function$;
+  $create$, target_schema);
+
+  EXECUTE format($create$
     CREATE OR REPLACE FUNCTION opengeni_host_export.host_export_claim_sidecars(
       p_export_kind text,
       p_consumer_id text,
@@ -559,6 +702,26 @@ BEGIN
         AND o.export_cursor <= v_consumer.lease_through
       ORDER BY o.export_cursor;
     END $function$;
+  $create$, target_schema);
+
+  -- Preserve the published host_export_consumer_status return signature. The
+  -- application joins this one-column companion helper in the same statement
+  -- and decodes the returned last_error only when the sidecar is 1.
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_host_export.host_export_consumer_status_sidecar(
+      p_export_kind text,
+      p_consumer_id text
+    ) RETURNS TABLE (
+      last_error_codec_version integer
+    )
+    LANGUAGE sql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+      SELECT c.last_error_codec_version
+      FROM %1$I.host_export_consumers c
+      WHERE c.export_kind = p_export_kind AND c.consumer_id = p_consumer_id;
+    $function$;
   $create$, target_schema);
 
   EXECUTE format($create$
@@ -651,11 +814,11 @@ BEGIN
       SET (
         checkpoint, lease_token, lease_holder_id, lease_expires_at,
         lease_from, lease_through, consecutive_failures, next_attempt_at,
-        last_error, last_error_at, blocked_at, updated_at
+        last_error, last_error_codec_version, last_error_at, blocked_at, updated_at
       ) = (
         p_export_cursor, NULL::uuid, NULL::text, NULL::timestamptz,
         NULL::bigint, NULL::bigint, 0, now(),
-        left('dead-lettered: ' || p_reason, 500), now(), NULL::timestamptz, now()
+        'dead-lettered: ' || p_reason, NULL::integer, now(), NULL::timestamptz, now()
       )
       WHERE c.id = v_consumer.id;
       RETURN p_export_cursor;
@@ -666,7 +829,13 @@ END $migration$;
 REVOKE ALL ON FUNCTION
   opengeni_private.enqueue_host_session_event_export() FROM PUBLIC;
 REVOKE ALL ON FUNCTION
+  opengeni_host_export.fail_host_export_batch(text, text, uuid, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_host_export.fail_host_export_batch(text, text, uuid, text, integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION
   opengeni_host_export.host_export_claim_sidecars(text, text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_host_export.host_export_consumer_status_sidecar(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION
   opengeni_host_export.dead_letter_host_export_head(text, text, uuid, bigint, text) FROM PUBLIC;
 
@@ -690,6 +859,52 @@ BEGIN
   LOOP
     EXECUTE format(
       'GRANT EXECUTE ON FUNCTION opengeni_host_export.host_export_claim_sidecars(text, text, uuid) TO %I',
+      v_role
+    );
+  END LOOP;
+END $migration$;
+
+-- Preserve the old failure-settlement ACL on the new codec-aware overload.
+DO $migration$
+DECLARE v_role name;
+BEGIN
+  FOR v_role IN
+    SELECT grantee.rolname
+    FROM pg_catalog.pg_proc proc
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      coalesce(proc.proacl, pg_catalog.acldefault('f', proc.proowner))
+    ) privilege
+    JOIN pg_catalog.pg_roles grantee ON grantee.oid = privilege.grantee
+    WHERE proc.oid =
+      'opengeni_host_export.fail_host_export_batch(text, text, uuid, text, integer)'::regprocedure
+      AND privilege.grantee <> proc.proowner
+      AND privilege.privilege_type = 'EXECUTE'
+  LOOP
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_host_export.fail_host_export_batch(text, text, uuid, text, integer, integer) TO %I',
+      v_role
+    );
+  END LOOP;
+END $migration$;
+
+-- Preserve the published consumer-status ACL on its out-of-band companion.
+DO $migration$
+DECLARE v_role name;
+BEGIN
+  FOR v_role IN
+    SELECT grantee.rolname
+    FROM pg_catalog.pg_proc proc
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      coalesce(proc.proacl, pg_catalog.acldefault('f', proc.proowner))
+    ) privilege
+    JOIN pg_catalog.pg_roles grantee ON grantee.oid = privilege.grantee
+    WHERE proc.oid =
+      'opengeni_host_export.host_export_consumer_status(text, text)'::regprocedure
+      AND privilege.grantee <> proc.proowner
+      AND privilege.privilege_type = 'EXECUTE'
+  LOOP
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_host_export.host_export_consumer_status_sidecar(text, text) TO %I',
       v_role
     );
   END LOOP;
@@ -746,6 +961,10 @@ COMMENT ON COLUMN host_export_outbox.payload IS
   'Original storage payload. Session-event rows carry exact codec truth in payload_codec_version; usage rows remain ordinary JSON with NULL codec version.';
 COMMENT ON COLUMN host_export_outbox.payload_codec_version IS
   'Out-of-band codec truth for the complete outbox payload. NULL is literal legacy or ordinary usage JSON; 1 means the whole payload used the application lossless codec.';
+COMMENT ON COLUMN host_export_consumers.last_error IS
+  'Exact internal host-sink failure storage. Public logs use a separate fixed structural projection.';
+COMMENT ON COLUMN host_export_consumers.last_error_codec_version IS
+  'Out-of-band codec truth for the complete last_error value. NULL is literal old-writer data; 1 means the application encoded the whole value.';
 COMMENT ON COLUMN host_export_dead_letters.envelope IS
   'Original mixed dead-letter envelope. SQL-built envelopes remain literal with NULL envelope_codec_version; nested session-event payload codec truth is separate.';
 COMMENT ON COLUMN host_export_dead_letters.event_payload_codec_version IS

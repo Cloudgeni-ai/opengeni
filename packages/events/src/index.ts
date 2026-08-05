@@ -587,11 +587,13 @@ export async function publishDurableSessionEvents(
   const publishStartedAt = performance.now();
   try {
     await bus.publish(workspaceId, sessionId, appended);
-  } catch (error) {
-    console.warn(
-      `[events] live publish failed for ${workspaceId}/${sessionId}; ${appended.length} event(s) are durable and reconcile on stream replay`,
-      error,
-    );
+  } catch {
+    console.warn("[events] live publish failed; durable events reconcile on stream replay", {
+      errorClass: "EventPublishOperationError",
+      errorCode: "session_event_live_publish_failed",
+      origin: "events",
+      eventCount: appended.length,
+    });
   }
   observeSince(observe?.onPublish, publishStartedAt, appended.length);
 }
@@ -604,10 +606,14 @@ export async function publishDurableWorkspaceControlEvent(
 ): Promise<void> {
   try {
     await bus.publishWorkspaceControl(workspaceId, event);
-  } catch (error) {
+  } catch {
     console.warn(
-      `[events] workspace-control live publish failed for ${workspaceId} at revision ${event.revision}; the event is durable and reconciles on stream replay`,
-      error,
+      "[events] workspace-control live publish failed; durable event reconciles on stream replay",
+      {
+        errorClass: "EventPublishOperationError",
+        errorCode: "workspace_control_live_publish_failed",
+        origin: "events",
+      },
     );
   }
 }
@@ -634,11 +640,13 @@ export async function appendAndPublishTurnEventsFenced(
   if (result.events.length === 0) return result;
   try {
     await bus.publish(workspaceId, sessionId, result.events);
-  } catch (error) {
-    console.warn(
-      `[events] live fenced publish failed for ${workspaceId}/${sessionId}/${turnId}@${executionGeneration}/${attemptId}; ${result.events.length} event(s) are durable`,
-      error,
-    );
+  } catch {
+    console.warn("[events] live fenced publish failed; events remain durable", {
+      errorClass: "EventPublishOperationError",
+      errorCode: "fenced_event_live_publish_failed",
+      origin: "events",
+      eventCount: result.events.length,
+    });
   }
   return result;
 }

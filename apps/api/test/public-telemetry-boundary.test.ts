@@ -10,14 +10,15 @@ describe("public telemetry boundaries", () => {
     signedUrl.searchParams.set(["X", "Amz", "Signature"].join("-"), sentinel);
     const authorizationHeader = ["Author", "ization: Bea", "rer ", sentinel].join("");
     const error = Object.assign(new Error(`request failed ${sentinel} ${signedUrl.toString()}`), {
-      code: "OAUTH_UPSTREAM_REJECTED",
+      name: sentinel,
+      code: sentinel,
       status: 401,
       responseBody: authorizationHeader,
     });
 
     expect(oauthPublicErrorFields(error)).toEqual({
-      errorClass: "Error",
-      errorCode: "OAUTH_UPSTREAM_REJECTED",
+      errorClass: "OAuthOperationError",
+      errorCode: "oauth_operation_failed",
       status: 401,
       origin: "oauth",
     });
@@ -28,7 +29,8 @@ describe("public telemetry boundaries", () => {
 
   test("Toolspace telemetry omits ids, bodies, URLs, and exact tool results", () => {
     const error = Object.assign(new Error(`tool result ${sentinel}`), {
-      code: "TOOLSPACE_UPSTREAM_FAILED",
+      name: sentinel,
+      code: sentinel,
       statusCode: 503,
       serverId: `server-${sentinel}`,
       url: `https://provider.example/${sentinel}`,
@@ -36,8 +38,8 @@ describe("public telemetry boundaries", () => {
     });
 
     expect(toolspacePublicErrorFields(error)).toEqual({
-      errorClass: "Error",
-      errorCode: "TOOLSPACE_UPSTREAM_FAILED",
+      errorClass: "ToolspaceOperationError",
+      errorCode: "toolspace_operation_failed",
       status: 503,
       origin: "toolspace",
     });

@@ -110,6 +110,7 @@ import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
+import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
 import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -5011,9 +5012,11 @@ describe("runtime event normalization", () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
     const registryId = `registry-${sentinel}`;
     const exactSourceError = Object.assign(new Error(`connect failed: ${sentinel}`), {
-      code: "MCP_TEST_FAILURE",
+      name: sentinel,
+      code: sentinel,
       status: 503,
       responseBody: { sentinel },
+      cause: { exact: sentinel },
     });
     const makeFacade = () =>
       new PrefixedMcpServer(
@@ -5066,7 +5069,7 @@ describe("runtime event normalization", () => {
       expect(lifecycleErrors).toContainEqual(
         expect.objectContaining({
           name: "McpLifecycleError",
-          code: "MCP_TEST_FAILURE",
+          code: "mcp_connect_failed",
           status: 503,
           origin: "runtime",
         }),
@@ -5075,6 +5078,71 @@ describe("runtime event normalization", () => {
       expect(renderedLogs).not.toContain(sentinel);
       expect(exactSourceError.message).toContain(sentinel);
       expect(exactSourceError.responseBody).toEqual({ sentinel });
+      expect(exactSourceError.cause).toEqual({ exact: sentinel });
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("MCP cleanup closes every batch and returns the first exact close error", async () => {
+    const sentinel = "synthetic-mcp-close-boundary-4d7e91";
+    const closeCalls: number[] = [];
+    const exactCloseErrors = new Map<number, Error>();
+    const servers = Array.from({ length: MCP_MAX_CONCURRENT_SERVER_OPERATIONS + 1 }, (_, index) => {
+      const exactCloseError = Object.assign(new Error(`close failed ${index}: ${sentinel}`), {
+        name: `${sentinel}-${index}`,
+        code: `${sentinel}-code-${index}`,
+        status: 502,
+        cause: { exact: `${sentinel}-cause-${index}` },
+      });
+      if (index === 0 || index === MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
+        exactCloseErrors.set(index, exactCloseError);
+      }
+      return new PrefixedMcpServer(
+        {
+          name: `inner-${sentinel}-${index}`,
+          cacheToolsList: false,
+          async connect() {},
+          async close() {
+            closeCalls.push(index);
+            const failure = exactCloseErrors.get(index);
+            if (failure) throw failure;
+          },
+          async listTools() {
+            return [];
+          },
+          async callTool() {
+            return [];
+          },
+          async invalidateToolsCache() {},
+        } as MCPServer,
+        `registry-${sentinel}-${index}`,
+      );
+    });
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const connected = await connectMcpServersInBatches(servers, { strict: true });
+      const closeError = await connected.close().then(
+        () => null,
+        (error) => error as Error,
+      );
+      expect(closeCalls.toSorted((left, right) => left - right)).toEqual(
+        servers.map((_, index) => index),
+      );
+      expect(closeError).toBe(exactCloseErrors.get(MCP_MAX_CONCURRENT_SERVER_OPERATIONS));
+      expect(closeError?.cause).toEqual({
+        exact: `${sentinel}-cause-${MCP_MAX_CONCURRENT_SERVER_OPERATIONS}`,
+      });
+      const renderedLogs = JSON.stringify([...warnings, ...errors]);
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain("mcp_close_failed");
+      expect(renderedLogs).not.toContain(sentinel);
     } finally {
       console.warn = originalWarn;
       console.error = originalError;
@@ -5460,8 +5528,9 @@ describe("runtime event normalization", () => {
     // The prod case: a best-effort server's tool call throws a raw transport 401
     // that never became the broker's JSON-RPC short-circuit (e.g. a codex_apps
     // bearer expired mid-turn). callTool must return a tool-error RESULT the model
-    // sees — with LOOP-SAFE copy (do-not-retry) and only the safe error surface
-    // (class + status), never the raw response body — rather than throw.
+    // sees — with LOOP-SAFE copy (do-not-retry) and only the fixed public
+    // classification, never the raw response body or arbitrary Error fields —
+    // rather than throw.
     const flaky = startTestMcpServer({
       unauthorizedForMethods: ["tools/call"],
     });
@@ -5525,8 +5594,8 @@ describe("runtime event normalization", () => {
           (a) =>
             typeof a === "object" &&
             a !== null &&
-            (a as { errorClass?: unknown }).errorClass === "StreamableHTTPError" &&
-            (a as { status?: unknown }).status === 401,
+            (a as { errorClass?: unknown }).errorClass === "McpOperationError" &&
+            (a as { errorCode?: unknown }).errorCode === "mcp_tool_call_failed",
         ),
       );
       expect(warned).toBeDefined();
@@ -5535,10 +5604,11 @@ describe("runtime event normalization", () => {
         unknown
       >;
       expect(payload).toMatchObject({
-        errorClass: "StreamableHTTPError",
-        status: 401,
+        errorClass: "McpOperationError",
+        errorCode: "mcp_tool_call_failed",
         origin: "runtime",
       });
+      expect(payload.status).toBeUndefined();
       expect(JSON.stringify(warnings)).not.toContain("flaky");
       expect(JSON.stringify(warnings)).not.toContain("search_documents");
       expect(JSON.stringify(warnings)).not.toContain("unauthorized");

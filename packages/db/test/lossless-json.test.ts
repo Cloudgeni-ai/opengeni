@@ -13,10 +13,11 @@ import {
   withLosslessContentWriteVersion,
 } from "../src/lossless-json";
 
-if (false) {
+function assertLosslessContentWriteTypeContract(): void {
   // @ts-expect-error protected writes must include the content key they stamp
   withLosslessContentWriteVersion({ id: "missing-payload" }, "payload", "payloadCodecVersion");
 }
+void assertLosslessContentWriteTypeContract;
 
 describe("lossless PostgreSQL content boundaries", () => {
   test("leaves ordinary queryable JSON unchanged", () => {
