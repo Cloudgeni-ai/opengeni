@@ -5,8 +5,8 @@ import type {
   TranscriptionRecordingSegment,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import type { Database } from "./index";
-import { withWorkspaceSubjectRls } from "./index";
+import type { Database } from "./database";
+import { withWorkspaceSubjectRls } from "./database";
 import * as schema from "./schema";
 
 type RecordingRow = typeof schema.transcriptionRecordings.$inferSelect;
