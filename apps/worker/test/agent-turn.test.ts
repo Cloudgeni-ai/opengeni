@@ -20,6 +20,7 @@ import {
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
+  CompactionNeededError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   WorkspaceArchiveIntegrityError,
@@ -41,7 +42,7 @@ import {
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
   createCompactionModelUsageEventState,
-  createModelResponseUsageEventState,
+  createModelResponseEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
@@ -59,11 +60,11 @@ import {
   modelSupportsImageInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
-  modelResponseUsageContextSignal,
+  modelResponseContextSignal,
   managedSandboxOwnershipForTurn,
   pointerReconcileReason,
   processCompactionModelUsageEvent,
-  processModelResponseUsageEvent,
+  processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountFromMetadata,
@@ -1161,11 +1162,11 @@ describe("production model-response usage callback authority", () => {
           };
         }),
       });
-      const fencedInputs: number[] = [];
-      const state = createModelResponseUsageEventState();
+      const fencedInputs: Array<number | null> = [];
+      const state = createModelResponseEventState();
       const emittedSourceKeys = new Set<string>();
       const process = (event: any, targetState = state, dispatchId = "activity-A") =>
-        processModelResponseUsageEvent({
+        processModelResponseTerminalEvent({
           event,
           state: targetState,
           dispatchId,
@@ -1201,7 +1202,7 @@ describe("production model-response usage callback authority", () => {
         }),
         {
           throwOnCompactionNeeded: true,
-          contextCompactionSignal: () => modelResponseUsageContextSignal(state),
+          contextCompactionSignal: () => modelResponseContextSignal(state),
         },
       );
       const first = [{ type: "message", role: "user", content: "start" }] as any;
@@ -1215,9 +1216,8 @@ describe("production model-response usage callback authority", () => {
 
       expect((await process(normalizedTerminal)).status).toBe("processed");
       expect((await process(rawTerminal)).status).toBe("duplicate");
-      expect(state.responseUsageCount).toBe(1);
-      expect(state.providerContextRevision).toBe(1);
-      expect(state.lastProviderContextTokensObserved).toBe(120);
+      expect(state.responseCount).toBe(1);
+      expect(state.contextSignal).toEqual({ revision: 1, totalTokens: 120 });
       expect(fencedInputs).toEqual([100]);
       expect(durableUsageSourceKeys).toEqual(new Set([response.id]));
       expect([...billingRows.values()]).toEqual([
@@ -1259,10 +1259,10 @@ describe("production model-response usage callback authority", () => {
       // response id reaches the durable fences again, but duplicate authority
       // prevents every local metric/context/fenced-input effect and the DB-level
       // idempotency key keeps one billing row.
-      const restartedState = createModelResponseUsageEventState();
+      const restartedState = createModelResponseEventState();
       const restartedInputsBefore = fencedInputs.length;
       const restartedEmittedSourceKeys = new Set<string>();
-      const restarted = await processModelResponseUsageEvent({
+      const restarted = await processModelResponseTerminalEvent({
         event: normalizedTerminal as any,
         state: restartedState,
         dispatchId: "activity-B",
@@ -1295,15 +1295,124 @@ describe("production model-response usage callback authority", () => {
         authoritative: false,
         sourceKey: response.id,
       });
-      expect(restartedState.responseUsageCount).toBe(1);
-      expect(restartedState.providerContextRevision).toBe(0);
-      expect(restartedState.lastProviderContextTokensObserved).toBeNull();
+      expect(restartedState.responseCount).toBe(1);
+      expect(restartedState.contextSignal).toBeNull();
       expect(fencedInputs).toHaveLength(restartedInputsBefore);
       expect(billingRows).toHaveLength(1);
       const metricsAfterRestart = await observability.prometheusMetrics();
       expect(metricsAfterRestart).toMatch(
         /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
       );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("clears missing usage and uses the same response ordinal when usage resumes", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async () => undefined,
+    );
+    try {
+      const state = createModelResponseEventState();
+      const fencedInputs: Array<number | null> = [];
+      const emittedSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })),
+      });
+      const process = (event: RunRawModelStreamEvent) =>
+        processModelResponseTerminalEvent({
+          event,
+          state,
+          dispatchId: "activity-missing-usage",
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          turnAttemptId: "attempt-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          metricProvider: "codex-subscription",
+          externallyBilled: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys,
+          renewLease: async () => undefined,
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+          setLastInputTokens: async (tokens) => {
+            fencedInputs.push(tokens);
+          },
+        });
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () => modelResponseContextSignal(state),
+        },
+      );
+
+      const first = [{ type: "message", role: "user", content: "start" }] as any;
+      await filter({ modelData: { input: first, instructions: "system" }, agent: {} as any });
+      const missingUsage = new RunRawModelStreamEvent({
+        type: "response_done",
+        response: { id: "resp-1", output: [] },
+      } as any);
+      expect(await process(missingUsage)).toMatchObject({
+        status: "processed",
+        authoritative: true,
+      });
+      expect(state).toMatchObject({
+        responseCount: 1,
+        contextSignal: null,
+      });
+      expect(fencedInputs).toEqual([null]);
+
+      const second = [
+        ...first,
+        { type: "message", role: "assistant", content: "first response" },
+        { type: "message", role: "user", content: "continue" },
+      ] as any;
+      await filter({ modelData: { input: second, instructions: "system" }, agent: {} as any });
+      const validUsage = new RunRawModelStreamEvent({
+        type: "response_done",
+        response: {
+          id: "resp-2",
+          output: [],
+          usage: { inputTokens: 11_000, outputTokens: 1_000, totalTokens: 12_000 },
+        },
+      } as any);
+      expect(await process(validUsage)).toMatchObject({
+        status: "processed",
+        authoritative: true,
+      });
+      expect(state).toMatchObject({
+        responseCount: 2,
+        contextSignal: { revision: 2, totalTokens: 12_000 },
+      });
+      expect(fencedInputs).toEqual([null, 11_000]);
+
+      const third = [
+        ...second,
+        { type: "message", role: "assistant", content: "second response" },
+        { type: "message", role: "user", content: "continue again" },
+      ] as any;
+      await expect(
+        filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
+      ).rejects.toBeInstanceOf(CompactionNeededError);
     } finally {
       recordUsageSpy.mockRestore();
     }
@@ -1346,10 +1455,10 @@ describe("production model-response usage callback authority", () => {
             },
           },
         } as any);
-      const state = createModelResponseUsageEventState();
+      const state = createModelResponseEventState();
       const emittedSourceKeys = new Set<string>();
       const process = (event: RunRawModelStreamEvent) =>
-        processModelResponseUsageEvent({
+        processModelResponseTerminalEvent({
           event,
           state,
           dispatchId: "activity-A",
@@ -1378,7 +1487,7 @@ describe("production model-response usage callback authority", () => {
 
       const beforeCompaction = await process(terminal(100, 20));
       // The compaction retry re-enters the stream callback with this same
-      // activity-wide state rather than resetting responseUsageCount.
+      // activity-wide state rather than resetting responseCount.
       const afterCompaction = await process(terminal(200, 30));
 
       expect(beforeCompaction).toMatchObject({
@@ -1391,7 +1500,7 @@ describe("production model-response usage callback authority", () => {
         sourceKey: "activity-A:response-2",
         authoritative: true,
       });
-      expect(state.responseUsageCount).toBe(2);
+      expect(state.responseCount).toBe(2);
       expect(durableUsageSourceKeys).toEqual(
         new Set(["activity-A:response-1", "activity-A:response-2"]),
       );

@@ -6257,9 +6257,9 @@ export const Session = z.object({
   createIdempotencyKey: z.string().nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
-  // Actual input tokens of the last model call of the most recent turn; the
-  // pre-turn portable context-compaction trigger reads it as its budget
-  // signal. Null until a turn with usage has completed.
+  // Provider-reported input tokens of the latest authoritative terminal
+  // response. Null after a context transition or whenever that latest response
+  // supplied no usable count, so an older response can never drive compaction.
   lastInputTokens: z.number().int().nonnegative().nullable(),
   queueVersion: z.number().int().nonnegative(),
   queueHeadPosition: z.number().int(),

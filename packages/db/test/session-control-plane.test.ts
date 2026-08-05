@@ -4582,6 +4582,19 @@ describe("clean session control plane", () => {
         lastInputTokens: 999,
       }),
     ).toBe(true);
+    expect(
+      await setSessionLastInputTokensForTurnAttempt(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: second!.id,
+        expectedExecutionGeneration: second!.executionGeneration,
+        expectedAttemptId: secondAttemptId,
+        lastInputTokens: null,
+      }),
+    ).toBe(true);
+    expect(
+      (await getSession(client.db, grant.workspaceId!, session.id))?.lastInputTokens,
+    ).toBeNull();
     const currentCompaction = await applyContextCompaction(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,

@@ -70,6 +70,7 @@ import {
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
@@ -415,6 +416,22 @@ describe("runtime event normalization", () => {
       },
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("recognizes a terminal response when the provider omitted usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage" },
+      },
+    } as any;
+
+    expect(modelTerminalResponseFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
   });
 
   test("extracts raw Responses usage without manufacturing a durable event", () => {

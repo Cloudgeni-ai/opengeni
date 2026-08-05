@@ -402,6 +402,11 @@ export type ModelResponseUsage = {
   };
 };
 
+export type ModelTerminalResponse = {
+  responseId?: string;
+  usage: ModelResponseUsage | null;
+};
+
 type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -6297,8 +6302,22 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
 }
 
 export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResponseUsage | null {
+  return modelTerminalResponseFromSdkEvent(event)?.usage ?? null;
+}
+
+/** Recognize a terminal response even when the provider omitted usage. */
+export function modelTerminalResponseFromSdkEvent(
+  event: RunStreamEvent,
+): ModelTerminalResponse | null {
   const response = modelResponseFromSdkEvent(event);
-  return modelResponseUsageFromResponse(response);
+  if (!response) {
+    return null;
+  }
+  const responseId = modelResponseIdFromResponse(response);
+  return {
+    ...(responseId ? { responseId } : {}),
+    usage: modelResponseUsageFromResponse(response),
+  };
 }
 
 /** Normalize usage from either a Responses or Chat Completions result. */
@@ -6307,12 +6326,7 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
   if (!usage) {
     return null;
   }
-  const responseId =
-    typeof (response as { id?: unknown } | null)?.id === "string"
-      ? (response as { id: string }).id
-      : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
-        ? (response as { responseId: string }).responseId
-        : undefined;
+  const responseId = modelResponseIdFromResponse(response);
   const serviceTier = modelResponseServiceTierFromResponse(response);
   const gatewayBilling = gatewayBillingFromResponse(response);
   return {
@@ -6321,6 +6335,14 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
     ...(gatewayBilling ? { gatewayBilling } : {}),
     usage,
   };
+}
+
+function modelResponseIdFromResponse(response: unknown): string | undefined {
+  return typeof (response as { id?: unknown } | null)?.id === "string"
+    ? (response as { id: string }).id
+    : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
+      ? (response as { responseId: string }).responseId
+      : undefined;
 }
 
 /** Extract only the bounded, non-secret Gateway billing facts we consume. */

@@ -350,6 +350,8 @@ prior-call input count at a turn boundary, or the immediately preceding
 same-activity provider total plus bounded newly appended input. With no bound
 provider count, OpenGeni sends the request and recovers from a genuine provider
 context overflow instead of compacting from a whole-request approximation.
+Each authoritative terminal response replaces the durable count with its usable
+input count or null; an omitted count never leaves an older response active.
 Local media-aware estimates remain confined to compaction-request fitting and
 history-only replacement reporting. See
 [`context-compaction.md`](context-compaction.md).
