@@ -196,7 +196,10 @@ function app(
     managedAuth: {
       handler: async () => new Response("not used", { status: 404 }),
       api: {
-        getSession: async ({ headers }: { headers: Headers }) => cookieSession(headers),
+        getSession: async ({ headers }: { headers: Headers }) => ({
+          headers: new Headers(),
+          response: cookieSession(headers),
+        }),
       },
     } as any,
     codexFetch: options.codexFetch ?? (provider.fetch.bind(provider) as typeof fetch),
@@ -287,10 +290,31 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(signin.status).toBeLessThan(300);
     const cookie = signin.headers.get("set-cookie");
     expect(cookie).toBeTruthy();
+
+    const [agedSession] = await admin`
+      update auth_sessions
+      set expires_at = now() + interval '5 days',
+          updated_at = now() - interval '2 days'
+      where user_id = (select id from auth_users where email = ${email})
+      returning expires_at`;
+    expect(agedSession).toBeTruthy();
+
     const access = await actual.request("/v1/access/me", {
       headers: { cookie: cookie! },
     });
     expect(access.status).toBe(200);
+    const renewedCookie = access.headers
+      .getSetCookie()
+      .find((value) => value.includes("session_token="));
+    expect(renewedCookie).toBeTruthy();
+    const [refreshedSession] = await admin`
+      select expires_at
+      from auth_sessions
+      where user_id = (select id from auth_users where email = ${email})`;
+    expect(refreshedSession!.expires_at.getTime()).toBeGreaterThan(
+      agedSession!.expires_at.getTime(),
+    );
+
     const context = (await access.json()) as AccessContext;
     const ownerSubject = context.workspaceGrants[0]!.subjectId;
     expect(ownerSubject).toStartWith("user:");
@@ -321,7 +345,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       connected.id,
       "credit-reset",
       crypto.randomUUID(),
-      browserHeaders(cookie!),
+      browserHeaders(renewedCookie!),
     );
     expect(prepared.response.status).toBe(200);
     expect(prepared.body.confirmationToken).toBeString();

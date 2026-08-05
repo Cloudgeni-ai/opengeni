@@ -1,5 +1,5 @@
 import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useEmbeddedFileAttachments,
   type EmbeddedFileAttachmentClientOverride,
@@ -84,15 +84,49 @@ export function useFileAttachments(
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const attachmentsRef = useRef<FileAttachment[]>([]);
+  attachmentsRef.current = attachments;
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
+  // Upload promises are not cancellable at this layer. Fence their settlements
+  // when the hook changes client/workspace or unmounts so an old tenant/session
+  // cannot mutate the next attachment queue (or an already-unmounted component).
+  const scopeGeneration = useRef(0);
+  const previousScope = useRef({ client, workspaceId });
+
+  useEffect(() => {
+    const previous = previousScope.current;
+    if (previous.client === client && previous.workspaceId === workspaceId) return;
+    previousScope.current = { client, workspaceId };
+    scopeGeneration.current += 1;
+    sources.current.clear();
+    setAttachments((current) => {
+      for (const attachment of current) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      return [];
+    });
+  }, [client, workspaceId]);
+
+  useEffect(
+    () => () => {
+      scopeGeneration.current += 1;
+      sources.current.clear();
+      for (const attachment of attachmentsRef.current) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      attachmentsRef.current = [];
+    },
+    [],
+  );
 
   // Run (or re-run) the upload for one already-tracked attachment id. Sets it
   // back to `uploading`, then resolves to `ready` (with the asset) or `failed`
   // (with the error message).
   const startUpload = useCallback(
     (id: string, file: File) => {
+      const generation = scopeGeneration.current;
       void client
         .uploadFile(workspaceId, {
           filename: file.name || "file",
@@ -100,6 +134,7 @@ export function useFileAttachments(
           data: file,
         })
         .then((asset) => {
+          if (scopeGeneration.current !== generation) return;
           // Retry bytes are useful only until durable finalization succeeds.
           // Drop the source File immediately; restored/ready attachments must
           // never retain browser-local byte authority.
@@ -121,6 +156,7 @@ export function useFileAttachments(
           );
         })
         .catch((error: unknown) => {
+          if (scopeGeneration.current !== generation) return;
           setAttachments((current) =>
             current.map((attachment) =>
               attachment.id === id
