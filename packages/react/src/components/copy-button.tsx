@@ -93,7 +93,7 @@ export function CopyButton({
           aria-label={tip}
           onClick={onClick}
           className={cn(
-            "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+            "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm pointer-coarse:size-11",
             "text-og-fg-subtle transition-[opacity,color,background-color] duration-150",
             "hover:bg-og-surface-2/80 hover:text-og-fg",
             "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent/40",

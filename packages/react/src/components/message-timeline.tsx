@@ -2247,7 +2247,7 @@ function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
       className={cn(
         "shrink-0 tabular-nums text-og-xs text-og-fg-subtle",
         "opacity-0 transition-opacity duration-150",
-        "group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-70",
+        "group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-100",
       )}
     >
       {formatClockTime(occurredAt)}
