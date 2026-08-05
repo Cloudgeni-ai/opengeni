@@ -357,7 +357,7 @@ async function seedStoppedRecording(
 function resumableRecordingResponse(
   manifest: VoiceRecordingManifest,
   input: {
-    state: "ready" | "failed" | "complete" | "discarded";
+    state: "segmenting" | "ready" | "transcribing" | "failed" | "complete" | "discarded";
     segmentCount?: number;
     completedSegmentCount?: number;
     retryable?: boolean;
@@ -1262,6 +1262,155 @@ describe("useVoiceInput", () => {
     expect(processNextCalls).toBe(1);
     expect(discardCalls).toBe(1);
     expect(draft).toBe("existing reclaimed transcript");
+    await hook.unmount();
+  });
+
+  test("re-enters process-next after a claimed-segment crash and repeated stale polling", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    const recordingId = "recording-crashed-segment";
+    await seedStoppedRecording(store, recordingId, "2026-08-04T07:00:00.000Z");
+    const manifest = store.manifests.get(recordingId);
+    if (!manifest) throw new Error("missing crashed recording manifest");
+    const transcribing = resumableRecordingResponse(manifest, {
+      state: "transcribing",
+      segmentCount: 1,
+    });
+    const complete = resumableRecordingResponse(manifest, {
+      state: "complete",
+      transcriptText: "recovered after crash",
+    });
+    let draft = "existing";
+    let getCalls = 0;
+    let uploadCalls = 0;
+    let finalizeCalls = 0;
+    let processNextCalls = 0;
+    let discardCalls = 0;
+    let crashed = false;
+    const hook = await renderRecoveredResumableRecording({
+      client: {
+        transcribeAudio: async () => ({ text: "wrong path", languages: [] }),
+        createTranscriptionRecording: async () => transcribing,
+        getTranscriptionRecording: async () => {
+          getCalls += 1;
+          return transcribing;
+        },
+        uploadTranscriptionRecordingChunk: async () => {
+          uploadCalls += 1;
+          throw new Error("claimed recordings must not re-upload chunks");
+        },
+        finalizeTranscriptionRecording: async () => {
+          finalizeCalls += 1;
+          return transcribing;
+        },
+        processNextTranscriptionRecordingSegment: async () => {
+          processNextCalls += 1;
+          if (!crashed) {
+            crashed = true;
+            throw new Error("handler exited after claiming the segment");
+          }
+          return processNextCalls === 2 ? transcribing : complete;
+        },
+        discardTranscriptionRecording: async () => {
+          discardCalls += 1;
+          return resumableRecordingResponse(manifest, { state: "discarded" });
+        },
+      },
+      store,
+      value: draft,
+      setValue: (value) => {
+        draft = value;
+      },
+      ownerId: "crashed-segment-owner",
+    });
+
+    await act(async () => {
+      hook.result.current.retry();
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await settle(30);
+    });
+    expect(hook.result.current.status).toBe("error");
+    expect(hook.result.current.error).toBe("unknown");
+
+    await act(async () => {
+      hook.result.current.retry();
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      await settle(30);
+    });
+
+    expect(getCalls).toBe(0);
+    expect(uploadCalls).toBe(0);
+    expect(finalizeCalls).toBe(2);
+    expect(processNextCalls).toBe(3);
+    expect(discardCalls).toBe(1);
+    expect(draft).toBe("existing recovered after crash");
+    expect(hook.result.current.status).toBe("idle");
+    expect(store.manifests.has(recordingId)).toBe(false);
+    await hook.unmount();
+  });
+
+  test("re-enters finalize while polling a segmenting assembly until it becomes ready", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    const recordingId = "recording-stale-assembly";
+    await seedStoppedRecording(store, recordingId, "2026-08-04T07:00:00.000Z");
+    const manifest = store.manifests.get(recordingId);
+    if (!manifest) throw new Error("missing stale assembly manifest");
+    const segmenting = resumableRecordingResponse(manifest, {
+      state: "segmenting",
+      segmentCount: 0,
+    });
+    const ready = resumableRecordingResponse(manifest, { state: "ready" });
+    const complete = resumableRecordingResponse(manifest, {
+      state: "complete",
+      transcriptText: "assembled after stale lease",
+    });
+    let draft = "";
+    let getCalls = 0;
+    let finalizeCalls = 0;
+    let processNextCalls = 0;
+    const hook = await renderRecoveredResumableRecording({
+      client: {
+        transcribeAudio: async () => ({ text: "wrong path", languages: [] }),
+        createTranscriptionRecording: async () => segmenting,
+        getTranscriptionRecording: async () => {
+          getCalls += 1;
+          return segmenting;
+        },
+        uploadTranscriptionRecordingChunk: async () => {
+          throw new Error("segmenting recordings must not re-upload chunks");
+        },
+        finalizeTranscriptionRecording: async () => {
+          finalizeCalls += 1;
+          return finalizeCalls === 1 ? segmenting : ready;
+        },
+        processNextTranscriptionRecordingSegment: async () => {
+          processNextCalls += 1;
+          return complete;
+        },
+        discardTranscriptionRecording: async () =>
+          resumableRecordingResponse(manifest, { state: "discarded" }),
+      },
+      store,
+      value: draft,
+      setValue: (value) => {
+        draft = value;
+      },
+      ownerId: "stale-assembly-owner",
+    });
+
+    await act(async () => {
+      hook.result.current.retry();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      await settle(20);
+    });
+
+    expect(getCalls).toBe(0);
+    expect(finalizeCalls).toBe(2);
+    expect(processNextCalls).toBe(1);
+    expect(draft).toBe("assembled after stale lease");
+    expect(hook.result.current.status).toBe("idle");
+    expect(store.manifests.has(recordingId)).toBe(false);
     await hook.unmount();
   });
 

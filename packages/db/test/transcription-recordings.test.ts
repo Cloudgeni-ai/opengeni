@@ -72,6 +72,24 @@ describe("resumable transcription recording persistence", () => {
     expect(recordingUpdate?.[1]).toContain("errorCode: null");
   });
 
+  test("reclaims stale segment attempts under a row lock and fences late completions", async () => {
+    const source = await readFile(sourcePath, "utf8");
+    expect(source).toContain('eq(schema.transcriptionRecordingSegments.state, "transcribing")');
+    expect(source).toContain('.limit(1)\n      .for("update")');
+    expect(source).toContain(
+      "if (active?.attemptStartedAt && active.attemptStartedAt >= input.staleBefore)",
+    );
+    expect(source).toContain('state: "failed"');
+    expect(source).toContain("attemptId: null");
+    expect(source).toContain(
+      "eq(schema.transcriptionRecordingSegments.attemptId, active.attemptId!)",
+    );
+    expect(source).toContain(
+      "eq(schema.transcriptionRecordingSegments.attemptId, input.attemptId)",
+    );
+    expect(source).toContain("eq(schema.transcriptionRecordings.processingOwner, input.attemptId)");
+  });
+
   test("declares every transcription table in the runtime posture contract", () => {
     for (const table of [
       "transcription_recordings",

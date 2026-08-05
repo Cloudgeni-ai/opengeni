@@ -9,7 +9,7 @@ const claim: TranscriptionRecordingObjectCleanupClaim = {
   workspaceId: "22222222-2222-4222-8222-222222222222",
   subjectId: "user:reaper-test",
   recordingId: "33333333-3333-4333-8333-333333333333",
-  objectKey: "transcription-recordings/account/workspace/recording/chunks/00000000.bin",
+  objectKey: `transcription-recordings/account/workspace/recording/chunks/00000000-${"a".repeat(64)}.bin`,
   cleanupClaimId: "44444444-4444-4444-8444-444444444444",
 };
 
@@ -36,7 +36,10 @@ describe("transcription recording object reaper", () => {
       completeTranscriptionObject: failedSettlement,
       purgeTranscriptionRecordings: async () => 0,
       deleteObject: async () => {
-        throw new Error("provider unavailable");
+        throw Object.assign(new Error("provider body contains private objectKey and token"), {
+          code: "provider",
+          status: 503,
+        });
       },
     });
 
@@ -47,6 +50,16 @@ describe("transcription recording object reaper", () => {
     });
     expect(failedSettlement).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
+    const warningAttributes = warn.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(warningAttributes).toMatchObject({
+      workspaceId: claim.workspaceId,
+      recordingId: claim.recordingId,
+      errorCategory: "provider",
+      errorStatus: 503,
+    });
+    expect(warningAttributes).not.toHaveProperty("objectKey");
+    expect(JSON.stringify(warningAttributes)).not.toContain(claim.objectKey);
+    expect(JSON.stringify(warningAttributes)).not.toContain("provider body contains private");
 
     const deleteObject = mock(async () => undefined);
     const completeTranscriptionObject = mock(async () => true);

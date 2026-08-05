@@ -12,6 +12,28 @@ export const FILE_UPLOAD_CLEANUP_GRACE_MS = 60 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_BATCH_SIZE = 100;
 
+function cleanupErrorAttributes(error: unknown): {
+  errorCategory: string;
+  errorStatus?: number;
+} {
+  let errorCategory = "provider_error";
+  let errorStatus: number | undefined;
+  if (error && typeof error === "object") {
+    const rawCode = (error as { code?: unknown }).code;
+    if (typeof rawCode === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/.test(rawCode)) {
+      errorCategory = rawCode;
+    }
+    const rawStatus = Number(
+      (error as { status?: unknown; statusCode?: unknown }).status ??
+        (error as { statusCode?: unknown }).statusCode,
+    );
+    if (Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599) {
+      errorStatus = rawStatus;
+    }
+  }
+  return { errorCategory, ...(errorStatus === undefined ? {} : { errorStatus }) };
+}
+
 export type ReapExpiredFileUploadsResult = {
   claimed: number;
   deleted: number;
@@ -60,7 +82,7 @@ export function createFileUploadReaperActivities(
         await purgeTranscriptionRecordings(db, { graceMs, limit: batchSize });
       } catch (error) {
         observability.warn("expired transcription recording metadata purge failed", {
-          error: error instanceof Error ? error.message : String(error),
+          ...cleanupErrorAttributes(error),
         });
       }
       return { claimed: 0, deleted: 0, failed: 0 };
@@ -87,7 +109,7 @@ export function createFileUploadReaperActivities(
           workspaceId: claim.workspaceId,
           uploadId: claim.uploadId,
           fileId: claim.fileId,
-          error: error instanceof Error ? error.message : String(error),
+          ...cleanupErrorAttributes(error),
         });
       }
     }
@@ -111,8 +133,7 @@ export function createFileUploadReaperActivities(
           {
             workspaceId: claim.workspaceId,
             recordingId: claim.recordingId,
-            objectKey: claim.objectKey,
-            error: error instanceof Error ? error.message : String(error),
+            ...cleanupErrorAttributes(error),
           },
         );
       }
@@ -125,7 +146,7 @@ export function createFileUploadReaperActivities(
       });
     } catch (error) {
       observability.warn("expired transcription recording metadata purge failed", {
-        error: error instanceof Error ? error.message : String(error),
+        ...cleanupErrorAttributes(error),
       });
     }
     const claimed = claims.length + recordingClaims.length;

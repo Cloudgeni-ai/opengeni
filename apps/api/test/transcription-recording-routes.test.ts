@@ -319,4 +319,55 @@ describe("resumable transcription recording routes", () => {
       }),
     );
   });
+
+  test("keeps an active segment lease nonterminal without invoking the provider", async () => {
+    const claimSegment = spyOn(
+      dbModule,
+      "claimNextTranscriptionRecordingSegment",
+    ).mockResolvedValue({
+      recording: response("transcribing", { segmentCount: 1 }),
+      claimed: false,
+      attemptId: CORRELATION_ID,
+      segment: null,
+    });
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    const transcribe = mock(async () => ({ text: "must not run", languages: [] }));
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe,
+    };
+    const api = app({
+      transcription,
+      segmenter: { available: () => true, segment: async function* () {} },
+      objectStorage: storage(),
+    });
+
+    const result = await api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": CORRELATION_ID,
+        },
+      },
+    );
+
+    expect(result.status).toBe(202);
+    expect(await result.json()).toMatchObject({ recording: { state: "transcribing" } });
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(claimSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        attemptId: CORRELATION_ID,
+        staleBefore: expect.any(Date),
+      }),
+    );
+  });
 });

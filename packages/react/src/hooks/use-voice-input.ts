@@ -1123,6 +1123,13 @@ async function transcribePersistedRecording(input: {
     throw { code: "invalid_audio" };
   }
 
+  const finalizeInput = {
+    chunkCount: input.manifest.chunkCount,
+    totalBytes: input.manifest.totalBytes,
+    totalDurationMilliseconds: input.manifest.totalDurationMilliseconds,
+    signal: input.signal,
+  };
+
   let remote = await client.createTranscriptionRecording(input.workspaceId, {
     recordingId: input.manifest.recordingId,
     mimeType: input.manifest.mimeType,
@@ -1156,12 +1163,7 @@ async function transcribePersistedRecording(input: {
   remote = await client.finalizeTranscriptionRecording(
     input.workspaceId,
     input.manifest.recordingId,
-    {
-      chunkCount: input.manifest.chunkCount,
-      totalBytes: input.manifest.totalBytes,
-      totalDurationMilliseconds: input.manifest.totalDurationMilliseconds,
-      signal: input.signal,
-    },
+    finalizeInput,
   );
 
   for (;;) {
@@ -1189,12 +1191,7 @@ async function transcribePersistedRecording(input: {
             ? await client.finalizeTranscriptionRecording(
                 input.workspaceId,
                 input.manifest.recordingId,
-                {
-                  chunkCount: input.manifest.chunkCount,
-                  totalBytes: input.manifest.totalBytes,
-                  totalDurationMilliseconds: input.manifest.totalDurationMilliseconds,
-                  signal: input.signal,
-                },
+                finalizeInput,
               )
             : await client.processNextTranscriptionRecordingSegment(
                 input.workspaceId,
@@ -1213,18 +1210,24 @@ async function transcribePersistedRecording(input: {
         remote = await client.finalizeTranscriptionRecording(
           input.workspaceId,
           input.manifest.recordingId,
-          {
-            chunkCount: input.manifest.chunkCount,
-            totalBytes: input.manifest.totalBytes,
-            totalDurationMilliseconds: input.manifest.totalDurationMilliseconds,
-            signal: input.signal,
-          },
+          finalizeInput,
         );
         break;
       case "segmenting":
+        await abortableDelay(500, input.signal);
+        // Re-enter the server-authoritative assembly claim so a stale segmenting
+        // owner can be reclaimed after a handler/process restart.
+        remote = await client.finalizeTranscriptionRecording(
+          input.workspaceId,
+          input.manifest.recordingId,
+          finalizeInput,
+        );
+        break;
       case "transcribing":
         await abortableDelay(500, input.signal);
-        remote = await client.getTranscriptionRecording(
+        // Re-enter the server-authoritative segment claim so a stale attempt is
+        // reclaimed instead of leaving the client in GET-only polling forever.
+        remote = await client.processNextTranscriptionRecordingSegment(
           input.workspaceId,
           input.manifest.recordingId,
           { signal: input.signal },
