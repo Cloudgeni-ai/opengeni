@@ -88,6 +88,7 @@ import type {
   Workspace,
   WorkspaceControlEvent,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceMember,
   WorkspaceRegisteredPack,
@@ -1008,8 +1009,14 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
   "variable-sets:manage",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
@@ -9854,6 +9861,111 @@ export async function getVariableSetByName(
       await listVariableSetVariableMetadata(scopedDb, workspaceId, row.id),
     );
   });
+}
+
+export type VariableSetSecretAuditActor =
+  | { kind: "subject" }
+  | {
+      kind: "agent_attempt";
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+    };
+
+/**
+ * Read one encrypted value, decrypt it, and commit its metadata-only audit in
+ * one RLS transaction. The plaintext is returned only after the audit insert
+ * commits; an audit failure rolls back and rejects the whole operation.
+ */
+export async function readVariableSetSecretAtomically(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    variableSetId?: string;
+    variableSetName?: string;
+    name: string;
+    actor: VariableSetSecretAuditActor;
+    decrypt: (valueEncrypted: string) => string;
+  },
+): Promise<VariableSetSecret | null> {
+  if ((input.variableSetId === undefined) === (input.variableSetName === undefined)) {
+    throw new Error("exactly one variableSetId or variableSetName is required");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({
+          variableSetId: schema.workspaceVariableSets.id,
+          name: schema.workspaceVariableSetVariables.name,
+          version: schema.workspaceVariableSetVariables.version,
+          valueEncrypted: schema.workspaceVariableSetVariables.valueEncrypted,
+        })
+        .from(schema.workspaceVariableSets)
+        .innerJoin(
+          schema.workspaceVariableSetVariables,
+          and(
+            eq(schema.workspaceVariableSetVariables.variableSetId, schema.workspaceVariableSets.id),
+            eq(
+              schema.workspaceVariableSetVariables.workspaceId,
+              schema.workspaceVariableSets.workspaceId,
+            ),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.workspaceVariableSets.accountId, input.accountId),
+            eq(schema.workspaceVariableSets.workspaceId, input.workspaceId),
+            input.variableSetId !== undefined
+              ? eq(schema.workspaceVariableSets.id, input.variableSetId)
+              : eq(schema.workspaceVariableSets.name, input.variableSetName!),
+            eq(schema.workspaceVariableSetVariables.name, input.name),
+          ),
+        )
+        .limit(1);
+      if (!row) return null;
+
+      const value = input.decrypt(row.valueEncrypted);
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            action: "variable_set.variable.read",
+            targetType: "workspace_variable_set",
+            targetId: row.variableSetId,
+            metadata: {
+              variableSetId: row.variableSetId,
+              name: row.name,
+              version: row.version,
+              actorKind: input.actor.kind,
+              ...(input.actor.kind === "agent_attempt"
+                ? {
+                    sessionId: input.actor.sessionId,
+                    turnId: input.actor.turnId,
+                    attemptId: input.actor.attemptId,
+                    executionGeneration: input.actor.executionGeneration,
+                  }
+                : {}),
+            },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
+      return {
+        variableSetId: row.variableSetId,
+        name: row.name,
+        version: row.version,
+        value,
+      };
+    },
+  );
 }
 
 export async function updateVariableSet(
