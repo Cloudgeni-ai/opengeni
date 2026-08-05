@@ -1,5 +1,11 @@
 # @opengeni/config
 
+## 0.10.14
+
+### Patch Changes
+
+- 8135dbb: Promote the default stable Connected Machine agent release to 0.1.9.
+
 ## 0.10.13
 
 ### Patch Changes
