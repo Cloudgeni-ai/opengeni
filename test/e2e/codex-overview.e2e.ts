@@ -285,7 +285,10 @@ beforeAll(async () => {
           ? json(sessionForHeaders(request.headers))
           : new Response("not found", { status: 404 }),
       api: {
-        getSession: async ({ headers }: { headers: Headers }) => sessionForHeaders(headers),
+        getSession: async ({ headers }: { headers: Headers }) => ({
+          headers: new Headers(),
+          response: sessionForHeaders(headers),
+        }),
       },
     } as any,
     codexFetch: provider.fetch.bind(provider) as typeof fetch,
