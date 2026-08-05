@@ -54,7 +54,13 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
 
 function ensureDelegablePermissions(grantPermissions: Permission[], requested: Permission[]): void {
   if (grantPermissions.includes("workspace:admin")) {
-    return;
+    const highTrustMissing = requested.filter(
+      (permission) => permission === "secrets:read" && !grantPermissions.includes("secrets:read"),
+    );
+    if (highTrustMissing.length === 0) return;
+    throw new HTTPException(403, {
+      message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}`,
+    });
   }
   const missing = requested.filter((permission) => !grantPermissions.includes(permission));
   if (missing.length > 0) {

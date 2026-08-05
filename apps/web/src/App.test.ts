@@ -11,6 +11,7 @@ import {
   buildApiKeyPermissionGroups,
   buildSessionMcpPermissionGroups,
   delegableApiKeyPermissions,
+  hasWorkspacePermission,
 } from "./lib/permissions";
 import {
   orgSettingsPath,
@@ -320,7 +321,10 @@ describe("rail session grouping", () => {
         truncated: false,
       },
     });
-    const selectedDetail = railSession({ id: "selected-manager", status: "running" });
+    const selectedDetail = railSession({
+      id: "selected-manager",
+      status: "running",
+    });
 
     const merged = mergeSessionForRail(listProjection, selectedDetail);
     expect(merged.status).toBe("running");
@@ -328,7 +332,10 @@ describe("rail session grouping", () => {
 
     const refreshedStats = { ...listProjection.treeStats!, directChildren: 3 };
     expect(
-      mergeSessionForRail(merged, { ...selectedDetail, treeStats: refreshedStats }).treeStats,
+      mergeSessionForRail(merged, {
+        ...selectedDetail,
+        treeStats: refreshedStats,
+      }).treeStats,
     ).toEqual(refreshedStats);
   });
 
@@ -685,8 +692,39 @@ describe("api key permission options", () => {
     }
   });
 
-  test("workspace:admin grants can delegate every permission", () => {
-    expect(delegableApiKeyPermissions(["workspace:admin"])).toEqual(new Set(Permission.options));
+  test("workspace:admin does not manufacture plaintext-read delegation", () => {
+    const wildcardOnly = delegableApiKeyPermissions(["workspace:admin"]);
+    expect(wildcardOnly.has("secrets:read")).toBe(false);
+    expect(wildcardOnly).toEqual(
+      new Set(Permission.options.filter((permission) => permission !== "secrets:read")),
+    );
+
+    expect(
+      delegableApiKeyPermissions(["workspace:admin", "secrets:read"]).has("secrets:read"),
+    ).toBe(true);
+  });
+
+  test("workspace permission checks preserve legacy metadata scopes but require literal plaintext", () => {
+    const context: AccessContext = {
+      mode: "managed",
+      subjectId: "subject",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          accountId: "account",
+          workspaceId: "workspace",
+          subjectId: "subject",
+          permissions: ["workspace:admin", "variable-sets:use"],
+        },
+      ],
+      defaultAccountId: "account",
+      defaultWorkspaceId: "workspace",
+    };
+    expect(hasWorkspacePermission(context, "workspace", "variable-sets:list")).toBe(true);
+    expect(hasWorkspacePermission(context, "workspace", "secrets:list")).toBe(true);
+    expect(hasWorkspacePermission(context, "workspace", "secrets:read")).toBe(false);
+    context.workspaceGrants[0]!.permissions.push("secrets:read");
+    expect(hasWorkspacePermission(context, "workspace", "secrets:read")).toBe(true);
   });
 
   test("non-admin grants can only delegate their own permissions", () => {
@@ -986,7 +1024,10 @@ describe("projectSessionTimeline", () => {
 
   test("does not resurrect the initial message while its turn is still queued", () => {
     const items = projectSessionTimeline(session({ initialMessage: "Queued bootstrap" }), [
-      { ...event(1, "user.message", { text: "Queued bootstrap" }), turnId: null },
+      {
+        ...event(1, "user.message", { text: "Queued bootstrap" }),
+        turnId: null,
+      },
       event(2, "turn.queued", {
         turnId: "turn-1",
         triggerEventId: "event-1",
@@ -1205,9 +1246,17 @@ describe("buildTools", () => {
   test("keeps mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
     const config = {
       mcpServers: [
-        { id: "opengeni", name: "OpenGeni", url: "https://example.test/opengeni" },
+        {
+          id: "opengeni",
+          name: "OpenGeni",
+          url: "https://example.test/opengeni",
+        },
         { id: "files", name: "Files", url: "https://example.test/files" },
-        { id: "docs", name: "Document Search", url: "https://example.test/docs" },
+        {
+          id: "docs",
+          name: "Document Search",
+          url: "https://example.test/docs",
+        },
         { id: "linear", name: "Linear", url: "https://example.test/linear" },
       ],
     } as unknown as Parameters<typeof selectableMcpServers>[0];
@@ -1602,7 +1651,11 @@ describe("GitHub repository resources", () => {
       [
         { id: 1, url: "https://github.com/acme/app.git", ref: "main" },
         { id: 2, url: "https://gitlab.com/acme/app.git", ref: "main" },
-        { id: 3, url: "https://dev.azure.com/acme/project/_git/app", ref: "main" },
+        {
+          id: 3,
+          url: "https://dev.azure.com/acme/project/_git/app",
+          ref: "main",
+        },
       ],
       [],
       new Set(),
@@ -1653,7 +1706,11 @@ describe("GitHub repository resources", () => {
 
   test("hydrates private repositories by identity, drops revoked entries, and keeps manual refs", () => {
     const privateRepo = githubRepository({ private: true });
-    const publicRepo = githubRepository({ id: 789, private: false, fullName: "example/public" });
+    const publicRepo = githubRepository({
+      id: 789,
+      private: false,
+      fullName: "example/public",
+    });
     const resources: ResourceRef[] = [
       {
         kind: "repository",

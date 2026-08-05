@@ -642,8 +642,14 @@ export const Permission = z.enum([
   "environments:manage",
   /** @deprecated alias of variable-sets:use */
   "environments:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
   "variable-sets:manage",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
   // Attach or rotate per-session third-party MCP server credentials. Deliberately
   // not part of the worker's default first-party MCP permission set: a sandboxed
   // agent must not be able to hand itself new bearer credentials.
@@ -744,6 +750,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_other_session_title",
   "variable_set_list",
   "environment_list",
+  "variable_set_get_variable",
   "variable_set_set_variable",
   "environment_set_variable",
   "github_connect_link",
@@ -1320,7 +1327,9 @@ export function resolveWorkspaceSlackReactionSummonSettings(
     return {
       enabled: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.enabled,
       emoji: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.emoji,
-      channelPolicy: { ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy },
+      channelPolicy: {
+        ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy,
+      },
     };
   }
   return configured.channelPolicy.mode === "allowlist"
@@ -4411,6 +4420,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.viewer.read",
   "session.viewer.control",
   "session.first_party_mcp.call",
+  "session.secret.read",
   "session.toolspace.call",
   "session.pin.write",
   "session.codex_account.write",
@@ -5132,9 +5142,9 @@ function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T) {
   }, z.object(shape));
 }
 
-// Metadata only by design: no schema in this file ever carries a variable value
-// back to a client. Values are write-only and decrypted exclusively inside the
-// worker at sandbox materialization time.
+// Generic variable-set reads remain metadata-only. Exact plaintext has one
+// dedicated response schema so callers cannot accidentally widen another
+// workspace/session response with secret material.
 export const VariableSetVariableMetadata = z.object({
   name: VariableSetVariableName,
   version: z.number().int().positive(),
@@ -5146,6 +5156,14 @@ export type VariableSetVariableMetadata = z.infer<typeof VariableSetVariableMeta
 export const WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 /** @deprecated use VariableSetVariableMetadata */
 export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
+
+export const VariableSetSecret = z.object({
+  variableSetId: z.string().uuid(),
+  name: VariableSetVariableName,
+  version: z.number().int().positive(),
+  value: z.string(),
+});
+export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
 export const VariableSet = z.object({
   id: z.string().uuid(),
@@ -5412,7 +5430,10 @@ export const ScheduledTask = z.object({
   runMode: ScheduledTaskRunMode,
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
-  createdBy: TurnInitiator.default({ kind: "service", subjectId: "unattributed-legacy" }),
+  createdBy: TurnInitiator.default({
+    kind: "service",
+    subjectId: "unattributed-legacy",
+  }),
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
   reusableSessionId: z.string().uuid().nullable(),
@@ -9712,9 +9733,10 @@ export const TurnExecutionReasoningSourceV1 =
   );
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
-export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionLatencyModeSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
 
 /**

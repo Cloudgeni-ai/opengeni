@@ -646,6 +646,7 @@ export type {
   Workspace,
   WorkspaceControlEvent,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   Rig,
   RigVersion,

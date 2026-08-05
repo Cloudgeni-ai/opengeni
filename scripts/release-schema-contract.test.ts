@@ -192,12 +192,17 @@ describe("release schema contract", () => {
         (migrations.has("0174_session_wake_live_interruption.sql") ? 1 : 0) +
         (migrations.has("0175_resumable_transcription_provider_deadline.sql") ? 1 : 0) +
         (migrations.has("0176_lossless_canonical_json.sql") ? 1 : 0) +
-        (migrations.has("0177_session_events_workspace_turn_type_index.sql") ? 1 : 0),
+        (migrations.has("0177_session_events_workspace_turn_type_index.sql") ? 1 : 0) +
+        (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "5d07fca906f3ce9bf059a975c02c09dc783b001ab2840323fbd7fbcb006c9257",
+      "6f3d39a558775e4afd0621751f275c46db59448c6dffff7531c6bfa6e43a1786",
     );
-    expect(contract.latestMigration).toBe("0177_session_events_workspace_turn_type_index.sql");
+    expect(contract.latestMigration).toBe("0178_permissioned_secret_reads.sql");
+    expect(migrations.get("0178_permissioned_secret_reads.sql")).toMatchObject({
+      sha256: "a671934c8c969fe14edc322fd64c1423605620977d98660efc942b955673357b",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0177_session_events_workspace_turn_type_index.sql")).toMatchObject({
       sha256: "24eaf3a8c0eb5cfabfbfaf96544b77ea8021be9ce92730a0ec663493d2651650",
       deploymentMode: "rolling",
