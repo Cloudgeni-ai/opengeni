@@ -3988,6 +3988,69 @@ describe("clean session control plane", () => {
     ).toEqual({ action: "quiesced", events: [] });
   });
 
+  test("a paused session still reconciles its settled attempt quiescence", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run until paused");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+
+    await controlSession(grant, session.id, "pause");
+    expect(
+      await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId),
+    ).toMatchObject({ action: "paused", attemptId });
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, grant.workspaceId!, session.id),
+      ),
+    ).toMatchObject({
+      state: "paused",
+      settlement: {
+        state: "stopping",
+        attemptCount: 1,
+        interruptionPendingCount: 0,
+        quiescencePendingCount: 1,
+      },
+    });
+
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    expect(
+      await reconcileSessionAttemptQuiescence(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        activitySettled: true,
+      }),
+    ).toMatchObject({ action: "quiesced" });
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, grant.workspaceId!, session.id),
+      ),
+    ).toMatchObject({
+      state: "paused",
+      settlement: null,
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+  });
+
   test("quiescence reconciliation finds an older rejected-stale predecessor", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run the predecessor");
