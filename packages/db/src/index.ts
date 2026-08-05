@@ -40323,11 +40323,15 @@ export type SessionWorkPeek =
   | { kind: "idle" };
 
 /**
- * Return the oldest exact attempt whose logical interruption or same-turn
- * recovery request settled but whose physical quiescence receipt is still
- * missing. This deliberately searches all attempts: a provider-recovery race
- * can create a newer generation before the predecessor receipt is reconciled,
- * and looking only at the newest attempt would strand the replacement forever.
+ * Return an exact attempt whose logical interruption or same-turn recovery
+ * request settled but whose physical quiescence receipt is still missing.
+ * Durable Pause/Steer interruptions deliberately search all predecessors: a
+ * recovery race can create a newer generation before their receipt arrives.
+ * A recovery-only row blocks admission only while it is the session's newest
+ * attempt. A later admitted attempt is durable proof that pre-fix code already
+ * crossed that recovery boundary; replaying every historical recovery receipt
+ * on the user's next prompt would add unbounded critical-path work. Historical
+ * rows remain available for the bounded operator cleanup.
  */
 async function nextSessionAttemptAwaitingQuiescence(
   db: Database,
@@ -40358,6 +40362,20 @@ async function nextSessionAttemptAwaitingQuiescence(
           )
           or (
             ${schema.sessionTurnAttempts.outcome} = 'interrupted_recoverable'
+            and not exists (
+              select 1
+              from session_turn_attempts successor
+              where successor.account_id = ${schema.sessionTurnAttempts.accountId}
+                and successor.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+                and successor.session_id = ${schema.sessionTurnAttempts.sessionId}
+                and (
+                  successor.started_at > ${schema.sessionTurnAttempts.startedAt}
+                  or (
+                    successor.started_at = ${schema.sessionTurnAttempts.startedAt}
+                    and successor.id > ${schema.sessionTurnAttempts.id}
+                  )
+                )
+            )
             and exists (
               select 1
               from session_events event
