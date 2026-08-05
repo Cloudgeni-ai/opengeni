@@ -39494,8 +39494,10 @@ export async function peekSessionWork(
         attemptId: interruption.attemptId,
       };
     }
-    if (effectiveControl.state !== "active") return { kind: "idle" };
-
+    // Physical quiescence finishes an already-accepted interruption; it is not
+    // new session work. Reconcile the missing receipt even while control stays
+    // paused, otherwise the pause itself can strand this session and every
+    // ancestor behind a permanent `settlement: stopping` projection.
     const awaitingQuiescence = await nextSessionAttemptAwaitingQuiescence(
       scopedDb,
       workspaceId,
@@ -39507,6 +39509,8 @@ export async function peekSessionWork(
         attemptId: awaitingQuiescence.attemptId,
       };
     }
+
+    if (effectiveControl.state !== "active") return { kind: "idle" };
 
     const [capacityWait] = await scopedDb
       .select()
