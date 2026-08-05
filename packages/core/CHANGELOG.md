@@ -1,5 +1,22 @@
 # @opengeni/core
 
+## 0.21.4
+
+### Patch Changes
+
+- 7dbd057: Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
+- Updated dependencies [1fbb6e7]
+- Updated dependencies [7dbd057]
+- Updated dependencies [42c04ce]
+  - @opengeni/runtime@0.18.19
+  - @opengeni/contracts@0.39.2
+  - @opengeni/config@0.11.2
+  - @opengeni/db@0.28.3
+  - @opengeni/documents@0.5.12
+  - @opengeni/events@0.3.82
+  - @opengeni/observability@0.5.2
+  - @opengeni/storage@0.2.70
+
 ## 0.21.3
 
 ### Patch Changes

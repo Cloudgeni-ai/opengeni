@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.39.2
+
+### Patch Changes
+
+- 7dbd057: Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
+
 ## 0.39.1
 
 ### Patch Changes
