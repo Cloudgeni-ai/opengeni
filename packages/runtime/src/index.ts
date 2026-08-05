@@ -3904,6 +3904,7 @@ function inspectMcpTransportError(
   complete: boolean;
   hasConnectivityCode: boolean;
   hasConnectivityMarker: boolean;
+  hasTypedError: boolean;
   hasRequestTimeout: boolean;
   statuses: number[];
 } {
@@ -3911,6 +3912,7 @@ function inspectMcpTransportError(
   const statuses: number[] = [];
   let hasConnectivityCode = false;
   let hasConnectivityMarker = false;
+  let hasTypedError = false;
   let hasRequestTimeout = false;
   let inspectedNodes = 0;
   let complete = true;
@@ -3932,6 +3934,12 @@ function inspectMcpTransportError(
       code = record.code;
       failureKind = record.mcpTransportFailureKind;
       message = record.message;
+      if (
+        current.value instanceof Error &&
+        Object.getPrototypeOf(current.value) !== Error.prototype
+      ) {
+        hasTypedError = true;
+      }
     } catch {
       complete = false;
       continue;
@@ -3983,6 +3991,7 @@ function inspectMcpTransportError(
     complete,
     hasConnectivityCode,
     hasConnectivityMarker,
+    hasTypedError,
     hasRequestTimeout,
     statuses,
   };
@@ -4036,7 +4045,12 @@ function isRawMcpTransportConnectivityError(
   } catch {
     // A hostile proxy is not a rollout-safe plain transport Error.
   }
-  return options.recoverySafeSetup === true && inspection.statuses.length === 0 && isPlainError;
+  return (
+    options.recoverySafeSetup === true &&
+    inspection.statuses.length === 0 &&
+    !inspection.hasTypedError &&
+    isPlainError
+  );
 }
 
 /**
