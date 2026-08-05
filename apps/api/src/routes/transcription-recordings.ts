@@ -383,6 +383,9 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           );
         }
         const providerStartedAt = new Date();
+        const providerDeadlineAt = new Date(
+          providerStartedAt.getTime() + TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
+        );
         await startTranscriptionRecordingSegmentProviderCall(deps.db, {
           workspaceId: authority.workspaceId,
           subjectId: authority.subjectId,
@@ -390,9 +393,7 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           segmentNumber,
           attemptId,
           providerStartedAt,
-          providerDeadlineAt: new Date(
-            providerStartedAt.getTime() + TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
-          ),
+          providerDeadlineAt,
         });
         const result = await service.transcribe({
           workspaceId: authority.workspaceId,
@@ -401,6 +402,7 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           mimeType: "audio/wav",
           durationSeconds: claim.segment.durationMilliseconds / 1_000,
           requestId: attemptId,
+          providerDeadlineAt,
           ...(claim.segment.providerId && claim.segment.providerId !== "host"
             ? { providerId: claim.segment.providerId }
             : {}),

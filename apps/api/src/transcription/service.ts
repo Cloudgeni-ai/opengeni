@@ -23,6 +23,8 @@ export function createTranscriptionService(input: {
   probeCodex?: (context?: TranscriptionAvailabilityContext) => boolean | Promise<boolean>;
   /** Test seam for exercising timeout and late-completion behavior quickly. */
   providerRequestTimeoutMilliseconds?: number;
+  /** Test seam for evaluating persisted absolute deadlines after delayed setup. */
+  now?: () => Date;
 }): TranscriptionService {
   const providers: TranscriptionProvider[] = resolveVoiceInputProviderRegistry(input.settings).map(
     (config) => {
@@ -56,6 +58,7 @@ export function createTranscriptionService(input: {
   };
   const providerRequestTimeoutMilliseconds =
     input.providerRequestTimeoutMilliseconds ?? TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS;
+  const now = input.now ?? (() => new Date());
   return {
     limits: () => limits,
     async available(context) {
@@ -107,10 +110,20 @@ export function createTranscriptionService(input: {
         });
       }
       const startedAt = performance.now();
-      const deadline = createProviderRequestDeadline(
-        request.signal,
-        providerRequestTimeoutMilliseconds,
-      );
+      const remainingMilliseconds = request.providerDeadlineAt
+        ? remainingTranscriptionProviderRequestMilliseconds(request.providerDeadlineAt, now())
+        : providerRequestTimeoutMilliseconds;
+      if (
+        request.providerDeadlineAt &&
+        (!Number.isFinite(remainingMilliseconds) || remainingMilliseconds <= 0)
+      ) {
+        throw new TranscriptionServiceError({
+          code: "timeout",
+          message: "Transcription provider deadline expired.",
+          retryable: true,
+        });
+      }
+      const deadline = createProviderRequestDeadline(request.signal, remainingMilliseconds);
       let result: { text: string; languages: string[] };
       try {
         result = await provider.transcribe({
@@ -150,6 +163,13 @@ export function createTranscriptionService(input: {
   };
 }
 
+export function remainingTranscriptionProviderRequestMilliseconds(
+  providerDeadlineAt: Date,
+  now: Date,
+): number {
+  return providerDeadlineAt.getTime() - now.getTime();
+}
+
 function createProviderRequestDeadline(
   parentSignal: AbortSignal | undefined,
   timeoutMilliseconds: number,
@@ -161,7 +181,7 @@ function createProviderRequestDeadline(
       timedOut = true;
       controller.abort(new DOMException("Transcription provider timed out", "TimeoutError"));
     },
-    Math.max(1, timeoutMilliseconds),
+    Math.max(1, Math.ceil(timeoutMilliseconds)),
   );
   const abortFromParent = () => {
     controller.abort(parentSignal?.reason);

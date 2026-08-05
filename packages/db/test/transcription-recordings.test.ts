@@ -137,28 +137,33 @@ describe("resumable transcription recording persistence", () => {
     ).toBe(false);
   });
 
-  test("keeps a five-minute reclaim margin after slow pre-provider setup", () => {
-    const initialClaimAt = new Date("2026-08-05T00:00:00.000Z");
-    for (const setupMinutes of [0, 4, 5, 6]) {
-      const providerStartedAt = new Date(initialClaimAt.getTime() + setupMinutes * 60_000);
-      const providerDeadlineAt = new Date(providerStartedAt.getTime() + 10 * 60_000);
-      expect(
-        canReclaimTranscriptionRecordingAttempt({
-          attemptStartedAt: providerStartedAt,
-          attemptDeadlineAt: providerDeadlineAt,
-          staleBefore: providerStartedAt,
-          now: new Date(providerDeadlineAt.getTime() + 5 * 60_000),
-        }),
-      ).toBe(false);
-      expect(
-        canReclaimTranscriptionRecordingAttempt({
-          attemptStartedAt: providerStartedAt,
-          attemptDeadlineAt: providerDeadlineAt,
-          staleBefore: new Date(providerStartedAt.getTime() + 1),
-          now: new Date(providerDeadlineAt.getTime() + 5 * 60_000 + 1),
-        }),
-      ).toBe(true);
+  test("keeps the five-minute reclaim margin after delayed provider-start refresh and commit", () => {
+    const providerStartedAt = new Date("2026-08-05T00:00:00.000Z");
+    const providerDeadlineAt = new Date(providerStartedAt.getTime() + 10 * 60_000);
+    for (const refreshDelayMinutes of [0, 4, 5, 6]) {
+      const refreshReturnedAt = new Date(
+        providerStartedAt.getTime() + refreshDelayMinutes * 60_000,
+      );
+      expect(providerDeadlineAt.getTime() - refreshReturnedAt.getTime()).toBe(
+        (10 - refreshDelayMinutes) * 60_000,
+      );
     }
+    expect(
+      canReclaimTranscriptionRecordingAttempt({
+        attemptStartedAt: providerStartedAt,
+        attemptDeadlineAt: providerDeadlineAt,
+        staleBefore: providerStartedAt,
+        now: new Date(providerDeadlineAt.getTime() + 5 * 60_000),
+      }),
+    ).toBe(false);
+    expect(
+      canReclaimTranscriptionRecordingAttempt({
+        attemptStartedAt: providerStartedAt,
+        attemptDeadlineAt: providerDeadlineAt,
+        staleBefore: new Date(providerStartedAt.getTime() + 1),
+        now: new Date(providerDeadlineAt.getTime() + 5 * 60_000 + 1),
+      }),
+    ).toBe(true);
   });
 
   test("declares every transcription table in the runtime posture contract", () => {

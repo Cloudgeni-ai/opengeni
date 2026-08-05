@@ -25,6 +25,8 @@ export type TranscriptionRequest = {
   durationSeconds?: number | undefined;
   signal?: AbortSignal | undefined;
   requestId: string;
+  /** Absolute server-owned provider deadline persisted for resumable attempts. */
+  providerDeadlineAt?: Date | undefined;
   /** Exact provider selected before a resumable segment is first sent upstream. */
   providerId?: string | undefined;
 };

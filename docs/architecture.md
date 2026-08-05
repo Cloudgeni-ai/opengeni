@@ -248,8 +248,11 @@ keeps the same recording UUID for local Retry, reload recovery, and same-subject
 cross-browser list/get resume; request/network aborts leave server-owned provider
 work retryable and retain audio objects, while explicit Discard is destructive.
 Immediately before a provider call, the server refreshes the durable attempt lease
-origin and starts a shorter server-owned deadline, leaving a five-minute reclaim
-margin. The first provider chosen for a server recording is
+origin and persists an absolute 10-minute server-owned deadline. After that
+refresh transaction returns, runtime computes the remaining time from that
+persisted deadline and arms cancellation only for the remainder; an expired
+deadline refuses provider invocation. This preserves a five-minute reclaim
+margin even when refresh/commit latency is long. The first provider chosen for a server recording is
 persisted privately on that recording, so every segment and retry stays pinned to
 one vendor. Segment text and deterministic final assembly persist server-side only
 for resumable recovery; provider text is also persisted locally before draft

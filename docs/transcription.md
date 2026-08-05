@@ -116,9 +116,13 @@ is the lower of the OpenGeni 50-second target and the selected service's maximum
 recordings that would require more than 1,000 segments fail before ffmpeg starts.
 Generation and pre-provider attempt leases become reclaimable after 15 minutes.
 Immediately before a provider call, the server refreshes the durable attempt
-lease origin and starts a 10-minute server-owned provider deadline. Reclaim is
-therefore impossible until at least five minutes after that provider deadline,
-even when object reads or handler setup consumed most of the original lease.
+lease origin and persists an absolute 10-minute server-owned provider deadline.
+After that refresh transaction returns, the service computes the remaining time
+against the persisted deadline and arms its AbortController for only that
+remaining duration; if the deadline has already passed, it refuses to invoke
+the provider. Reclaim is therefore impossible until at least five minutes after
+that provider deadline, even when object reads, handler setup, or refresh/commit
+latency consumed most of the original lease.
 Request/network aborts do not cancel this server-owned provider work: the same
 recording UUID remains retryable and its objects remain retained. Only explicit
 Discard is destructive. Stale callbacks cannot settle a successor generation or

@@ -380,6 +380,7 @@ describe("resumable transcription recording routes", () => {
       "startTranscriptionRecordingSegmentProviderCall",
     ).mockResolvedValue(undefined);
     spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    let observedProviderDeadlineAt: Date | undefined;
     const transcription: TranscriptionService = {
       limits: () => ({
         maxDurationSeconds: 50,
@@ -388,7 +389,8 @@ describe("resumable transcription recording routes", () => {
       }),
       available: () => true,
       selectProvider: () => "openai",
-      transcribe: async () => {
+      transcribe: async (input) => {
+        observedProviderDeadlineAt = input.providerDeadlineAt;
         liveProviderCalls += 1;
         maximumLiveProviderCalls = Math.max(maximumLiveProviderCalls, liveProviderCalls);
         providerStarted();
@@ -439,6 +441,137 @@ describe("resumable transcription recording routes", () => {
       expect.anything(),
       expect.objectContaining({
         attemptId: firstAttemptId,
+        providerStartedAt: expect.any(Date),
+        providerDeadlineAt: expect.any(Date),
+      }),
+    );
+    const startProviderInput = startProviderCall.mock.calls[0]?.[1];
+    if (!startProviderInput) throw new Error("provider-start input missing");
+    expect(observedProviderDeadlineAt).toBeInstanceOf(Date);
+    expect(observedProviderDeadlineAt?.getTime()).toBe(
+      (startProviderInput as { providerDeadlineAt: Date }).providerDeadlineAt.getTime(),
+    );
+    expect(claimSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ providerDeadlineAt: expect.any(Date) }),
+    );
+  });
+
+  test("fences a successor while provider-start refresh is still pending", async () => {
+    const successorAttemptId = "88888888-8888-4888-8888-888888888888";
+    const segmentBytes = new Uint8Array([7, 8, 9]);
+    const segmentSha256 = createHash("sha256").update(segmentBytes).digest("hex");
+    const claimed = response("transcribing", { segmentCount: 1 });
+    const complete = response("complete", {
+      segmentCount: 1,
+      completedSegmentCount: 1,
+      transcriptText: "refresh committed once",
+    });
+    let claimCalls = 0;
+    let providerCalls = 0;
+    let refreshStarted!: () => void;
+    let releaseRefresh!: () => void;
+    const refreshStartedPromise = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+    const refreshReleasePromise = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const claimSegment = spyOn(
+      dbModule,
+      "claimNextTranscriptionRecordingSegment",
+    ).mockImplementation(async (_db, input) => {
+      claimCalls += 1;
+      if (claimCalls > 1) {
+        return {
+          recording: claimed,
+          claimed: false,
+          attemptId: CORRELATION_ID,
+          segment: null,
+        };
+      }
+      return {
+        recording: claimed,
+        claimed: true,
+        attemptId: input.attemptId,
+        segment: {
+          segmentNumber: 0,
+          durationMilliseconds: 50_000,
+          byteLength: segmentBytes.byteLength,
+          sha256: segmentSha256,
+          objectKey: "segment-0",
+          providerId: "openai",
+        } as never,
+      };
+    });
+    const completeSegment = spyOn(
+      dbModule,
+      "completeTranscriptionRecordingSegment",
+    ).mockResolvedValue(complete);
+    const startProviderCall = spyOn(
+      dbModule,
+      "startTranscriptionRecordingSegmentProviderCall",
+    ).mockImplementation(async () => {
+      refreshStarted();
+      await refreshReleasePromise;
+    });
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async (input) => {
+        providerCalls += 1;
+        expect(input.providerDeadlineAt).toBeInstanceOf(Date);
+        return { text: "refresh committed once", languages: ["en"] };
+      },
+    };
+    const api = app({
+      transcription,
+      segmenter: { available: () => true, segment: async function* () {} },
+      objectStorage: storage({
+        getObjectBytes: async () => ({ bytes: segmentBytes, contentType: "audio/wav" }),
+      }),
+    });
+
+    const first = api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": CORRELATION_ID,
+        },
+      },
+    );
+    await refreshStartedPromise;
+    const second = await api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": successorAttemptId,
+        },
+      },
+    );
+    expect(second.status).toBe(202);
+    expect(providerCalls).toBe(0);
+    releaseRefresh();
+    expect((await first).status).toBe(200);
+    expect(providerCalls).toBe(1);
+    expect(completeSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ attemptId: CORRELATION_ID }),
+    );
+    expect(startProviderCall).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        attemptId: CORRELATION_ID,
         providerStartedAt: expect.any(Date),
         providerDeadlineAt: expect.any(Date),
       }),

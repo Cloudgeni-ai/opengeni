@@ -1,7 +1,10 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import { createTranscriptionService } from "../src/transcription/service";
+import {
+  createTranscriptionService,
+  remainingTranscriptionProviderRequestMilliseconds,
+} from "../src/transcription/service";
 
 const audio = new Uint8Array([1, 2, 3]);
 
@@ -170,6 +173,67 @@ describe("transcription providers", () => {
         requestId: "late-request",
       }),
     ).rejects.toMatchObject({ code: "timeout", retryable: true });
+  });
+
+  test("keeps the absolute deadline after delayed provider-start refresh and commit", async () => {
+    const providerStartedAt = new Date("2026-08-05T00:00:00.000Z");
+    const providerDeadlineAt = new Date(providerStartedAt.getTime() + 10 * 60_000);
+    const remainingByRefreshDelay = [0, 4, 5, 6].map((delayMinutes) =>
+      remainingTranscriptionProviderRequestMilliseconds(
+        providerDeadlineAt,
+        new Date(providerStartedAt.getTime() + delayMinutes * 60_000),
+      ),
+    );
+    expect(remainingByRefreshDelay).toEqual([600_000, 360_000, 300_000, 240_000]);
+
+    const service = createTranscriptionService({
+      settings: testSettings({ voiceInputProviderOrder: "openai" }),
+      db: {} as never,
+      // A fresh full timeout would expire this deliberately slow provider;
+      // the persisted deadline still has four minutes after a six-minute
+      // refresh/commit delay.
+      providerRequestTimeoutMilliseconds: 5,
+      now: () => new Date(providerStartedAt.getTime() + 6 * 60_000),
+      fetch: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return Response.json({ text: "after refresh", language: "en" });
+      },
+    });
+    const result = await service.transcribe({
+      workspaceId: "workspace",
+      accountId: "account",
+      audio,
+      mimeType: "audio/webm",
+      requestId: "absolute-deadline-request",
+      providerDeadlineAt,
+    });
+    expect(result.text).toBe("after refresh");
+  });
+
+  test("refuses provider invocation when refresh/commit returns after the absolute deadline", async () => {
+    let sends = 0;
+    const providerStartedAt = new Date("2026-08-05T00:00:00.000Z");
+    const providerDeadlineAt = new Date(providerStartedAt.getTime() + 10 * 60_000);
+    const service = createTranscriptionService({
+      settings: testSettings({ voiceInputProviderOrder: "openai" }),
+      db: {} as never,
+      now: () => new Date(providerDeadlineAt.getTime() + 1),
+      fetch: async () => {
+        sends += 1;
+        return Response.json({ text: "must not send" });
+      },
+    });
+    await expect(
+      service.transcribe({
+        workspaceId: "workspace",
+        accountId: "account",
+        audio,
+        mimeType: "audio/webm",
+        requestId: "expired-absolute-deadline-request",
+        providerDeadlineAt,
+      }),
+    ).rejects.toMatchObject({ code: "timeout", retryable: true });
+    expect(sends).toBe(0);
   });
 
   test("prefers Codex when subscription is attached even if OpenAI is configured", async () => {
