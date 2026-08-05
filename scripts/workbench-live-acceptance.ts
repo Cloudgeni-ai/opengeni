@@ -2356,6 +2356,14 @@ async function assertAccessibility(page: Page): Promise<void> {
   const report = await new AxeBuilder({ page: page as never })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
+  const manuallyAuditedContrastTargets = new Set(
+    await markIncompleteContrastTargetsForManualAudit(
+      page,
+      report.incomplete
+        .filter((rule) => rule.id === "color-contrast")
+        .flatMap((rule) => rule.nodes.map((node) => node.target)),
+    ),
+  );
   const manual = await manualAccessibilityAudit(page);
   if (report.violations.length > 0) {
     throw new Error(
@@ -2369,6 +2377,7 @@ async function assertAccessibility(page: Page): Promise<void> {
         if (rule.id === "aria-valid-attr-value") return false;
         if (rule.id === "color-contrast") {
           return (
+            !manuallyAuditedContrastTargets.has(target) &&
             !target.includes("diffs-container") &&
             !target.includes("data-line-number-content") &&
             !target.includes("data-contrast-audited") &&
@@ -2398,6 +2407,49 @@ async function assertAccessibility(page: Page): Promise<void> {
   if (manual.minimumContrast !== null && manual.minimumContrast < 4.5) {
     throw new Error(`manual text contrast ${manual.minimumContrast} is below WCAG AA 4.5:1`);
   }
+}
+
+export function axeManualContrastSelector(target: unknown): string | null {
+  if (!Array.isArray(target) || target.length !== 1 || typeof target[0] !== "string") return null;
+  const selector = target[0].trim();
+  return selector.length > 0 ? selector : null;
+}
+
+async function markIncompleteContrastTargetsForManualAudit(
+  page: Page,
+  targets: readonly unknown[],
+): Promise<string[]> {
+  const candidates = targets.flatMap((target) => {
+    const selector = axeManualContrastSelector(target);
+    return selector ? [{ selector, serializedTarget: JSON.stringify(target) }] : [];
+  });
+  return page.evaluate((candidates) => {
+    const audited: string[] = [];
+    for (const { selector, serializedTarget } of candidates) {
+      try {
+        const visibleMatches = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(
+          (element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          },
+        );
+        if (visibleMatches.length === 0) continue;
+        for (const element of visibleMatches) {
+          element.setAttribute("data-contrast-audited", "");
+        }
+        audited.push(serializedTarget);
+      } catch {
+        // Invalid or non-DOM Axe target paths remain unresolved and fail below.
+      }
+    }
+    return audited;
+  }, candidates);
 }
 
 async function assertTouchTargets(page: Page, mobile: boolean): Promise<void> {
