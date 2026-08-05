@@ -1,5 +1,13 @@
 # @opengeni/contracts
 
+## 0.39.2
+
+### Patch Changes
+
+- 7dbd057: Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- 23de73b: Add explicitly permissioned, audited plaintext reads for encrypted workspace variable-set values across REST, SDK, React, MCP, and UI surfaces.
+
 ## 0.39.1
 
 ### Patch Changes
