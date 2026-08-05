@@ -1012,6 +1012,8 @@ type NativeScreenshotFence = {
   detachAbortSignal: () => void;
 };
 
+type NativeScreenshotResult = Awaited<ReturnType<NativeDesktopSession["screenshot"]>>;
+
 /** A capture failure that RETRYING cannot cure — Screen Recording (TCC) has not been
  *  granted to the agent, so every capture will deny until the user grants it. We fail
  *  FAST on this rather than burn the warm-up budget, and surface the reason verbatim so
@@ -1050,6 +1052,7 @@ export class NativeDesktopComputer implements Computer {
   private readonly screenshotRetryDelayMs: number;
   private readonly screenshotReadbackTimeoutMs: number;
   private readonly abortSignal: AbortSignal | undefined;
+  private inFlightScreenshot: Promise<NativeScreenshotResult> | null = null;
   // The ENCODED vs NATIVE geometry of the MOST RECENT screenshot the model saw. The
   // model computes click coordinates in the encoded-pixel space of that screenshot;
   // when the agent downscaled the PNG to fit the transport budget, encoded < native,
@@ -1134,6 +1137,25 @@ export class NativeDesktopComputer implements Computer {
 
   private assertScreenshotAdmission(fence: NativeScreenshotFence): void {
     if (fence.controller.signal.aborted) throw this.screenshotFenceError(fence);
+  }
+
+  private startProviderScreenshot(): Promise<NativeScreenshotResult> {
+    if (this.inFlightScreenshot) {
+      throw new ScreenshotReadError(
+        "capture_outcome_unknown",
+        "a previous native screenshot capture remains unresolved; refusing to start another provider capture",
+      );
+    }
+    const providerCall = this.session.screenshot();
+    this.inFlightScreenshot = providerCall;
+    const clearIfCurrent = () => {
+      if (this.inFlightScreenshot === providerCall) this.inFlightScreenshot = null;
+    };
+    // The provider API is not cancellable. Keep the exact promise as the
+    // instance-level admission identity until that operation itself settles;
+    // caller timeout/abort must not clear it and admit accumulating captures.
+    void providerCall.then(clearIfCurrent, clearIfCurrent);
+    return providerCall;
   }
 
   private async beforeScreenshotDeadline<T>(
@@ -1247,7 +1269,7 @@ export class NativeDesktopComputer implements Computer {
           // against the turn/deadline fence so a late result is ignored and can never
           // reach geometry, base64, or model/tool serialization.
           const { png, width, height, nativeWidth, nativeHeight } =
-            await this.beforeScreenshotDeadline(() => this.session.screenshot(), fence);
+            await this.beforeScreenshotDeadline(() => this.startProviderScreenshot(), fence);
           this.assertScreenshotAdmission(fence);
           if (png.byteLength > MAX_SCREENSHOT_BYTES) {
             throw new ScreenshotReadError(

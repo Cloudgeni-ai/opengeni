@@ -856,6 +856,56 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     expect(attempts()).toBe(1);
   });
 
+  test("repeated timeouts never accumulate native provider captures and settlement admits one fresh call", async () => {
+    type Result = Awaited<ReturnType<NativeDesktopSession["screenshot"]>>;
+    const resolvers: Array<(value: Result) => void> = [];
+    let started = 0;
+    let pending = 0;
+    const { session } = makeNativeSession({
+      screenshotImpl: async () => {
+        started += 1;
+        pending += 1;
+        return await new Promise<Result>((resolve) => {
+          resolvers.push((value) => {
+            pending -= 1;
+            resolve(value);
+          });
+        });
+      },
+    });
+    const c = new NativeDesktopComputer(session, { screenshotReadbackTimeoutMs: 5 });
+
+    const first = await c.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(first).toBeInstanceOf(ScreenshotReadError);
+    expect((first as ScreenshotReadError).code).toBe("read_timeout");
+    const second = await c.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(second).toBeInstanceOf(ScreenshotReadError);
+    expect((second as ScreenshotReadError).code).toBe("capture_outcome_unknown");
+    expect({ started, pending }).toEqual({ started: 1, pending: 1 });
+
+    const valid = {
+      png: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      width: 1280,
+      height: 800,
+      nativeWidth: 1280,
+      nativeHeight: 800,
+    };
+    resolvers[0]!(valid);
+    await Bun.sleep(0);
+
+    const fresh = c.screenshot();
+    expect({ started, pending }).toEqual({ started: 2, pending: 1 });
+    resolvers[1]!(valid);
+    await expect(fresh).resolves.toBe(Buffer.from(valid.png).toString("base64"));
+    expect({ started, pending }).toEqual({ started: 2, pending: 0 });
+  });
+
   test("an in-flight abort ignores a late native result without mutating screenshot geometry", async () => {
     const controller = new AbortController();
     let settleProvider!: (value: Awaited<ReturnType<NativeDesktopSession["screenshot"]>>) => void;
