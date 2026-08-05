@@ -102,10 +102,10 @@ spec:
             (
               sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome="failed"}[10m]))
               /
-              clamp_min(sum by (backend, op) (increase(opengeni_sandbox_operations_total[10m])), 1)
+              clamp_min(sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m])), 1)
             ) > 0.2
             and
-            sum by (backend, op) (increase(opengeni_sandbox_operations_total[10m])) >= 5
+            sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m])) >= 5
           for: 10m
           labels:
             severity: warning

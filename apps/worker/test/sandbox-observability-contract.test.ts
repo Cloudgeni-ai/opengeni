@@ -178,6 +178,7 @@ describe("sandbox observability contract", () => {
     const source = await Bun.file(rulePath).text();
     expect(source).toContain('age_bucket=~"5m_1h|1h_1d|gte_1d"');
     expect(source).toContain("OpenGeniSandboxOperationFailureRatio");
+    expect(source).toContain('opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m]');
     expect(source).toContain("must cover at least three sandbox reaper periods");
     expect(source).toContain("$inventoryFreshnessSeconds");
     expect(source).not.toMatch(/5m_to_15m|gt_15m/);

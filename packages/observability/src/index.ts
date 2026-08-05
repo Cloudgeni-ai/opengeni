@@ -227,7 +227,7 @@ const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
 export type SandboxOperationMetricObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "failed";
+  outcome: "ok" | "not_found" | "failed";
   durationMs: number;
 };
 
