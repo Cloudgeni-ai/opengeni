@@ -90,14 +90,15 @@ export function useFileAttachments(
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
   // Upload promises are not cancellable at this layer. Fence their settlements
-  // when the hook changes workspace or unmounts so an old tenant/session cannot
-  // mutate the next attachment queue (or an already-unmounted component).
+  // when the hook changes client/workspace or unmounts so an old tenant/session
+  // cannot mutate the next attachment queue (or an already-unmounted component).
   const scopeGeneration = useRef(0);
-  const previousWorkspaceId = useRef(workspaceId);
+  const previousScope = useRef({ client, workspaceId });
 
   useEffect(() => {
-    if (previousWorkspaceId.current === workspaceId) return;
-    previousWorkspaceId.current = workspaceId;
+    const previous = previousScope.current;
+    if (previous.client === client && previous.workspaceId === workspaceId) return;
+    previousScope.current = { client, workspaceId };
     scopeGeneration.current += 1;
     sources.current.clear();
     setAttachments((current) => {
@@ -106,7 +107,7 @@ export function useFileAttachments(
       }
       return [];
     });
-  }, [workspaceId]);
+  }, [client, workspaceId]);
 
   useEffect(
     () => () => {

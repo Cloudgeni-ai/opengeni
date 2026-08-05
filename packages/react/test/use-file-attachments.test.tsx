@@ -191,6 +191,35 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("client changes clear attachments and fence the previous upload", async () => {
+    let resolveUpload!: (asset: FileAsset) => void;
+    const previousClient = fakeClient({
+      uploadFile: () =>
+        new Promise<FileAsset>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    });
+    const nextClient = fakeClient({ uploadFile: async () => fakeAsset() });
+    const hook = await renderHook(
+      ({ client }: { client: typeof previousClient }) =>
+        useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      { client: previousClient },
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile()]));
+    const preview = hook.result.current.attachments[0]!.previewUrl!;
+    await hook.rerender({ client: nextClient });
+
+    expect(hook.result.current.attachments).toEqual([]);
+    expect(hook.result.current.readyResources).toEqual([]);
+    expect(revoked).toContain(preview);
+
+    await flushing(() => resolveUpload(fakeAsset({ id: "old-client-file" })));
+    expect(hook.result.current.attachments).toEqual([]);
+    expect(hook.result.current.readyResources).toEqual([]);
+    await hook.unmount();
+  });
+
   test("removeReadyFiles clears only the accepted snapshot and preserves later attachments", async () => {
     let upload = 0;
     const client = fakeClient({
