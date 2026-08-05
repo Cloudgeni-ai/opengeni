@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import postgres from "postgres";
 import {
   acquireLease,
+  advanceWorkspaceGenerationForDirectRequest,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
   claimWorkspaceArchiveCapture,
@@ -20,6 +21,7 @@ import {
   claimSandboxCheckpointArtifactsForGc,
   persistDrainSnapshot as persistDrainSnapshotRaw,
   readLease,
+  readWorkspaceArchiveCapturePreflight,
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
   reapStaleLeaseHolders,
@@ -1474,6 +1476,95 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect(reap.drained.map((d) => d.sandboxGroupId)).toContain(groupId);
     expect(reap.drained.find((d) => d.sandboxGroupId === groupId)?.instanceId).toBe("box");
+  }, 60_000);
+
+  test("(3a) releasing a completed direct request settles its abandoned null-outcome admission", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const sessionId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const holderId = `direct:${requestId}`;
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, status, initial_message, model,
+        sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
+      ) values (
+        ${sessionId}, ${accountId}, ${workspaceId}, 'idle',
+        'direct release fixture', 'test-model', 'modal', ${groupId},
+        ${`session-${sessionId}`},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )`;
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "direct",
+      holderId,
+      subjectId: sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "box-direct-release",
+      leaseTtlMs: 45_000,
+    });
+    const epoch = committed.lease!.leaseEpoch;
+    const admission = await advanceWorkspaceGenerationForDirectRequest(db, {
+      accountId,
+      workspaceId,
+      sessionId,
+      requestId,
+      holderId,
+      sandboxGroupId: groupId,
+      expectedEpoch: epoch,
+      expectedInstanceId: "box-direct-release",
+      routeTargetId: null,
+      routeEpoch: 0,
+      operation: "exec",
+    });
+
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "box-direct-release",
+        liveness: "warm",
+      }),
+    ).toBeNull();
+    expect(
+      await releaseLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "direct",
+        holderId,
+        idleGraceMs: 45_000,
+      }),
+    ).toEqual({ liveness: "draining", refcount: 0 });
+
+    const [settled] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
+      select provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions
+      where id = ${admission.id}`;
+    expect(settled).toMatchObject({ providerOutcome: "rejected" });
+    expect(settled?.settledAt).toBeInstanceOf(Date);
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "box-direct-release",
+        liveness: "draining",
+      }),
+    ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
   }, 60_000);
 
   test("(4) a stale VIEWER holder is TTL-reaped while a same-age TURN holder survives; lease stays warm", async () => {

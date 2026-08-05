@@ -27714,6 +27714,46 @@ export async function releaseLeaseHolder(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        // A direct request reaches this release seam only after its provider
+        // operation has resolved, rejected, or been physically quiesced by the
+        // Channel-A cancellation fence. If the ordinary settlement callback
+        // failed after that physical boundary (for example, its worker was
+        // interrupted during a rollout), leaving a null-outcome admission here
+        // would block archive capture forever after the request holder leaves.
+        //
+        // Lock admission -> lease, the same suffix used by mutation settlement
+        // and retained-process promotion. Taking the lease first recreates the
+        // admission/lease deadlock this fallback exists to recover. A promoted
+        // process has provider_outcome='retained' and is deliberately untouched;
+        // its non-TTL process holder remains the only settlement authority.
+        if (input.kind === "direct") {
+          await tx.execute(sql`
+            select id
+            from sandbox_workspace_mutation_admissions
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and sandbox_group_id = ${input.sandboxGroupId}
+              and actor_kind = 'direct'
+              and holder_kind = 'direct'
+              and holder_id = ${input.holderId}
+              and provider_outcome is null
+              and settled_at is null
+            order by id
+            for update
+          `);
+          await tx.execute(sql`
+            update sandbox_workspace_mutation_admissions
+            set provider_outcome = 'rejected', settled_at = now()
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and sandbox_group_id = ${input.sandboxGroupId}
+              and actor_kind = 'direct'
+              and holder_kind = 'direct'
+              and holder_id = ${input.holderId}
+              and provider_outcome is null
+              and settled_at is null
+          `);
+        }
         const rows = await tx.execute<LeaseRow>(sql`
         select * from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
