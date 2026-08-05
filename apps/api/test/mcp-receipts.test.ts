@@ -12,6 +12,9 @@ const sessionCreateResult = {
     status: "queued",
     sandboxGroupId: "00000000-0000-4000-8000-000000000004",
     parentSessionId: null,
+    rootSessionId: "00000000-0000-4000-8000-000000000004",
+    nestedAgentDepth: 0,
+    effectiveMaxNestedAgentDepth: 3,
   },
   outcome: "created",
   changed: true,
@@ -73,6 +76,10 @@ describe("first-party MCP receipt builder", () => {
       changed: true,
       idempotency: { status: "applied" },
       facts: { sessionCreateOutcome: "repaired" },
+      id: sessionCreateResult.session.id,
+      rootSessionId: sessionCreateResult.session.rootSessionId,
+      nestedAgentDepth: 0,
+      effectiveMaxNestedAgentDepth: 3,
     });
   });
 

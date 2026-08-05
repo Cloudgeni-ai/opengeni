@@ -59,6 +59,10 @@ function sizeCases(): SizeCase[] {
     timestamp: TIMESTAMP,
     idempotency: { status: "not_requested" },
     facts: { sandboxGroupId: ID, parentSessionId: null },
+    id: ID,
+    rootSessionId: ID,
+    nestedAgentDepth: 0,
+    effectiveMaxNestedAgentDepth: 3,
     nextAction: { tool: "session_get", arguments: { sessionId: ID } },
   });
 
@@ -335,6 +339,10 @@ describe("MCP receipt response size", () => {
         resource: { type: "session", id: ID },
         timestamp: TIMESTAMP,
         idempotency: { status: "not_requested" },
+        id: ID,
+        rootSessionId: ID,
+        nestedAgentDepth: 0,
+        effectiveMaxNestedAgentDepth: 3,
         warnings: ["界".repeat(512)],
       }),
     ).toThrow();
@@ -350,6 +358,10 @@ describe("MCP receipt response size", () => {
       timestamp: TIMESTAMP,
       idempotency: { status: "applied" },
       facts: { sessionCreateOutcome: "repaired" },
+      id: ID,
+      rootSessionId: ID,
+      nestedAgentDepth: 0,
+      effectiveMaxNestedAgentDepth: 3,
       nextAction: { tool: "session_get", arguments: { sessionId: ID } },
     });
     const partialFailure = mcpMutationReceipt({
@@ -365,6 +377,10 @@ describe("MCP receipt response size", () => {
         "The session committed, but usage recording failed. Do not retry this keyless request; inspect the returned session.",
       ],
       facts: { sessionCreateOutcome: "created" },
+      id: ID,
+      rootSessionId: ID,
+      nestedAgentDepth: 0,
+      effectiveMaxNestedAgentDepth: 3,
       nextAction: { tool: "session_get", arguments: { sessionId: ID } },
     });
     expect(utf8Bytes(repaired)).toBeLessThanOrEqual(MCP_MUTATION_RECEIPT_MAX_BYTES);

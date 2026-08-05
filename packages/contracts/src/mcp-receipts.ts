@@ -127,9 +127,77 @@ export const McpMutationReceipt = z
       .optional(),
     /** Operation-specific outcome facts. Values are deliberately bounded scalars. */
     facts: McpMutationReceiptFacts.optional(),
+    /**
+     * Bounded session_create compatibility aliases. Existing orchestration
+     * consumers use these server-authored lineage facts to spawn descendants
+     * without fetching the full session entity.
+     */
+    id: boundedUtf8String(256, 1).optional(),
+    rootSessionId: boundedUtf8String(256, 1).optional(),
+    nestedAgentDepth: z.number().int().nonnegative().optional(),
+    effectiveMaxNestedAgentDepth: z.number().int().nonnegative().optional(),
+    /** Bounded session_steer compatibility alias for resource.id. */
+    updateId: boundedUtf8String(256, 1).optional(),
   })
   .strict()
   .superRefine((receipt, context) => {
+    const sessionCreateCompatibility = [
+      ["id", receipt.id],
+      ["rootSessionId", receipt.rootSessionId],
+      ["nestedAgentDepth", receipt.nestedAgentDepth],
+      ["effectiveMaxNestedAgentDepth", receipt.effectiveMaxNestedAgentDepth],
+    ] as const;
+    if (receipt.operation === "session_create") {
+      for (const [field, value] of sessionCreateCompatibility) {
+        if (value === undefined) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message: `session_create receipts require ${field}`,
+          });
+        }
+      }
+      if (receipt.id !== undefined && receipt.id !== receipt.resource.id) {
+        context.addIssue({
+          code: "custom",
+          path: ["id"],
+          message: "session_create id must equal resource.id",
+        });
+      }
+    } else {
+      for (const [field, value] of sessionCreateCompatibility) {
+        if (value !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message: `${field} is only valid for session_create receipts`,
+          });
+        }
+      }
+    }
+
+    if (receipt.operation === "session_steer") {
+      if (receipt.updateId === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["updateId"],
+          message: "session_steer receipts require updateId",
+        });
+      } else if (receipt.updateId !== receipt.resource.id) {
+        context.addIssue({
+          code: "custom",
+          path: ["updateId"],
+          message: "session_steer updateId must equal resource.id",
+        });
+      }
+    } else if (receipt.updateId !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["updateId"],
+        message: "updateId is only valid for session_steer receipts",
+      });
+    }
+
     if (receipt.outcome === "partial_failure") {
       if (!receipt.committed) {
         context.addIssue({

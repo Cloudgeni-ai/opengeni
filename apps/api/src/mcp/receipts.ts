@@ -33,6 +33,9 @@ export type SessionCreateReceiptResult = {
     status: string;
     sandboxGroupId: string;
     parentSessionId: string | null;
+    rootSessionId: string;
+    nestedAgentDepth: number;
+    effectiveMaxNestedAgentDepth: number;
   };
   outcome: "created" | "repaired" | "replayed";
   changed: boolean;
@@ -80,6 +83,10 @@ export function sessionCreateMutationReceipt(
       parentSessionId: result.session.parentSessionId,
       sessionCreateOutcome: result.outcome,
     },
+    id: result.session.id,
+    rootSessionId: result.session.rootSessionId,
+    nestedAgentDepth: result.session.nestedAgentDepth,
+    effectiveMaxNestedAgentDepth: result.session.effectiveMaxNestedAgentDepth,
     nextAction: {
       tool: "session_get",
       arguments: { sessionId: result.session.id },

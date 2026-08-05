@@ -38,6 +38,10 @@ unbounded.
   "timestamp": "2026-07-20T00:00:00.000Z",
   "idempotency": { "status": "applied" },
   "warnings": [],
+  "id": "11111111-1111-4111-8111-111111111111",
+  "rootSessionId": "11111111-1111-4111-8111-111111111111",
+  "nestedAgentDepth": 0,
+  "effectiveMaxNestedAgentDepth": 3,
   "nextAction": {
     "tool": "session_get",
     "arguments": {
@@ -63,6 +67,8 @@ unbounded.
 | `partialFailure` | Present only for `partial_failure`; names the failed stage and whether retry is safe. |
 | `warnings` | Bounded operational warnings, never request or entity bodies. |
 | `facts` | At most 16 bounded scalar operation facts. Nested entities and arbitrary JSON are forbidden. |
+| `id`, `rootSessionId`, `nestedAgentDepth`, `effectiveMaxNestedAgentDepth` | Required only for `session_create`. These bounded top-level compatibility aliases preserve the generated session identity and immutable descendant-policy lineage without returning the full session. `id` is validated to equal `resource.id`. |
+| `updateId` | Required only for `session_steer`; a bounded compatibility alias validated to equal `resource.id`. |
 | `nextAction` | A safe explicit read/follow-up tool plus at most eight bounded scalar arguments. |
 
 The schema is intentionally strict and intrinsically bounded: resource strings,
@@ -171,11 +177,19 @@ non-model clients and is unchanged.
 ## Compatibility and migration
 
 This is an intentional breaking change for MCP consumers that assumed a
-mutation returned a full entity. The versioned compatibility path is:
+mutation returned a full entity. Small server-authored facts used by existing
+session orchestration remain available as bounded compatibility aliases:
+
+- `session_create` preserves `id`, `rootSessionId`, `nestedAgentDepth`, and
+  `effectiveMaxNestedAgentDepth` at the top level;
+- `session_steer` preserves top-level `updateId`.
+
+The versioned compatibility path is:
 
 1. Detect `receiptVersion === "mcp-mutation-receipt.v1"`.
-2. Read the primary generated identity from `receipt.resource.id`, not a legacy
-   top-level `id`.
+2. Prefer the primary generated identity at `receipt.resource.id`. For
+   `session_create`, the bounded top-level `id` alias remains equal to it for
+   existing orchestration consumers.
 3. Inspect `committed`, `outcome`, `changed`, and `idempotency.status` instead of
    inferring success or replay from an entity body.
 4. When entity details are actually needed, call `receipt.nextAction.tool` or
@@ -197,9 +211,10 @@ instructions into a full session:
 }
 ```
 
-The new result is the receipt shown at the top of this page. Call
-`session_get({sessionId: receipt.resource.id})` when a current session projection
-is needed.
+The new result is the receipt shown at the top of this page. The bounded
+top-level lineage aliases are sufficient to spawn descendants under the same
+depth policy. Call `session_get({sessionId: receipt.resource.id})` when any other
+current session projection is needed.
 
 The REST API is unchanged. The React timeline's worker-reference projection is
 a tolerant reader: it recognizes v1 `resource.type:"session"` receipts and the

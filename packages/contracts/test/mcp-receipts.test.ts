@@ -27,6 +27,13 @@ const baseReceipt = {
   },
 } satisfies McpMutationReceiptType;
 
+const sessionCreateCompatibility = {
+  id: "00000000-0000-4000-8000-000000000002",
+  rootSessionId: "00000000-0000-4000-8000-000000000002",
+  nestedAgentDepth: 0,
+  effectiveMaxNestedAgentDepth: 3,
+} as const;
+
 describe("MCP mutation receipt contract", () => {
   test("accepts a compact versioned mutation receipt", () => {
     expect(McpMutationReceipt.parse(baseReceipt)).toEqual(baseReceipt);
@@ -40,6 +47,7 @@ describe("MCP mutation receipt contract", () => {
       changed: false,
       resource: { type: "session", id: "00000000-0000-4000-8000-000000000002" },
       idempotency: { status: "replayed" },
+      ...sessionCreateCompatibility,
       nextAction: {
         tool: "session_get",
         arguments: { sessionId: "00000000-0000-4000-8000-000000000002" },
@@ -57,6 +65,7 @@ describe("MCP mutation receipt contract", () => {
         changed: true,
         resource: { type: "session", id: "00000000-0000-4000-8000-000000000002" },
         idempotency: { status: "applied" },
+        ...sessionCreateCompatibility,
       }),
     ).toMatchObject({ outcome: "repaired", changed: true });
 
@@ -98,7 +107,9 @@ describe("MCP mutation receipt contract", () => {
         operation: "session_create",
         outcome: "partial_failure",
         changed: false,
+        resource: { type: "session", id: sessionCreateCompatibility.id },
         idempotency: { status: "replayed" },
+        ...sessionCreateCompatibility,
         partialFailure: { stage: "usage_recording", retryable: true },
         warnings: ["Retry only with the same idempotency key."],
       }),
@@ -107,6 +118,43 @@ describe("MCP mutation receipt contract", () => {
       changed: false,
       idempotency: { status: "replayed" },
     });
+  });
+
+  test("requires exact bounded session compatibility aliases", () => {
+    expect(() =>
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_create",
+        resource: { type: "session", id: sessionCreateCompatibility.id },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_create",
+        resource: { type: "session", id: sessionCreateCompatibility.id },
+        ...sessionCreateCompatibility,
+        id: "00000000-0000-4000-8000-000000000099",
+      }),
+    ).toThrow();
+
+    expect(
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_steer",
+        resource: { type: "session_system_update", id: sessionCreateCompatibility.id },
+        updateId: sessionCreateCompatibility.id,
+      }),
+    ).toMatchObject({ updateId: sessionCreateCompatibility.id });
+
+    expect(() =>
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_steer",
+        resource: { type: "session_system_update", id: sessionCreateCompatibility.id },
+      }),
+    ).toThrow();
   });
 
   test("rejects success-shaped receipts for noncommitted operations", () => {

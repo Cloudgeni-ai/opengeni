@@ -3101,6 +3101,7 @@ function registerWorkspaceOrchestrationTools(
                 interruptionCount: result.interruptionCount,
                 stoppingPreviousAttempt: result.interruptionCount > 0,
               },
+              updateId: result.updateId,
               nextAction: { tool: "session_get", arguments: { sessionId } },
             }),
           );
