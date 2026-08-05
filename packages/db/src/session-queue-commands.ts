@@ -45,6 +45,10 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 
+type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
+  payload: unknown;
+};
+
 export type QueueCommandConflictCode =
   | "QUEUE_VERSION_CHANGED"
   | "QUEUE_PROMPT_STARTED"
@@ -1140,7 +1144,7 @@ export async function steerQueuedTurnInTransaction(
     input.actor.type === "agent_attempt"
       ? `attempt:${input.actor.attemptId}`
       : input.actor.subjectId;
-  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [];
+  const eventValues: SessionEventInsertWithPayload[] = [];
   if (supersededTurnId && !liveCurrentTurnId) {
     eventValues.push({
       accountId: input.accountId,
@@ -1516,7 +1520,7 @@ export async function submitHumanPromptInTransaction(
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
   let sequence = session.lastSequence;
-  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
+  const eventValues: SessionEventInsertWithPayload[] = [
     {
       id: acceptedEventId,
       accountId: input.accountId,
@@ -2188,7 +2192,7 @@ export async function steerAgentSessionInTransaction(
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent Steer instruction was not inserted");
   let sequence = supersession.lastSequence;
-  const events: Array<typeof schema.sessionEvents.$inferInsert> = [];
+  const events: SessionEventInsertWithPayload[] = [];
   if (supersession.replacedTurn && !supersession.liveCurrentTurnId) {
     events.push({
       accountId: input.accountId,

@@ -75,6 +75,7 @@ import {
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
+  PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
   stripProviderItemIdsFilter,
@@ -150,6 +151,9 @@ const codexAppsTestFetch =
     return await globalThis.fetch(raw === CODEX_APPS_MCP_URL ? url : input, init);
   };
 
+const runtimeMcpServerId = (server: MCPServer): string =>
+  server instanceof PrefixedMcpServer ? server.registryId : server.name;
+
 test("Agents SDK debug logging omits model and tool payload data", () => {
   const logger = getLogger("opengeni:test-sensitive-logging");
 
@@ -160,13 +164,20 @@ test("Agents SDK debug logging omits model and tool payload data", () => {
 });
 
 test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle", async () => {
-  const slowServer = {
-    name: "slow-connect",
-    connect: async () => {
-      await Bun.sleep(50);
-    },
-    close: async () => {},
-  } as unknown as MCPServer;
+  const slowServer = new PrefixedMcpServer(
+    {
+      name: "inner-slow-connect",
+      cacheToolsList: false,
+      connect: async () => {
+        await Bun.sleep(50);
+      },
+      close: async () => {},
+      listTools: async () => [],
+      callTool: async () => [],
+      invalidateToolsCache: async () => {},
+    } as MCPServer,
+    "slow-connect",
+  );
 
   await expect(
     connectMcpServersInBatches([slowServer], {
@@ -4987,32 +4998,42 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // A warning names the skipped server so the drop is observable.
-      const warned = warnings.some((args) =>
-        args.some((arg) => typeof arg === "string" && arg.includes("geni-notebook")),
-      );
-      expect(warned).toBe(true);
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(JSON.stringify(warnings)).not.toContain("geni-notebook");
+      expect(JSON.stringify(warnings)).toContain('"origin":"runtime"');
     } finally {
       console.warn = originalWarn;
       broken.close();
     }
   });
 
-  test("MCP connect logging preserves exact provider diagnostics", async () => {
-    const syntheticCredential = "synthetic-mcp-log-secret-123456";
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: () =>
-        new Response(
-          JSON.stringify({
-            error: "unauthorized",
-            echoed: `Authorization: Bearer ${syntheticCredential}`,
-            retry: `https://objects.example/file?X-Amz-Signature=${syntheticCredential}`,
-          }),
-          { status: 401, headers: { "content-type": "application/json" } },
-        ),
+  test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
+    const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
+    const registryId = `registry-${sentinel}`;
+    const exactSourceError = Object.assign(new Error(`connect failed: ${sentinel}`), {
+      code: "MCP_TEST_FAILURE",
+      status: 503,
+      responseBody: { sentinel },
     });
+    const makeFacade = () =>
+      new PrefixedMcpServer(
+        {
+          name: `inner-${registryId}`,
+          cacheToolsList: false,
+          async connect() {
+            throw exactSourceError;
+          },
+          async close() {},
+          async listTools() {
+            return [];
+          },
+          async callTool() {
+            return [];
+          },
+          async invalidateToolsCache() {},
+        } as MCPServer,
+        registryId,
+      );
     const warnings: unknown[][] = [];
     const errors: unknown[][] = [];
     const originalWarn = console.warn;
@@ -5020,35 +5041,36 @@ describe("runtime event normalization", () => {
     console.warn = (...args: unknown[]) => warnings.push(args);
     console.error = (...args: unknown[]) => errors.push(args);
     try {
-      const prepared = await prepareAgentTools(
-        testSettings({
-          mcpServers: [
-            {
-              id: "synthetic-optional",
-              name: "Synthetic optional MCP",
-              url: `http://127.0.0.1:${server.port}/mcp`,
-              cacheToolsList: false,
-            },
-          ],
-        }),
-        [{ kind: "mcp", id: "synthetic-optional", optional: true }],
+      const bestEffortFacade = makeFacade();
+      const bestEffort = await connectMcpServersInBatches([bestEffortFacade], { strict: false });
+      const returnedError = bestEffort.errors.get(bestEffortFacade);
+      expect(returnedError?.message).toBe(exactSourceError.message);
+      expect(returnedError?.cause).toBe(exactSourceError);
+      await bestEffort.close();
+
+      const strictFacade = makeFacade();
+      const strictError = await connectMcpServersInBatches([strictFacade], { strict: true }).then(
+        () => null,
+        (error) => error as Error,
       );
-      await prepared.close();
+      expect(strictError?.message).toBe(exactSourceError.message);
+      expect(strictError?.cause).toBe(exactSourceError);
 
       const renderedLogs = [...warnings, ...errors]
         .flat()
         .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
         .map((value) => JSON.stringify(value))
         .join("\n");
-      expect(renderedLogs).toContain("synthetic-optional");
-      expect(renderedLogs).toContain("401");
-      expect(renderedLogs).toContain(syntheticCredential);
-      expect(renderedLogs).toContain("Authorization: Bearer");
-      expect(renderedLogs).toContain("X-Amz-Signature");
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain("MCP_TEST_FAILURE");
+      expect(renderedLogs).toContain("503");
+      expect(renderedLogs).not.toContain(registryId);
+      expect(renderedLogs).not.toContain(sentinel);
+      expect(exactSourceError.message).toContain(sentinel);
+      expect(exactSourceError.responseBody).toEqual({ sentinel });
     } finally {
       console.warn = originalWarn;
       console.error = originalError;
-      server.stop(true);
     }
   });
 

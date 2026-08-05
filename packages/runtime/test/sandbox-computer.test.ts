@@ -369,11 +369,30 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     // computerCallNormalizingFetch is also in place as a second net. Non-zero exit
     // codes (true command errors) still throw — only the still-running case is
     // silenced. screenshot()'s fail-loud + retry contract is preserved.
+    const sentinel = "synthetic-command-text-123456";
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
     const { session } = makeMockSession({ stillRunning: true });
     const c = new SandboxComputer(session as never);
-    // move() must RESOLVE (not reject) so the SDK action loop exits cleanly and
+    // type() must RESOLVE (not reject) so the SDK action loop exits cleanly and
     // screenshot() is called afterward.
-    await expect(c.move(5, 5)).resolves.toBeUndefined();
+    try {
+      await expect(c.type(sentinel)).resolves.toBeUndefined();
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([
+      [
+        "[SandboxComputer] action command did not finish before the yield window; proceeding to screenshot",
+        {
+          errorClass: "ComputerActionTimeoutError",
+          errorCode: "command_yield_timeout",
+          origin: "sandbox-computer",
+        },
+      ],
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain(sentinel);
   });
 
   test("F5: scroll converts model pixel deltas to clamped wheel notches (not literal repeat counts)", async () => {
@@ -670,17 +689,33 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
   });
 
   test("BLANK-SCREENSHOT FIX: a permission (TCC) denial FAILS FAST and loud — no retry, no blank", async () => {
-    const denial = new Error("Screen Recording permission is not granted");
+    const sentinel = "synthetic-screen-recording-denial-123456";
+    const denial = new Error(`Screen Recording permission is not granted: ${sentinel}`);
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
     const { session, attempts } = makeNativeSession({ throwPerAttempt: [denial] });
     const c = new NativeDesktopComputer(session, FAST_WARMUP);
-    const result = await c.screenshot().then(
-      (s) => ({ ok: true as const, s }),
-      (e) => ({ ok: false as const, e }),
-    );
+    const result = await c
+      .screenshot()
+      .then(
+        (s) => ({ ok: true as const, s }),
+        (e) => ({ ok: false as const, e }),
+      )
+      .finally(() => {
+        console.warn = originalWarn;
+      });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("a denied capture must throw, never resolve to a blank");
     // The AGENT's reason is surfaced verbatim (operator sees "grant Screen Recording").
     expect((result.e as Error).message).toContain("Screen Recording");
+    expect((result.e as Error).message).toContain(sentinel);
+    expect(JSON.stringify(warnings)).not.toContain(sentinel);
+    expect(warnings[0]?.[1]).toEqual({
+      errorClass: "Error",
+      errorCode: "screenshot_capture_failed",
+      origin: "sandbox-computer",
+    });
     // Terminal denial short-circuits the warm-up budget — exactly ONE attempt.
     expect(attempts()).toBe(1);
   });

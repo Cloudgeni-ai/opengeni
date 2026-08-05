@@ -340,9 +340,10 @@ describe("turn exact-content boundaries", () => {
     const diagnostic = safeErrorDiagnostic(error);
 
     expect(diagnostic).toEqual({
-      name: "Error",
+      errorClass: "Error",
+      errorCode: "AUTH_REJECTED",
       status: 401,
-      code: "AUTH_REJECTED",
+      origin: "worker",
     });
     expect(agentRunFailurePayload(error).error).toBe(`request rejected; detail=${syntheticValue}`);
     expect(diagnostic).not.toHaveProperty("stack");

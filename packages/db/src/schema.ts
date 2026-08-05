@@ -3510,6 +3510,9 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    workspaceTurnType: index("session_events_workspace_turn_type_idx")
+      .on(table.workspaceId, table.turnId, table.type)
+      .where(sql`${table.turnId} is not null`),
     monitoringTail: index("session_events_workspace_session_monitoring_tail_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(
@@ -5410,7 +5413,8 @@ export const hostExportConfig = pgTable(
 /**
  * Transactional delivery buffer. It intentionally has no tenant/source FKs:
  * a workspace deletion must not erase an already-committed, unacknowledged
- * host fact. Payloads are sanitized/bounded before they reach this table.
+ * host fact. Session-event payloads retain their exact storage bytes plus
+ * explicit codec truth; usage payloads remain ordinary JSON.
  */
 export const hostExportOutbox = pgTable(
   "host_export_outbox",
@@ -5440,6 +5444,7 @@ export const hostExportOutbox = pgTable(
       .default({}),
     origin: text("origin"),
     payload: jsonb("payload").$type<unknown>().notNull(),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     envelopeBytes: integer("envelope_bytes").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     sourceRecordedAt: timestamp("source_recorded_at", { withTimezone: true }).notNull(),
@@ -5550,6 +5555,7 @@ export const hostExportDeadLetters = pgTable(
     reason: text("reason").notNull(),
     envelope: losslessJsonb("envelope").$type<Record<string, unknown>>().notNull(),
     envelopeCodecVersion: losslessCodecVersion("envelope_codec_version"),
+    eventPayloadCodecVersion: losslessCodecVersion("event_payload_codec_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -3085,6 +3085,12 @@ export type PrepareToolsOptions = {
 
 type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
 
+type McpLifecyclePhase = "connect" | "close";
+
+type McpLifecycleAwareServer = MCPServer & {
+  unwrapLifecycleError?: (error: Error, phase: McpLifecyclePhase) => Error | undefined;
+};
+
 export type ConnectedMcpServerBatches = {
   active: MCPServer[];
   failed: MCPServer[];
@@ -3105,18 +3111,21 @@ export async function connectMcpServersInBatches(
   const batches: ConnectedMcpServerBatch[] = [];
   try {
     for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-      batches.push(
-        await connectMcpServers(
-          servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS),
-          {
+      const batchServers = servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS);
+      try {
+        batches.push(
+          await connectMcpServers(batchServers, {
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
             connectInParallel: true,
             strict: options.strict,
-          },
-        ),
-      );
+          }),
+        );
+      } catch (error) {
+        const sdkError = error instanceof Error ? error : new Error(String(error));
+        throw unwrapMcpLifecycleErrorFromServers(batchServers, sdkError, "connect");
+      }
     }
   } catch (error) {
     await closeMcpServerBatches(batches).catch(() => undefined);
@@ -3125,7 +3134,9 @@ export async function connectMcpServersInBatches(
 
   const errors = new Map<MCPServer, Error>();
   for (const batch of batches) {
-    for (const [server, error] of batch.errors) errors.set(server, error);
+    for (const [server, error] of batch.errors) {
+      errors.set(server, unwrapMcpLifecycleError(server, error, "connect") ?? error);
+    }
   }
   return {
     active: batches.flatMap((batch) => batch.active),
@@ -3145,8 +3156,31 @@ async function closeMcpServerBatches(batches: ConnectedMcpServerBatch[]): Promis
     } catch (error) {
       firstError ??= error;
     }
+    for (const [server, error] of batch.errors) {
+      firstError ??= unwrapMcpLifecycleError(server, error, "close");
+    }
   }
   if (firstError !== undefined) throw firstError;
+}
+
+function unwrapMcpLifecycleError(
+  server: MCPServer,
+  error: Error,
+  phase: McpLifecyclePhase,
+): Error | undefined {
+  return (server as McpLifecycleAwareServer).unwrapLifecycleError?.(error, phase);
+}
+
+function unwrapMcpLifecycleErrorFromServers(
+  servers: MCPServer[],
+  error: Error,
+  phase: McpLifecyclePhase,
+): Error {
+  for (const server of servers) {
+    const exact = unwrapMcpLifecycleError(server, error, phase);
+    if (exact) return exact;
+  }
+  return error;
 }
 
 export async function prepareAgentTools(
@@ -3272,8 +3306,12 @@ export async function prepareAgentTools(
   // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
   // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
   // ChatGPT plan is a normal, non-noteworthy state).
-  const optionalServerNames = new Set(
-    servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
+  const optionalServerIds = new Set(
+    servers
+      .filter((entry) => entry.optional)
+      .map((entry) => entry.server)
+      .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+      .map((server) => server.registryId),
   );
   const connectedRequired = await connectMcpServersInBatches(requiredServers, {
     strict: true,
@@ -3298,12 +3336,12 @@ export async function prepareAgentTools(
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
       }
-      if (!optionalServerNames.has(failed.name)) {
+      if (!(failed instanceof PrefixedMcpServer) || !optionalServerIds.has(failed.registryId)) {
         continue;
       }
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
-        `[mcp] optional server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
+        "[mcp] optional server failed to connect/list tools; skipping it for this turn",
         mcpErrorFields(error),
       );
     }
@@ -3763,22 +3801,57 @@ function exactErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-// Structured metadata is additive; it never replaces the exact diagnostic.
-function mcpErrorFields(error: unknown): {
+type McpPublicErrorFields = {
   errorClass: string;
+  errorCode?: string;
   status?: number;
-  errorMessage: string;
-} {
-  const errorClass = error instanceof Error ? error.constructor.name : typeof error;
-  const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
-  const status = typeof raw === "number" ? raw : undefined;
-  if (status === undefined) {
-    const altRaw = (error as { status?: unknown } | null)?.status;
-    return typeof altRaw === "number"
-      ? { errorClass, status: altRaw, errorMessage: exactErrorMessage(error) }
-      : { errorClass, errorMessage: exactErrorMessage(error) };
+  origin: "runtime";
+};
+
+/** Allowlisted projection for public SDK/console telemetry; internal errors stay exact. */
+function mcpErrorFields(error: unknown): McpPublicErrorFields {
+  const candidateClass = error instanceof Error ? error.constructor.name : typeof error;
+  const fields: McpPublicErrorFields = {
+    errorClass: publicMcpIdentifier(candidateClass) ? candidateClass : "Error",
+    origin: "runtime",
+  };
+  const rawCode =
+    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  const errorCode = publicMcpCode(rawCode);
+  if (errorCode !== undefined) fields.errorCode = errorCode;
+  const status =
+    error && typeof error === "object"
+      ? Number(
+          (error as { status?: unknown; statusCode?: unknown }).status ??
+            (error as { statusCode?: unknown }).statusCode ??
+            (typeof rawCode === "number" ? rawCode : undefined),
+        )
+      : Number.NaN;
+  if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  return fields;
+}
+
+function publicMcpCode(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const candidate = String(value);
+  return publicMcpIdentifier(candidate) ? candidate : undefined;
+}
+
+function publicMcpIdentifier(value: string): boolean {
+  if (value.length === 0 || value.length > 80) return false;
+  for (const character of value) {
+    const point = character.charCodeAt(0);
+    const allowed =
+      point === 45 ||
+      point === 46 ||
+      point === 58 ||
+      point === 95 ||
+      (point >= 48 && point <= 57) ||
+      (point >= 65 && point <= 90) ||
+      (point >= 97 && point <= 122);
+    if (!allowed) return false;
   }
-  return { errorClass, status, errorMessage: exactErrorMessage(error) };
+  return true;
 }
 
 type McpTransportError = Error & {
@@ -3901,7 +3974,7 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
 
 export function mcpTransportErrorWithRetryMetadata(error: unknown): McpTransportError {
   const fields = mcpErrorFields(error);
-  const classified = new Error(fields.errorMessage, {
+  const classified = new Error(exactErrorMessage(error), {
     cause: error,
   }) as McpTransportError;
   classified.name = error instanceof Error ? error.name : "McpTransportError";
@@ -3917,7 +3990,7 @@ export function mcpTransportErrorWithRetryMetadata(error: unknown): McpTransport
   return classified;
 }
 
-function mcpTransportLogger(serverId: string) {
+function mcpTransportLogger(_serverId: string) {
   const logFailure = (_message: string, ...args: unknown[]) => {
     let error: unknown;
     for (let index = args.length - 1; index >= 0; index -= 1) {
@@ -3926,10 +3999,7 @@ function mcpTransportLogger(serverId: string) {
         break;
       }
     }
-    console.warn("[mcp] transport operation failed", {
-      serverId,
-      ...mcpErrorFields(error),
-    });
+    console.warn("[mcp] transport operation failed", mcpErrorFields(error));
   };
   return {
     namespace: "opengeni:mcp-transport",
@@ -4191,10 +4261,34 @@ export function prefixedMcpToolName(registryId: string, toolName: string): strin
   return sharedPrefixedMcpToolName(registryId, toolName);
 }
 
-class PrefixedMcpServer implements MCPServer {
+const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
+
+type McpLifecycleFailure = {
+  phase: McpLifecyclePhase;
+  publicError: Error;
+  exactError: Error;
+};
+
+function publicMcpLifecycleError(error: Error, phase: McpLifecyclePhase): Error {
+  const fields = mcpErrorFields(error);
+  const lifecycleError = new Error(`MCP lifecycle ${phase} failed`) as Error & {
+    code?: string;
+    status?: number;
+    origin?: string;
+  };
+  lifecycleError.name = "McpLifecycleError";
+  lifecycleError.code = fields.errorCode ?? `mcp_${phase}_failed`;
+  if (fields.status !== undefined) lifecycleError.status = fields.status;
+  lifecycleError.origin = fields.origin;
+  return lifecycleError;
+}
+
+/** @internal Exported for exact SDK-boundary conformance tests. */
+export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
-  readonly name: string;
+  readonly name = MCP_SDK_LIFECYCLE_NAME;
   readonly prefix: string;
+  readonly registryId: string;
   private readonly allowedTools: Set<string> | undefined;
   // Best-effort servers (optional refs, connectionRef-backed capability MCPs,
   // codex_apps) must never fail a turn: a tools/list throw degrades to zero
@@ -4204,6 +4298,7 @@ class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private modelToolSchemaAccountingDeferred = false;
+  private readonly lifecycleFailures: Partial<Record<McpLifecyclePhase, McpLifecycleFailure>> = {};
 
   constructor(
     private readonly inner: MCPServer,
@@ -4213,24 +4308,43 @@ class PrefixedMcpServer implements MCPServer {
     private readonly aggregateToolBudget?: McpAggregateToolListBudget,
     private readonly aggregateSourceId = registryId,
   ) {
-    this.name = registryId;
+    this.registryId = registryId;
     this.prefix = prefixedMcpToolName(registryId, "");
     this.cacheToolsList = inner.cacheToolsList;
     this.allowedTools = allowedTools ? new Set(allowedTools) : undefined;
     this.bestEffort = bestEffort;
   }
 
-  connect(): Promise<void> {
-    return this.inner.connect().catch((error: unknown) => {
-      // Preserve the exact source diagnostic and attach retry metadata without
-      // changing the message.
-      throw mcpTransportErrorWithRetryMetadata(error);
-    });
+  async connect(): Promise<void> {
+    try {
+      await this.inner.connect();
+      delete this.lifecycleFailures.connect;
+    } catch (error) {
+      // The SDK logs its rejected Error directly. Keep exact internal truth
+      // out-of-band and reject only a structural public lifecycle error.
+      const exactError = mcpTransportErrorWithRetryMetadata(error);
+      const publicError = publicMcpLifecycleError(exactError, "connect");
+      this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
+      throw publicError;
+    }
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
     this.releaseAggregateBudget();
-    return this.inner.close();
+    try {
+      await this.inner.close();
+      delete this.lifecycleFailures.close;
+    } catch (error) {
+      const exactError = mcpTransportErrorWithRetryMetadata(error);
+      const publicError = publicMcpLifecycleError(exactError, "close");
+      this.lifecycleFailures.close = { phase: "close", publicError, exactError };
+      throw publicError;
+    }
+  }
+
+  unwrapLifecycleError(error: Error, phase: McpLifecyclePhase): Error | undefined {
+    const failure = this.lifecycleFailures[phase];
+    return failure?.publicError === error ? failure.exactError : undefined;
   }
 
   releaseAggregateBudget(): void {
@@ -4244,7 +4358,7 @@ class PrefixedMcpServer implements MCPServer {
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => ({
           ...tool,
-          name: prefixedMcpToolName(this.name, tool.name),
+          name: prefixedMcpToolName(this.registryId, tool.name),
         }));
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
@@ -4273,7 +4387,7 @@ class PrefixedMcpServer implements MCPServer {
         this.loggedListToolsFailure = true;
         console.warn(
           "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          { serverId: this.name, ...mcpErrorFields(error) },
+          mcpErrorFields(error),
         );
       }
       this.releaseAggregateBudget();
@@ -4302,7 +4416,7 @@ class PrefixedMcpServer implements MCPServer {
   ): Promise<any> {
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
-      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
+      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
     try {
       const output = await this.inner.callTool(unprefixed, args, meta);
@@ -4346,7 +4460,7 @@ class PrefixedMcpServer implements MCPServer {
       if (this.bestEffort) {
         console.warn(
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
-          { serverId: this.name, toolName: unprefixed, ...mcpErrorFields(error) },
+          mcpErrorFields(error),
         );
         return {
           isError: true,
@@ -4366,7 +4480,7 @@ class PrefixedMcpServer implements MCPServer {
       listResources?: (params?: Record<string, unknown>) => Promise<any>;
     };
     if (!resourcesServer.listResources) {
-      throw new Error(`MCP server ${this.name} does not support resources`);
+      throw new Error(`MCP server ${this.registryId} does not support resources`);
     }
     return await resourcesServer.listResources(params);
   }
@@ -4376,7 +4490,7 @@ class PrefixedMcpServer implements MCPServer {
       listResourceTemplates?: (params?: Record<string, unknown>) => Promise<any>;
     };
     if (!resourcesServer.listResourceTemplates) {
-      throw new Error(`MCP server ${this.name} does not support resource templates`);
+      throw new Error(`MCP server ${this.registryId} does not support resource templates`);
     }
     return await resourcesServer.listResourceTemplates(params);
   }
@@ -4386,7 +4500,7 @@ class PrefixedMcpServer implements MCPServer {
       readResource?: (uri: string) => Promise<any>;
     };
     if (!resourcesServer.readResource) {
-      throw new Error(`MCP server ${this.name} does not support resource reads`);
+      throw new Error(`MCP server ${this.registryId} does not support resource reads`);
     }
     return await resourcesServer.readResource(uri);
   }
@@ -4397,7 +4511,7 @@ class PrefixedMcpServer implements MCPServer {
 
   private unprefixToolName(toolName: string): string {
     if (!toolName.startsWith(this.prefix)) {
-      throw new Error(`MCP tool ${toolName} is missing expected ${this.name} prefix`);
+      throw new Error(`MCP tool ${toolName} is missing expected ${this.registryId} prefix`);
     }
     return toolName.slice(this.prefix.length);
   }
@@ -4545,8 +4659,12 @@ export async function prepareRunInput(
     );
   }
   const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
-  for (const repair of compatibleRunState.repairs) {
-    console.warn("[runtime] repaired incompatible RunState exposedPorts", repair);
+  if (compatibleRunState.repairs.length > 0) {
+    console.warn("[runtime] repaired incompatible RunState exposedPorts", {
+      errorClass: "RunStateCompatibilityError",
+      errorCode: "incompatible_exposed_ports",
+      origin: "runtime",
+    });
   }
   const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
   const interruptions = state.getInterruptions();

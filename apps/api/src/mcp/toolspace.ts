@@ -398,10 +398,10 @@ async function resolveToolListing(input: {
       turn: activeTurn,
       personalConnectionDelegations,
     }).catch((error) => {
-      deps.observability?.warn("toolspace upstream connection failed", {
-        serverId,
-        ...toolspaceTelemetryErrorAttributes(error),
-      });
+      deps.observability?.warn(
+        "toolspace upstream connection failed",
+        toolspacePublicErrorFields(error),
+      );
       return null;
     });
     if (!connection) {
@@ -412,20 +412,20 @@ async function resolveToolListing(input: {
       const listed = await connection.client
         .listTools(undefined, toolspaceRequestOptions(config))
         .catch((error) => {
-          deps.observability?.warn("toolspace upstream tool list failed", {
-            serverId,
-            ...toolspaceTelemetryErrorAttributes(error),
-          });
+          deps.observability?.warn(
+            "toolspace upstream tool list failed",
+            toolspacePublicErrorFields(error),
+          );
           return { tools: [] };
         });
       let boundedTools: readonly McpTool[];
       try {
         boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
       } catch (error) {
-        deps.observability?.warn("toolspace upstream tool list exceeded safety limit", {
-          serverId,
-          errorClass: error instanceof Error ? error.name : typeof error,
-        });
+        deps.observability?.warn(
+          "toolspace upstream tool list exceeded safety limit",
+          toolspacePublicErrorFields(error, "tool_list_too_large"),
+        );
         aggregateBudget.replace(serverId, []);
         return;
       }
@@ -756,11 +756,10 @@ async function callRemoteTool(
     return output;
   } catch (error) {
     if (error instanceof McpPayloadTooLargeError) {
-      deps.observability?.warn("toolspace upstream tool result exceeded safety limit", {
-        serverId: server.config.id,
-        toolName,
-        errorClass: error.name,
-      });
+      deps.observability?.warn(
+        "toolspace upstream tool result exceeded safety limit",
+        toolspacePublicErrorFields(error, "tool_result_too_large"),
+      );
       return mcpError("upstream tool result exceeded the safety limit");
     }
     if (isToolspaceAuthNeededError(error)) {
@@ -770,11 +769,12 @@ async function callRemoteTool(
       return mcpError(TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message);
     }
     const message = exactErrorMessage(error);
-    deps.observability?.warn("toolspace upstream tool call failed", {
-      serverId: server.config.id,
-      toolName,
-      error: message,
-    });
+    // The exact provider diagnostic remains the internal/model-facing tool
+    // result. Public observability receives only allowlisted metadata.
+    deps.observability?.warn(
+      "toolspace upstream tool call failed",
+      toolspacePublicErrorFields(error),
+    );
     return mcpError(message);
   }
 }
@@ -783,23 +783,60 @@ function exactErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Bounded projection for the external observability sink; product data stays exact. */
-function toolspaceTelemetryErrorAttributes(error: unknown): {
+export type ToolspacePublicErrorFields = {
   errorClass: string;
   errorCode?: string;
-  errorMessage?: string;
-} {
-  if (!(error instanceof Error)) {
-    return { errorClass: typeof error };
-  }
-  const code = (error as Error & { code?: unknown }).code;
-  return {
-    errorClass: error.name,
-    ...(typeof code === "string" ? { errorCode: code } : {}),
-    ...(error.message
-      ? { errorMessage: error.message.replaceAll(/[\r\n]+/gu, " ").slice(0, 512) }
-      : {}),
+  status?: number;
+  origin: "toolspace";
+};
+
+/** Allowlisted projection for public telemetry; product data stays exact. */
+export function toolspacePublicErrorFields(
+  error: unknown,
+  fallbackCode?: string,
+): ToolspacePublicErrorFields {
+  const candidateClass = error instanceof Error ? error.constructor.name : typeof error;
+  const fields: ToolspacePublicErrorFields = {
+    errorClass: publicToolspaceIdentifier(candidateClass) ? candidateClass : "Error",
+    origin: "toolspace",
   };
+  const rawCode =
+    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  const errorCode = publicToolspaceCode(rawCode) ?? publicToolspaceCode(fallbackCode);
+  if (errorCode !== undefined) fields.errorCode = errorCode;
+  const status =
+    error && typeof error === "object"
+      ? Number(
+          (error as { status?: unknown; statusCode?: unknown }).status ??
+            (error as { statusCode?: unknown }).statusCode ??
+            (typeof rawCode === "number" ? rawCode : undefined),
+        )
+      : Number.NaN;
+  if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  return fields;
+}
+
+function publicToolspaceCode(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const candidate = String(value);
+  return publicToolspaceIdentifier(candidate) ? candidate : undefined;
+}
+
+function publicToolspaceIdentifier(value: string): boolean {
+  if (value.length === 0 || value.length > 80) return false;
+  for (const character of value) {
+    const point = character.charCodeAt(0);
+    const allowed =
+      point === 45 ||
+      point === 46 ||
+      point === 58 ||
+      point === 95 ||
+      (point >= 48 && point <= 57) ||
+      (point >= 65 && point <= 90) ||
+      (point >= 97 && point <= 122);
+    if (!allowed) return false;
+  }
+  return true;
 }
 
 type ToolspaceReservation =

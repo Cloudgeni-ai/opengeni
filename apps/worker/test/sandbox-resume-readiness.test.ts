@@ -3,6 +3,7 @@ import { type EstablishedSandboxSession, SandboxExecReadinessError } from "@open
 import {
   SandboxWarmingTimeoutError,
   isRetryableDegradedRestore,
+  safeSnapshotError,
   waitForSandboxExecReadiness,
   waitForWarmSnapshot,
 } from "../src/sandbox-resume";
@@ -77,6 +78,24 @@ describe("sandbox exec readiness", () => {
 });
 
 describe("workspace snapshot cancellation", () => {
+  test("public snapshot diagnostics omit exact provider content", () => {
+    const sentinel = "synthetic-snapshot-provider-value-123456";
+    const error = Object.assign(new Error(`snapshot failed: ${sentinel}`), {
+      code: "SNAPSHOT_FAILED",
+      status: 503,
+      responseBody: sentinel,
+    });
+
+    expect(safeSnapshotError(error)).toEqual({
+      errorClass: "Error",
+      errorCode: "SNAPSHOT_FAILED",
+      status: 503,
+      origin: "sandbox-resume",
+    });
+    expect(error.message).toContain(sentinel);
+    expect(JSON.stringify(safeSnapshotError(error))).not.toContain(sentinel);
+  });
+
   test("Steer/Pause preempts an in-flight snapshot wait instead of paying its timeout", async () => {
     const controller = new AbortController();
     const startedAt = performance.now();

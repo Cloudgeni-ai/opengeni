@@ -9,22 +9,23 @@ const MAX_JSON_DEPTH = 512;
  * column and must never be decoded based on content shape alone.
  */
 export const LOSSLESS_CONTENT_CODEC_VERSION = 1 as const;
+export const LOSSLESS_CONTENT_WRITER_APPLICATION_NAME = "opengeni-lossless-v1";
 
 export function withLosslessContentWriteVersion<
   const ContentKey extends string,
   const VersionKey extends string,
-  Value extends object,
+  const Value extends object,
 >(
-  value: Value,
+  value: Value & Record<ContentKey, unknown>,
   contentKey: ContentKey,
   versionKey: VersionKey,
 ): Value & Record<VersionKey, typeof LOSSLESS_CONTENT_CODEC_VERSION>;
 export function withLosslessContentWriteVersion<
   const ContentKey extends string,
   const VersionKey extends string,
-  Value extends object,
+  const Value extends object,
 >(
-  value: readonly Value[],
+  value: readonly (Value & Record<ContentKey, unknown>)[],
   contentKey: ContentKey,
   versionKey: VersionKey,
 ): Array<Value & Record<VersionKey, typeof LOSSLESS_CONTENT_CODEC_VERSION>>;

@@ -841,9 +841,10 @@ function compactionFailureReason(reason: string): string {
 }
 
 export type SafeErrorDiagnostic = {
-  name: string;
+  errorClass: string;
+  errorCode?: string;
   status?: number;
-  code?: string;
+  origin: "worker";
 };
 
 /**
@@ -853,21 +854,24 @@ export type SafeErrorDiagnostic = {
  * permission-controlled session event, not stdout or telemetry.
  */
 export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
-  const rawName = error instanceof Error ? error.name : "Error";
-  const name = /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error";
-  const diagnostic: SafeErrorDiagnostic = { name };
+  const rawClass = error instanceof Error ? error.constructor.name : typeof error;
+  const diagnostic: SafeErrorDiagnostic = {
+    errorClass: publicWorkerIdentifier(rawClass) ? rawClass : "Error",
+    origin: "worker",
+  };
   if (error && typeof error === "object") {
+    const rawCode = (error as { code?: unknown }).code;
     const status = Number(
       (error as { status?: unknown; statusCode?: unknown }).status ??
-        (error as { statusCode?: unknown }).statusCode,
+        (error as { statusCode?: unknown }).statusCode ??
+        (typeof rawCode === "number" ? rawCode : undefined),
     );
     if (Number.isInteger(status) && status >= 100 && status <= 599) {
       diagnostic.status = status;
     }
-    const rawCode = (error as { code?: unknown }).code;
     if (typeof rawCode === "string" || typeof rawCode === "number") {
       const code = String(rawCode);
-      if (/^[A-Za-z0-9_.:-]+$/.test(code)) diagnostic.code = code;
+      if (publicWorkerIdentifier(code)) diagnostic.errorCode = code;
     }
   }
   return diagnostic;
@@ -875,17 +879,33 @@ export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
 
 function safeErrorForTelemetry(error: unknown): Error {
   const diagnostic = safeErrorDiagnostic(error);
-  const metadata = [
-    diagnostic.code ? `code=${diagnostic.code}` : undefined,
-    diagnostic.status ? `status=${diagnostic.status}` : undefined,
-  ].filter((value): value is string => Boolean(value));
-  const safe = new Error(
-    metadata.length > 0
-      ? `worker operation failed (${metadata.join(", ")})`
-      : "worker operation failed",
-  );
-  safe.name = diagnostic.name;
+  const safe = new Error("worker operation failed") as Error & {
+    code?: string;
+    status?: number;
+    origin?: string;
+  };
+  safe.name = "WorkerOperationError";
+  safe.code = diagnostic.errorCode ?? "worker_operation_failed";
+  if (diagnostic.status !== undefined) safe.status = diagnostic.status;
+  safe.origin = diagnostic.origin;
   return safe;
+}
+
+function publicWorkerIdentifier(value: string): boolean {
+  if (value.length === 0 || value.length > 80) return false;
+  for (const character of value) {
+    const point = character.charCodeAt(0);
+    const allowed =
+      point === 45 ||
+      point === 46 ||
+      point === 58 ||
+      point === 95 ||
+      (point >= 48 && point <= 57) ||
+      (point >= 65 && point <= 90) ||
+      (point >= 97 && point <= 122);
+    if (!allowed) return false;
+  }
+  return true;
 }
 
 function compactionFailureReasonFromError(error: unknown): string {
@@ -2513,7 +2533,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           workspaceId: input.workspaceId,
           turnId,
           reason,
-          errorName: error instanceof Error ? error.name : "unknown",
+          ...safeErrorDiagnostic(error),
         });
         observability.incrementCounter({
           name: "opengeni_codex_lease_renewals_total",
@@ -2902,7 +2922,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   sessionId: input.sessionId,
                   sandboxGroupId: heartbeatGroupId,
                   leaseEpoch: heartbeatEpoch,
-                  error: error instanceof Error ? error.message : String(error),
+                  ...safeErrorDiagnostic(error),
                 });
               })
               .finally(() => {
@@ -6185,7 +6205,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           observability.error("context compaction failed", {
             sessionId: input.sessionId,
             turnId,
-            error: errorMessage,
+            ...safeErrorDiagnostic(compactError),
           });
           if (
             !(await settle!({
@@ -6977,8 +6997,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
             turnId: activeTurnId,
             reason: recoveryKind,
-            code: overflow?.code ? String(overflow.code) : undefined,
-            error: String(overflow?.message ?? compactionNeeded?.message ?? ""),
+            ...safeErrorDiagnostic(attemptError),
             signalTokens: compactionNeeded?.signalTokens,
             thresholdTokens: compactionNeeded?.thresholdTokens,
           });
@@ -7027,7 +7046,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             observability.warn("context compaction recovery compaction failed", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
-              error: compactionFailureMessage,
+              ...safeErrorDiagnostic(compactError),
             });
           }
           if (!compactionHandled) {
@@ -9401,7 +9420,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       sessionId: input.sessionId,
       turnId: input.turnId,
       sourceKey: input.sourceKey,
-      error: error instanceof Error ? error.message : String(error),
+      ...safeErrorDiagnostic(error),
     });
   }
 }

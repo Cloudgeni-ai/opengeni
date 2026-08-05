@@ -229,6 +229,58 @@ export class ComputerActionError extends Error {
   }
 }
 
+function computerPublicErrorFields(
+  error: unknown,
+  fallbackClass: string,
+  fallbackCode: string,
+): {
+  errorClass: string;
+  errorCode: string;
+  status?: number;
+  origin: "sandbox-computer";
+} {
+  const rawClass = error instanceof Error ? error.constructor.name : fallbackClass;
+  const errorClass = publicComputerIdentifier(rawClass) ? rawClass : fallbackClass;
+  const rawCode =
+    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  const candidateCode =
+    typeof rawCode === "string" || typeof rawCode === "number" ? String(rawCode) : fallbackCode;
+  const errorCode = publicComputerIdentifier(candidateCode) ? candidateCode : fallbackCode;
+  const fields: {
+    errorClass: string;
+    errorCode: string;
+    status?: number;
+    origin: "sandbox-computer";
+  } = { errorClass, errorCode, origin: "sandbox-computer" };
+  const status =
+    error && typeof error === "object"
+      ? Number(
+          (error as { status?: unknown; statusCode?: unknown }).status ??
+            (error as { statusCode?: unknown }).statusCode ??
+            (typeof rawCode === "number" ? rawCode : undefined),
+        )
+      : Number.NaN;
+  if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  return fields;
+}
+
+function publicComputerIdentifier(value: string): boolean {
+  if (value.length === 0 || value.length > 80) return false;
+  for (const character of value) {
+    const point = character.charCodeAt(0);
+    const allowed =
+      point === 45 ||
+      point === 46 ||
+      point === 58 ||
+      point === 95 ||
+      (point >= 48 && point <= 57) ||
+      (point >= 65 && point <= 90) ||
+      (point >= 97 && point <= 122);
+    if (!allowed) return false;
+  }
+  return true;
+}
+
 /**
  * The Computer the agent drives. Every action issues ONE shell line through the
  * externally-owned session (exec ?? execCommand, F1), prefixed with the display.
@@ -328,7 +380,8 @@ export class SandboxComputer implements Computer {
       // produces empty bytes, and the retry loop eventually throws. The wire-level
       // backstop in computerCallNormalizingFetch is also in place as a second net.
       console.warn(
-        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${cmd}`,
+        "[SandboxComputer] action command did not finish before the yield window; proceeding to screenshot",
+        computerPublicErrorFields(undefined, "ComputerActionTimeoutError", "command_yield_timeout"),
       );
       return output;
     }
@@ -755,12 +808,11 @@ export class NativeDesktopComputer implements Computer {
         break;
       }
     }
-    // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
-    // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
-    // then rethrow — never return "".
-    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Public logs
+    // receive only structural metadata; the exact error is rethrown internally.
     console.warn(
-      `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
+      "[NativeDesktopComputer] screenshot failed after the capture retry budget",
+      computerPublicErrorFields(lastError, "ComputerUnavailableError", "screenshot_capture_failed"),
     );
     if (lastError instanceof Error) {
       throw lastError;

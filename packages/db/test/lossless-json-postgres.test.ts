@@ -8,20 +8,27 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { and, asc, eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import {
+  acknowledgeHostExportBatch,
   appendSessionEvents,
   appendSessionHistoryItems,
   bootstrapWorkspace,
+  claimHostExportBatch,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  deadLetterHostExportHead,
   getSession,
   getSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEventPage,
   materializeGoalContinuation,
   provisionRoles,
+  recordUsageEvent,
+  registerDbBinding,
+  registerHostExportConsumer,
   recordPendingSessionToolCallResult,
   registerPendingSessionToolCall,
   saveWorkspaceMemory,
@@ -99,6 +106,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
 
     const admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
     let rollingApp: ReturnType<typeof createDb> | null = null;
+    let oldWriter: ReturnType<typeof postgres> | null = null;
+    let injectedSql: ReturnType<typeof postgres> | null = null;
     try {
       await admin.unsafe(`create table schema_migrations (
         name text primary key,
@@ -233,6 +242,18 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       const secondKey = String.fromCharCode(112, 97, 115, 115, 119, 111, 114, 100);
       Reflect.set(appUrl, secondKey, testValue);
       rollingApp = createDb(appUrl.toString(), { max: 4 });
+      oldWriter = postgres(appUrl.toString(), {
+        max: 1,
+        prepare: false,
+        connection: { application_name: "opengeni" },
+      });
+      injectedSql = postgres(appUrl.toString(), {
+        max: 1,
+        prepare: false,
+        connection: { application_name: "synthetic-embedded-host" },
+      });
+      const injectedDb = drizzle(injectedSql, { schema });
+      registerDbBinding(injectedDb, { rlsStrategy: "force" });
 
       const bootstrapped = await bootstrapWorkspace(rollingApp.db, {
         accountExternalSource: "lossless-rolling-test",
@@ -279,6 +300,99 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         initialMessage: legacyTextMarker,
         initialVersion: null,
       });
+
+      const newVersionedInitial = `new${nul}${loneHigh}${loneLow}${LOSSLESS_TEXT_PREFIX}`;
+      await withWorkspaceRls(rollingApp.db, workspace!.id, (db) =>
+        db
+          .update(schema.sessions)
+          .set(
+            withLosslessContentWriteVersion(
+              { initialMessage: newVersionedInitial },
+              "initialMessage",
+              "initialMessageCodecVersion",
+            ),
+          )
+          .where(eq(schema.sessions.id, sessionId)),
+      );
+      const [versionedInitial] = await admin<
+        Array<{ initialMessage: string; initialVersion: number | null }>
+      >`
+        select initial_message as "initialMessage",
+               initial_message_codec_version as "initialVersion"
+        from sessions where id = ${sessionId}
+      `;
+      expect(versionedInitial?.initialVersion).toBe(1);
+      expect(
+        fromPostgresLosslessText(
+          versionedInitial!.initialMessage,
+          versionedInitial!.initialVersion,
+        ),
+      ).toBe(newVersionedInitial);
+
+      await oldWriter.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${workspace!.id}, true)`;
+        await tx`
+          update sessions set title = 'old writer unrelated update'
+          where id = ${sessionId}
+        `;
+      });
+      const [afterOldUnrelatedUpdate] = await admin<Array<{ initialVersion: number | null }>>`
+        select initial_message_codec_version as "initialVersion"
+        from sessions where id = ${sessionId}
+      `;
+      expect(afterOldUnrelatedUpdate?.initialVersion).toBe(1);
+
+      await oldWriter.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${workspace!.id}, true)`;
+        await tx`
+          update sessions set initial_message = ${legacyTextMarker}
+          where id = ${sessionId}
+        `;
+      });
+      const [afterOldContentUpdate] = await admin<
+        Array<{ initialMessage: string; initialVersion: number | null }>
+      >`
+        select initial_message as "initialMessage",
+               initial_message_codec_version as "initialVersion"
+        from sessions where id = ${sessionId}
+      `;
+      expect(afterOldContentUpdate).toEqual({
+        initialMessage: legacyTextMarker,
+        initialVersion: null,
+      });
+      expect((await getSession(rollingApp.db, workspace!.id, sessionId))?.initialMessage).toBe(
+        legacyTextMarker,
+      );
+
+      const embeddedExact = `embedded${nul}${loneHigh}${loneLow}${LOSSLESS_TEXT_PREFIX}`;
+      await withWorkspaceRls(injectedDb, workspace!.id, (db) =>
+        db
+          .update(schema.sessions)
+          .set(
+            withLosslessContentWriteVersion(
+              { initialMessage: embeddedExact },
+              "initialMessage",
+              "initialMessageCodecVersion",
+            ),
+          )
+          .where(eq(schema.sessions.id, sessionId)),
+      );
+      const [afterEmbeddedUpdate] = await admin<
+        Array<{ initialMessage: string; initialVersion: number | null }>
+      >`
+        select initial_message as "initialMessage",
+               initial_message_codec_version as "initialVersion"
+        from sessions where id = ${sessionId}
+      `;
+      expect(afterEmbeddedUpdate?.initialVersion).toBe(1);
+      expect(
+        fromPostgresLosslessText(
+          afterEmbeddedUpdate!.initialMessage,
+          afterEmbeddedUpdate!.initialVersion,
+        ),
+      ).toBe(embeddedExact);
 
       await admin`
         insert into session_history_items (
@@ -392,6 +506,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       });
     } finally {
       await rollingApp?.close().catch(() => undefined);
+      await oldWriter?.end().catch(() => undefined);
+      await injectedSql?.end().catch(() => undefined);
       await admin.end().catch(() => undefined);
       await blank.release();
     }
@@ -860,5 +976,176 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       payloadTrigger: false,
       realtimeBounds: 0,
     });
+  }, 180_000);
+
+  test("materializes exact host exports and nested dead-letter payloads", async () => {
+    if (!shared || !app) return;
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(app.db, {
+      accountExternalSource: "lossless-host-export-test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Lossless host export",
+      workspaceExternalSource: "lossless-host-export-test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Lossless host export",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const session = await createSession(app.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "prepare exact host export",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const started = await initializeSessionStartAtomically(app.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    if (!started.turn) throw new Error("host-export fixture did not create a turn");
+
+    const exporter = createDb(shared.adminUrl, { max: 2 });
+    const eventConsumerId = `lossless-event-${suffix}`;
+    const usageConsumerId = `lossless-usage-${suffix}`;
+    try {
+      await registerHostExportConsumer(exporter.db, {
+        kind: "session_event",
+        consumerId: eventConsumerId,
+      });
+      await registerHostExportConsumer(exporter.db, {
+        kind: "usage_event",
+        consumerId: usageConsumerId,
+      });
+
+      const nul = String.fromCharCode(0);
+      const loneHigh = String.fromCharCode(0xd800);
+      const loneLow = String.fromCharCode(0xdc00);
+      const activePrefixCollision = `${LOSSLESS_JSON_STRING_PREFIX}QQAAAA==`;
+      const exactPayload = {
+        id: `call-${suffix}`,
+        updateId: `update-${suffix}`,
+        sourceKey: `source-${suffix}`,
+        recordingId: `recording-${suffix}`,
+        code: "synthetic_exact_host_export",
+        type: "agent.toolCall.output",
+        output: `before${nul}${loneHigh}${loneLow}after`,
+        collision: activePrefixCollision,
+      };
+      const [event] = await appendSessionEvents(app.db, workspaceId, session.id, [
+        {
+          type: "agent.toolCall.output",
+          payload: exactPayload,
+          turnId: started.turn.id,
+        },
+      ]);
+      const usage = await recordUsageEvent(app.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        eventType: "synthetic.host.export",
+        quantity: 1,
+        unit: "event",
+        sessionId: session.id,
+        turnId: started.turn.id,
+        idempotencyKey: `lossless-host-usage-${suffix}`,
+      });
+
+      const eventBatch = await claimHostExportBatch(exporter.db, {
+        kind: "session_event",
+        consumerId: eventConsumerId,
+        leaseToken: crypto.randomUUID(),
+        leaseHolderId: `lossless-host-${suffix}`,
+      });
+      expect(eventBatch?.events).toHaveLength(1);
+      expect(eventBatch?.events[0]?.event.id).toBe(event!.id);
+      expect(eventBatch?.events[0]?.event.payload).toEqual(exactPayload);
+
+      const [outbox] = await shared.admin<
+        Array<{
+          payloadVersion: number | null;
+          id: string | null;
+          updateId: string | null;
+          sourceKey: string | null;
+          recordingId: string | null;
+          code: string | null;
+          type: string | null;
+        }>
+      >`
+        select payload_codec_version as "payloadVersion",
+               payload ->> 'id' as id,
+               payload ->> 'updateId' as "updateId",
+               payload ->> 'sourceKey' as "sourceKey",
+               payload ->> 'recordingId' as "recordingId",
+               payload ->> 'code' as code,
+               payload ->> 'type' as type
+        from host_export_outbox
+        where export_kind = 'session_event' and source_id = ${event!.id}::uuid
+      `;
+      expect(outbox).toEqual({
+        payloadVersion: 1,
+        id: exactPayload.id,
+        updateId: exactPayload.updateId,
+        sourceKey: exactPayload.sourceKey,
+        recordingId: exactPayload.recordingId,
+        code: exactPayload.code,
+        type: exactPayload.type,
+      });
+
+      const usageBatch = await claimHostExportBatch(exporter.db, {
+        kind: "usage_event",
+        consumerId: usageConsumerId,
+        leaseToken: crypto.randomUUID(),
+        leaseHolderId: `lossless-usage-${suffix}`,
+      });
+      expect(usageBatch?.events).toHaveLength(1);
+      expect(usageBatch?.events[0]?.usage.id).toBe(usage.id);
+      const [usageOutbox] = await shared.admin<Array<{ payloadVersion: number | null }>>`
+        select payload_codec_version as "payloadVersion"
+        from host_export_outbox
+        where export_kind = 'usage_event' and source_id = ${usage.id}::uuid
+      `;
+      expect(usageOutbox?.payloadVersion).toBeNull();
+      await acknowledgeHostExportBatch(exporter.db, {
+        kind: "usage_event",
+        consumerId: usageConsumerId,
+        leaseToken: usageBatch!.leaseToken,
+      });
+
+      await deadLetterHostExportHead(exporter.db, {
+        kind: "session_event",
+        consumerId: eventConsumerId,
+        leaseToken: eventBatch!.leaseToken,
+        cursor: eventBatch!.events[0]!.cursor,
+        reason: "synthetic exact-content disposition",
+      });
+      const [deadLetter] = await shared.admin<
+        Array<{
+          envelope: Record<string, unknown>;
+          envelopeVersion: number | null;
+          eventPayloadVersion: number | null;
+        }>
+      >`
+        select envelope,
+               envelope_codec_version as "envelopeVersion",
+               event_payload_codec_version as "eventPayloadVersion"
+        from host_export_dead_letters
+        where export_kind = 'session_event'
+          and consumer_id = ${eventConsumerId}
+          and export_cursor = ${eventBatch!.events[0]!.cursor}::bigint
+      `;
+      expect(deadLetter?.envelopeVersion).toBeNull();
+      expect(deadLetter?.eventPayloadVersion).toBe(1);
+      const deadLetterEvent = deadLetter?.envelope.event as Record<string, unknown>;
+      expect(
+        fromPostgresLosslessJson(deadLetterEvent.payload, deadLetter?.eventPayloadVersion),
+      ).toEqual(exactPayload);
+    } finally {
+      await exporter.close();
+    }
   }, 180_000);
 });

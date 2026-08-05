@@ -248,6 +248,10 @@ import {
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
+
+type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
+  payload: unknown;
+};
 import {
   AGENT_VISIBLE_MEMORY_STATUSES,
   hashMemoryText,
@@ -509,11 +513,18 @@ type HostExportRow = {
   initiator_context: unknown;
   origin: string | null;
   payload: unknown;
+  payload_codec_version: number | null;
   occurred_at: Date | string;
   source_recorded_at: Date | string;
 };
 
-type HostExportClaimRow = Omit<HostExportRow, "root_session_id">;
+type HostExportClaimRow = Omit<HostExportRow, "root_session_id" | "payload_codec_version">;
+
+type HostExportClaimSidecarRow = {
+  export_cursor: string | number | bigint;
+  root_session_id: string | null;
+  payload_codec_version: number | null;
+};
 
 function hostExportCursor(value: string | number | bigint): string {
   return BigInt(value).toString();
@@ -616,89 +627,123 @@ export async function claimHostExportBatch(
   },
 ): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
-  const claimedRows = await rawRows<HostExportClaimRow>(
-    db,
-    sql`
-      select * from opengeni_host_export.claim_host_export_batch(
-        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
-        ${input.leaseHolderId}, ${input.leaseSeconds ?? 60},
-        ${input.limit ?? 100}, ${input.maxBytes ?? 1_048_576}
+  return await db.transaction(async (tx) => {
+    const transaction = tx as unknown as Database;
+    const claimedRows = await rawRows<HostExportClaimRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.claim_host_export_batch(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+          ${input.leaseHolderId}, ${input.leaseSeconds ?? 60},
+          ${input.limit ?? 100}, ${input.maxBytes ?? 1_048_576}
+        )
+      `,
+    );
+    if (claimedRows.length === 0) return null;
+    const claimedFirst = claimedRows[0]!;
+    if (
+      claimedRows.some(
+        (row) =>
+          row.consumer_id !== claimedFirst.consumer_id ||
+          row.export_kind !== claimedFirst.export_kind ||
+          row.lease_token !== claimedFirst.lease_token ||
+          hostExportCursor(row.checkpoint) !== hostExportCursor(claimedFirst.checkpoint) ||
+          hostExportCursor(row.lease_through) !== hostExportCursor(claimedFirst.lease_through),
       )
-    `,
-  );
-  if (claimedRows.length === 0) return null;
-  const claimedFirst = claimedRows[0]!;
-  if (
-    claimedRows.some(
-      (row) =>
-        row.consumer_id !== claimedFirst.consumer_id ||
-        row.export_kind !== claimedFirst.export_kind ||
-        row.lease_token !== claimedFirst.lease_token ||
-        hostExportCursor(row.checkpoint) !== hostExportCursor(claimedFirst.checkpoint) ||
-        hostExportCursor(row.lease_through) !== hostExportCursor(claimedFirst.lease_through),
-    )
-  ) {
-    throw new Error("Host export claim returned inconsistent batch metadata");
-  }
-
-  const roots = await rawRows<{
-    export_cursor: string | number | bigint;
-    root_session_id: string | null;
-  }>(
-    db,
-    sql`
-      select * from opengeni_host_export.host_export_cursor_roots(
-        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
-      )
-    `,
-  );
-  const rootByExportCursor = new Map(
-    roots.map((row) => [hostExportCursor(row.export_cursor), row.root_session_id]),
-  );
-  const rows = claimedRows.map((row): HostExportRow => {
-    const cursor = hostExportCursor(row.export_cursor);
-    if (!rootByExportCursor.has(cursor)) {
-      throw new Error(`Host export root lookup omitted leased cursor ${cursor}`);
+    ) {
+      throw new Error("Host export claim returned inconsistent batch metadata");
     }
-    return { ...row, root_session_id: rootByExportCursor.get(cursor) ?? null };
-  });
-  const first = rows[0]!;
 
-  if (input.kind === "session_event") {
-    const events = rows.map((row): HostEventExport => {
-      const parsed = HostEventExportContract.safeParse({
+    const sidecars = await rawRows<HostExportClaimSidecarRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.host_export_claim_sidecars(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+        )
+      `,
+    );
+    const sidecarByExportCursor = new Map(
+      sidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
+    );
+    const rows = claimedRows.map((row): HostExportRow => {
+      const cursor = hostExportCursor(row.export_cursor);
+      const sidecar = sidecarByExportCursor.get(cursor);
+      if (!sidecar) {
+        throw new Error(`Host export sidecar lookup omitted leased cursor ${cursor}`);
+      }
+      return {
+        ...row,
+        root_session_id: sidecar.root_session_id,
+        payload_codec_version: sidecar.payload_codec_version,
+      };
+    });
+    const first = rows[0]!;
+
+    if (input.kind === "session_event") {
+      const events = rows.map((row): HostEventExport => {
+        const parsed = HostEventExportContract.safeParse({
+          schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+          cursor: hostExportCursor(row.export_cursor),
+          idempotencyKey: row.idempotency_key,
+          accountId: row.account_id,
+          workspaceId: row.workspace_id,
+          rootSessionId: row.root_session_id,
+          initiator: row.initiator,
+          initiatorContext: row.initiator_context,
+          origin: row.origin,
+          event: {
+            id: row.source_id,
+            workspaceId: row.workspace_id,
+            sessionId: row.session_id,
+            sequence: row.session_sequence,
+            type: row.event_type,
+            payload: fromPostgresLosslessJson(row.payload, row.payload_codec_version),
+            occurredAt: hostExportTimestamp(row.occurred_at),
+            clientEventId: row.client_event_id,
+            turnId: row.turn_id,
+            turnGeneration: row.turn_generation,
+            turnAttemptId: row.turn_attempt_id,
+            turnAssociation: row.turn_association,
+            duplicateOfEventId: row.duplicate_of_event_id,
+            duplicateReason: row.duplicate_reason,
+          },
+        });
+        if (!parsed.success) {
+          throw hostExportPayloadError(input, row, parsed.error.issues);
+        }
+        return parsed.data;
+      });
+      return HostEventExportBatchContract.parse({
+        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+        consumerId: first.consumer_id,
+        leaseToken: first.lease_token,
+        checkpoint: hostExportCursor(first.checkpoint),
+        throughCursor: hostExportCursor(first.lease_through),
+        events,
+      });
+    }
+
+    const events = rows.map((row): HostUsageExport => {
+      const parsed = HostUsageExportContract.safeParse({
         schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
         cursor: hostExportCursor(row.export_cursor),
-        idempotencyKey: row.idempotency_key,
         accountId: row.account_id,
         workspaceId: row.workspace_id,
+        sessionId: row.session_id,
         rootSessionId: row.root_session_id,
+        turnId: row.turn_id,
+        turnAttemptId: row.turn_attempt_id,
         initiator: row.initiator,
         initiatorContext: row.initiator_context,
         origin: row.origin,
-        event: {
-          id: row.source_id,
-          workspaceId: row.workspace_id,
-          sessionId: row.session_id,
-          sequence: row.session_sequence,
-          type: row.event_type,
-          payload: row.payload,
-          occurredAt: hostExportTimestamp(row.occurred_at),
-          clientEventId: row.client_event_id,
-          turnId: row.turn_id,
-          turnGeneration: row.turn_generation,
-          turnAttemptId: row.turn_attempt_id,
-          turnAssociation: row.turn_association,
-          duplicateOfEventId: row.duplicate_of_event_id,
-          duplicateReason: row.duplicate_reason,
-        },
+        usage: row.payload,
       });
       if (!parsed.success) {
         throw hostExportPayloadError(input, row, parsed.error.issues);
       }
       return parsed.data;
     });
-    return HostEventExportBatchContract.parse({
+    return HostUsageExportBatchContract.parse({
       schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
       consumerId: first.consumer_id,
       leaseToken: first.lease_token,
@@ -706,35 +751,6 @@ export async function claimHostExportBatch(
       throughCursor: hostExportCursor(first.lease_through),
       events,
     });
-  }
-
-  const events = rows.map((row): HostUsageExport => {
-    const parsed = HostUsageExportContract.safeParse({
-      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
-      cursor: hostExportCursor(row.export_cursor),
-      accountId: row.account_id,
-      workspaceId: row.workspace_id,
-      sessionId: row.session_id,
-      rootSessionId: row.root_session_id,
-      turnId: row.turn_id,
-      turnAttemptId: row.turn_attempt_id,
-      initiator: row.initiator,
-      initiatorContext: row.initiator_context,
-      origin: row.origin,
-      usage: row.payload,
-    });
-    if (!parsed.success) {
-      throw hostExportPayloadError(input, row, parsed.error.issues);
-    }
-    return parsed.data;
-  });
-  return HostUsageExportBatchContract.parse({
-    schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
-    consumerId: first.consumer_id,
-    leaseToken: first.lease_token,
-    checkpoint: hostExportCursor(first.checkpoint),
-    throughCursor: hostExportCursor(first.lease_through),
-    events,
   });
 }
 
@@ -13699,7 +13715,7 @@ async function supersedeCodexCapacityWaitInTransaction(
     : [];
   const nextSessionStatus =
     input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
-  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
+  const eventValues: SessionEventInsertWithPayload[] = [
     {
       accountId: input.session.accountId,
       workspaceId: input.session.workspaceId,
@@ -37661,8 +37677,8 @@ export async function claimSessionWorkForAttempt(
           historyItemId: string | null;
           historyItem: Record<string, unknown> | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
-          events: Array<typeof schema.sessionEvents.$inferInsert>;
-          event: typeof schema.sessionEvents.$inferInsert | null;
+          events: SessionEventInsertWithPayload[];
+          event: SessionEventInsertWithPayload | null;
         }> => {
           const [agentSteer] = await tx
             .select()
@@ -37825,7 +37841,7 @@ export async function claimSessionWorkForAttempt(
             );
           const eventId = triggerEventId ?? crypto.randomUUID();
           let sequence = nextSequence - 1;
-          const events: Array<typeof schema.sessionEvents.$inferInsert> = [];
+          const events: SessionEventInsertWithPayload[] = [];
           if (cancelledUpdateIds.length > 0) {
             events.push({
               accountId,
@@ -37845,7 +37861,7 @@ export async function claimSessionWorkForAttempt(
               occurredAt,
             });
           }
-          const event: typeof schema.sessionEvents.$inferInsert = {
+          const event: SessionEventInsertWithPayload = {
             id: eventId,
             accountId,
             workspaceId,
@@ -39010,7 +39026,7 @@ export async function claimSessionWorkForAttempt(
               historyItemId: null,
               historyItem: null,
               updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
-              events: [] as Array<typeof schema.sessionEvents.$inferInsert>,
+              events: [] as SessionEventInsertWithPayload[],
               event: null,
             }
           : await deliverPendingUpdates(
@@ -39652,7 +39668,7 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = terminalCancel
+      const eventValues: SessionEventInsertWithPayload[] = terminalCancel
         ? [
             {
               accountId: session.accountId,
@@ -40749,9 +40765,13 @@ function isTerminalSessionTurnStatus(
   return ["completed", "failed", "cancelled", "superseded"].includes(status);
 }
 
-function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> {
-  return payload && typeof payload === "object" && !Array.isArray(payload)
-    ? (payload as Record<string, unknown>)
+function sessionEventPayloadRecord(
+  payload: unknown,
+  payloadCodecVersion: number | null,
+): Record<string, unknown> {
+  const logicalPayload = fromPostgresLosslessJson(payload, payloadCodecVersion);
+  return logicalPayload && typeof logicalPayload === "object" && !Array.isArray(logicalPayload)
+    ? (logicalPayload as Record<string, unknown>)
     : {};
 }
 
@@ -41227,7 +41247,10 @@ export async function applySessionTurnSettlement(
       if (requestedEvents.length > 0) {
         const requestedIds = new Set(
           requestedEvents.flatMap((event) => {
-            const request = sessionEventPayloadRecord(event.payload).request;
+            const request = sessionEventPayloadRecord(
+              event.payload,
+              event.payloadCodecVersion,
+            ).request;
             if (!request || typeof request !== "object" || Array.isArray(request)) return [];
             const id = (request as Record<string, unknown>).id;
             return typeof id === "string" ? [id] : [];
@@ -41259,7 +41282,7 @@ export async function applySessionTurnSettlement(
       );
       for (const event of inserted) {
         if (event.type !== "user.humanInputResponse") continue;
-        const payload = sessionEventPayloadRecord(event.payload);
+        const payload = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion);
         const requestId = typeof payload.requestId === "string" ? payload.requestId : null;
         const request = requestId ? terminalHumanInputById.get(requestId) : null;
         if (!request) continue;
@@ -41287,7 +41310,13 @@ export async function applySessionTurnSettlement(
       const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       if (isTerminalSessionTurnStatus(input.turnStatus)) {
         const terminalType = terminalSessionTurnEventType(input.turnStatus);
-        const persistedTerminal = inserted.find((event) => event.type === terminalType);
+        const terminalEventIndex = settlementEvents.findIndex(
+          (event) => event.type === terminalType,
+        );
+        const persistedTerminal =
+          terminalEventIndex >= 0 ? inserted[terminalEventIndex] : undefined;
+        const terminalInput =
+          terminalEventIndex >= 0 ? settlementEvents[terminalEventIndex] : undefined;
         const projection = await projectSessionRealtimeDelegationTerminalInTransaction(
           tx as unknown as Database,
           {
@@ -41297,14 +41326,19 @@ export async function applySessionTurnSettlement(
             turnId: input.turnId,
             turnStatus: input.turnStatus,
             terminalEvent: {
+              id: persistedTerminal?.id ?? null,
               type: terminalType,
               payload: persistedTerminal
-                ? sessionEventPayloadRecord(persistedTerminal.payload)
+                ? sessionEventPayloadRecord(
+                    persistedTerminal.payload,
+                    persistedTerminal.payloadCodecVersion,
+                  )
                 : {
                     code: "delegation_terminal_event_missing",
                     error: `Delegated turn reached ${input.turnStatus} without its canonical terminal event.`,
                   },
             },
+            retainedOutputEvidence: terminalInput?.retainedOutputEvidence,
             now,
           },
         );
@@ -41623,8 +41657,12 @@ export async function settleCodexCredentialLeaseLoss(
             turnId: input.turnId,
             turnStatus: "failed",
             terminalEvent: {
+              id: settlementEvent.id,
               type: "turn.failed",
-              payload: sessionEventPayloadRecord(settlementEvent.payload),
+              payload: sessionEventPayloadRecord(
+                settlementEvent.payload,
+                settlementEvent.payloadCodecVersion,
+              ),
             },
             now,
           });
@@ -42421,8 +42459,12 @@ export async function recoverSessionDispatch(
           turnId: turn.id,
           turnStatus: "failed",
           terminalEvent: {
+            id: failedEvent.id,
             type: "turn.failed",
-            payload: sessionEventPayloadRecord(failedEvent.payload),
+            payload: sessionEventPayloadRecord(
+              failedEvent.payload,
+              failedEvent.payloadCodecVersion,
+            ),
           },
           now,
         });

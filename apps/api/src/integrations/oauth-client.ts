@@ -282,8 +282,7 @@ export async function startMcpOAuth(
       error instanceof OAuthStartStageError
         ? error
         : new OAuthStartStageError("connection_lookup", oauthStartFailureReason(error), error);
-    const providerDomain = safeRequestedProviderDomain(context.payload);
-    logOAuthStartFailure(deps.observability, staged, providerDomain);
+    logOAuthStartFailure(deps.observability, staged);
     throw oauthStartApiError(staged);
   } finally {
     deadline.dispose();
@@ -1474,31 +1473,16 @@ function throwIfCallbackAborted(signal: AbortSignal, stage: OAuthCallbackStage):
 function logOAuthCallbackFailure(
   observability: Observability | undefined,
   error: OAuthCallbackStageError,
-  state: OAuthStatePayload | null,
+  _state: OAuthStatePayload | null,
 ): void {
-  observability?.error("MCP OAuth callback failed", {
-    "opengeni.oauth.stage": error.stage,
-    "opengeni.oauth.reason": error.reason,
-    "opengeni.oauth.provider_domain": state?.providerDomain,
-    "opengeni.oauth.resource_host": state ? safeHost(state.resource) : undefined,
-    "opengeni.oauth.authorization_server": state?.authorizationServer,
-    "opengeni.oauth.issuer": state?.issuer,
-    "opengeni.oauth.client_registration_method": state?.clientRegistrationMethod,
-    error: exactErrorDescription(error.cause),
-  });
+  observability?.error("MCP OAuth callback failed", oauthPublicErrorFields(error.cause));
 }
 
 function logOAuthStartFailure(
   observability: Observability | undefined,
   error: OAuthStartStageError,
-  providerDomain: string | undefined,
 ): void {
-  observability?.warn("MCP OAuth setup failed", {
-    "opengeni.oauth.stage": error.stage,
-    "opengeni.oauth.reason": error.reason,
-    "opengeni.oauth.provider_domain": providerDomain,
-    error: exactErrorDescription(error.cause),
-  });
+  observability?.warn("MCP OAuth setup failed", oauthPublicErrorFields(error.cause));
 }
 
 function oauthStartFailureReason(error: unknown): string {
@@ -1581,51 +1565,75 @@ function oauthStartStageLabel(stage: OAuthStartStage): string {
 function logOAuthVerificationWarning(
   observability: Observability | undefined,
   error: OAuthCallbackStageError,
-  state: OAuthStatePayload,
+  _state: OAuthStatePayload,
 ): void {
-  observability?.warn("MCP OAuth tools/list verification failed after token exchange", {
-    "opengeni.oauth.stage": error.stage,
-    "opengeni.oauth.reason": error.reason,
-    "opengeni.oauth.provider_domain": state.providerDomain,
-    "opengeni.oauth.resource_host": safeHost(state.resource),
-    "opengeni.oauth.mcp_host": safeHost(state.mcpUrl),
-    "opengeni.oauth.authorization_server": state.authorizationServer,
-    "opengeni.oauth.issuer": state.issuer,
-    "opengeni.oauth.client_registration_method": state.clientRegistrationMethod,
-    error: exactErrorDescription(error.cause),
-  });
+  observability?.warn(
+    "MCP OAuth tools/list verification failed after token exchange",
+    oauthPublicErrorFields(error.cause),
+  );
 }
 
-function exactErrorDescription(error: unknown): string {
-  if (error instanceof HTTPException) {
-    return `HTTPException ${error.status}: ${error.message}`;
-  }
-  if (error instanceof Error) {
-    return `${error.name}: ${error.message}`;
-  }
-  return String(error);
+export type OAuthPublicErrorFields = {
+  errorClass: string;
+  errorCode?: string;
+  status?: number;
+  origin: "oauth";
+};
+
+/** Allowlisted projection for public telemetry; canonical OAuth errors stay exact. */
+export function oauthPublicErrorFields(error: unknown): OAuthPublicErrorFields {
+  const fields: OAuthPublicErrorFields = {
+    errorClass: publicErrorClass(error),
+    origin: "oauth",
+  };
+  const rawCode =
+    error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  const errorCode = publicErrorCode(rawCode);
+  if (errorCode !== undefined) fields.errorCode = errorCode;
+  const status =
+    error instanceof HTTPException
+      ? error.status
+      : error && typeof error === "object"
+        ? Number(
+            (error as { status?: unknown; statusCode?: unknown }).status ??
+              (error as { statusCode?: unknown }).statusCode ??
+              (typeof rawCode === "number" ? rawCode : undefined),
+          )
+        : Number.NaN;
+  if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  return fields;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function safeHost(rawUrl: string): string | undefined {
-  try {
-    return new URL(rawUrl).host;
-  } catch {
-    return undefined;
-  }
+function publicErrorClass(error: unknown): string {
+  const candidate = error instanceof Error ? error.constructor.name : typeof error;
+  return publicIdentifier(candidate) ? candidate : "Error";
 }
 
-function safeRequestedProviderDomain(payload: OAuthStartRequest): string | undefined {
-  try {
-    const resource = payload.mcpUrl ?? payload.resource;
-    if (!resource) return undefined;
-    return canonicalProviderDomain(payload.providerDomain ?? new URL(resource).hostname);
-  } catch {
-    return undefined;
+function publicErrorCode(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const candidate = String(value);
+  return publicIdentifier(candidate) ? candidate : undefined;
+}
+
+function publicIdentifier(value: string): boolean {
+  if (value.length === 0 || value.length > 80) return false;
+  for (const character of value) {
+    const point = character.charCodeAt(0);
+    const allowed =
+      point === 45 ||
+      point === 46 ||
+      point === 58 ||
+      point === 95 ||
+      (point >= 48 && point <= 57) ||
+      (point >= 65 && point <= 90) ||
+      (point >= 97 && point <= 122);
+    if (!allowed) return false;
   }
+  return true;
 }
 
 async function oauthErrorFromResponse(

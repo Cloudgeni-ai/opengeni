@@ -16,6 +16,10 @@ import {
   renderRealtimeHumanInputResponseContext,
 } from "./session-realtime-mirror";
 
+type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
+  payload: unknown;
+};
+
 export const SESSION_ANCESTRY_LIMIT = 10_000;
 
 export type WorkspaceControlLockMode = "none" | "share" | "update";
@@ -2208,7 +2212,7 @@ async function cancelSessionSubtreeInTransaction(
     let sequence = session.lastSequence + (session.id === input.rootSessionId ? 1 : 0);
     const cancelledTurns = cancelledTurnsBySession.get(session.id) ?? [];
     const preinsertedEvents: Array<{ id: string; sequence: number }> = [];
-    const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [];
+    const eventValues: SessionEventInsertWithPayload[] = [];
     for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
       left.id.localeCompare(right.id),
     )) {
