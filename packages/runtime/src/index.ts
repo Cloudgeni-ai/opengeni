@@ -3857,8 +3857,21 @@ function publicMcpIdentifier(value: string): boolean {
 type McpTransportError = Error & {
   status?: number;
   code?: number;
-  mcpTransportFailureKind?: "request_timeout" | "connectivity_unavailable";
+  mcpTransportFailureKind?: McpTransportFailureKind;
 };
+
+type McpTransportFailureKind = "request_timeout" | "connectivity_unavailable";
+
+// Lifecycle errors must cross the SDK boundary as structural safe errors while
+// the authoritative caller receives the original Error object. Keep retry
+// classification out-of-band so exact Error identity and content are unchanged.
+const mcpTransportFailureKinds = new WeakMap<object, McpTransportFailureKind>();
+
+function mcpTransportFailureKind(error: object): McpTransportFailureKind | undefined {
+  const inline = (error as Record<string, unknown>).mcpTransportFailureKind;
+  if (inline === "request_timeout" || inline === "connectivity_unavailable") return inline;
+  return mcpTransportFailureKinds.get(error);
+}
 
 const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNRESET",
@@ -3935,7 +3948,7 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
   return (
     !!error &&
     typeof error === "object" &&
-    (error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable"
+    mcpTransportFailureKind(error) === "connectivity_unavailable"
   );
 }
 
@@ -3953,7 +3966,7 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
   }
   seen.add(error);
   const record = error as Record<string, unknown>;
-  if (record.mcpTransportFailureKind === "request_timeout") {
+  if (mcpTransportFailureKind(error) === "request_timeout") {
     return true;
   }
   const code = typeof record.code === "number" ? record.code : record.status;
@@ -3988,6 +4001,16 @@ export function mcpTransportErrorWithRetryMetadata(error: unknown): McpTransport
     classified.mcpTransportFailureKind = "connectivity_unavailable";
   }
   return classified;
+}
+
+function exactMcpLifecycleError(error: unknown): Error {
+  const exactError = error instanceof Error ? error : new Error(String(error), { cause: error });
+  if (isMcpRequestTimeoutError(error)) {
+    mcpTransportFailureKinds.set(exactError, "request_timeout");
+  } else if (isRawMcpTransportConnectivityError(error)) {
+    mcpTransportFailureKinds.set(exactError, "connectivity_unavailable");
+  }
+  return exactError;
 }
 
 function mcpTransportLogger(_serverId: string) {
@@ -4322,7 +4345,7 @@ export class PrefixedMcpServer implements MCPServer {
     } catch (error) {
       // The SDK logs its rejected Error directly. Keep exact internal truth
       // out-of-band and reject only a structural public lifecycle error.
-      const exactError = mcpTransportErrorWithRetryMetadata(error);
+      const exactError = exactMcpLifecycleError(error);
       const publicError = publicMcpLifecycleError(exactError, "connect");
       this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
       throw publicError;
@@ -4335,7 +4358,7 @@ export class PrefixedMcpServer implements MCPServer {
       await this.inner.close();
       delete this.lifecycleFailures.close;
     } catch (error) {
-      const exactError = mcpTransportErrorWithRetryMetadata(error);
+      const exactError = exactMcpLifecycleError(error);
       const publicError = publicMcpLifecycleError(exactError, "close");
       this.lifecycleFailures.close = { phase: "close", publicError, exactError };
       throw publicError;

@@ -5044,8 +5044,7 @@ describe("runtime event normalization", () => {
       const bestEffortFacade = makeFacade();
       const bestEffort = await connectMcpServersInBatches([bestEffortFacade], { strict: false });
       const returnedError = bestEffort.errors.get(bestEffortFacade);
-      expect(returnedError?.message).toBe(exactSourceError.message);
-      expect(returnedError?.cause).toBe(exactSourceError);
+      expect(returnedError).toBe(exactSourceError);
       await bestEffort.close();
 
       const strictFacade = makeFacade();
@@ -5053,17 +5052,25 @@ describe("runtime event normalization", () => {
         () => null,
         (error) => error as Error,
       );
-      expect(strictError?.message).toBe(exactSourceError.message);
-      expect(strictError?.cause).toBe(exactSourceError);
+      expect(strictError).toBe(exactSourceError);
 
       const renderedLogs = [...warnings, ...errors]
         .flat()
         .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
         .map((value) => JSON.stringify(value))
         .join("\n");
+      const lifecycleErrors = [...warnings, ...errors]
+        .flat()
+        .filter((value): value is Error => value instanceof Error);
       expect(renderedLogs).toContain("McpLifecycleError");
-      expect(renderedLogs).toContain("MCP_TEST_FAILURE");
-      expect(renderedLogs).toContain("503");
+      expect(lifecycleErrors).toContainEqual(
+        expect.objectContaining({
+          name: "McpLifecycleError",
+          code: "MCP_TEST_FAILURE",
+          status: 503,
+          origin: "runtime",
+        }),
+      );
       expect(renderedLogs).not.toContain(registryId);
       expect(renderedLogs).not.toContain(sentinel);
       expect(exactSourceError.message).toContain(sentinel);
@@ -5108,7 +5115,7 @@ describe("runtime event normalization", () => {
         ],
       );
       try {
-        expect(prepared.mcpServers.map((server) => server.name)).toEqual(["docs"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["docs"]);
         const tools = await prepared.mcpServers[0]!.listTools();
         expect(tools.map((tool) => tool.name)).toContain("docs__search_documents");
       } finally {
@@ -5224,10 +5231,7 @@ describe("runtime event normalization", () => {
       connected = true;
       try {
         // Both connected, so both are handed to the runner.
-        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual([
-          "cap-expired",
-          "docs",
-        ]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["cap-expired", "docs"]);
         // Drive the exact code path the agent runner uses. Pre-fix this REJECTS
         // (the expired server's tools/list 401 throws out of getAllMcpTools).
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
@@ -5247,18 +5251,20 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The drop is observable in the log as a structured warn carrying the
-      // server id and the error class (failure-visibility doctrine).
+      // The drop is observable as an allowlisted structural warning. Exact
+      // registry identity remains available through the internal auth-needed
+      // event above, but must not cross the public console boundary.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
             typeof arg === "object" &&
             arg !== null &&
-            (arg as { serverId?: unknown }).serverId === "cap-expired" &&
-            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+            typeof (arg as { errorClass?: unknown }).errorClass === "string" &&
+            (arg as { origin?: unknown }).origin === "runtime",
         ),
       );
       expect(warned).toBe(true);
+      expect(JSON.stringify(warnings)).not.toContain("cap-expired");
     } finally {
       console.warn = originalWarn;
       expired.close();
@@ -5306,7 +5312,7 @@ describe("runtime event normalization", () => {
       );
       try {
         // The optional server connects (initialize is fine); only tools/list 500s.
-        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual(["docs", "flaky"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["docs", "flaky"]);
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
         const toolNames = tools.map((tool) => tool.name);
         expect(toolNames).toContain("docs__search_documents");
@@ -5314,17 +5320,19 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The non-auth degrade is observable: server id + a real error class.
+      // The non-auth degrade is observable without leaking registry identity or
+      // the provider's raw response through the public console boundary.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
             typeof arg === "object" &&
             arg !== null &&
-            (arg as { serverId?: unknown }).serverId === "flaky" &&
-            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+            typeof (arg as { errorClass?: unknown }).errorClass === "string" &&
+            (arg as { origin?: unknown }).origin === "runtime",
         ),
       );
       expect(warned).toBe(true);
+      expect(JSON.stringify(warnings)).not.toContain("flaky");
     } finally {
       console.warn = originalWarn;
       brokenOptional.close();
@@ -5424,8 +5432,8 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const cap = prepared.mcpServers.find((s) => s.name === "cap")!;
-      const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+      const cap = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "cap")!;
+      const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
       await cap.listTools();
       const result = await cap.callTool("cap__search_documents", {
         query: "x",
@@ -5487,8 +5495,10 @@ describe("runtime event normalization", () => {
         ],
       );
       try {
-        const flakySrv = prepared.mcpServers.find((s) => s.name === "flaky")!;
-        const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+        const flakySrv = prepared.mcpServers.find(
+          (server) => runtimeMcpServerId(server) === "flaky",
+        )!;
+        const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
         await flakySrv.listTools(); // fine — only tools/call 401s
         const result = await flakySrv.callTool("flaky__search_documents", {
           query: "x",
@@ -5508,13 +5518,15 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // Structured warning carries classification plus the exact provider message.
+      // The model-visible result above preserves the exact provider message;
+      // the public warning is an allowlisted structural projection only.
       const warned = warnings.find((args) =>
         args.some(
           (a) =>
             typeof a === "object" &&
             a !== null &&
-            (a as { serverId?: unknown }).serverId === "flaky",
+            (a as { errorClass?: unknown }).errorClass === "StreamableHTTPError" &&
+            (a as { status?: unknown }).status === 401,
         ),
       );
       expect(warned).toBeDefined();
@@ -5523,12 +5535,13 @@ describe("runtime event normalization", () => {
         unknown
       >;
       expect(payload).toMatchObject({
-        serverId: "flaky",
-        toolName: "search_documents",
         errorClass: "StreamableHTTPError",
         status: 401,
+        origin: "runtime",
       });
-      expect(JSON.stringify(payload)).toContain("unauthorized");
+      expect(JSON.stringify(warnings)).not.toContain("flaky");
+      expect(JSON.stringify(warnings)).not.toContain("search_documents");
+      expect(JSON.stringify(warnings)).not.toContain("unauthorized");
     } finally {
       console.warn = originalWarn;
       flaky.close();
