@@ -45,6 +45,7 @@ import {
   SlackBotLifecycleSuccessAuditError,
   updateConnection,
   updateConnectionWithSlackBotSuccessAudit,
+  updateSlackBotDocumentDestination,
   type SlackBotInstallCallbackFailureReason,
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
@@ -399,7 +400,6 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       c.req.param("connectionId"),
       grant.subjectId,
     );
-    let metadata = payload.metadata;
     if (existing && isOpenGeniSlackBotConnection(existing)) {
       const destination = ConnectorDocumentDestinationSelection.safeParse(
         payload.metadata?.documentDestination,
@@ -441,7 +441,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "personal destination requires the exact actor",
         });
       }
-      metadata = {
+      const metadata = {
         ...existing.metadata,
         documentDestination: bindConnectorDocumentDestination(destinationSelection, {
           accountId: grant.accountId,
@@ -449,6 +449,21 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           initiatingSubjectId: grant.subjectId,
         }),
       };
+      const connection = await updateSlackBotDocumentDestination(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        connectionId: existing.id,
+        visibleToSubjectId: grant.subjectId,
+        expectedVersion: existing.version,
+        metadata,
+        updatedBySubjectId: grant.subjectId,
+      });
+      if (!connection) {
+        throw new HTTPException(409, {
+          message: "Slack bot connection changed; reload before saving its destination",
+        });
+      }
+      return c.json(ConnectionResponse.parse({ connection }));
     }
     if (existing && GoogleDriveConnectionMetadata.safeParse(existing.metadata).success) {
       throw new HTTPException(422, {
@@ -502,7 +517,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(payload.expiresAt !== undefined
         ? { expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null }
         : {}),
-      ...(metadata !== undefined ? { metadata } : {}),
+      ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
     });
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
