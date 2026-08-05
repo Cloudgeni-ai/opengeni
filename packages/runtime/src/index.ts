@@ -3802,6 +3802,7 @@ function inspectMcpTransportError(
   complete: boolean;
   hasConnectivityCode: boolean;
   hasConnectivityMarker: boolean;
+  hasTypedError: boolean;
   hasRequestTimeout: boolean;
   statuses: number[];
 } {
@@ -3809,6 +3810,7 @@ function inspectMcpTransportError(
   const statuses: number[] = [];
   let hasConnectivityCode = false;
   let hasConnectivityMarker = false;
+  let hasTypedError = false;
   let hasRequestTimeout = false;
   let inspectedNodes = 0;
   let complete = true;
@@ -3830,6 +3832,9 @@ function inspectMcpTransportError(
       code = record.code;
       failureKind = record.mcpTransportFailureKind;
       message = record.message;
+      if (current.value instanceof Error && current.value.constructor.name !== "Error") {
+        hasTypedError = true;
+      }
     } catch {
       complete = false;
       continue;
@@ -3881,6 +3886,7 @@ function inspectMcpTransportError(
     complete,
     hasConnectivityCode,
     hasConnectivityMarker,
+    hasTypedError,
     hasRequestTimeout,
     statuses,
   };
@@ -3931,6 +3937,7 @@ function isRawMcpTransportConnectivityError(
   return (
     options.recoverySafeSetup === true &&
     inspection.statuses.length === 0 &&
+    !inspection.hasTypedError &&
     safeMcpErrorFields(error).errorClass === "Error"
   );
 }
