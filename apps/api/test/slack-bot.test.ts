@@ -3251,6 +3251,6 @@ describe("OpenGeni Slack bot connection", () => {
     expect(capabilitiesSource).toContain("Slack knowledge destination");
     expect(capabilitiesSource).toContain("slackBotDestinationLabel");
     expect(capabilitiesSource).toContain("collectionId: null");
-    expect(capabilitiesSource).toContain("No user-created collection is required");
+    expect(capabilitiesSource).toMatch(/No\s+user-created collection is required/);
   });
 });
