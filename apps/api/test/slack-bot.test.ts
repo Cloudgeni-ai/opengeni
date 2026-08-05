@@ -29,6 +29,7 @@ import {
   releaseSlackBotPostOperationClaim,
   setConnectionStatus,
   updateConnection,
+  updateSlackBotDocumentDestination,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -3021,5 +3022,235 @@ describe("OpenGeni Slack bot connection", () => {
         and metadata->>'outcome' = 'succeeded'`;
     expect(successCount?.count).toBe(1);
     expect(JSON.stringify(retried)).not.toContain("audit rollback fixture");
+  });
+
+  test("preserves verified Slack bot proof across fenced destination transitions", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const connected = await connectBot(workspace, slack.fetch);
+    const connectionId = connected.body.connection.id;
+    const endpoint = `/v1/workspaces/${workspace.workspaceId}/connections/${connectionId}`;
+    const writeAuthorization = await bearer(workspace, "subject-a", ["connections:write"]);
+    const before = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connectionId,
+      null,
+    );
+    expect(before).toMatchObject({ version: 1, verifiedInstallVersion: 1 });
+    expect(before?.verifiedInstallAt).not.toBeNull();
+    if (!before?.verifiedInstallAt) throw new Error("expected verified Slack bot fixture");
+
+    const personal = await app(slack.fetch).request(endpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: writeAuthorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        metadata: {
+          documentDestination: { authorityKind: "personal", collectionId: null },
+        },
+      }),
+    });
+    expect(personal.status).toBe(200);
+    const afterPersonal = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connectionId,
+      null,
+    );
+    expect(afterPersonal).toMatchObject({ version: 2, verifiedInstallVersion: 2 });
+    expect(afterPersonal?.verifiedInstallAt).toBe(before.verifiedInstallAt);
+    expect(afterPersonal?.metadata.documentDestination).toEqual({
+      authorityKind: "personal",
+      authorityAccountId: workspace.accountId,
+      authorityWorkspaceId: workspace.workspaceId,
+      authoritySubjectId: "subject-a",
+      collectionId: null,
+    });
+
+    const resolvedAfterPersonal = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connectionId,
+    });
+    expect(resolvedAfterPersonal.connection).toMatchObject({ id: connectionId, version: 2 });
+
+    const reinstallSelection = await startBotInstall(workspace, slack.fetch, connectionId);
+    expect(reinstallSelection.response.status).toBe(200);
+    expect(reinstallSelection.state).not.toBeNull();
+
+    const rejectedGenericMutation = await app(slack.fetch).request(endpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: writeAuthorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ metadata: { label: "must not bypass the reserved bot guard" } }),
+    });
+    expect(rejectedGenericMutation.status).toBe(422);
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, connectionId, null),
+    ).toMatchObject({ version: 2, verifiedInstallVersion: 2 });
+
+    const deniedWorkspace = await app(slack.fetch).request(endpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: writeAuthorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        metadata: {
+          documentDestination: { authorityKind: "workspace", collectionId: null },
+        },
+      }),
+    });
+    expect(deniedWorkspace.status).toBe(403);
+
+    await shared!.admin`
+      update workspace_memberships
+      set permissions = ${shared!.admin.json([
+        "connections:read",
+        "connections:write",
+        "workspace:admin",
+      ])}
+      where workspace_id = ${workspace.workspaceId}
+        and subject_id = 'subject-a'`;
+    const adminAuthorization = await bearer(workspace, "subject-a", [
+      "connections:write",
+      "workspace:admin",
+    ]);
+    const allowedWorkspace = await app(slack.fetch).request(endpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: adminAuthorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        metadata: {
+          documentDestination: { authorityKind: "workspace", collectionId: null },
+        },
+      }),
+    });
+    expect(allowedWorkspace.status).toBe(200);
+    const persisted = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connectionId,
+      null,
+    );
+    expect(persisted).toMatchObject({ version: 3, verifiedInstallVersion: 3 });
+    expect(persisted?.verifiedInstallAt).toBe(before.verifiedInstallAt);
+    expect(persisted?.metadata.documentDestination).toEqual({
+      authorityKind: "workspace",
+      authorityAccountId: workspace.accountId,
+      authorityWorkspaceId: workspace.workspaceId,
+      authoritySubjectId: null,
+      collectionId: null,
+    });
+    if (!persisted) throw new Error("expected persisted Slack bot destination");
+
+    const personalRaceMetadata = {
+      ...persisted.metadata,
+      documentDestination: {
+        authorityKind: "personal",
+        authorityAccountId: workspace.accountId,
+        authorityWorkspaceId: workspace.workspaceId,
+        authoritySubjectId: "subject-a",
+        collectionId: null,
+      },
+    };
+    const workspaceRaceMetadata = {
+      ...persisted.metadata,
+      documentDestination: {
+        authorityKind: "workspace",
+        authorityAccountId: workspace.accountId,
+        authorityWorkspaceId: workspace.workspaceId,
+        authoritySubjectId: null,
+        collectionId: null,
+      },
+    };
+    const [firstRace, secondRace] = await Promise.all([
+      updateSlackBotDocumentDestination(client.db, {
+        ...workspace,
+        connectionId,
+        visibleToSubjectId: "subject-a",
+        expectedVersion: persisted.version,
+        metadata: personalRaceMetadata,
+        updatedBySubjectId: "subject-a",
+      }),
+      updateSlackBotDocumentDestination(client.db, {
+        ...workspace,
+        connectionId,
+        visibleToSubjectId: "subject-a",
+        expectedVersion: persisted.version,
+        metadata: workspaceRaceMetadata,
+        updatedBySubjectId: "subject-a",
+      }),
+    ]);
+    expect([firstRace, secondRace].filter((result) => result !== null)).toHaveLength(1);
+    expect([firstRace, secondRace].filter((result) => result === null)).toHaveLength(1);
+    const afterRace = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connectionId,
+      null,
+    );
+    expect(afterRace).toMatchObject({ version: 4, verifiedInstallVersion: 4 });
+    expect(afterRace?.verifiedInstallAt).toBe(before.verifiedInstallAt);
+    expect(afterRace?.metadata.documentDestination).toEqual(
+      firstRace !== null
+        ? personalRaceMetadata.documentDestination
+        : workspaceRaceMetadata.documentDestination,
+    );
+
+    const stale = await updateSlackBotDocumentDestination(client.db, {
+      ...workspace,
+      connectionId,
+      visibleToSubjectId: "subject-a",
+      expectedVersion: persisted.version,
+      metadata: persisted.metadata,
+      updatedBySubjectId: "subject-a",
+    });
+    expect(stale).toBeNull();
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, connectionId, null),
+    ).toMatchObject({
+      version: 4,
+      verifiedInstallVersion: 4,
+      metadata: { documentDestination: afterRace?.metadata.documentDestination },
+    });
+
+    expect(
+      (
+        await resolveSlackBotConnectionForTool({
+          db: client.db,
+          grant: {
+            ...workspace,
+            subjectId: "subject-a",
+            permissions: ["connections:read"],
+            metadata: {},
+          },
+          sessionId: null,
+          requestedConnectionId: connectionId,
+        })
+      ).connection,
+    ).toMatchObject({ id: connectionId, version: 4 });
+
+    const capabilitiesSource = await Bun.file(
+      new URL("../../web/src/routes/capabilities.tsx", import.meta.url),
+    ).text();
+    expect(capabilitiesSource).toContain("Slack knowledge destination");
+    expect(capabilitiesSource).toContain("slackBotDestinationLabel");
+    expect(capabilitiesSource).toContain("collectionId: null");
+    expect(capabilitiesSource).toMatch(/No\s+user-created collection is required/);
   });
 });
