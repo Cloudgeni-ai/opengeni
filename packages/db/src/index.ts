@@ -154,7 +154,12 @@ import {
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
 } from "@opengeni/config";
-import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
+import {
+  boundModelToolOutputItem,
+  isCodexBilledModel,
+  refreshCodexToken,
+  type CodexFetch,
+} from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
@@ -187,16 +192,10 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
-import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
-import { decryptEnvironmentValue } from "./environment-crypto";
+import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
-import {
-  runIdempotentPersistenceTransaction,
-  type IdempotentPersistenceTransactionOptions,
-} from "./persistence-errors";
+import { runIdempotentPersistenceTransaction } from "./persistence-errors";
 import {
   closePendingSessionToolCallsInTransaction,
   historyCallId,
@@ -303,22 +302,58 @@ export {
 // Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
 export * from "./memory-domain";
 
-// §7.7 driver widening (Step I). `Database` is the structural, cross-driver
-// query-layer port: every helper in this file accepts `db: Database` and uses
-// only the methods present on drizzle's base `PgDatabase` (select/insert/update/
-// delete/transaction/execute). Widening from the concrete
-// `PostgresJsDatabase<typeof schema>` to `PgDatabase<any, typeof schema>` is a
-// pure TYPE change — no runtime behavior changes — that lets an embedded host
-// inject ANY drizzle pg driver handle (node-postgres, neon-http, etc.) bound to
-// OpenGeni's schema, not just the postgres-js handle `createDb` builds. The
-// `any` for the query-result HKT is deliberate: it keeps `db.execute(sql\`…\`)`
-// callable across drivers whose raw-result shapes differ (postgres-js returns a
-// row array; node-postgres returns `{ rows }`). The three raw `db.execute(…)`
-// reads that index a row array (`getManagedUserByEmail` here is the only
-// host-facing one — see `userLookup`) stay postgres-js-shaped for standalone;
-// `userLookup` is the injection seam for hosts on a different driver.
-// `PostgresJsDatabase<typeof schema>` is assignable to this, so standalone is
-// unaffected.
+import {
+  dbBindingFor,
+  rawRows,
+  retryRlsPersistence,
+  retryWorkspacePersistence,
+  rlsContextForWorkspace,
+  setRlsContext,
+  setSubjectRlsContext,
+  withAccountRls,
+  withRlsContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
+  withWorkspaceUsageLock,
+  type Database,
+} from "./database";
+export {
+  createDb,
+  registerDbBinding,
+  rlsContextForWorkspace,
+  rlsStrategyFor,
+  setRlsContext,
+  setSubjectRlsContext,
+  withAccountRls,
+  withDatabaseStatementTimeout,
+  withRlsContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
+  withWorkspaceUsageLock,
+  type CreateDbOptions,
+  type Database,
+  type DbClient,
+  type RlsContext,
+  type RlsStrategy,
+  type UserLookup,
+} from "./database";
+import {
+  buildCodexTokenResolver as buildCodexTokenResolverCore,
+  fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
+  fetchCodexUsageForAccount as fetchCodexUsageForAccountCore,
+  type CodexAccountUsageSnapshot,
+  type CodexAuthDeps,
+  type CodexCredentialForRun,
+  type CodexCredentialTokens,
+} from "./codex-token-resolver";
+import {
+  buildConnectionTokenResolver as buildConnectionTokenResolverCore,
+  refreshOAuthConnectionCredential as refreshOAuthConnectionCredentialCore,
+  type ConnectionBrokerDeps,
+  type ConnectionCredentialForBroker,
+  type ConnectionTokenResolverOptions,
+} from "./connection-token-resolver";
+
 function parsedPersonalConnectionDelegations(
   value: unknown,
   context: string,
@@ -330,8 +365,6 @@ function parsedPersonalConnectionDelegations(
   return parsed.data.map((delegation) => ({ ...delegation }));
 }
 
-export type Database = PgDatabase<any, typeof schema>;
-
 /** Raised when a durable session tool-policy write lost its version fence. */
 export class SessionToolPolicyVersionConflictError extends Error {
   readonly code = "SESSION_TOOL_POLICY_CONFLICT";
@@ -341,16 +374,6 @@ export class SessionToolPolicyVersionConflictError extends Error {
     this.name = "SessionToolPolicyVersionConflictError";
   }
 }
-
-export type DbClient = {
-  db: Database;
-  close: () => Promise<void>;
-};
-
-export type RlsContext = {
-  accountId: string;
-  workspaceId?: string | null;
-};
 
 export type NestedAgentDepthPolicySource = "session" | "workspace" | "deployment" | "default";
 
@@ -412,165 +435,6 @@ export class SessionSpawnDeniedDbError extends Error {
     super(denial.code);
     this.name = "SessionSpawnDeniedDbError";
   }
-}
-
-/**
- * RLS posture for the connection OpenGeni's query layer runs over (Step I, §7.7).
- *
- * - `"force"` (DEFAULT — today's standalone behavior, byte-for-byte): OpenGeni
- *   connects as a NON-OWNER role (`opengeni_app`) and every table carries
- *   `FORCE ROW LEVEL SECURITY`, so the workspace/account GUCs set by
- *   `setRlsContext` are the ONLY thing that admits rows — even the table owner
- *   is subject to RLS. This is the Fork-A isolation guarantee.
- * - `"scoped"` (embedded Fork-B opt-in): the host runs OpenGeni's queries over a
- *   role that OWNS the dedicated schema (RLS need not be forced for that role),
- *   relying on the host's own tenant boundary. OpenGeni STILL emits the
- *   `set_config('opengeni.account_id'/'workspace_id', …)` GUCs defensively on
- *   every scoped query, so the application query path is byte-identical between
- *   the two strategies and the app code is RLS-mode-agnostic. The strategy is a
- *   declared posture (consumed by `provisionRoles` and as a documented
- *   invariant), NOT a query-path branch — there is deliberately no `if
- *   (strategy === …)` anywhere in the helpers below. Picking `"scoped"` does not
- *   relax any GUC; it only changes which DB role the host provisions/connects as
- *   and asserts that the host accepts owning the isolation boundary.
- */
-export type RlsStrategy = "force" | "scoped";
-
-/**
- * Resolve a host-IdP/Better-Auth user *identifier* by email. Injected via
- * `createDb({ userLookup })` (Step I). UNSET → today's raw parameterized select
- * against Better Auth's `auth_users` table (see `getManagedUserByEmail`), which
- * relies on the postgres-js array-shaped `db.execute` result. An embedded host
- * whose identity lives elsewhere (a different IdP table, a different driver, or
- * a non-`auth_users` user store) injects this closure so OpenGeni never touches
- * `auth_users` directly. Returns the user id, or null when no such user exists.
- */
-export type UserLookup = (db: Database, email: string) => Promise<string | null>;
-
-export type CreateDbOptions = {
-  /**
-   * The Postgres `search_path` for this connection (Step I, §7.8 runtime half).
-   * UNSET → today's behavior: NO `search_path` startup parameter is sent, so the
-   * server default applies (`public` for standalone, where every table + the
-   * `vector` extension + `gen_random_uuid()` live). For an embedded dedicated
-   * schema, pass e.g. `"opengeni,opengeni_private,public"` — postgres-js sends
-   * it as a per-session startup parameter (the supported, query-param-free way;
-   * URL `?search_path=` is IGNORED by postgres-js). Keep `public` LAST so the
-   * `vector` type and `gen_random_uuid()` (which live in `public` on the
-   * pgvector image) still resolve — the schema-isolation contract live footgun.
-   */
-  searchPath?: string;
-  /** RLS posture; defaults to `"force"` (today's standalone). */
-  rlsStrategy?: RlsStrategy;
-  /** Host-provided user-by-email resolver; unset → today's raw `auth_users` query. */
-  userLookup?: UserLookup;
-  /** postgres-js pool size; defaults to today's `10`. */
-  max?: number;
-  /**
-   * Connection-local default transaction isolation sent in the postgres-js
-   * startup parameters. This is intentionally not a role/database default:
-   * tests and embedded callers can exercise a different ambient isolation
-   * without mutating a shared PostgreSQL role or affecting other connections.
-   */
-  isolationLevel?: postgres.ConnectionParameters["default_transaction_isolation"];
-};
-
-/**
- * The active RLS strategy + userLookup for an injected `Database`, recorded in a
- * side WeakMap so helpers (and `getManagedUserByEmail`) can consult the host's
- * binding without changing every call signature. A handle with no recorded
- * config (e.g. one built outside `createDb`, or in a test) falls back to the
- * standalone defaults: `rlsStrategy: "force"`, raw `auth_users` lookup.
- */
-type DbBinding = { rlsStrategy: RlsStrategy; userLookup?: UserLookup };
-const dbBindings = new WeakMap<object, DbBinding>();
-
-/** The strategy bound to a handle (or the `"force"` default). */
-export function rlsStrategyFor(db: Database): RlsStrategy {
-  return dbBindings.get(db as unknown as object)?.rlsStrategy ?? "force";
-}
-
-/**
- * Run a raw SQL query and read its rows as a typed array.
- *
- * Why this exists: the Step I driver widening (`Database = PgDatabase<any, …>`)
- * deliberately sets the query-result HKT to `any` so `db.execute(…)` is callable
- * across drivers whose raw-result shapes differ (postgres-js → row array;
- * node-postgres → `{ rows }`). A side effect is that `db.execute<T>(…)` now
- * resolves to `any`, erasing the per-row element type at the call site. OpenGeni's
- * OWN internal raw queries usually run over the postgres-js handle `createDb`
- * builds (array result), while an embedded host may inject a node-postgres style
- * driver (`{ rows }`). Normalize those two standard shapes in one place; reject
- * an unknown driver result rather than silently treating it as an empty query.
- */
-async function rawRows<T extends Record<string, unknown>>(
-  executor: Pick<Database, "execute">,
-  query: SQL,
-): Promise<T[]> {
-  const result = await executor.execute<T>(query);
-  if (Array.isArray(result)) {
-    return result as unknown as T[];
-  }
-  const rows = (result as unknown as { rows?: unknown }).rows;
-  if (Array.isArray(rows)) {
-    return rows as T[];
-  }
-  throw new Error("Unsupported database execute() result shape");
-}
-
-export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
-  // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
-  // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
-  // statements (`s_N`) are bound to one backend, but a transaction pooler hands
-  // each transaction a different backend, so a later `execute` intermittently
-  // throws `prepared statement "s_N" does not exist`. Every RLS read in this
-  // module (set_config + SELECT inside one db.transaction) rides on this pool, so
-  // the failure surfaces as a "worked, then didn't" credential/permission read.
-  // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
-  // is never reused indefinitely; application_name aids server-side diagnostics.
-  const client = postgres(databaseUrl, {
-    max: options.max ?? 10,
-    prepare: false,
-    idle_timeout: 30,
-    max_lifetime: 1800,
-    // `connection` carries per-session Postgres STARTUP parameters. `application_name`
-    // (always) aids server-side diagnostics; `search_path` (embedded only) is the
-    // supported, query-param-free way to scope a connection to a dedicated schema —
-    // postgres-js IGNORES a URL `?search_path=`. Unset searchPath → omit it so the
-    // server default (`public`) is unchanged for standalone.
-    connection: {
-      application_name: "opengeni",
-      ...(options.searchPath ? { search_path: options.searchPath } : {}),
-      ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
-    },
-  });
-  const db = drizzle(client, { schema });
-  dbBindings.set(db as unknown as object, {
-    rlsStrategy: options.rlsStrategy ?? "force",
-    ...(options.userLookup ? { userLookup: options.userLookup } : {}),
-  });
-  return {
-    db,
-    close: async () => {
-      await client.end();
-    },
-  };
-}
-
-/**
- * Register a host's `rlsStrategy`/`userLookup` against an externally-constructed
- * `Database` handle (e.g. one the embedded host built from its own driver and
- * injected, rather than via `createDb`). Lets the same WeakMap-backed lookups
- * work for injected handles. Standalone never calls this (it uses `createDb`).
- */
-export function registerDbBinding(
-  db: Database,
-  binding: { rlsStrategy?: RlsStrategy; userLookup?: UserLookup },
-): void {
-  dbBindings.set(db as unknown as object, {
-    rlsStrategy: binding.rlsStrategy ?? "force",
-    ...(binding.userLookup ? { userLookup: binding.userLookup } : {}),
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,187 +912,6 @@ export async function getHostExportConsumerStatus(
   };
 }
 
-export async function setRlsContext(db: Database, context: RlsContext): Promise<void> {
-  // Fail loud on an empty/blank account id: a "" account would set an RLS GUC
-  // that matches no tenant row, silently returning zero rows from every scoped
-  // read (a phantom "not found" / "no active subscription"). An RLS context with
-  // no account is always a bug at the call site, never a valid query scope.
-  if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
-    throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
-  }
-  await db.execute(sql`select set_config('opengeni.account_id', ${context.accountId}, true)`);
-  await db.execute(
-    sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`,
-  );
-  await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
-}
-
-export async function withRlsContext<T>(
-  db: Database,
-  context: RlsContext,
-  fn: (db: Database) => Promise<T>,
-  transactionConfig?: PgTransactionConfig,
-): Promise<T> {
-  return await db.transaction(async (tx) => {
-    const scoped = tx as unknown as Database;
-    await setRlsContext(scoped, context);
-    // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
-    // the scoped query. The set_config and this read share one db.transaction,
-    // which a transaction pooler pins to a single backend — so a mismatch here
-    // means the context was genuinely lost (a torn transaction / pooler backend
-    // swap), not normal operation. Without this guard such an event runs the
-    // scoped read with an empty account_id and returns zero RLS-visible rows,
-    // manufacturing a phantom "no active subscription" from a credential that is
-    // in fact active. Convert that silent false into a loud, root-cause-bearing
-    // error so the caller can retry rather than permanently mis-decide.
-    const applied = await tx.execute<{
-      account_id: string | null;
-      workspace_id: string | null;
-    }>(
-      sql`select
-        current_setting('opengeni.account_id', true) as account_id,
-        current_setting('opengeni.workspace_id', true) as workspace_id`,
-    );
-    const appliedAccountId = applied[0]?.account_id ?? "";
-    const expectedWorkspaceId = context.workspaceId ?? "";
-    const appliedWorkspaceId = applied[0]?.workspace_id ?? "";
-    if (appliedAccountId !== context.accountId) {
-      throw new Error(
-        `RLS context not applied on the active backend: expected account ${context.accountId}, got "${appliedAccountId}"`,
-      );
-    }
-    if (appliedWorkspaceId !== expectedWorkspaceId) {
-      throw new Error(
-        `RLS context not applied on the active backend: expected workspace "${expectedWorkspaceId}", got "${appliedWorkspaceId}"`,
-      );
-    }
-    return await fn(scoped);
-  }, transactionConfig);
-}
-
-/**
- * Run one bounded database operation on a transaction-pinned backend.
- *
- * Callers that also have an application deadline should check their abort
- * signal before returning from `fn`; throwing there rolls the transaction back
- * even when the application deadline won a surrounding Promise race.
- */
-export async function withDatabaseStatementTimeout<T>(
-  db: Database,
-  timeoutMs: number,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("withDatabaseStatementTimeout requires a positive timeout");
-  }
-  const boundedTimeoutMs = Math.max(1, Math.floor(timeoutMs));
-  return await db.transaction(async (tx) => {
-    const scoped = tx as unknown as Database;
-    await scoped.execute(
-      sql`select set_config('statement_timeout', ${`${boundedTimeoutMs}ms`}, true)`,
-    );
-    return await fn(scoped);
-  });
-}
-
-export async function rlsContextForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<RlsContext> {
-  const [row] = await db
-    .select({ accountId: schema.workspaces.accountId })
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, workspaceId))
-    .limit(1);
-  if (!row) {
-    throw new Error(`Workspace not found: ${workspaceId}`);
-  }
-  return { accountId: row.accountId, workspaceId };
-}
-
-export async function withWorkspaceRls<T>(
-  db: Database,
-  workspaceId: string,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
-}
-
-async function retryWorkspacePersistence<T>(
-  db: Database,
-  workspaceId: string,
-  options: IdempotentPersistenceTransactionOptions,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  return await runIdempotentPersistenceTransaction(options, async () => {
-    return await withWorkspaceRls(db, workspaceId, fn);
-  });
-}
-
-async function retryRlsPersistence<T>(
-  db: Database,
-  context: RlsContext,
-  options: IdempotentPersistenceTransactionOptions,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  return await runIdempotentPersistenceTransaction(options, async () => {
-    return await withRlsContext(db, context, fn);
-  });
-}
-
-/**
- * Personal workspace data needs both tenant and authenticated-principal GUCs.
- * `session_pins` uses this helper so FORCE RLS rejects another member's rows
- * even if a future query accidentally omits its explicit subject predicate.
- */
-export async function withWorkspaceSubjectRls<T>(
-  db: Database,
-  workspaceId: string,
-  subjectId: string,
-  fn: (db: Database) => Promise<T>,
-  transactionConfig?: PgTransactionConfig,
-): Promise<T> {
-  if (!subjectId.trim()) {
-    throw new Error("withWorkspaceSubjectRls: a non-empty subjectId is required");
-  }
-  const context = await rlsContextForWorkspace(db, workspaceId);
-  return await withRlsContext(
-    db,
-    context,
-    async (scopedDb) => {
-      await setSubjectRlsContext(scopedDb, subjectId);
-      return await fn(scopedDb);
-    },
-    transactionConfig,
-  );
-}
-
-/** Apply and verify actor-private RLS on an already transaction-pinned handle. */
-export async function setSubjectRlsContext(db: Database, subjectId: string): Promise<void> {
-  if (!subjectId.trim()) {
-    throw new Error("setSubjectRlsContext: a non-empty subjectId is required");
-  }
-  await db.execute(sql`select set_config('opengeni.subject_id', ${subjectId}, true)`);
-  const applied = await db.execute<{ subject_id: string | null }>(
-    sql`select current_setting('opengeni.subject_id', true) as subject_id`,
-  );
-  if ((applied[0]?.subject_id ?? "") !== subjectId) {
-    throw new Error("Authenticated subject RLS context was not applied on the active backend");
-  }
-}
-
-export async function withWorkspaceUsageLock<T>(
-  db: Database,
-  workspaceId: string,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  const context = await rlsContextForWorkspace(db, workspaceId);
-  return await withRlsContext(db, context, async (scopedDb) => {
-    await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${`usage:${workspaceId}`}))`);
-    return await fn(scopedDb);
-  });
-}
-
 export type DocumentIndexAuthority = {
   authorityKind: DocumentAuthorityKind;
   authorityWorkspaceId: string | null;
@@ -1276,14 +959,6 @@ export async function resolveDocumentIndexAuthority(
     authorityWorkspaceId: row.authority_workspace_id,
     authoritySubjectId: row.authority_subject_id,
   };
-}
-
-export async function withAccountRls<T>(
-  db: Database,
-  accountId: string,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  return await withRlsContext(db, { accountId, workspaceId: null }, fn);
 }
 
 export const allWorkspacePermissions: Permission[] = [
@@ -2096,7 +1771,7 @@ export async function removeWorkspaceMember(
  * unknown users are deferred.
  */
 export async function getManagedUserByEmail(db: Database, email: string): Promise<string | null> {
-  const binding = dbBindings.get(db as unknown as object);
+  const binding = dbBindingFor(db);
   if (binding?.userLookup) {
     return await binding.userLookup(db, email);
   }
@@ -3674,22 +3349,6 @@ export type SlackBotDeleteOperation = {
   completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
-};
-
-export type ConnectionCredentialForBroker = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  subjectId: string | null;
-  providerDomain: string;
-  kind: ConnectionKind;
-  status: ConnectionStatus;
-  credential: Record<string, unknown>;
-  grantedScopes: string[];
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  version: number;
-  metadata: Record<string, unknown>;
 };
 
 export type IntegrationOAuthClientForUse = {
@@ -11691,27 +11350,6 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
-export type CodexCredentialTokens = {
-  accessToken: string;
-  refreshToken: string;
-  idToken: string;
-};
-
-export type CodexCredentialForRun = {
-  id: string; // row id — for compare-and-set writes (P1-c)
-  version: number; // optimistic-concurrency version loaded with this snapshot
-  workspaceId: string;
-  tokens: CodexCredentialTokens; // decrypted — never logged, never returned by a route
-  chatgptAccountId: string | null;
-  scopes: string | null;
-  planType: string | null;
-  isFedramp: boolean;
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  status: string;
-  lastError: string | null;
-};
-
 /**
  * Login / rotation write (multi-account P1). Caller passes the PRE-encrypted
  * credential blob. Keyed on the composite partial index (workspace, chatgpt
@@ -11835,11 +11473,10 @@ export async function upsertCodexSubscriptionCredential(
             // it when still null) so a re-connect never clobbers a rename.
             accountEmail: input.accountEmail ?? null,
             label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
-            // Ownership follows the most recent connection exactly. A
-            // configured/delegated/API-key reconnect is intentionally
-            // nonhuman and clears the prior human owner, making the row
-            // view-only until a direct managed-cookie human reconnects it.
-            connectedBySubjectId: input.connectedBySubjectId ?? null,
+            // Reconnect refreshes credential material, never ownership. A row
+            // without an owner may be claimed by its first direct managed human;
+            // after that, disconnect is the explicit ownership-reset boundary.
+            connectedBySubjectId: sql`coalesce(${schema.codexSubscriptionCredentials.connectedBySubjectId}, ${input.connectedBySubjectId ?? null})`,
             status: "active",
             lastError: null,
             version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
@@ -11861,6 +11498,333 @@ export async function upsertCodexSubscriptionCredential(
       // insert from update without a second read.
       const isNew = row.createdAt.getTime() === row.updatedAt.getTime();
       return { kind: "upserted", id: row.id, isNew };
+    },
+  );
+}
+
+export type CodexAppsSettings = {
+  credentialId: string | null;
+  version: number;
+  designatedAt: Date | null;
+};
+
+export async function getCodexAppsSettings(
+  db: Database,
+  workspaceId: string,
+): Promise<CodexAppsSettings> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        credentialId: schema.codexAppsSettings.credentialId,
+        version: schema.codexAppsSettings.version,
+        designatedAt: schema.codexAppsSettings.designatedAt,
+      })
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .limit(1);
+    return row ?? { credentialId: null, version: 0, designatedAt: null };
+  });
+}
+
+export type CodexAppsCredentialAuthorization = {
+  credentialId: string;
+  ownerSubjectId: string;
+};
+
+function canManageCodexApps(permissions: unknown): boolean {
+  return (
+    Array.isArray(permissions) &&
+    (permissions.includes("connections:write") || permissions.includes("workspace:admin"))
+  );
+}
+
+export class CodexAppsAuthorizationRevokedError extends Error {
+  constructor() {
+    super("Codex Apps authorization is no longer active");
+    this.name = "CodexAppsAuthorizationRevokedError";
+  }
+}
+
+/** Exact Apps credential and owner, independent of every inference-capacity field. */
+export async function getCodexAppsCredentialAuthorizationForRun(
+  db: Database,
+  workspaceId: string,
+): Promise<CodexAppsCredentialAuthorization | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        credentialId: schema.codexAppsSettings.credentialId,
+        ownerSubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+      })
+      .from(schema.codexAppsSettings)
+      .innerJoin(
+        schema.codexSubscriptionCredentials,
+        and(
+          eq(schema.codexSubscriptionCredentials.id, schema.codexAppsSettings.credentialId),
+          eq(schema.codexSubscriptionCredentials.accountId, schema.codexAppsSettings.accountId),
+          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+          eq(schema.codexSubscriptionCredentials.status, "active"),
+        ),
+      )
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .limit(1);
+    return row?.credentialId && row.ownerSubjectId
+      ? { credentialId: row.credentialId, ownerSubjectId: row.ownerSubjectId }
+      : null;
+  });
+}
+
+/**
+ * Hold the exact designation, credential, and owner-membership authorization
+ * stable through one outbound Apps request. Clear/disconnect operations share
+ * the workspace advisory lock; credential or membership revocation must wait on
+ * the row locks. The callback deliberately runs inside this short transaction so
+ * no revocation can commit in the gap between a final check and network dispatch.
+ */
+export async function withCodexAppsRequestAuthorization<T>(
+  db: Database,
+  input: { workspaceId: string; credentialId: string },
+  use: () => Promise<T>,
+): Promise<T> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
+    );
+    const [designation] = await scopedDb
+      .select({ credentialId: schema.codexAppsSettings.credentialId })
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+      .for("share")
+      .limit(1);
+    if (designation?.credentialId !== input.credentialId) {
+      throw new CodexAppsAuthorizationRevokedError();
+    }
+    const [credential] = await scopedDb
+      .select({
+        ownerSubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+        status: schema.codexSubscriptionCredentials.status,
+      })
+      .from(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (!credential?.ownerSubjectId || credential.status !== "active") {
+      throw new CodexAppsAuthorizationRevokedError();
+    }
+    const [membership] = await scopedDb
+      .select({ permissions: schema.workspaceMemberships.permissions })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+          eq(schema.workspaceMemberships.subjectId, credential.ownerSubjectId),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (!canManageCodexApps(membership?.permissions)) {
+      throw new CodexAppsAuthorizationRevokedError();
+    }
+    return await use();
+  });
+}
+
+export type DesignateCodexAppsCredentialResult =
+  | ({ kind: "updated" } & CodexAppsSettings)
+  | ({ kind: "conflict" | "already_designated" } & CodexAppsSettings)
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+  | { kind: "forbidden" }
+  | { kind: "unavailable" };
+
+export async function designateCodexAppsCredential(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    credentialId: string;
+    subjectId: string;
+    expectedVersion: number;
+  },
+): Promise<DesignateCodexAppsCredentialResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
+      );
+      const [currentRow] = await scopedDb
+        .select()
+        .from(schema.codexAppsSettings)
+        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+        .for("update")
+        .limit(1);
+      const current: CodexAppsSettings = currentRow
+        ? {
+            credentialId: currentRow.credentialId,
+            version: currentRow.version,
+            designatedAt: currentRow.designatedAt,
+          }
+        : { credentialId: null, version: 0, designatedAt: null };
+      if (current.version !== input.expectedVersion) return { kind: "conflict", ...current };
+      if (current.credentialId !== null) return { kind: "already_designated", ...current };
+
+      const [credential] = await scopedDb
+        .select({
+          connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+          status: schema.codexSubscriptionCredentials.status,
+        })
+        .from(schema.codexSubscriptionCredentials)
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+            eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+            eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!credential) return { kind: "not_found" };
+      if (credential.connectedBySubjectId !== input.subjectId) return { kind: "not_owner" };
+      if (credential.status !== "active") return { kind: "unavailable" };
+
+      const [membership] = await scopedDb
+        .select({ permissions: schema.workspaceMemberships.permissions })
+        .from(schema.workspaceMemberships)
+        .where(
+          and(
+            eq(schema.workspaceMemberships.accountId, input.accountId),
+            eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+            eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!canManageCodexApps(membership?.permissions)) return { kind: "forbidden" };
+
+      const now = new Date();
+      const version = current.version + 1;
+      const [updated] = await scopedDb
+        .insert(schema.codexAppsSettings)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          credentialId: input.credentialId,
+          version,
+          designatedAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: schema.codexAppsSettings.workspaceId,
+          set: {
+            credentialId: input.credentialId,
+            version,
+            designatedAt: now,
+            updatedAt: now,
+          },
+        })
+        .returning({
+          credentialId: schema.codexAppsSettings.credentialId,
+          version: schema.codexAppsSettings.version,
+          designatedAt: schema.codexAppsSettings.designatedAt,
+        });
+      if (!updated?.credentialId || !updated.designatedAt) {
+        throw new Error("Codex Apps designation was not persisted");
+      }
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "codex_apps.designated",
+        targetType: "codex_subscription_credential",
+        targetId: input.credentialId,
+        metadata: { version },
+      });
+      return { kind: "updated", ...updated };
+    },
+  );
+}
+
+export type ClearCodexAppsCredentialResult = {
+  kind: "updated" | "unchanged" | "conflict" | "forbidden";
+} & CodexAppsSettings;
+
+export async function clearCodexAppsCredential(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    expectedVersion: number;
+  },
+): Promise<ClearCodexAppsCredentialResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
+      );
+      const [row] = await scopedDb
+        .select()
+        .from(schema.codexAppsSettings)
+        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+        .for("update")
+        .limit(1);
+      const current: CodexAppsSettings = row
+        ? { credentialId: row.credentialId, version: row.version, designatedAt: row.designatedAt }
+        : { credentialId: null, version: 0, designatedAt: null };
+      const [membership] = await scopedDb
+        .select({ permissions: schema.workspaceMemberships.permissions })
+        .from(schema.workspaceMemberships)
+        .where(
+          and(
+            eq(schema.workspaceMemberships.accountId, input.accountId),
+            eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+            eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!canManageCodexApps(membership?.permissions)) {
+        return { kind: "forbidden", ...current };
+      }
+      if (current.version !== input.expectedVersion) return { kind: "conflict", ...current };
+      if (current.credentialId === null) return { kind: "unchanged", ...current };
+
+      const now = new Date();
+      const version = current.version + 1;
+      const [updated] = await scopedDb
+        .update(schema.codexAppsSettings)
+        .set({
+          credentialId: null,
+          version,
+          designatedAt: null,
+          updatedAt: now,
+        })
+        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
+        .returning({
+          credentialId: schema.codexAppsSettings.credentialId,
+          version: schema.codexAppsSettings.version,
+          designatedAt: schema.codexAppsSettings.designatedAt,
+        });
+      if (!updated) throw new Error("Codex Apps designation clear was not persisted");
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "codex_apps.cleared",
+        targetType: "codex_subscription_credential",
+        targetId: current.credentialId,
+        metadata: { version },
+      });
+      return { kind: "updated", ...updated };
     },
   );
 }
@@ -12351,11 +12315,6 @@ export type CodexAccountStatus = {
   // P3 rotation cooldown: when set and in the future, this account is cooling-down
   // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
   exhaustedUntil: Date | null;
-  // P4 connector-aware rotation: the ORIGINAL-dotted connector namespaces this
-  // account exposes via codex_apps (github/gmail/linear/…). null ⇒ never probed
-  // (the ranker treats it as unknown: never credited as covering, never excluded).
-  connectorNamespaces: string[] | null;
-  connectorsCheckedAt: Date | null;
 };
 
 /**
@@ -12474,8 +12433,6 @@ type CodexLeaseCandidateRow = {
   secondary_reset_at: Date | string | null;
   usage_checked_at: Date | string | null;
   exhausted_until: Date | string | null;
-  connector_namespaces: string[] | null;
-  connectors_checked_at: Date | string | null;
   selection_count: number;
   last_selected_at: Date | string | null;
   active_lease_count: number;
@@ -12508,8 +12465,6 @@ function mapCodexLeaseCandidate(
     secondaryResetAt: codexMetadataDate(row.secondary_reset_at),
     usageCheckedAt: codexMetadataDate(row.usage_checked_at),
     exhaustedUntil: codexMetadataDate(row.exhausted_until),
-    connectorNamespaces: row.connector_namespaces,
-    connectorsCheckedAt: codexMetadataDate(row.connectors_checked_at),
     selectionCount: Number(row.selection_count),
     lastSelectedAt: codexMetadataDate(row.last_selected_at),
     activeLeaseCount: Number(row.active_lease_count),
@@ -12569,8 +12524,6 @@ async function listCodexLeaseCandidatesInTransaction(
       c.secondary_reset_at,
       c.usage_checked_at,
       c.exhausted_until,
-      c.connector_namespaces,
-      c.connectors_checked_at,
       c.selection_count,
       c.last_selected_at,
       count(l.id) filter (
@@ -12617,8 +12570,6 @@ export async function acquireCodexCredentialLease<
     holderId: string;
     /** Pins must not move the workspace-global cursor. */
     advanceActivePointer: boolean;
-    /** Exact frozen credential for this same durable turn, if it is resuming. */
-    continuationCredentialId?: string | null;
     /**
      * Optional downstream parser for private accepted-turn policy metadata.
      * It is pure, runs under the turn/rotation transaction, and must not query
@@ -12627,8 +12578,8 @@ export async function acquireCodexCredentialLease<
     resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
     /**
      * Optional downstream membership policy for NEW allocations only. A live
-     * lease or validated frozen credential is offered to the selector against
-     * the complete workspace rows first and can never be filtered out here.
+     * exact-turn lease is offered to the selector against the complete workspace
+     * rows first and can never be filtered out here.
      */
     filterNewAllocationCandidates?: CodexCredentialLeaseCandidateFilter<
       TPolicyScope,
@@ -12694,23 +12645,6 @@ export async function acquireCodexCredentialLease<
         throw new Error(`Session turn not found for Codex lease: ${input.turnId}`);
       }
       const policyScope = input.resolvePolicyScope?.(turns[0].metadata ?? {}) ?? null;
-      const continuationRows = input.continuationCredentialId
-        ? await tx.execute(
-            sql<{ frozen_codex_credential_id: string | null }>`
-              select frozen_codex_credential_id
-              from agent_run_states
-              where account_id = ${input.accountId}
-                and workspace_id = ${input.workspaceId}
-                and turn_id = ${input.turnId}
-              order by state_version desc
-              limit 1
-            `,
-          )
-        : [];
-      const validatedContinuationCredentialId =
-        continuationRows[0]?.frozen_codex_credential_id === input.continuationCredentialId
-          ? input.continuationCredentialId
-          : null;
       const activeCredentialId = settingsRow.active_credential_id;
       const rotationEnabled = settingsRow.rotation_enabled;
       // Fail closed on a torn/manual legacy write. The user-intent bit and the
@@ -12752,7 +12686,7 @@ export async function acquireCodexCredentialLease<
         activeCredentialId,
         excludeTurnId: input.turnId,
       });
-      const sameTurnCredentialId = existingCredentialId ?? validatedContinuationCredentialId;
+      const sameTurnCredentialId = existingCredentialId;
       const selectionContext = (
         accounts: CodexLeaseAccountStatus[],
         unavailableDiagnostics: readonly TUnavailableDiagnostic[],
@@ -12776,10 +12710,9 @@ export async function acquireCodexCredentialLease<
         }
       }
 
-      // Exact-turn continuity is resolved before any future pool membership
+      // A live exact-turn lease is resolved before any future pool membership
       // filter. The normal selector still owns health validation: a quarantined
-      // live/frozen row falls through to scoped new acquisition rather than
-      // being reused blindly.
+      // row falls through to scoped new acquisition rather than being reused.
       if (!selected) {
         const filtered = filterCodexLeaseCandidatesForPolicy(
           allAccounts,
@@ -12816,11 +12749,7 @@ export async function acquireCodexCredentialLease<
       if (!selectedAccount) {
         throw new Error("Codex lease selector returned a credential outside the workspace pool");
       }
-      if (
-        !selectedAccount.allocatorEnabled &&
-        selectedAccount.id !== existingCredentialId &&
-        selectedAccount.id !== validatedContinuationCredentialId
-      ) {
+      if (!selectedAccount.allocatorEnabled && selectedAccount.id !== existingCredentialId) {
         throw new Error("Codex lease selector returned a credential disabled for new allocations");
       }
 
@@ -14235,9 +14164,6 @@ export async function listCodexAccountStatuses(
         secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
         usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
         exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
-        // P4 connector-set cache — metadata-only, rides along on this read.
-        connectorNamespaces: schema.codexSubscriptionCredentials.connectorNamespaces,
-        connectorsCheckedAt: schema.codexSubscriptionCredentials.connectorsCheckedAt,
       })
       .from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
@@ -14255,7 +14181,6 @@ export async function listCodexAccountStatuses(
       secondaryResetAt: codexMetadataDate(row.secondaryResetAt),
       usageCheckedAt: codexMetadataDate(row.usageCheckedAt),
       exhaustedUntil: codexMetadataDate(row.exhaustedUntil),
-      connectorsCheckedAt: codexMetadataDate(row.connectorsCheckedAt),
       isActive: row.id === activeId,
     }));
   });
@@ -15156,16 +15081,6 @@ export async function completeCodexResetRedemption(
 }
 
 /** The P2 usage-cache snapshot written by the refreshing usage wrapper. */
-export type CodexAccountUsageSnapshot = {
-  primaryUsedPercent?: number | null;
-  primaryResetAt?: Date | null;
-  secondaryUsedPercent?: number | null;
-  secondaryResetAt?: Date | null;
-  /** Present only when the quota body parsed successfully. */
-  checkedAt?: Date;
-  resetCreditAvailableCount?: number | null;
-  resetCreditsCheckedAt?: Date | null;
-};
 
 /**
  * Cache-write for P2 quota bars: persist the five plaintext usage columns on a
@@ -15528,46 +15443,6 @@ export async function countConsecutiveReactiveRotations(
   });
 }
 
-/**
- * P4 connector-set cache writer: persist the set of ORIGINAL-dotted connector
- * namespaces a SPECIFIC credential exposes via codex_apps (+ the freshness clock).
- * Modeled byte-for-byte on recordCodexAccountUsage / setCodexCredentialExhausted:
- * RLS-scoped, guarded by (id, workspace_id), and — critically — NO `version` bump and
- * NO `updatedAt` touch, so it can never race the (id, version) token-refresh CAS.
- *
- * The CALLER must only invoke this with a NON-EMPTY set: codex_apps connects
- * best-effort (a transient failure yields an empty tools/list), and overwriting a
- * known non-empty set with [] would falsely "drop" coverage on a flaky turn. A
- * genuinely connector-less account stays null (the ranker treats null as unknown).
- * Returns true iff a row was updated (false ⇒ the credential was disconnected under us).
- */
-export async function recordCodexAccountConnectors(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  namespaces: string[],
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({
-        connectorNamespaces: namespaces,
-        connectorsCheckedAt: new Date(),
-        // NB: no `version` bump and no `updatedAt` touch — connector set is non-credential
-        // metadata and must NOT race the (id, version) refresh CAS (same discipline as
-        // recordCodexAccountUsage / setCodexCredentialExhausted).
-      })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
-}
-
 /** The supported rotation strategies (P3). */
 export const CODEX_ROTATION_STRATEGIES = [
   "most_remaining",
@@ -15778,6 +15653,7 @@ export async function disconnectCodexAccount(
   db: Database,
   workspaceId: string,
   credentialId: string,
+  actorSubjectId: string | null = null,
 ): Promise<{
   removed: boolean;
   newActiveCredentialId: string | null;
@@ -15789,8 +15665,20 @@ export async function disconnectCodexAccount(
       where workspace_id = ${workspaceId}
       for update
     `);
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${workspaceId}`}, 0))`,
+    );
+    const [appsSettings] = await scopedDb
+      .select()
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .for("update")
+      .limit(1);
     const [credential] = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
+      .select({
+        id: schema.codexSubscriptionCredentials.id,
+        accountId: schema.codexSubscriptionCredentials.accountId,
+      })
       .from(schema.codexSubscriptionCredentials)
       .where(
         and(
@@ -15831,6 +15719,27 @@ export async function disconnectCodexAccount(
         newActiveCredentialId: settingsBefore?.activeCredentialId ?? null,
         blockedByUnresolvedRedemption: true,
       };
+    }
+    if (appsSettings?.credentialId === credentialId) {
+      const version = appsSettings.version + 1;
+      await scopedDb
+        .update(schema.codexAppsSettings)
+        .set({
+          credentialId: null,
+          version,
+          designatedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.codexAppsSettings.id, appsSettings.id));
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: credential.accountId,
+        workspaceId,
+        subjectId: actorSubjectId,
+        action: "codex_apps.cleared_on_disconnect",
+        targetType: "codex_subscription_credential",
+        targetId: credentialId,
+        metadata: { version },
+      });
     }
     const removedRows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
@@ -15884,10 +15793,23 @@ export async function disconnectCodexAccount(
 export async function disconnectAllCodexAccounts(
   db: Database,
   workspaceId: string,
+  actorSubjectId: string | null = null,
 ): Promise<{ removed: number; blockedCredentialIds: string[] }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${workspaceId}`}, 0))`,
+    );
+    const [appsSettings] = await scopedDb
+      .select()
+      .from(schema.codexAppsSettings)
+      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
+      .for("update")
+      .limit(1);
     const credentials = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
+      .select({
+        id: schema.codexSubscriptionCredentials.id,
+        accountId: schema.codexSubscriptionCredentials.accountId,
+      })
       .from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .orderBy(asc(schema.codexSubscriptionCredentials.id))
@@ -15909,6 +15831,27 @@ export async function disconnectAllCodexAccounts(
         removed: 0,
         blockedCredentialIds: blocked.map((row) => row.credentialId).sort(),
       };
+    }
+    if (appsSettings?.credentialId) {
+      const version = appsSettings.version + 1;
+      await scopedDb
+        .update(schema.codexAppsSettings)
+        .set({
+          credentialId: null,
+          version,
+          designatedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.codexAppsSettings.id, appsSettings.id));
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: credentials[0]!.accountId,
+        workspaceId,
+        subjectId: actorSubjectId,
+        action: "codex_apps.cleared_on_disconnect",
+        targetType: "codex_subscription_credential",
+        targetId: appsSettings.credentialId,
+        metadata: { version },
+      });
     }
     const rows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
@@ -17489,6 +17432,18 @@ async function lockSessionCreateIdempotencyKey(
   );
 }
 
+async function lockAgentSessionCreate(tx: Database, input: SessionCreateInput): Promise<void> {
+  const actorSessionId = input.createdByActor?.sessionId;
+  if (!actorSessionId) return;
+  // Agent-originated child creation first reads the parent under FOR SHARE,
+  // then verifies the live attempt under FOR UPDATE. Serialize creates from
+  // the same parent session so concurrent tool calls cannot deadlock while
+  // upgrading that row lock. Unrelated sessions retain full concurrency.
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`agent-session-create:${input.workspaceId}:${actorSessionId}`}, 0))`,
+  );
+}
+
 async function existingSpawnDenialForKey(
   tx: Database,
   workspaceId: string,
@@ -17593,6 +17548,8 @@ async function createSessionInTransaction(
       };
     }
   }
+
+  await lockAgentSessionCreate(tx, input);
 
   const decision = await resolveSessionDepthDecision(tx, input, id, workspace, deploymentPolicy);
   if (decision.denied) {
@@ -20622,11 +20579,6 @@ export async function getLatestRunState(
   turnId: string | null;
   serializedRunState: string;
   pendingApprovals: unknown[];
-  // The codex account that froze this state (pin > workspace-active), or null
-  // when frozen on the non-codex path / before the column existed. The replay
-  // path compares it to the resuming turn's codex account to decide whether the
-  // blob's account-bound reasoning must be neutralized before being replayed.
-  frozenCodexCredentialId: string | null;
   providerArtifactInvalidatedAt: Date | null;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -20647,7 +20599,6 @@ export async function getLatestRunState(
           turnId: row.turnId ?? null,
           serializedRunState: row.serializedRunState,
           pendingApprovals: row.pendingApprovals,
-          frozenCodexCredentialId: row.frozenCodexCredentialId ?? null,
           providerArtifactInvalidatedAt: row.providerArtifactInvalidatedAt ?? null,
         }
       : null;
@@ -21404,10 +21355,6 @@ export async function appendSessionHistoryItems(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
-    // The codex account that produced these items (the turn's resolved credential
-    // id), or null/undefined on the non-codex path. Stored verbatim so the read
-    // path can strip cross-account reasoning.encrypted_content blobs per turn.
-    producerCodexCredentialId?: string | null;
     modelToolOutputTruncationTokens?: number;
     items: Array<{ position: number; item: Record<string, unknown> }>;
   },
@@ -21436,7 +21383,6 @@ export async function appendSessionHistoryItems(
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId: input.turnId,
-              producerCodexCredentialId: input.producerCodexCredentialId ?? null,
               position: entry.position,
               // This is the canonical model-memory boundary. The pending-call
               // ledger and audit event may retain their separate raw/preview
@@ -21815,18 +21761,18 @@ export async function getActiveSessionHistoryItems(
   sessionId: string,
 ): Promise<
   Array<{
+    id: string;
     position: number;
     item: Record<string, unknown>;
-    producerCodexCredentialId: string | null;
     providerArtifactInvalidatedAt: Date | null;
   }>
 > {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select({
+        id: schema.sessionHistoryItems.id,
         position: schema.sessionHistoryItems.position,
         item: schema.sessionHistoryItems.item,
-        producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
         providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
       })
       .from(schema.sessionHistoryItems)
@@ -22024,8 +21970,6 @@ export async function applyContextCompaction(
     replacementInputTokens: number;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
-    /** Tag inserted history rows with the Codex credential that produced them. */
-    producerCodexCredentialId?: string | null;
   },
 ): Promise<ApplyContextCompactionResult> {
   return await withRlsContext(
@@ -22075,9 +22019,6 @@ export async function applyContextCompaction(
               position: supersededFrom + index,
               item: sanitizeModelPayload(item),
               active: true,
-              ...(input.producerCodexCredentialId
-                ? { producerCodexCredentialId: input.producerCodexCredentialId }
-                : {}),
             })),
           );
         }
@@ -22090,9 +22031,6 @@ export async function applyContextCompaction(
           position: summaryPosition,
           item: sanitizeModelPayload(input.summaryItem),
           active: true,
-          ...(input.producerCodexCredentialId
-            ? { producerCodexCredentialId: input.producerCodexCredentialId }
-            : {}),
         });
         const insertedEvents = input.eventPayload
           ? await tx
@@ -34788,11 +34726,6 @@ export async function saveRunState(
     expectedAttemptId: string;
     serializedRunState: string;
     pendingApprovals: unknown[];
-    // The codex account freezing this state (the turn's resolved credential id),
-    // or null on a non-codex turn. Stamped so a resume on a DIFFERENT codex
-    // account can strip the blob's account-bound reasoning. Defaults null so
-    // every legacy caller (and the non-codex path) is byte-identical.
-    frozenCodexCredentialId?: string | null;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -34827,7 +34760,6 @@ export async function saveRunState(
           stateVersion: Number(maxVersion) + 1,
           serializedRunState: input.serializedRunState,
           pendingApprovals: input.pendingApprovals,
-          frozenCodexCredentialId: input.frozenCodexCredentialId ?? null,
         });
         return true;
       });
@@ -37537,7 +37469,6 @@ export async function claimSessionWorkForAttempt(
             turnId,
             position: Number(position),
             item: sanitizeModelPayload(delivered.historyItem),
-            producerCodexCredentialId: null,
           });
         };
 
@@ -38585,7 +38516,6 @@ export async function claimSessionWorkForAttempt(
             row.prompt,
             Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
           ),
-          producerCodexCredentialId: null,
         });
         const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
         // Cross-session updates are already projected through
@@ -40221,7 +40151,6 @@ export type ApplySessionTurnSettlementInput = {
   runState?: {
     serializedRunState: string;
     pendingApprovals: unknown[];
-    frozenCodexCredentialId?: string | null;
     humanInputRequests?: Array<{
       id: string;
       toolCallId: string;
@@ -40450,7 +40379,6 @@ export async function applySessionTurnSettlement(
           stateVersion: Number(maxVersion) + 1,
           serializedRunState: input.runState.serializedRunState,
           pendingApprovals: input.runState.pendingApprovals,
-          frozenCodexCredentialId: input.runState.frozenCodexCredentialId ?? null,
         });
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
@@ -41435,7 +41363,8 @@ export type RequestSessionTurnRecoveryInput = {
   providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
-    codexCredentialId: string;
+    historyItemIds: string[];
+    runStateId?: string;
     reason: "encrypted_content_rejected";
   };
 };
@@ -41538,47 +41467,36 @@ export async function requestSessionTurnRecovery(
       }
       let providerArtifactsInvalidated = 0;
       if (input.providerArtifactInvalidation) {
-        const invalidatedHistory = await tx
-          .update(schema.sessionHistoryItems)
-          .set({
-            providerArtifactInvalidatedAt: now,
-            providerArtifactInvalidationReason: input.providerArtifactInvalidation.reason,
-            providerArtifactInvalidatedByAttemptId: input.attemptId,
-          })
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.accountId, session.accountId),
-              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-              eq(
-                schema.sessionHistoryItems.producerCodexCredentialId,
-                input.providerArtifactInvalidation.codexCredentialId,
-              ),
-              isNull(schema.sessionHistoryItems.providerArtifactInvalidatedAt),
-              sql`${schema.sessionHistoryItems.item} ->> 'type' in ('reasoning', 'compaction')`,
-            ),
-          )
-          .returning({ id: schema.sessionHistoryItems.id });
-        const [latestRunState] = await tx
-          .select({ id: schema.agentRunStates.id })
-          .from(schema.agentRunStates)
-          .where(
-            and(
-              eq(schema.agentRunStates.accountId, session.accountId),
-              eq(schema.agentRunStates.workspaceId, workspaceId),
-              eq(schema.agentRunStates.sessionId, input.sessionId),
-              eq(schema.agentRunStates.turnId, input.turnId),
-              eq(
-                schema.agentRunStates.frozenCodexCredentialId,
-                input.providerArtifactInvalidation.codexCredentialId,
-              ),
-              isNull(schema.agentRunStates.providerArtifactInvalidatedAt),
-            ),
-          )
-          .orderBy(desc(schema.agentRunStates.stateVersion))
-          .limit(1);
-        const invalidatedRunState = latestRunState
+        const historyItemIds = [...new Set(input.providerArtifactInvalidation.historyItemIds)];
+        const invalidatedHistory =
+          historyItemIds.length > 0
+            ? await tx
+                .update(schema.sessionHistoryItems)
+                .set({
+                  providerArtifactInvalidatedAt: now,
+                  providerArtifactInvalidationReason: input.providerArtifactInvalidation.reason,
+                  providerArtifactInvalidatedByAttemptId: input.attemptId,
+                })
+                .where(
+                  and(
+                    eq(schema.sessionHistoryItems.accountId, session.accountId),
+                    eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+                    eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+                    eq(schema.sessionHistoryItems.active, true),
+                    inArray(schema.sessionHistoryItems.id, historyItemIds),
+                    isNull(schema.sessionHistoryItems.providerArtifactInvalidatedAt),
+                    sql`${schema.sessionHistoryItems.item} ->> 'type' in ('reasoning', 'compaction')`,
+                    sql`(
+                      nullif(${schema.sessionHistoryItems.item} ->> 'encrypted_content', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} ->> 'encryptedContent', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encrypted_content', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encryptedContent', '') is not null
+                    )`,
+                  ),
+                )
+                .returning({ id: schema.sessionHistoryItems.id })
+            : [];
+        const invalidatedRunState = input.providerArtifactInvalidation.runStateId
           ? await tx
               .update(schema.agentRunStates)
               .set({
@@ -41588,8 +41506,20 @@ export async function requestSessionTurnRecovery(
               })
               .where(
                 and(
-                  eq(schema.agentRunStates.id, latestRunState.id),
+                  eq(schema.agentRunStates.accountId, session.accountId),
+                  eq(schema.agentRunStates.workspaceId, workspaceId),
+                  eq(schema.agentRunStates.sessionId, input.sessionId),
+                  eq(schema.agentRunStates.turnId, input.turnId),
+                  eq(schema.agentRunStates.id, input.providerArtifactInvalidation.runStateId),
                   isNull(schema.agentRunStates.providerArtifactInvalidatedAt),
+                  sql`${schema.agentRunStates.stateVersion} = (
+                    select max(latest.state_version)
+                    from agent_run_states latest
+                    where latest.account_id = ${session.accountId}
+                      and latest.workspace_id = ${workspaceId}
+                      and latest.session_id = ${input.sessionId}
+                      and latest.turn_id = ${input.turnId}
+                  )`,
                 ),
               )
               .returning({ id: schema.agentRunStates.id })
@@ -45092,12 +45022,119 @@ function shortHash(value: string): string {
   return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }
 
-// Shared, refreshing, id-addressed Codex token resolver + the per-account usage
-// wrapper (P2). Placed at the END so every accessor it orchestrates
-// (loadCodexCredentialForRun / recordCodexTokenRefresh / setCodexCredentialStatus /
-// recordCodexAccountUsage) is already initialized when its default-deps bag
-// evaluates under the index↔resolver module cycle.
-export * from "./codex-token-resolver";
-export * from "./connection-token-resolver";
+// The resolver modules are cycle-free orchestration leaves. The root barrel is
+// the composition point that supplies their existing persistence accessors while
+// retaining the historical public builder/fetcher signatures.
+function codexAuthDeps(): CodexAuthDeps {
+  return {
+    loadCredential: loadCodexCredentialForRun,
+    recordRefresh: recordCodexTokenRefresh,
+    setStatus: setCodexCredentialStatus,
+    refresh: refreshCodexToken,
+    encrypt: encryptEnvironmentValue,
+    keyBytes: environmentsEncryptionKeyBytes,
+    withRefreshLock: withCodexCredentialRefreshLock,
+    recordUsage: recordCodexAccountUsage,
+  };
+}
+
+function connectionBrokerDeps(): ConnectionBrokerDeps {
+  return {
+    loadCredential: loadConnectionCredentialForBroker,
+    recordRefresh: recordConnectionTokenRefresh,
+    setStatus: setConnectionStatus,
+    recordUsed: recordConnectionUsed,
+    refresh: refreshOAuthConnectionCredentialCore,
+    encrypt: encryptEnvironmentValue,
+    keyBytes: environmentsEncryptionKeyBytes,
+    now: () => new Date(),
+  };
+}
+
+export function buildCodexTokenResolver(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  deps: CodexAuthDeps = codexAuthDeps(),
+): ReturnType<typeof buildCodexTokenResolverCore> {
+  return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);
+}
+
+export async function fetchCodexUsageForAccount(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  fetchImpl: CodexFetch = fetch,
+): ReturnType<typeof fetchCodexUsageForAccountCore> {
+  return await fetchCodexUsageForAccountCore(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    codexAuthDeps(),
+    fetchImpl,
+  );
+}
+
+export async function fetchCodexRateLimitResetCreditsForAccount(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  fetchImpl: CodexFetch = fetch,
+): ReturnType<typeof fetchCodexRateLimitResetCreditsForAccountCore> {
+  return await fetchCodexRateLimitResetCreditsForAccountCore(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    codexAuthDeps(),
+    fetchImpl,
+  );
+}
+
+export function buildConnectionTokenResolver(
+  db: Database,
+  settings: Settings,
+  deps: ConnectionBrokerDeps = connectionBrokerDeps(),
+  options: ConnectionTokenResolverOptions = {},
+): ReturnType<typeof buildConnectionTokenResolverCore> {
+  return buildConnectionTokenResolverCore(db, settings, deps, options);
+}
+
+export {
+  withCodexTokenDeadline,
+  type CodexAccountUsageSnapshot,
+  type CodexAuthDeps,
+  type CodexCredentialForRun,
+  type CodexCredentialTokens,
+  type CodexRateLimitResetCreditsAccountResult,
+  type CodexTokenDeadlineClock,
+  type CodexTokenDeadlineOptions,
+} from "./codex-token-resolver";
+
+export {
+  buildHostConnectionTokenResolver,
+  ConnectionRefreshHttpError,
+  HostMcpCredentialBindingError,
+  HostMcpCredentialScopeError,
+  isPrivateAddress,
+  normalizeBearerScheme,
+  refreshOAuthConnectionCredential,
+  type ConnectionBrokerDeps,
+  type ConnectionCredentialForBroker,
+  type ConnectionCredentialLookupInput,
+  type ConnectionStatusGuard,
+  type ConnectionTokenRefreshInput,
+  type ConnectionTokenResolverOptions,
+  type HostMcpCredentialResolverContext,
+  type PermanentConnectionRefreshFailure,
+  type RefreshTransportOptions,
+  type ResolveConnectionCredentialInput,
+  type ResolveConnectionCredentialResult,
+} from "./connection-token-resolver";
+
 export * from "./workspace-artifacts";
 export * from "./transcription-recordings";

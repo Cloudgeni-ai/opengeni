@@ -734,7 +734,6 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "variable_set_set_variable",
   "environment_set_variable",
   "github_connect_link",
-  "github_token",
   "github_repositories_list",
   "social_connections_list",
   "social_posts_recent",

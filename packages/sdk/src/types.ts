@@ -2094,7 +2094,6 @@ export type FirstPartyMcpToolName =
   | "variable_set_set_variable"
   | "environment_set_variable"
   | "github_connect_link"
-  | "github_token"
   | "github_repositories_list"
   | "social_connections_list"
   | "social_posts_recent"
@@ -2370,6 +2369,10 @@ export type CodexAccount = {
   /** Cached authoritative summary count, never detailed redemption authority. */
   resetCreditAvailableCount?: number | null;
   resetCreditsCheckedAt?: string | null;
+  /** True when this exact credential is the workspace's independent Apps credential. */
+  appsDesignated: boolean;
+  /** True only for the scoped managed human who connected it. */
+  canEnableApps: boolean;
 };
 
 export type CodexResetCredit = {
@@ -2436,10 +2439,10 @@ export type CodexAllocatorUpdate = {
   changed: boolean;
 };
 
-/** Per-workspace Codex rotation/active settings. P1: rotation inert, only activeCredentialId loads. */
+/** Per-workspace Codex rotation/active settings. New servers return `sharded`. */
 export type CodexRotationSettings = {
   rotationEnabled: boolean;
-  rotationStrategy: "most_remaining" | "round_robin" | "drain_then_next";
+  rotationStrategy: "sharded" | "most_remaining" | "round_robin" | "drain_then_next";
   activeCredentialId: string | null;
 };
 
@@ -2447,7 +2450,22 @@ export type CodexRotationSettings = {
 export type CodexAccountsResponse = {
   accounts: CodexAccount[];
   activeAccountId: string | null;
+  /** Added by Apps-aware servers; absent on older same-major deployments. */
+  apps?: {
+    available: boolean;
+    credentialId: string | null;
+    version: number;
+    designatedAt: string | null;
+    canDisable: boolean;
+  };
   settings: CodexRotationSettings;
+};
+
+export type CodexAppsUpdate = {
+  credentialId: string | null;
+  version: number;
+  designatedAt: string | null;
+  changed: boolean;
 };
 
 /** Payload of a `codex.account.switched` session event. */
@@ -2455,10 +2473,6 @@ export type CodexAccountSwitchedPayload = {
   fromAccountId: string | null;
   toAccountId: string;
   reason: "manual" | "exhausted" | "rotation";
-  // P4 connector-aware rotation: the session's used connectors that the new account
-  // does NOT cover (a prefer-not-require failover that dropped a connector). Present
-  // only on such a switch; the UI renders a "dropped <connector>" badge on the pill.
-  droppedConnectors?: string[];
 };
 
 /** Device-code start: show `userCode` at `verificationUri`, then poll with `state`. */

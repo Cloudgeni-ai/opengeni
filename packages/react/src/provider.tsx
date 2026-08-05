@@ -152,17 +152,17 @@ function ApiContractMismatchScreen({ mismatch }: { mismatch: OpenGeniApiContract
       data-opengeni-api-contract-mismatch
     >
       <div className="w-full max-w-md rounded-xl border border-og-border bg-og-surface p-6 shadow-2xl">
-        <p className="text-sm font-semibold text-og-fg">OpenGeni updated</p>
-        <p className="mt-2 text-sm leading-6 text-og-muted">
+        <p className="text-og-menu font-semibold text-og-fg">OpenGeni updated</p>
+        <p className="mt-2 text-og-menu leading-6 text-og-muted">
           This tab cannot safely continue with the new server version. Reload it before sending or
           controlling work.
         </p>
-        <p className="mt-3 font-mono text-xs text-og-subtle">
+        <p className="mt-3 font-mono text-og-control text-og-subtle">
           Client {mismatch.expected} · API {mismatch.actual}
         </p>
         <button
           type="button"
-          className="mt-5 inline-flex h-9 items-center rounded-md bg-og-fg px-3 text-sm font-medium text-og-bg"
+          className="mt-5 inline-flex h-9 items-center rounded-md bg-og-fg px-3 text-og-menu font-medium text-og-bg"
           onClick={() => window.location.reload()}
         >
           Reload now

@@ -1,5 +1,33 @@
 # @opengeni/react
 
+## 0.44.6
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- Updated dependencies [69bc207]
+- Updated dependencies [c0f8e40]
+  - @opengeni/sdk@0.44.6
+
+## 0.44.5
+
+### Patch Changes
+
+- 4e39d4d: Keep the Northstar demo's host font reset contained to embedded OpenGeni surfaces.
+
+## 0.44.4
+
+### Patch Changes
+
+- 9159e64: Add render-compatible runtime typography and model-picker density tokens, a compact embedded preset, host-reset-safe component typography, and token propagation for portalled model and realtime menus.
+
+## 0.44.3
+
+### Patch Changes
+
+- Updated dependencies [4502474]
+  - @opengeni/sdk@0.44.3
+
 ## 0.44.2
 
 ### Patch Changes

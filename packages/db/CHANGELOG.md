@@ -1,5 +1,27 @@
 # @opengeni/db
 
+## 0.27.10
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- 144fd9e: Prevent fully quiesced historical interruptions from upgrading later ordinary workflow wakes to control signals.
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+- Updated dependencies [69bc207]
+- Updated dependencies [c0f8e40]
+  - @opengeni/codex@0.2.11
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+
+## 0.27.9
+
+### Patch Changes
+
+- 4502474: Add workspace-default and explicitly personal ownership for first-party social connections, preserve causal personal authority for agent work, and retain actionable structured gateway errors.
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/config@0.10.12
+
 ## 0.27.8
 
 ### Patch Changes

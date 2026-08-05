@@ -497,7 +497,8 @@ export const workspaceVariableSetVariables = pgTable(
   }),
 );
 
-// Per-workspace ChatGPT/Codex subscription credential. One row per workspace.
+// Per-workspace ChatGPT/Codex subscription credential. One row per connected
+// ChatGPT account within a workspace.
 // access/refresh/id tokens live INSIDE credential_encrypted (v1 AES-256-GCM,
 // same envelope as workspace_variable_set_variables); the other columns are
 // plaintext metadata (header value + UI). RLS-isolated per workspace.
@@ -536,21 +537,11 @@ export const codexSubscriptionCredentials = pgTable(
     // usage cap on a rotation turn; the rotation engine treats `exhausted_until > now()` as
     // capped/skip so it isn't immediately re-picked. Self-clears via the now() comparison.
     exhaustedUntil: timestamp("exhausted_until", { withTimezone: true }),
-    // P4 connector-aware rotation cache (plaintext metadata; NEVER a token). The set
-    // of ORIGINAL-dotted connector namespaces (github/gmail/linear/…) this account
-    // exposes via codex_apps, captured from the per-turn tools/list. null ⇒ never
-    // probed (the ranker treats it as unknown: never credited as covering, never
-    // excluded). The writer only ever sets a NON-empty set, so a flaky empty turn
-    // can't false-drop coverage. connectorsCheckedAt is the freshness clock.
-    connectorNamespaces: text("connector_namespaces").array(),
-    connectorsCheckedAt: timestamp("connectors_checked_at", {
-      withTimezone: true,
-    }),
     // Workspace-local, server-held fairness cursor. Provider usage headers are
     // capacity hints, never the sole allocator: live lease count is ranked first
     // and this cursor deterministically breaks equal-load/equal-capacity ties.
     // This flag controls NEW automatic allocations only. Credential health,
-    // refresh, encrypted material, and already-frozen/in-flight turns are
+    // refresh, encrypted material, and an already-leased in-flight turn are
     // intentionally independent. account eligibility policy owns toggle OCC/audit and product UI.
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     // Independent OCC/audit sequence for the allocator toggle. Token refresh
@@ -585,6 +576,54 @@ export const codexSubscriptionCredentials = pgTable(
     workspaceIdentity: uniqueIndex("codex_subscription_credentials_workspace_id_idx").on(
       table.workspaceId,
       table.id,
+    ),
+    workspaceAccountIdentity: uniqueIndex(
+      "codex_subscription_credentials_workspace_account_id_idx",
+    ).on(table.workspaceId, table.accountId, table.id),
+  }),
+);
+
+// Optional workspace-level credential used only for ChatGPT connected Apps.
+// Inference selection, usage, cooldown, allocator, pins, and leases never read
+// this row. A durable null row retains the OCC sequence after designation clear.
+export const codexAppsSettings = pgTable(
+  "codex_apps_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    credentialId: uuid("credential_id"),
+    version: integer("version").notNull().default(1),
+    designatedAt: timestamp("designated_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "codex_apps_settings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    credentialScope: foreignKey({
+      name: "codex_apps_settings_credential_scope_fk",
+      columns: [table.workspaceId, table.accountId, table.credentialId],
+      foreignColumns: [
+        codexSubscriptionCredentials.workspaceId,
+        codexSubscriptionCredentials.accountId,
+        codexSubscriptionCredentials.id,
+      ],
+    }).onDelete("cascade"),
+    workspace: uniqueIndex("codex_apps_settings_workspace_idx").on(table.workspaceId),
+    designationShape: check(
+      "codex_apps_settings_designation_shape_chk",
+      sql`${table.version} > 0 and (
+        (${table.credentialId} is null and ${table.designatedAt} is null)
+        or
+        (${table.credentialId} is not null and ${table.designatedAt} is not null)
+      )`,
     ),
   }),
 );
@@ -3519,25 +3558,9 @@ export const agentRunStates = pgTable("agent_run_states", {
   stateVersion: integer("state_version").notNull(),
   serializedRunState: text("serialized_run_state").notNull(),
   pendingApprovals: jsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
-  // The Codex account that FROZE this run state: the turn's resolved codex
-  // credential id (pin > workspace-active), or NULL when frozen on the
-  // non-codex / Azure path (or before this column existed). The serialized
-  // RunState blob round-trips `reasoning.encrypted_content` minted by the
-  // ChatGPT/Codex backend — account/org-bound, so a foreign blob 400s — and the
-  // foreign reasoning ids the Responses backend validates; but the blob carries
-  // NO per-item producer tag (those live only on session_history_items). So we
-  // stamp the freezing account here: on an approval resume whose codex account
-  // DIFFERS from this value,
-  // the replay path neutralizes every reasoning item's account-bound identity
-  // (encrypted_content + provider id) in the blob before it reaches the model.
-  // Deliberately NO FK: provenance must OUTLIVE the account's hard-disconnect (a
-  // stale-but-null tag still mismatches a live codex id, so the strip stays
-  // correct either way). NULL on both sides (non-codex freeze + non-codex
-  // resume) is a no-op, so single-account and non-codex sessions are unchanged.
-  frozenCodexCredentialId: uuid("frozen_codex_credential_id"),
-  // Exact provider rejection invalidates only the opaque reasoning identity
-  // inside this frozen state. The serialized receipt remains durable and
-  // auditable; the resume path neutralizes its provider-bound identity.
+  // Exact provider rejection marks the latest current-turn receipt only when it
+  // was part of the rejected request. The serialized receipt remains durable;
+  // recovery builds a temporary view without unusable opaque artifacts.
   providerArtifactInvalidatedAt: timestamp("provider_artifact_invalidated_at", {
     withTimezone: true,
   }),
@@ -3661,22 +3684,11 @@ export const sessionHistoryItems = pgTable(
     // inserts ONE synthetic active summary row at the boundary. Defaults true so
     // every existing and normally-appended row is live.
     active: boolean("active").notNull().default(true),
-    // The Codex account that PRODUCED these items: the per-turn resolved codex
-    // credential id (pin > workspace-active), or NULL when produced on the
-    // non-codex / Azure path (or before this column existed). Used to strip
-    // cross-account `reasoning.encrypted_content` blobs — those are account/org-
-    // bound, minted by the ChatGPT/Codex backend, so replaying account A's blob
-    // into a turn running on account B 400s. The read path drops the encrypted
-    // reasoning of any item whose producer != the turn's current codex account.
-    // Deliberately NO FK: provenance must OUTLIVE the account's hard-disconnect
-    // (an ON DELETE SET NULL would erase the tag, and a stale-but-null tag still
-    // mismatches a live codex id so the strip stays correct either way).
-    producerCodexCredentialId: uuid("producer_codex_credential_id"),
-    // An exact provider 400 can prove that an otherwise same-credential opaque
-    // reasoning artifact is no longer decryptable. Keep the original item and
-    // producer provenance immutable, but record the attempt-fenced rejection so
-    // later model reads omit only the provider-bound identity. No FK: the receipt
-    // must outlive operational attempt retention just like producer provenance.
+    // An exact provider 400 can prove that the request's active opaque artifact
+    // set is no longer usable. Keep each canonical item immutable, but record the
+    // attempt-fenced rejection on the exact candidate row IDs so later model
+    // reads build a temporary projection. No FK: the receipt must outlive
+    // operational attempt retention.
     providerArtifactInvalidatedAt: timestamp("provider_artifact_invalidated_at", {
       withTimezone: true,
     }),

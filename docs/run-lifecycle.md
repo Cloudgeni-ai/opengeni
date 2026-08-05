@@ -248,16 +248,19 @@ the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
 Recoverable conditions preserve context instead of failing the session, so a
-long run survives them. Retryable provider connectivity and 5xx failures resume
-the same accepted turn after a pacing delay. Hitting an explicitly configured
-model-call cap, escaped MCP request timeouts, and budget/credit exhaustion end
-the current turn gracefully; an active goal may create a later continuation,
-while an otherwise idle session waits for the next user message. For an MCP
-timeout that escapes after a successful tool output, conversation truth is
-checkpointed before the turn settles and the continuation is a new follow-up —
-the completed tool call/full turn is never blindly replayed. Budget/credit
-exhaustion likewise idles the turn rather than failing the session, so a top-up
-lets the same session continue.
+long run survives them. Retryable provider connectivity, 5xx failures, and
+secret-safely classified required-MCP connectivity failures resume the same
+accepted turn after a pacing delay. The MCP classifier retains only an
+allowlisted timeout/connectivity marker; raw transport messages, URLs, response
+bodies, and unknown provider codes never cross the runtime boundary. HTTP client
+failures remain authoritative and terminal. Hitting an explicitly configured
+model-call cap and budget/credit exhaustion ends the current turn gracefully;
+an active goal may create a later continuation, while an otherwise idle session
+waits for the next user message. For an MCP timeout that escapes after a
+successful tool output, conversation truth is checkpointed before the turn
+settles and the continuation is a new follow-up — the completed tool call/full
+turn is never blindly replayed. Budget/credit exhaustion likewise idles the turn
+rather than failing the session, so a top-up lets the same session continue.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
@@ -454,6 +457,11 @@ cancelled descendants do not notify parents inside the same terminal subtree.
 Only physical attempt quiescence can clear the stopping projection.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
+Wake repair treats only an undelivered control revision, an actionable
+interruption, or a settled interruption whose exact attempt still lacks its
+quiescence receipt as control work. A fully quiesced historical interruption is
+audit evidence and cannot upgrade a later ordinary queue wake to
+`sessionControl`.
 For Agent Steer, accepting that signal is not an admission acknowledgement: if
 effective control is active while the newest `agent_steer_instruction` remains
 pending, the delivery path leaves its coalesced workflow-wake revision
@@ -495,7 +503,10 @@ physical receipt remains pending, `effectiveControl.settlement` stays typed as
 Hosted POSIX process cancellation still validates the exact PID, process group,
 and randomized command token before signalling; it reads those facts through
 `ps` when available and Linux `/proc` when a minimal image omits procps. Missing
-or malformed identity remains fail-closed.
+or malformed identity remains fail-closed. An explicit `tty:false` command keeps
+pipe-mode stdin/stdout/stderr and never receives terminal control bytes during
+cancellation; the same marker-bound process-group TERM/KILL proof remains
+authoritative. Omitting `tty` preserves the existing interactive default.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -906,10 +917,21 @@ strips provider item ids from every model-call input by default
 self-contained and reasoning continuity does not hinge on provider storage.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
-the same-credential active reasoning/compaction rows and the current turn's
-latest frozen RunState as provider-invalid. Their durable rows, summaries,
-messages, provenance, and timeline truth remain intact. Recovery then reclaims
-the same logical turn with a new attempt and omits or neutralizes only the
-rejected provider-bound identity. A generic 400, a different provider error, or
-a rejection that invalidates no matching artifact is terminal rather than an
-equivalent retry loop.
+the exact active reasoning/compaction row IDs and the current turn's latest
+RunState receipt containing opaque artifacts that participated in the rejected
+request as provider-invalid.
+Their durable rows, readable content, provenance, and timeline truth remain
+intact. Recovery then reclaims the same logical turn with a new attempt and
+builds one temporary input view that omits or neutralizes only that rejected
+identity; an unusable remote-compaction blob is omitted because no portable
+plaintext exists. Credential identity is irrelevant. A generic 400, a different
+provider error, or a rejection that invalidates none of that exact candidate set is terminal
+rather than an equivalent retry loop.
+
+Subscription, model, and provider-route changes never alter canonical history
+or a saved approval RunState. Responses consumes canonical history directly;
+Chat Completions receives one request-local transcript projection only for item
+types its wire protocol cannot represent. Historical `tool_search` and other
+tool call/output pairs are completed facts, not authorization to execute again.
+The projection is discarded after the request. Portable sessions may switch
+between supported providers; `remote_v2` sessions remain Codex-only.

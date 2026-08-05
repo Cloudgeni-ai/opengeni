@@ -6,8 +6,8 @@ import type {
   WorkspaceArtifactVersion,
 } from "@opengeni/contracts";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
-import type { Database } from "./index";
-import { withRlsContext, withWorkspaceRls } from "./index";
+import type { Database } from "./database";
+import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;

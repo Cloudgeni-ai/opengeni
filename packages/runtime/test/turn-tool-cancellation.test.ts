@@ -118,7 +118,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     },
   );
 
-  test("forces a short PTY yield and escalates ignored Ctrl-C/TERM to a confirmed group KILL", async () => {
+  test("preserves explicit non-TTY execution and escalates without injecting Ctrl-C", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let processAlive = true;
@@ -161,7 +161,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 30_000 }),
     );
     expect(output).toContain("Process running with session ID 7");
-    expect(execInput?.tty).toBe(true);
+    expect(execInput?.tty).toBe(false);
     expect(execInput?.yield_time_ms).toBe(250);
     expect(String(execInput?.cmd)).toContain("sleep 60");
     expect(String(execInput?.cmd)).toContain("/tmp/opengeni-turn-shell/");
@@ -169,8 +169,64 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
 
-    expect(writes[0]).toBe("\u0003");
+    expect(writes).not.toContain("\u0003");
     expect(signals).toEqual(["TERM", "KILL"]);
+    expect(processAlive).toBe(false);
+  });
+
+  test("preserves explicit PTY execution and uses Ctrl-C before process-group escalation", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let processAlive = true;
+    let execInput: Record<string, unknown> | null = null;
+    const signals: string[] = [];
+    const writes: string[] = [];
+
+    const exec = functionTool("exec_command", async (_context, rawInput) => {
+      const input = JSON.parse(rawInput) as Record<string, unknown>;
+      const cmd = String(input.cmd);
+      if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+        return exited(0, "4300 4300\n");
+      }
+      if (cmd.includes("command kill -TERM")) {
+        signals.push("TERM");
+        return exited(0);
+      }
+      if (cmd.includes("command kill -KILL")) {
+        signals.push("KILL");
+        processAlive = false;
+        return exited(0);
+      }
+      if (cmd.includes("command kill -0")) {
+        return exited(processAlive ? 75 : 0);
+      }
+      execInput = input;
+      return running(8, "started\n");
+    });
+    const write = functionTool("write_stdin", async (_context, rawInput) => {
+      const input = JSON.parse(rawInput) as { chars?: string };
+      const chars = input.chars ?? "";
+      writes.push(chars);
+      if (chars === "\u0003") processAlive = false;
+      return processAlive ? running(8) : exited(130);
+    });
+    const wrapped = controller.wrapTools([exec, write]) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const output = await wrapped[0]!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "sleep 60", tty: true, yield_time_ms: 30_000 }),
+    );
+    expect(output).toContain("Process running with session ID 8");
+    expect(execInput?.tty).toBe(true);
+    expect(execInput?.yield_time_ms).toBe(250);
+
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+
+    expect(writes[0]).toBe("\u0003");
+    expect(signals).toEqual([]);
     expect(processAlive).toBe(false);
   });
 
@@ -655,6 +711,60 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(processAlive).toBe(false);
   });
 
+  test("preserves explicit non-TTY lifecycle commands and cancels them without Ctrl-C", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let processAlive = true;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const signals: string[] = [];
+    const writes: string[] = [];
+    const session = {
+      supportsPty: () => true,
+      exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
+        if (input.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return { exitCode: 0, output: "4500 4500\n" };
+        }
+        if (input.cmd.includes("command kill -TERM")) {
+          signals.push("TERM");
+          return { exitCode: 0, output: "" };
+        }
+        if (input.cmd.includes("command kill -KILL")) {
+          signals.push("KILL");
+          processAlive = false;
+          return { exitCode: 0, output: "" };
+        }
+        if (input.cmd.includes("command kill -0")) {
+          return { exitCode: processAlive ? 75 : 0, output: "" };
+        }
+        expect(input.tty).toBe(false);
+        expect(input.yieldTimeMs).toBe(250);
+        markStarted();
+        return { sessionId: 13, output: "started\n" };
+      },
+      writeStdin: async ({ chars }: { chars?: string }) => {
+        writes.push(chars ?? "");
+        return processAlive ? running(13) : exited(137);
+      },
+    };
+
+    const command = controller.runSandboxCommand(session, {
+      cmd: "trap '' INT TERM; sleep 60",
+      tty: false,
+      yieldTimeMs: 120_000,
+    });
+    await started;
+    abort.abort(new Error("steered during non-TTY setup"));
+    await expect(command).rejects.toThrow("steered during non-TTY setup");
+    await controller.waitForQuiescence();
+
+    expect(writes).not.toContain("\u0003");
+    expect(signals).toEqual(["TERM", "KILL"]);
+    expect(processAlive).toBe(false);
+  });
+
   test("cancels a connected-machine lifecycle command by a durable op id", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
@@ -737,6 +847,63 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
     if (originalPython === undefined) delete process.env.OPENAI_AGENTS_PYTHON;
     else process.env.OPENAI_AGENTS_PYTHON = originalPython;
   });
+
+  test.skipIf(Bun.which("git") === null)(
+    "explicit non-TTY execution exposes pipe descriptors and bypasses the Git pager",
+    async () => {
+      const python = Bun.which("python3");
+      expect(python).not.toBeNull();
+      process.env.OPENAI_AGENTS_PYTHON = python!;
+      const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+      const client = createSandboxClientForBackend("local", settings) as {
+        create(manifest?: unknown): Promise<{
+          close(): Promise<void>;
+          state: { workspaceRootPath: string };
+        }>;
+      };
+      const session = await client.create({});
+      sessions.push(session);
+      const repoPath = `${session.state.workspaceRootPath}/non-tty-repo-${crypto.randomUUID()}`;
+      const pagerMarker = `${session.state.workspaceRootPath}/pager-${crypto.randomUUID()}`;
+      const controller = createTurnToolCancellationController();
+      const capability = shell({ configureTools: (tools) => controller.wrapTools(tools) });
+      const tools = capability
+        .clone()
+        .bind(session as never)
+        .tools();
+      const exec = tools.find(
+        (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+          tool.type === "function" && tool.name === "exec_command",
+      );
+      expect(exec).toBeDefined();
+
+      const output = await exec!.invoke(
+        runContext,
+        JSON.stringify({
+          tty: false,
+          cmd: [
+            "set -eu",
+            `rm -rf '${repoPath}' '${pagerMarker}'`,
+            `mkdir -p '${repoPath}'`,
+            `git -C '${repoPath}' init -q`,
+            `git -C '${repoPath}' config user.name OpenGeni`,
+            `git -C '${repoPath}' config user.email opengeni@example.invalid`,
+            `printf first > '${repoPath}/file.txt'`,
+            `git -C '${repoPath}' add file.txt`,
+            `git -C '${repoPath}' commit -qm first`,
+            'printf "stdin=%s stdout=%s stderr=%s\\n" "$([ -t 0 ] && echo tty || echo pipe)" "$([ -t 1 ] && echo tty || echo pipe)" "$([ -t 2 ] && echo tty || echo pipe)"',
+            `GIT_PAGER="tee '${pagerMarker}'" git -C '${repoPath}' log --oneline`,
+            `test ! -e '${pagerMarker}'`,
+            "printf 'pager=not-invoked\\n'",
+          ].join("\n"),
+        }),
+      );
+
+      expect(output).toContain("stdin=pipe stdout=pipe stderr=pipe");
+      expect(output).toContain("pager=not-invoked");
+      expect(existsSync(pagerMarker)).toBe(false);
+    },
+  );
 
   test("a signal-ignoring process cannot write after the fence resolves", async () => {
     const python = Bun.which("python3");

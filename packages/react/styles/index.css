@@ -25,17 +25,26 @@
   --font-sans: var(--og-font-sans);
   --font-mono: var(--og-font-mono);
 
-  /* Type ramp — a real 4-step scale (no half-pixel hand-tuning). Every
-     timeline string maps to one of these via `text-og-{xs,sm,base,md}`;
-     mono reuses the same steps. */
-  --text-og-xs: 11px;
-  --text-og-xs--line-height: 1.45;
-  --text-og-sm: 12px;
-  --text-og-sm--line-height: 1.5;
-  --text-og-base: 13px;
-  --text-og-base--line-height: 1.55;
-  --text-og-md: 15px;
-  --text-og-md--line-height: 1.6;
+  /* Type ramp. Runtime values live in tokens.css so an embedder can tune the
+     complete SDK subtree without rebuilding Tailwind. The control/menu tokens
+     preserve Tailwind's historic xs/sm metrics without leaking through or
+     mutating the host application's own `text-xs` / `text-sm` utilities. */
+  --text-og-xs: var(--og-font-size-xs);
+  --text-og-xs--line-height: var(--og-line-height-xs);
+  --text-og-sm: var(--og-font-size-sm);
+  --text-og-sm--line-height: var(--og-line-height-sm);
+  --text-og-base: var(--og-font-size-base);
+  --text-og-base--line-height: var(--og-line-height-base);
+  --text-og-md: var(--og-font-size-md);
+  --text-og-md--line-height: var(--og-line-height-md);
+  --text-og-control: var(--og-font-size-control);
+  --text-og-control--line-height: var(--og-line-height-control);
+  --text-og-menu: var(--og-font-size-menu);
+  --text-og-menu--line-height: var(--og-line-height-menu);
+  --text-og-composer: var(--og-font-size-composer);
+  --text-og-composer--line-height: var(--og-line-height-composer);
+  --text-og-composer-wide: var(--og-font-size-composer-wide);
+  --text-og-composer-wide--line-height: var(--og-line-height-composer-wide);
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;
 
@@ -149,6 +158,52 @@
   /* Stream end fallback breath when View Transitions are unavailable. */
   --animate-og-markdown-settle: og-markdown-settle var(--og-duration-markdown-crystallize)
     var(--og-ease-stream) both;
+}
+
+/* Typography utilities also publish their effective metrics as private
+   component variables. A host reset such as `.app button { font: inherit }`
+   otherwise beats a one-class Tailwind utility on specificity and silently
+   inflates embedded controls. The scoped guard below reads these variables at
+   higher specificity, while responsive variants can still replace them and
+   public --og-* tokens remain the only customization surface. */
+@utility text-og-xs {
+  --og-component-font-size: var(--og-font-size-xs);
+  --og-component-line-height: var(--og-line-height-xs);
+}
+
+@utility text-og-sm {
+  --og-component-font-size: var(--og-font-size-sm);
+  --og-component-line-height: var(--og-line-height-sm);
+}
+
+@utility text-og-base {
+  --og-component-font-size: var(--og-font-size-base);
+  --og-component-line-height: var(--og-line-height-base);
+}
+
+@utility text-og-md {
+  --og-component-font-size: var(--og-font-size-md);
+  --og-component-line-height: var(--og-line-height-md);
+}
+
+@utility text-og-control {
+  --og-component-font-size: var(--og-font-size-control);
+  --og-component-line-height: var(--og-line-height-control);
+}
+
+@utility text-og-menu {
+  --og-component-font-size: var(--og-font-size-menu);
+  --og-component-line-height: var(--og-line-height-menu);
+}
+
+@utility text-og-composer {
+  --og-component-font-size: var(--og-font-size-composer);
+  --og-component-line-height: var(--og-line-height-composer);
+}
+
+@utility text-og-composer-wide {
+  --og-component-font-size: var(--og-font-size-composer-wide);
+  --og-component-line-height: var(--og-line-height-composer-wide);
 }
 
 /* Radix Collapsible disclosure: height auto-animates via the content var. Used
@@ -358,6 +413,31 @@
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   color: var(--og-color-fg);
+}
+
+:is(.og-root.og-root, .og-root .og-root)
+  :where(
+    .text-og-xs,
+    .text-og-sm,
+    .text-og-base,
+    .text-og-md,
+    .text-og-control,
+    .text-og-menu,
+    .text-og-composer,
+    .text-og-composer-wide
+  ),
+:is(
+  .og-root.text-og-xs,
+  .og-root.text-og-sm,
+  .og-root.text-og-base,
+  .og-root.text-og-md,
+  .og-root.text-og-control,
+  .og-root.text-og-menu,
+  .og-root.text-og-composer,
+  .og-root.text-og-composer-wide
+) {
+  font-size: var(--og-component-font-size);
+  line-height: var(--tw-leading, var(--og-component-line-height));
 }
 
 .og-root :where(*) {

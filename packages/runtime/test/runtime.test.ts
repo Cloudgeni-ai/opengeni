@@ -80,6 +80,7 @@ import {
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
+  isMcpTransportConnectivityError,
   projectModelInputForCapabilities,
   projectModelInputForImageSupport,
   prefixedMcpToolName,
@@ -87,6 +88,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  safeMcpTransportError,
   serializeApprovals,
   serializeHumanInputRequests,
   refreshToolspaceTokenFile,
@@ -110,14 +112,14 @@ import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testi
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
-  codexRequestStorage,
-  type CodexRequestContext,
+  CODEX_APPS_MCP_URL,
   type CodexTokenSnapshot,
 } from "@opengeni/codex";
 
-function makeCodexContext(
-  overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {},
-): CodexRequestContext {
+function makeCodexAppsAuth(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): {
+  clientVersion: string;
+  withAuthorization: <T>(use: (token: CodexTokenSnapshot) => Promise<T>) => Promise<T>;
+} {
   const token: CodexTokenSnapshot = overrides.token ?? {
     accessToken: "tok-123",
     chatgptAccountId: "acct-9",
@@ -125,22 +127,27 @@ function makeCodexContext(
   };
   return {
     clientVersion: "0.0.0-test",
-    getToken: overrides.tokenError
+    withAuthorization: overrides.tokenError
       ? async () => {
           throw overrides.tokenError;
         }
-      : async () => token,
-    refresh: async () => token,
-    resolveModel: (slug: string) => slug,
+      : async (use) => await use(token),
   };
 }
 
-const CODEX_APPS_ENTRY = (url: string) => ({
+const CODEX_APPS_ENTRY = () => ({
   id: "codex_apps",
   name: "codex_apps",
-  url,
+  url: CODEX_APPS_MCP_URL,
   cacheToolsList: false,
 });
+
+const codexAppsTestFetch =
+  (url: string): typeof globalThis.fetch =>
+  async (input, init) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    return await globalThis.fetch(raw === CODEX_APPS_MCP_URL ? url : input, init);
+  };
 
 test("Agents SDK debug logging omits model and tool payload data", () => {
   const logger = getLogger("opengeni:test-sensitive-logging");
@@ -166,6 +173,41 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
       connectTimeoutMs: 5,
     }),
   ).rejects.toThrow("MCP server connect timed out after 5ms");
+});
+
+test("sanitizes nested MCP connectivity failures into an allowlisted marker", () => {
+  const raw = new Error("MCP connect failed for https://private.example/token-value");
+  raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+    code: "ECONNREFUSED",
+  });
+
+  const sanitized = safeMcpTransportError(raw);
+
+  expect(isMcpTransportConnectivityError(raw)).toBe(false);
+  expect(isMcpTransportConnectivityError(sanitized)).toBe(true);
+  expect(sanitized).toMatchObject({
+    name: "McpTransportError",
+    message: "MCP transport operation failed (Error)",
+    mcpTransportFailureKind: "connectivity_unavailable",
+  });
+  expect(JSON.stringify(sanitized)).not.toContain("private.example");
+  expect(JSON.stringify(sanitized)).not.toContain("token-value");
+  expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+});
+
+test("does not turn MCP client failures or arbitrary codes into connectivity recovery", () => {
+  const clientFailure = Object.assign(new Error("request rejected"), {
+    status: 401,
+    cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+  });
+  const arbitrary = Object.assign(new Error("provider-specific failure"), {
+    code: "CONNECTION_REFUSED_BY_POLICY",
+  });
+
+  expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
+  expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
+  expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -4075,6 +4117,7 @@ describe("runtime event normalization", () => {
 
   test("degrades a subject-owned MCP without human authority instead of failing the turn", async () => {
     let resolverCalls = 0;
+    const transportCalls: Array<{ input: string | URL | Request; init?: RequestInit }> = [];
     const authNeeded: ToolAuthNeededPayload[] = [];
     const prepared = await prepareAgentTools(
       testSettings({
@@ -4105,10 +4148,15 @@ describe("runtime event normalization", () => {
           };
         },
         onAuthNeeded: (payload) => authNeeded.push(payload),
+        mcpFetchImpl: async (input, init) => {
+          transportCalls.push({ input, init });
+          throw new Error("credential-free request must not reach the transport");
+        },
       },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
+      expect(transportCalls).toEqual([]);
       expect(resolverCalls).toBeGreaterThan(0);
       expect(authNeeded).toEqual([
         expect.objectContaining({
@@ -4209,7 +4257,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("retries brokered MCP requests once after 401 with a forced credential refresh", async () => {
+  test("retries replay-safe brokered MCP requests once after 401 with a forced refresh", async () => {
     const connectionId = "33333333-3333-4333-8333-333333333333";
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer fresh-token" },
@@ -4248,11 +4296,71 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const result = await prepared.mcpServers[0]!.callTool("cap-refresh__search_documents", {
-        query: "refresh",
-      });
-      expect(JSON.stringify(result)).toContain("found document for refresh");
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toContain("cap-refresh__search_documents");
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("never replays brokered tools/call after 401 and reports an uncertain outcome", async () => {
+    const connectionId = "34343434-3434-4434-8434-343434343434";
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer fresh-token" },
+    });
+    const resolved: ResolveConnectionCredentialInput[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-uncertain",
+            name: "Uncertain capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-uncertain" }],
+      {
+        workspaceId: "45454545-4545-4545-8545-454545454545",
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+          resolved.push(input);
+          return {
+            status: "ok",
+            connectionId,
+            headers: {
+              authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
+            },
+          };
+        },
+      },
+    );
+    try {
+      const result = await prepared.mcpServers[0]!.callTool("cap-uncertain__search_documents", {
+        query: "do not duplicate",
+      });
+      expect(result).toMatchObject({ isError: true });
+      const text = JSON.stringify(result);
+      expect(text).toMatch(/outcome uncertain/i);
+      expect(text).toMatch(/did not replay/i);
+      expect(text).toMatch(/do not retry automatically/i);
+      expect(text).toMatch(/verify provider state/i);
+      expect(text).not.toContain("unauthorized");
+      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
+        1,
+      );
+      expect(mcp.calls).toHaveLength(0);
+      expect(
+        resolved.some((input) => input.toolName === "search_documents" && input.forceRefresh),
+      ).toBe(true);
     } finally {
       await prepared.close();
       mcp.close();
@@ -4589,17 +4697,24 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: injects the dynamic ChatGPT bearer + account-id from the codex ALS at connect", async () => {
+  test("codex_apps: injects only the explicit Apps bearer + account-id", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: {
         authorization: "Bearer tok-123",
         "chatgpt-account-id": "acct-9",
       },
     });
-    const prepared = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [
-        { kind: "mcp", id: "codex_apps" },
-      ]),
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    let tokenResolutions = 0;
+    auth.withAuthorization = async (use) => {
+      tokenResolutions += 1;
+      return await authorize(use);
+    };
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      { codexAppsAuth: auth, mcpFetchImpl: codexAppsTestFetch(mcp.url) },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
@@ -4609,10 +4724,30 @@ describe("runtime event normalization", () => {
         query: "gmail",
       });
       expect(JSON.stringify(result)).toContain("found document for gmail");
+      expect(tokenResolutions).toBeGreaterThanOrEqual(2);
     } finally {
       await prepared.close();
       mcp.close();
     }
+  });
+
+  test("codex_apps: rejects a reserved id pointed at a non-canonical endpoint", async () => {
+    await expect(
+      prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "codex_apps",
+              name: "hostile",
+              url: "https://attacker.example/mcp",
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "codex_apps" }],
+        { codexAppsAuth: makeCodexAppsAuth() },
+      ),
+    ).rejects.toThrow("reserved for the canonical endpoint");
   });
 
   test("codex_apps: emits X-OpenAI-Product-Sku only when configured", async () => {
@@ -4622,14 +4757,16 @@ describe("runtime event normalization", () => {
         "X-OpenAI-Product-Sku": "plus",
       },
     });
-    const preparedWith = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(
-        testSettings({
-          codexProductSku: "plus",
-          mcpServers: [CODEX_APPS_ENTRY(withSku.url)],
-        }),
-        [{ kind: "mcp", id: "codex_apps" }],
-      ),
+    const preparedWith = await prepareAgentTools(
+      testSettings({
+        codexProductSku: "plus",
+        mcpServers: [CODEX_APPS_ENTRY()],
+      }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(withSku.url),
+      },
     );
     try {
       expect(preparedWith.mcpServers).toHaveLength(1); // connected => SKU header accepted
@@ -4646,10 +4783,13 @@ describe("runtime event normalization", () => {
         "X-OpenAI-Product-Sku": "plus",
       },
     });
-    const preparedWithout = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(requiresSku.url)] }), [
-        { kind: "mcp", id: "codex_apps" },
-      ]),
+    const preparedWithout = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(requiresSku.url),
+      },
     );
     try {
       expect(preparedWithout.mcpServers).toHaveLength(0); // header absent => connect rejected => dropped
@@ -4659,20 +4799,75 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: no ALS store => no auth => graceful best-effort drop (turn does not throw)", async () => {
+  test("codex_apps: authorization revoked after discovery blocks the remote tool call", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
-    // No codexRequestStorage.run wrapper: the bearer cannot be resolved, the
-    // server fails auth at connect, and because codex_apps is best-effort the
-    // call resolves with codex_apps simply absent (contrast the strict
-    // third-party test above, which throws).
+    let authorized = true;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (!authorized) throw new Error("Codex Apps authorization was revoked");
+      return await authorize(use);
+    };
     const prepared = await prepareAgentTools(
-      testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }),
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
+      { codexAppsAuth: auth, mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      await prepared.mcpServers[0]!.listTools();
+      authorized = false;
+      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
+        query: "must-not-run",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: no explicit Apps auth => graceful best-effort drop", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    // Inference authentication is deliberately not consulted as a fallback.
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      { mcpFetchImpl: codexAppsTestFetch(mcp.url) },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps ignores configured static credentials instead of using a fallback", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer static-must-not-be-used" },
+    });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            ...CODEX_APPS_ENTRY(),
+            headers: { authorization: "Bearer static-must-not-be-used" },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      { mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(mcp.calls).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();
@@ -4683,15 +4878,17 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
-    const prepared = await codexRequestStorage.run(
-      makeCodexContext({ tokenError: new Error("needs_relogin") }),
-      () =>
-        prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [
-          { kind: "mcp", id: "codex_apps" },
-        ]),
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth({ tokenError: new Error("needs_relogin") }),
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+      },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
+      expect(mcp.calls).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();
@@ -4709,24 +4906,26 @@ describe("runtime event normalization", () => {
     });
     try {
       await expect(
-        codexRequestStorage.run(makeCodexContext(), () =>
-          prepareAgentTools(
-            testSettings({
-              mcpServers: [
-                {
-                  id: "cap-secure",
-                  name: "Secure capability MCP",
-                  url: required.url,
-                  cacheToolsList: false,
-                }, // no headers => fails strict
-                CODEX_APPS_ENTRY(apps.url),
-              ],
-            }),
-            [
-              { kind: "mcp", id: "cap-secure" },
-              { kind: "mcp", id: "codex_apps" },
+        prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "cap-secure",
+                name: "Secure capability MCP",
+                url: required.url,
+                cacheToolsList: false,
+              }, // no headers => fails strict
+              CODEX_APPS_ENTRY(),
             ],
-          ),
+          }),
+          [
+            { kind: "mcp", id: "cap-secure" },
+            { kind: "mcp", id: "codex_apps" },
+          ],
+          {
+            codexAppsAuth: makeCodexAppsAuth(),
+            mcpFetchImpl: codexAppsTestFetch(apps.url),
+          },
         ),
       ).rejects.toThrow();
     } finally {

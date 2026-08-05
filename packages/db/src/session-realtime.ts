@@ -9,7 +9,7 @@ import type {
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import { flushSessionRealtimeTranscriptTailInTransaction } from "./session-realtime-context";
 import {
   evaluateSessionControl,

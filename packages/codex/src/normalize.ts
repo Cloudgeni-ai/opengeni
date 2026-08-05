@@ -69,7 +69,7 @@ export function normalizeCodexRequestBody(
   // strip every item id; PRESERVE call_id. spec §1.6 / verdict §0(b)
   // (This also covers tool_search items: the backend accepts an id-less
   // tool_search_call/output pair correlated by call_id — verified live — and
-  // stripping the account-bound `tsc_…` id here sanitizes BOTH replay paths.)
+  // stripping the provider-stored `tsc_…` id here sanitizes BOTH replay paths.)
   if (Array.isArray(body.input)) {
     for (const item of body.input as unknown[]) {
       if (!item || typeof item !== "object") {

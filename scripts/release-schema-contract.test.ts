@@ -186,12 +186,23 @@ describe("release schema contract", () => {
         (migrations.has("0169_workspace_instruction_policy_onboarding_proposals.sql") ? 1 : 0) +
         (migrations.has("0170_resumable_transcription_recordings.sql") ? 1 : 0) +
         (migrations.has("0170_session_control_wake_revision.sql") ? 1 : 0) +
-        (migrations.has("0171_social_connection_subject_ownership.sql") ? 1 : 0),
+        (migrations.has("0171_social_connection_subject_ownership.sql") ? 1 : 0) +
+        (migrations.has("0172_retire_model_visible_github_token.sql") ? 1 : 0) +
+        (migrations.has("0173_codex_auth_boundaries.sql") ? 1 : 0) +
+        (migrations.has("0174_session_wake_live_interruption.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "8148148265079d3a6c7ea5c96e5e40a0dcbafdb0a2e6cc3cc3493e9adae5ab74",
+      "dfdc7ebcceae2bf5ade2a68ec32cc51b3978f623b68c65a4e7059d01d13c9cfd",
     );
-    expect(contract.latestMigration).toBe("0171_social_connection_subject_ownership.sql");
+    expect(contract.latestMigration).toBe("0174_session_wake_live_interruption.sql");
+    expect(migrations.get("0174_session_wake_live_interruption.sql")).toMatchObject({
+      sha256: "492f93a4ba0f715f3d37cdc539d5e09dd277b8a882d24b1730d01e245e2f85cf",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0173_codex_auth_boundaries.sql")).toMatchObject({
+      sha256: "450075954cb9c8bfc346ccf09991edd362cc5ffdcf4e94d1c404d3fc6795e2ca",
+      deploymentMode: "maintenance",
+    });
     expect(migrations.get("0171_social_connection_subject_ownership.sql")).toMatchObject({
       sha256: "939893142dc109c77b2a665e76e58533002cebbf3320dba28277e2caea825deb",
       deploymentMode: "rolling",
@@ -209,6 +220,10 @@ describe("release schema contract", () => {
     ).toMatchObject({
       sha256: "71d36ab95a1711c78ab36a09af9a14ddbf6ee84a3bac5ec5fdb460c768c54ef8",
       deploymentMode: "rolling",
+    });
+    expect(migrations.get("0172_retire_model_visible_github_token.sql")).toMatchObject({
+      sha256: "6e2123085f5574a046eaea7db7b5168540625d554771ee9e5639787bbde4c713",
+      deploymentMode: "maintenance",
     });
     expect(
       migrations.get("0168_workspace_instruction_policy_operation_receipts.sql"),

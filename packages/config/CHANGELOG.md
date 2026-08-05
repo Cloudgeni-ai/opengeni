@@ -1,5 +1,21 @@
 # @opengeni/config
 
+## 0.10.13
+
+### Patch Changes
+
+- Updated dependencies [69bc207]
+- Updated dependencies [c0f8e40]
+  - @opengeni/codex@0.2.11
+  - @opengeni/contracts@0.38.3
+
+## 0.10.12
+
+### Patch Changes
+
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+
 ## 0.10.11
 
 ### Patch Changes

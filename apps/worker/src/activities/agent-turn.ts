@@ -15,7 +15,6 @@ import {
   getSessionEvent,
   getSessionRootId,
   getSessionGoal,
-  getLatestRunState,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   installOrReadTurnExecutionPolicyForAttempt,
@@ -34,7 +33,6 @@ import {
   recordSessionActiveCodexCredential,
   setSessionCodexPin,
   recordCodexAccountUsageWithWakeTargets,
-  recordCodexAccountConnectors,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
   resolveWorkspaceMemoryBlock,
@@ -76,6 +74,7 @@ import {
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
+  withCodexAppsRequestAuthorization,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -93,6 +92,7 @@ import {
   modelResponseUsageFromSdkEvent,
   normalizeModelCallUsage,
   normalizeSdkEvent,
+  projectHistoryForProvider,
   sanitizeHistoryItemsForModel,
   projectModelInputForCapabilities,
   appendPersistentSessionSettings,
@@ -122,6 +122,7 @@ import {
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   isMcpRequestTimeoutError,
+  isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
   WorkspaceArchiveIntegrityError,
@@ -210,6 +211,7 @@ import {
   classifyCodexUsageLimitError,
   codexRequestStorage,
   isCodexTransportError,
+  opaqueProviderArtifactFingerprint,
   withCodexRequestOverrides,
   selectCodexCredentialId,
   type CodexRequestContext,
@@ -220,6 +222,7 @@ import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
   directPersonalConnectionSubjectId,
+  resolveCodexAppsCredentialIdForRun,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
 } from "@opengeni/core";
@@ -273,11 +276,9 @@ import {
   type SecretForRedaction,
 } from "./redaction";
 import {
-  applyCodexHistoryStrip,
   createModelHistoryAttachmentProjector,
   turnInput,
   type ModelAttachmentInputPolicy,
-  type TurnCodexAccount,
 } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -463,7 +464,8 @@ export function providerRecoveryResult(input: {
     input.failureCode === "provider_rate_limited"
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
-          input.failureCode === "upstream_connectivity_unavailable"
+          input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "mcp_transport_unavailable"
         ? Math.max(
             providerDelay ?? 0,
             PROVIDER_CONNECTIVITY_BACKOFF_MS[
@@ -1611,6 +1613,42 @@ export function historyRowsToAppend(
   };
 }
 
+/** Select only opaque rows that participated in the provider's rejected wire request. */
+export function selectRejectedProviderArtifactHistoryIds(
+  activeHistory: ReadonlyArray<{
+    id: string;
+    item: Record<string, unknown>;
+    providerArtifactInvalidatedAt: Date | null;
+  }>,
+  candidates: {
+    knownHistoryItemIds: readonly string[];
+    historyItemIds: readonly string[];
+  },
+  wireFingerprints: readonly string[],
+): string[] {
+  const remainingWireArtifacts = new Map<string, number>();
+  for (const fingerprint of wireFingerprints) {
+    remainingWireArtifacts.set(fingerprint, (remainingWireArtifacts.get(fingerprint) ?? 0) + 1);
+  }
+  const knownHistoryItemIds = new Set(candidates.knownHistoryItemIds);
+  const initialCandidateIds = new Set(candidates.historyItemIds);
+  const selected: string[] = [];
+  for (const row of activeHistory) {
+    if (row.providerArtifactInvalidatedAt !== null) continue;
+    // A row present before this attempt is eligible only when the exact
+    // model-facing projection retained it. Rows appended during this run are
+    // eligible after durable reconciliation.
+    if (knownHistoryItemIds.has(row.id) && !initialCandidateIds.has(row.id)) continue;
+    const fingerprint = opaqueProviderArtifactFingerprint(row.item);
+    if (!fingerprint) continue;
+    const remaining = remainingWireArtifacts.get(fingerprint) ?? 0;
+    if (remaining === 0) continue;
+    selected.push(row.id);
+    remainingWireArtifacts.set(fingerprint, remaining - 1);
+  }
+  return selected;
+}
+
 /** Literal final per-call boundary for replayed and current-turn model input. */
 export function secretRedactionModelInputFilter(
   redactValue: (value: unknown) => unknown,
@@ -1632,49 +1670,6 @@ function isModelOrToolProgressHistoryItem(item: Record<string, unknown>): boolea
     return item.type !== "message";
   }
   return false;
-}
-
-/**
- * Seed the turn-end reconcile watermark (`persistedHistoryCount`) from EXACTLY the
- * view `state.history` was seeded from, so the model-input length and the watermark
- * can NEVER disagree. The watermark is the slice index the reconcile cuts the
- * (re-sanitized) `state.history` at to find this turn's genuinely-new items, so it
- * must equal the length of `state.history`'s already-persisted leading prefix.
- *
- * The cross-account reasoning strip drops foreign reasoning items, so the prefix
- * length is PATH-DEPENDENT, captured by `modelHistoryFromItems`:
- *
- *  - items read path (`modelHistoryFromItems === true`) — `state.history` was seeded
- *    from the cross-account-STRIPPED active items (foreign reasoning DROPPED), so it
- *    starts K shorter than the raw active-row count. Seed from the SAME strip
- *    (HOLE D); seeding from the un-stripped count would slice K genuinely-new items
- *    off the reconcile and silently lose them (incl. the user's switch-turn message).
- *
- *  - approval RunState path (`modelHistoryFromItems === false`) — `state.history` was seeded
- *    from the blob, where foreign reasoning is NEUTRALIZED-IN-PLACE (the item is
- *    KEPT, only its id/encrypted_content go — see resumeRunStateForCodexAccount), so
- *    the blob's history length still COUNTS those items. Applying the strip here
- *    under-counts by K and the reconcile re-appends K already-persisted items at
- *    fresh positions — HOLE E. So the blob path must NOT strip: count the raw
- *    sanitized active length, which mirrors the blob's completed prefix.
- *
- * On a same-account / non-codex turn the strip is a no-op, so both branches reduce
- * to the same raw sanitized count (byte-identical to the pre-strip behaviour).
- * Pure; exported for unit testing the D/E seed invariant.
- */
-export function reconcileSeedCount(
-  activeSeedRows: ReadonlyArray<{
-    item: Record<string, unknown>;
-    producerCodexCredentialId: string | null;
-  }>,
-  modelHistoryFromItems: boolean,
-  current: TurnCodexAccount,
-): number {
-  return sanitizeHistoryItemsForModel(
-    modelHistoryFromItems
-      ? applyCodexHistoryStrip(activeSeedRows, current)
-      : activeSeedRows.map((row) => row.item),
-  ).length;
 }
 
 /**
@@ -3103,6 +3098,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // stable and this scalar append watermark is valid again. The sanitizer
     // remains the final call/result pairing guard for every other reconcile.
     let persistedHistoryCount = 0;
+    let providerArtifactCandidates: Awaited<
+      ReturnType<typeof turnInput>
+    >["providerArtifactCandidates"] = {
+      knownHistoryItemIds: [],
+      historyItemIds: [],
+    };
     // Next free WHOLE-NUMBER absolute position to append at. Tracked separately
     // from persistedHistoryCount (the in-memory slice index) because a compaction
     // inserts a fractional summary position, so total rows no longer equal
@@ -3137,11 +3138,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId,
               expectedExecutionGeneration: executionGeneration,
               expectedAttemptId: input.attemptId,
-              // Tag each row with the codex account that produced it (null on the
-              // non-codex path). Resolved at line ~504 before any reconcile pass
-              // runs, so this is the turn's effective account. The read path uses
-              // it to strip cross-account reasoning.encrypted_content next turn.
-              producerCodexCredentialId: effectiveCodexCredentialId,
               modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
               items: rows,
             });
@@ -3202,7 +3198,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // a per-call usage log can report whether the serving account CHANGED since the
     // session's previous call (the prompt-cache account-switch hypothesis).
     let priorSessionCodexCredentialId: string | null = null;
-    // Multi-account P4 (Part A): the latest usage-header snapshot scraped FOR FREE
+    // The latest usage-header snapshot scraped for free
     // off this turn's `/codex/responses` responses (a turn issues many model calls;
     // latest wins). Flushed ONCE into the P2 usage cache for the serving account in
     // the `finally` — cheaper than a /wham/usage poll AND it self-heals P3 rotation
@@ -3210,6 +3206,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Hoisted to activity scope so the finally flush (below) sees it. The sink is
     // wired into codexContext.onUsageHeaders inside the try.
     let latestCodexUsage: CodexUsageHeaderSnapshot | null = null;
+    let lastCodexRequestOpaqueArtifacts: readonly string[] = [];
     // Hoisted for same-turn recovery: an approval-decision rerun must
     // re-enter through the approval resume path (its frozen mid-flight state
     // only exists in the RunState blob), never through a swapped trigger.
@@ -3239,6 +3236,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input.workspaceId,
         codexSettings,
       );
+      const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
+        ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
+        : null;
       runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);
       const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
@@ -3302,9 +3302,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         trigger,
       );
       triggerType = trigger.type;
-      const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
-      const continuationCodexCredentialId =
-        latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
       redispatchesAtDispatch = Number(
         (turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ??
           0,
@@ -3548,7 +3545,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionPinnedCredentialId: sessionPin,
             sessionPinSource,
             sessionLastCredentialId: sessionCodex?.lastCredentialId ?? null,
-            continuationCredentialId: continuationCodexCredentialId,
             now: new Date(),
           });
 
@@ -3567,7 +3563,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId,
               holderId: codexLeaseHolderId,
               advanceActivePointer: sessionPin === null,
-              continuationCredentialId: continuationCodexCredentialId,
             },
             selectForTurn,
           );
@@ -3623,7 +3618,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnId,
                 holderId: codexLeaseHolderId,
                 advanceActivePointer: sessionPin === null,
-                continuationCredentialId: continuationCodexCredentialId,
               },
               selectForTurn,
             );
@@ -3773,10 +3767,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : rotationDecision.kind === "allCapped"
             ? "all_capped"
             : "none";
-        const fencedInFlight =
-          leased.reused ||
-          (continuationCodexCredentialId !== null &&
-            continuationCodexCredentialId === effectiveCodexCredentialId);
+        const fencedInFlight = leased.reused;
         const shadowResult = await publishCodexFleetShadowDecisionV1({
           enabled: settings.codexFleetPolicyShadowEnabled,
           decision: {
@@ -4090,11 +4081,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           if (priorAccountId !== effectiveCodexCredentialId) {
             const rotated = rotationDecision.kind === "active" && rotationDecision.moved;
-            // P4: surface the dropped-connector note when this rotation pick couldn't
-            // cover the session's used connectors (a Tier-2/unknown failover); the pill
-            // renders the badge. Omitted when the switch covered everything (the norm).
-            const droppedConnectors =
-              rotationDecision.kind === "active" ? rotationDecision.droppedConnectors : undefined;
             await publish([
               {
                 type: "codex.account.switched",
@@ -4102,9 +4088,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   fromAccountId: priorAccountId,
                   toAccountId: effectiveCodexCredentialId,
                   reason: rotated ? "rotation" : "manual",
-                  ...(droppedConnectors && droppedConnectors.length > 0
-                    ? { droppedConnectors }
-                    : {}),
                 },
               },
             ]);
@@ -4262,6 +4245,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnExecutionPolicy.productModelId,
       );
       const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
+      const providerApi = resolvedModel?.provider.api ?? "responses";
       const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
       const attachmentProjector = createModelHistoryAttachmentProjector(
         db,
@@ -4271,6 +4255,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
         projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
+      const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
+        await modelHistoryProjector(projectHistoryForProvider(items, providerApi));
       const selectedProvider = resolvedModel?.provider;
       const publicProviderHeaders = new Set(
         selectedProvider?.publicDefaultHeaderNames?.map((name) => name.toLowerCase()) ?? [],
@@ -4395,6 +4381,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onUsageHeaders: (snapshot) => {
                   latestCodexUsage = snapshot;
                 }, // latest wins; flushed once in finally
+                onRequestOpaqueArtifacts: ({ fingerprints }) => {
+                  lastCodexRequestOpaqueArtifacts = fingerprints;
+                },
                 nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
                 onModelRequestEvent: async (event) => {
                   if (!publish || !turnId) {
@@ -4564,9 +4553,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(remoteCompactionRequester
           ? { requestRemoteCompactionV2: remoteCompactionRequester }
           : {}),
-        ...(effectiveCodexCredentialId
-          ? { producerCodexCredentialId: effectiveCodexCredentialId }
-          : {}),
       } as const;
 
       // Operator /compact:
@@ -4630,10 +4616,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   force: true,
                   clearRequestedCompaction: true,
                   trigger: "operator",
-                  codexAccount: {
-                    currentCodexCredentialId: effectiveCodexCredentialId,
-                  },
-                  projectModelInput: modelHistoryProjector,
+                  projectModelInput: compactionModelHistoryProjector,
                   ...compactionModeOptions,
                 },
               ),
@@ -5608,10 +5591,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         connectionCredentials?.mcpCredentials && hostCredentialRootSessionId
           ? hostCredentialRootSessionId
           : input.sessionId;
-      // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
-      // (initialize + tools/list) can resolve the per-workspace bearer from
-      // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
-      // identity on every non-codex turn, so this is a no-op for existing paths.
+      // Connection credentials and the optional Apps credential are resolved
+      // independently. Inference auth is never an Apps fallback.
       const rawResolveCredential = connectionTokenResolverForTurn({
         db,
         settings: runSettings,
@@ -5648,36 +5629,64 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return result;
       };
       const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
+      const codexAppsAuth = codexAppsCredentialId
+        ? (() => {
+            const resolver = buildCodexTokenResolver(
+              db,
+              runSettings,
+              input.workspaceId,
+              codexAppsCredentialId,
+            );
+            return {
+              clientVersion: CODEX_CLIENT_VERSION,
+              withAuthorization: async <T>(
+                use: (token: {
+                  accessToken: string;
+                  chatgptAccountId: string | null;
+                }) => Promise<T>,
+              ): Promise<T> => {
+                const snapshot = await resolver.getToken();
+                registerSecretRedactions([
+                  { name: "CODEX_APPS_ACCESS_TOKEN", value: snapshot.accessToken },
+                ]);
+                return await withCodexAppsRequestAuthorization(
+                  db,
+                  { workspaceId: input.workspaceId, credentialId: codexAppsCredentialId },
+                  async () => await use(snapshot),
+                );
+              },
+            };
+          })()
+        : undefined;
       preparedTools = await waitForTurnOperation(
-        withCodex(() =>
-          runtime.prepareTools(runSettings, turnTools, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            // Sign the calling turn into the first-party token so tools classify
-            // the caller by its own identity (sacred-pause guard), not the racy
-            // live active pointer.
-            ...(turnId ? { turnId } : {}),
-            attemptId: input.attemptId,
-            executionGeneration,
-            subjectId: "worker:first-party-mcp",
-            subjectLabel: "OpenGeni worker",
-            ...(credentialSubjectId ? { credentialSubjectId } : {}),
-            resolveCredential,
-            onAuthNeeded: async (payload) => {
-              if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
-                return;
-              }
-              await publish!([{ type: "tool.auth_needed", payload }], true);
-            },
-            // Manager-style sessions carry a creation-validated permission set
-            // for their first-party MCP token; null keeps the fixed default.
-            ...(session.firstPartyMcpPermissions?.length
-              ? { firstPartyPermissions: session.firstPartyMcpPermissions }
-              : {}),
-            firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-          }),
-        ),
+        runtime.prepareTools(runSettings, turnTools, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          // Sign the calling turn into the first-party token so tools classify
+          // the caller by its own identity (sacred-pause guard), not the racy
+          // live active pointer.
+          ...(turnId ? { turnId } : {}),
+          attemptId: input.attemptId,
+          executionGeneration,
+          subjectId: "worker:first-party-mcp",
+          subjectLabel: "OpenGeni worker",
+          ...(credentialSubjectId ? { credentialSubjectId } : {}),
+          ...(codexAppsAuth ? { codexAppsAuth } : {}),
+          resolveCredential,
+          onAuthNeeded: async (payload) => {
+            if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
+              return;
+            }
+            await publish!([{ type: "tool.auth_needed", payload }], true);
+          },
+          // Manager-style sessions carry a creation-validated permission set
+          // for their first-party MCP token; null keeps the fixed default.
+          ...(session.firstPartyMcpPermissions?.length
+            ? { firstPartyPermissions: session.firstPartyMcpPermissions }
+            : {}),
+          firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        }),
         cancellationSignal,
         async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
       );
@@ -6161,10 +6170,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   force: true,
                   clearRequestedCompaction: true,
                   trigger: "operator",
-                  codexAccount: {
-                    currentCodexCredentialId: effectiveCodexCredentialId,
-                  },
-                  projectModelInput: modelHistoryProjector,
+                  projectModelInput: compactionModelHistoryProjector,
                   ...compactionModeOptions,
                 },
               ),
@@ -6296,18 +6302,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     force: true,
                     clearRequestedCompaction: true,
                     trigger: "operator",
-                    codexAccount: {
-                      currentCodexCredentialId: effectiveCodexCredentialId,
-                    },
-                    projectModelInput: modelHistoryProjector,
+                    projectModelInput: compactionModelHistoryProjector,
                     ...compactionModeOptions,
                   }
                 : {
                     trigger: "auto",
-                    codexAccount: {
-                      currentCodexCredentialId: effectiveCodexCredentialId,
-                    },
-                    projectModelInput: modelHistoryProjector,
+                    projectModelInput: compactionModelHistoryProjector,
                     ...compactionModeOptions,
                   },
             ),
@@ -6444,35 +6444,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
         fileMaterializationFailures,
       );
-      // Cross-account reasoning strip: pass THIS turn's codex account so every
-      // history read path (items + run-state replay) drops reasoning produced by
-      // a DIFFERENT codex account. effectiveCodexCredentialId is the resolved
-      // codex credential on a codex turn (pin > workspace-active) and null on a
-      // non-codex turn OR a codex turn with no usable account — exactly the
-      // "current account" the single strip rule compares against (null is the
-      // built-in/Azure account, so a non-codex turn still drops codex-produced
-      // reasoning, and a no-codex-history session is a byte-for-byte no-op).
+      // Build one attempt from canonical history. The provider adapter creates
+      // only the temporary wire view required by this turn's selected API;
+      // subscription identity never edits or filters durable history.
       const activeTurnId = turnId;
       if (!activeTurnId) {
         throw new Error("Turn id was not initialized");
       }
       let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
       const prepareRunAttemptInput = async () => {
-        const prepared = await turnInput(
-          db,
-          runtime,
-          agent,
-          trigger,
-          { currentCodexCredentialId: effectiveCodexCredentialId },
-          {
-            turnId: activeTurnId,
-            recovering: turn.executionGeneration > 1,
-            ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
-            ...(runCredentialsNote ? { runCredentialsNote } : {}),
-            projectModelHistory: modelHistoryProjector,
-          },
-        );
+        const prepared = await turnInput(db, runtime, agent, trigger, {
+          turnId: activeTurnId,
+          recovering: turn.executionGeneration > 1,
+          ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
+          ...(runCredentialsNote ? { runCredentialsNote } : {}),
+          providerApi,
+          projectModelHistory: modelHistoryProjector,
+        });
         runInput = prepared.input;
+        providerArtifactCandidates = prepared.providerArtifactCandidates;
         // Slice index = the length of the model-facing (active) history this turn
         // is seeded from; new items beyond it (the trigger message + this turn's
         // generated items) are the ones to persist. After a compaction this is the
@@ -6494,18 +6484,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // and bricks the session (issue-61). The sanitized seed is already
         // orphan-free, so it is a stable prefix of the re-sanitized history and the
         // slice begins exactly at the first genuinely-new item.
-        const activeSeedRows = await getActiveSessionHistoryItems(
-          db,
-          input.workspaceId,
-          input.sessionId,
-        );
-        // Seed the reconcile watermark from EXACTLY the view the model's
-        // `state.history` was seeded from (items strip on the items path = HOLE D; NO
-        // strip on the run-state blob path, where foreign reasoning is neutralized but
-        // KEPT = HOLE E), so the model-input length and the watermark never disagree.
-        persistedHistoryCount = reconcileSeedCount(activeSeedRows, prepared.modelHistoryFromItems, {
-          currentCodexCredentialId: effectiveCodexCredentialId,
-        });
+        persistedHistoryCount = prepared.persistedHistoryCount;
         nextHistoryPosition = await nextSessionHistoryPosition(
           db,
           input.workspaceId,
@@ -6540,10 +6519,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               force: true,
               ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
               trigger: triggerLabel,
-              codexAccount: {
-                currentCodexCredentialId: effectiveCodexCredentialId,
-              },
-              projectModelInput: modelHistoryProjector,
+              projectModelInput: compactionModelHistoryProjector,
               ...compactionModeOptions,
             },
           ),
@@ -7071,7 +7047,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               runState: {
                 serializedRunState: stream.state.toString(),
                 pendingApprovals: approvals,
-                frozenCodexCredentialId: effectiveCodexCredentialId,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,
                 ),
@@ -7735,7 +7710,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 priorCredentialId: effectiveCodexCredentialId,
                 accounts,
                 now: new Date(),
-                usedConnectors: serving?.connectorNamespaces ?? [],
               })
             : ({ kind: "none" } as const);
           const candidateAvailable =
@@ -7951,9 +7925,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 priorCredentialId: effectiveCodexCredentialId,
                 accounts: fresh,
                 now: new Date(),
-                // P4: the just-capped serving account's connector set is the proxy for
-                // "what this session has access to" — prefer a covering failover target.
-                usedConnectors: serving?.connectorNamespaces ?? [],
               });
               if (decision.kind === "active") {
                 rotated = true;
@@ -8164,8 +8135,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // credential-row UUID is unchanged. HTTP 400 + the exact provider
       // semantic proves this request never entered inference. Atomically mark
       // the active opaque artifacts rejected and recover the SAME logical turn
-      // from durable history; messages, tool calls/results, summaries, and the
-      // original audit rows remain intact. If no artifact can be invalidated,
+      // from durable history; messages, tool calls/results, readable reasoning,
+      // and the original audit rows remain intact. Opaque remote compaction has
+      // no portable plaintext representation. If no artifact can be invalidated,
       // fall through to the terminal path rather than resend an equivalent
       // request forever.
       const encryptedArtifactRejection =
@@ -8181,6 +8153,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ) {
         await flushRuntimeBatcher();
         await reconcileConversationTruth({ requireDurable: true });
+        const activeHistory = await getActiveSessionHistoryItems(
+          db,
+          input.workspaceId,
+          input.sessionId,
+        );
+        const rejectedHistoryItemIds = selectRejectedProviderArtifactHistoryIds(
+          activeHistory,
+          providerArtifactCandidates,
+          lastCodexRequestOpaqueArtifacts,
+        );
+        const rejectedRunStateId =
+          providerArtifactCandidates.runStateId && lastCodexRequestOpaqueArtifacts.length > 0
+            ? providerArtifactCandidates.runStateId
+            : undefined;
         const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId,
@@ -8192,7 +8178,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             retryable: true,
           },
           providerArtifactInvalidation: {
-            codexCredentialId: effectiveCodexCredentialId,
+            historyItemIds: rejectedHistoryItemIds,
+            ...(rejectedRunStateId ? { runStateId: rejectedRunStateId } : {}),
             reason: encryptedArtifactRejection.kind,
           },
         });
@@ -8542,19 +8529,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 finalizerSignal,
               );
             }
-          }
-          // Part B.1: the connector namespaces codex_apps listed this turn → the
-          // connector-set cache. NON-EMPTY-only: a flaky/empty tools/list must never
-          // overwrite a known set with [] (false coverage drop). Read by reference
-          // AFTER the run, so every tools/list this turn has accumulated.
-          const connectorNamespaces = preparedTools?.codexConnectorNamespaces;
-          if (connectorNamespaces && connectorNamespaces.size > 0) {
-            await waitForTurnFinalizerStep(
-              recordCodexAccountConnectors(db, input.workspaceId, effectiveCodexCredentialId, [
-                ...connectorNamespaces,
-              ]).catch(() => undefined),
-              finalizerSignal,
-            );
           }
         }
         if (codexLeaseHeartbeatTimer) {
@@ -9030,6 +9004,14 @@ export function agentRunFailurePayload(
       ...(mcpTimeout.detail || mcpTimeout.message
         ? { detail: mcpTimeout.detail ?? mcpTimeout.message }
         : {}),
+    };
+  }
+  if (isMcpTransportConnectivityError(error)) {
+    return {
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
     };
   }
   if (

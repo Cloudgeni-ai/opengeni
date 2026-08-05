@@ -1,5 +1,38 @@
 # @opengeni/runtime
 
+## 0.18.14
+
+### Patch Changes
+
+- c6c9acb: Recover required MCP setup when a transient socket failure is wrapped by the MCP SDK, while preserving only secret-safe transport classification.
+
+## 0.18.13
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+- Updated dependencies [69bc207]
+- Updated dependencies [c0f8e40]
+  - @opengeni/codex@0.2.11
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+
+## 0.18.12
+
+### Patch Changes
+
+- 8105c25: Honor explicit non-TTY sandbox commands without injecting terminal control bytes while preserving marker-bound process-group cancellation.
+
+## 0.18.11
+
+### Patch Changes
+
+- 1ea5e62: Honor explicit shell and login selections when commands run on Connected Machines instead of substituting the machine service's ambient default shell.
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/config@0.10.12
+
 ## 0.18.10
 
 ### Patch Changes
