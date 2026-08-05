@@ -1,5 +1,20 @@
 # @opengeni/worker-bundle
 
+## 0.16.20
+
+### Patch Changes
+
+- 55f6ad0: Use one terminal-response ordinal for provider context binding, and clear the
+  durable input-token signal when the latest provider response supplies no usable
+  usage instead of retaining an older response's count.
+- Updated dependencies [55f6ad0]
+- Updated dependencies [18eea76]
+  - @opengeni/db@0.28.1
+  - @opengeni/runtime@0.18.17
+  - @opengeni/core@0.21.1
+  - @opengeni/documents@0.5.10
+  - @opengeni/events@0.3.80
+
 ## 0.16.19
 
 ### Patch Changes

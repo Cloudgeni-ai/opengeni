@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.18.17
+
+### Patch Changes
+
+- 55f6ad0: Use one terminal-response ordinal for provider context binding, and clear the
+  durable input-token signal when the latest provider response supplies no usable
+  usage instead of retaining an older response's count.
+- 18eea76: Apply the configured Modal snapshot timeout to new sandboxes, rebind legacy resume envelopes to the current operational timeout without changing provider identity, and normalize durable SDK backend identifiers before product-provider lookup.
+
 ## 0.18.16
 
 ### Patch Changes
