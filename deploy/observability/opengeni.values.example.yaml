@@ -1,0 +1,14 @@
+# Include this file in the OpenGeni application-chart upgrade after the
+# opengeni-observability release has installed the Prometheus Operator CRDs.
+
+observability:
+  metrics:
+    enabled: true
+  serviceMonitor:
+    enabled: true
+    labels:
+      opengeni.ai/monitoring: enabled
+  prometheusRule:
+    enabled: true
+    labels:
+      opengeni.ai/monitoring: enabled

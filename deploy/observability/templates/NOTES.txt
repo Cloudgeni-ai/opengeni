@@ -1,0 +1,17 @@
+OpenGeni observability is installed in {{ .Release.Namespace }}.
+
+Before expecting application targets or rules, include
+deploy/observability/opengeni.values.example.yaml in the next ordinary OpenGeni
+application release. Do not use an observability-only action to reconcile a
+different application chart version or run application hooks.
+
+Verify the complete contract with:
+
+  bun run deployment:observability-verify -- \
+    --namespace {{ .Release.Namespace }} \
+    --release {{ .Release.Name }} \
+    --app-namespace opengeni
+
+Grafana remains ClusterIP-only unless an environment overlay explicitly configures
+authenticated ingress. For temporary local access, discover the Grafana service and
+use kubectl port-forward rather than exposing it publicly.

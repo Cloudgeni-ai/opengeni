@@ -32,9 +32,17 @@ providers:
       foldersFromFilesStructure: true
 ```
 
-**Kubernetes sidecar (kube-prometheus-stack / Grafana Helm)** — wrap each file in a
-ConfigMap carrying the sidecar's discovery label (default `grafana_dashboard: "1"`);
-the sidecar imports it automatically. Example:
+**OpenGeni Kubernetes observability wrapper** — install the chart rooted at
+`deploy/observability`. It renders one deterministic ConfigMap per file directly
+from this directory, labels it for the Grafana sidecar, records the content hash
+and source revision, and installs the pinned Prometheus/Grafana stack. See
+[`../README.md`](../README.md).
+
+**Existing Kubernetes sidecar** — if the cluster already has a compatible Grafana
+sidecar, wrap each file in a ConfigMap carrying the sidecar's discovery label
+(default `grafana_dashboard: "1"`). The wrapper chart can provision only these
+ConfigMaps with `kube-prometheus-stack.enabled=false`; manual creation remains a
+fallback for non-Helm installations. Example:
 
 ```bash
 kubectl create configmap opengeni-streaming-health \
