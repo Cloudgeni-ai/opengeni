@@ -69,43 +69,52 @@ const observability = {
 } as never;
 
 describe("reaper terminate envelope→resume round-trip preserves sandboxId", () => {
-  test("normalizes the durable SDK local id before product-registry client construction", async () => {
+  test("normalizes the SDK local ID and cold-commits an unavailable process-local workspace", async () => {
     const clientBuilds: string[] = [];
-    const expectedFailure = new Error("local resume probe reached");
     const localClient = {
       backendId: "unix_local",
       async deserializeSessionState(state: Record<string, unknown>) {
         return { ...state };
       },
       async resume() {
-        throw expectedFailure;
+        throw new Error(
+          "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+        );
       },
     };
 
-    await expect(
-      terminateProviderBox(
-        testSettings({ sandboxBackend: "local", sandboxOwnershipEnabled: true }),
-        {
-          sandboxGroupId: "group-local-sdk-id",
-          leaseEpoch: 1,
-          backend: "local",
-          resumeBackendId: "unix_local",
-          resumeState: {
-            backendId: "unix_local",
-            sessionState: {
-              providerState: { workspaceRootPath: "/tmp/opengeni-local-workspace" },
-            },
+    const persistCalls: unknown[] = [];
+    const outcome = await terminateProviderBox(
+      testSettings({ sandboxBackend: "local", sandboxOwnershipEnabled: true }),
+      {
+        sandboxGroupId: "group-local-sdk-id",
+        leaseEpoch: 1,
+        backend: "local",
+        resumeBackendId: "unix_local",
+        resumeState: {
+          backendId: "unix_local",
+          sessionState: {
+            providerState: { workspaceRootPath: "/tmp/opengeni-local-workspace" },
           },
-        } as never,
-        observability,
-        async () => ({ wrote: true }),
-        ((backend: string) => {
-          clientBuilds.push(backend);
-          return localClient;
-        }) as never,
-      ),
-    ).rejects.toThrow(expectedFailure);
+        },
+      } as never,
+      observability,
+      async (...args) => {
+        persistCalls.push(args);
+        return { wrote: true };
+      },
+      ((backend: string) => {
+        clientBuilds.push(backend);
+        return localClient;
+      }) as never,
+    );
+
     expect(clientBuilds).toEqual(["local"]);
+    expect(outcome).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: true,
+    });
+    expect(persistCalls).toHaveLength(0);
   });
 
   test("the PRODUCTION envelope nests providerState under sessionState (the trap)", async () => {
