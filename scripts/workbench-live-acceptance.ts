@@ -2423,9 +2423,9 @@ async function markIncompleteContrastTargetsForManualAudit(
     const selector = axeManualContrastSelector(target);
     return selector ? [{ selector, serializedTarget: JSON.stringify(target) }] : [];
   });
-  return page.evaluate((candidates) => {
+  return page.evaluate((browserCandidates) => {
     const audited: string[] = [];
-    for (const { selector, serializedTarget } of candidates) {
+    for (const { selector, serializedTarget } of browserCandidates) {
       try {
         const visibleMatches = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(
           (element) => {
