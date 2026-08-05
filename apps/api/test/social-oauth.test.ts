@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import type { Settings } from "@opengeni/config";
-import type { Database } from "@opengeni/db";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { decryptVariableSetValue, type Database } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
 import { HTTPException } from "hono/http-exception";
@@ -84,7 +84,11 @@ describe("startSocialOAuth", () => {
     expect(payload.returnPath).toBe("/social?tab=x");
     expect(typeof payload.nonce).toBe("string");
     // The PKCE verifier must never travel in cleartext state.
-    expect(String(payload.encryptedPkceVerifier)).toStartWith("v1:");
+    const key = environmentsEncryptionKeyBytes(settings);
+    expect(key).not.toBeNull();
+    expect(decryptVariableSetValue(key!, String(payload.encryptedPkceVerifier))).toMatch(
+      /^[A-Za-z0-9_-]{43,128}$/,
+    );
   });
 
   test("caller-provided scopes replace defaults", async () => {

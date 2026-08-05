@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -77,9 +76,16 @@ describe("retire model-visible GitHub token migration", () => {
           and table_name = 'sessions'
           and column_name = 'first_party_mcp_tools'`;
       expect(column?.column_default).not.toContain("github_token");
-      for (const tool of FIRST_PARTY_MCP_TOOL_NAMES) {
-        expect(column?.column_default).toContain(tool);
-      }
+      const migrationSql = await readFile(join(migrationsDir, migration), "utf8");
+      const defaultLiteral = migrationSql.match(/SET DEFAULT '(\[[\s\S]*?\])'::jsonb;/)?.[1];
+      expect(defaultLiteral).toBeDefined();
+      const [defaulted] = await admin<Array<{ tools: string[] }>>`
+        insert into sessions (id)
+        values (${crypto.randomUUID()})
+        returning first_party_mcp_tools as tools`;
+      expect(defaulted?.tools).toEqual(JSON.parse(defaultLiteral!));
+      expect(defaulted?.tools).toContain("session_get");
+      expect(defaulted?.tools).not.toContain("github_token");
 
       let staleWriterError: unknown;
       try {
