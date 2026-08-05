@@ -1000,6 +1000,16 @@ export type NativeDesktopComputerOptions = {
   readOnly?: boolean; // when true, every WRITE action throws ComputerReadOnlyError
   screenshotWarmupBudgetMs?: number; // wall-clock budget to retry a warming/empty first frame
   screenshotRetryDelayMs?: number; // delay between warm-up retries
+  /** Aggregate wall-clock budget for provider capture and pre-serialization admission. */
+  screenshotReadbackTimeoutMs?: number;
+  /** Turn cancellation fence; aborting it stops all new native capture admissions. */
+  abortSignal?: AbortSignal;
+};
+
+type NativeScreenshotFence = {
+  controller: AbortController;
+  timer: ReturnType<typeof setTimeout>;
+  detachAbortSignal: () => void;
 };
 
 /** A capture failure that RETRYING cannot cure — Screen Recording (TCC) has not been
@@ -1038,6 +1048,8 @@ export class NativeDesktopComputer implements Computer {
   private readonly readOnly: boolean;
   private readonly screenshotWarmupBudgetMs: number;
   private readonly screenshotRetryDelayMs: number;
+  private readonly screenshotReadbackTimeoutMs: number;
+  private readonly abortSignal: AbortSignal | undefined;
   // The ENCODED vs NATIVE geometry of the MOST RECENT screenshot the model saw. The
   // model computes click coordinates in the encoded-pixel space of that screenshot;
   // when the agent downscaled the PNG to fit the transport budget, encoded < native,
@@ -1058,6 +1070,15 @@ export class NativeDesktopComputer implements Computer {
     this.screenshotWarmupBudgetMs =
       opts.screenshotWarmupBudgetMs ?? NATIVE_SCREENSHOT_WARMUP_BUDGET_MS;
     this.screenshotRetryDelayMs = opts.screenshotRetryDelayMs ?? NATIVE_SCREENSHOT_RETRY_DELAY_MS;
+    this.screenshotReadbackTimeoutMs =
+      opts.screenshotReadbackTimeoutMs ?? SCREENSHOT_READBACK_TIMEOUT_MS;
+    if (
+      !Number.isFinite(this.screenshotReadbackTimeoutMs) ||
+      this.screenshotReadbackTimeoutMs <= 0
+    ) {
+      throw new RangeError("screenshotReadbackTimeoutMs must be a positive finite number");
+    }
+    this.abortSignal = opts.abortSignal;
   }
 
   /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
@@ -1067,6 +1088,96 @@ export class NativeDesktopComputer implements Computer {
 
   private guardWrite() {
     if (this.readOnly) throw new ComputerReadOnlyError();
+  }
+
+  private startScreenshotFence(): NativeScreenshotFence {
+    const controller = new AbortController();
+    const timeoutError = new ScreenshotReadError(
+      "read_timeout",
+      `native screenshot capture exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+    );
+    const timer = setTimeout(
+      () => controller.abort(timeoutError),
+      this.screenshotReadbackTimeoutMs,
+    );
+    const onAbort = () =>
+      controller.abort(
+        new ScreenshotReadError(
+          "aborted",
+          "native screenshot capture was aborted before completion",
+        ),
+      );
+    if (this.abortSignal?.aborted) onAbort();
+    else this.abortSignal?.addEventListener("abort", onAbort, { once: true });
+    return {
+      controller,
+      timer,
+      detachAbortSignal: () => this.abortSignal?.removeEventListener("abort", onAbort),
+    };
+  }
+
+  private finishScreenshotFence(fence: NativeScreenshotFence): void {
+    clearTimeout(fence.timer);
+    fence.detachAbortSignal();
+  }
+
+  private screenshotFenceError(fence: NativeScreenshotFence): ScreenshotReadError {
+    const reason = fence.controller.signal.reason;
+    if (reason instanceof ScreenshotReadError) return reason;
+    return new ScreenshotReadError(
+      this.abortSignal?.aborted ? "aborted" : "read_timeout",
+      this.abortSignal?.aborted
+        ? "native screenshot capture was aborted before completion"
+        : `native screenshot capture exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+    );
+  }
+
+  private assertScreenshotAdmission(fence: NativeScreenshotFence): void {
+    if (fence.controller.signal.aborted) throw this.screenshotFenceError(fence);
+  }
+
+  private async beforeScreenshotDeadline<T>(
+    startProviderCall: () => Promise<T>,
+    fence: NativeScreenshotFence,
+  ): Promise<T> {
+    this.assertScreenshotAdmission(fence);
+    const providerCall = startProviderCall();
+    const signal = fence.controller.signal;
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const settle = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => settle(() => reject(this.screenshotFenceError(fence)));
+      signal.addEventListener("abort", onAbort, { once: true });
+      void providerCall.then(
+        (value) => settle(() => resolve(value)),
+        (error) => settle(() => reject(error)),
+      );
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private async waitForScreenshotRetry(fence: NativeScreenshotFence): Promise<void> {
+    this.assertScreenshotAdmission(fence);
+    const signal = fence.controller.signal;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settle = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const timer = setTimeout(() => settle(resolve), this.screenshotRetryDelayMs);
+      const onAbort = () => settle(() => reject(this.screenshotFenceError(fence)));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
   }
 
   /** Scale a coordinate the model expressed in the MOST RECENT screenshot's
@@ -1122,53 +1233,67 @@ export class NativeDesktopComputer implements Computer {
     // bounded budget and, on a terminal failure, FAIL LOUD with the agent's actual
     // reason (logged) — never a silent blank. A permission (TCC) denial is terminal:
     // retrying cannot grant Screen Recording, so we break immediately.
-    let lastError: unknown;
-    const deadline = Date.now() + this.screenshotWarmupBudgetMs;
-    let attempt = 0;
-    while (true) {
-      if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, this.screenshotRetryDelayMs));
-      }
-      attempt++;
-      try {
-        const { png, width, height, nativeWidth, nativeHeight } = await this.session.screenshot();
-        if (png.length === 0) {
-          // A warming capture yields an empty frame — retry rather than hand the model
-          // a blank; throw once the budget is spent.
-          throw new ComputerUnavailableError(
-            "native desktop screenshot returned an empty frame (display not up?)",
-          );
+    const fence = this.startScreenshotFence();
+    try {
+      let lastError: unknown;
+      const warmupDeadline = Date.now() + this.screenshotWarmupBudgetMs;
+      let attempt = 0;
+      while (true) {
+        if (attempt > 0) await this.waitForScreenshotRetry(fence);
+        this.assertScreenshotAdmission(fence);
+        attempt++;
+        try {
+          // Native provider capture has no cancellable structural API today. Race it
+          // against the turn/deadline fence so a late result is ignored and can never
+          // reach geometry, base64, or model/tool serialization.
+          const { png, width, height, nativeWidth, nativeHeight } =
+            await this.beforeScreenshotDeadline(() => this.session.screenshot(), fence);
+          this.assertScreenshotAdmission(fence);
+          if (png.byteLength > MAX_SCREENSHOT_BYTES) {
+            throw new ScreenshotReadError(
+              "size_limit_exceeded",
+              `native screenshot byte size exceeds the ${MAX_SCREENSHOT_BYTES}B safety limit`,
+            );
+          }
+          if (png.length === 0) {
+            // A warming capture yields an empty frame — retry rather than hand the model
+            // a blank; throw once the budget is spent.
+            throw new ComputerUnavailableError(
+              "native desktop screenshot returned an empty frame (display not up?)",
+            );
+          }
+          // Record the encoded (what the model sees) vs native geometry of THIS frame so
+          // the next click/move/scroll/drag scales its coordinates back to native pixels.
+          this.lastEncoded = [width, height];
+          this.lastNative = [nativeWidth || width, nativeHeight || height];
+          return Buffer.from(png).toString("base64");
+        } catch (error) {
+          // Bounds, cancellation, and deadline failures are admission fences, not
+          // warm-up transients. Retrying could duplicate an ambiguous provider call.
+          if (error instanceof ScreenshotReadError) throw error;
+          lastError = error;
+          // A permission denial will deny on every retry — fail fast with the reason.
+          if (isTerminalCaptureDenial(error)) break;
         }
-        // Record the encoded (what the model sees) vs native geometry of THIS frame so
-        // the next click/move/scroll/drag scales its coordinates back to native pixels.
-        this.lastEncoded = [width, height];
-        this.lastNative = [nativeWidth || width, nativeHeight || height];
-        return Buffer.from(png).toString("base64");
-      } catch (error) {
-        lastError = error;
-        // A permission denial will deny on every retry — fail fast with the reason.
-        if (isTerminalCaptureDenial(error)) break;
+        // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
+        if (Date.now() + this.screenshotRetryDelayMs >= warmupDeadline) break;
       }
-      // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
-      if (Date.now() + this.screenshotRetryDelayMs >= deadline) {
-        break;
-      }
+      // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
+      // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
+      // then rethrow — never return "".
+      const reason = redactSensitiveText(
+        lastError instanceof Error ? lastError.message : String(lastError),
+      );
+      console.warn(
+        `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
+      );
+      if (lastError instanceof Error) throw lastError;
+      throw new ComputerUnavailableError(
+        "native desktop screenshot returned an empty frame (display not up?)",
+      );
+    } finally {
+      this.finishScreenshotFence(fence);
     }
-    // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
-    // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
-    // then rethrow — never return "".
-    const reason = redactSensitiveText(
-      lastError instanceof Error ? lastError.message : String(lastError),
-    );
-    console.warn(
-      `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
-    );
-    if (lastError instanceof Error) {
-      throw lastError;
-    }
-    throw new ComputerUnavailableError(
-      "native desktop screenshot returned an empty frame (display not up?)",
-    );
   }
 
   async click(x: number, y: number, button: ComputerButton) {
@@ -1638,6 +1763,7 @@ export class ComputerUseCapability extends Capability {
       ? new NativeDesktopComputer(session, {
           ...(this.args.dimensions ? { dimensions: this.args.dimensions } : {}),
           ...(this.args.readOnly !== undefined ? { readOnly: this.args.readOnly } : {}),
+          ...(this.args.abortSignal ? { abortSignal: this.args.abortSignal } : {}),
         })
       : new SandboxComputer(session, {
           ...(this.args.dimensions ? { dimensions: this.args.dimensions } : {}),

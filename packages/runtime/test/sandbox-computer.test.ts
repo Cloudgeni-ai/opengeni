@@ -646,6 +646,7 @@ function makeNativeSession(
     // When set, screenshot() THROWS this per attempt (last value sticks; null = resolve).
     // Models the agent surfacing a capture AgentError (permission denied / null image).
     throwPerAttempt?: (Error | null)[];
+    screenshotImpl?: NativeDesktopSession["screenshot"];
   } = {},
 ) {
   const inputs: NonNullable<DesktopInputRequest["event"]>[] = [];
@@ -660,6 +661,7 @@ function makeNativeSession(
     },
     screenshot: async () => {
       const i = attempt++;
+      if (opts.screenshotImpl) return await opts.screenshotImpl();
       const toThrow = at(opts.throwPerAttempt, i);
       if (toThrow) throw toThrow;
       return {
@@ -816,7 +818,7 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     expect([ev.pointer.x, ev.pointer.y]).toEqual([640, 400]); // 1.0 factor, unchanged
   });
 
-  test("screenshot returns the base64 of the fake PNG (non-empty, no data-URL prefix)", async () => {
+  test("a bounded valid screenshot returns raw base64 without a data-URL prefix", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const { session } = makeNativeSession({ png });
     const c = new NativeDesktopComputer(session);
@@ -824,6 +826,71 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     expect(shot).toBe(Buffer.from(png).toString("base64"));
     // Raw base64 — the SDK adds the `data:image/png;base64,` prefix itself.
     expect(shot.startsWith("data:")).toBe(false);
+  });
+
+  test("an oversized native PNG is rejected before function-image serialization", async () => {
+    const { session, attempts } = makeNativeSession({
+      png: new Uint8Array(MAX_SCREENSHOT_BYTES + 1),
+    });
+    const c = new NativeDesktopComputer(session);
+    const screenshot = toolsByName(computerFunctionTools(c as never, false))["computer_screenshot"];
+    const output = await invokeTool(screenshot, {});
+    expect(output).toBe(
+      `computer screenshot failed [size_limit_exceeded]: native screenshot byte size exceeds the ${MAX_SCREENSHOT_BYTES}B safety limit`,
+    );
+    expect(String(output)).not.toContain("data:image/png;base64,");
+    expect(attempts()).toBe(1);
+  });
+
+  test("a stalled native provider capture fails at the aggregate readback deadline", async () => {
+    const { session, attempts } = makeNativeSession({
+      screenshotImpl: async () => await new Promise<never>(() => {}),
+    });
+    const c = new NativeDesktopComputer(session, { screenshotReadbackTimeoutMs: 10 });
+    const result = await c.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(result).toBeInstanceOf(ScreenshotReadError);
+    expect((result as ScreenshotReadError).code).toBe("read_timeout");
+    expect(attempts()).toBe(1);
+  });
+
+  test("an in-flight abort ignores a late native result without mutating screenshot geometry", async () => {
+    const controller = new AbortController();
+    let settleProvider!: (value: Awaited<ReturnType<NativeDesktopSession["screenshot"]>>) => void;
+    const providerResult = new Promise<Awaited<ReturnType<NativeDesktopSession["screenshot"]>>>(
+      (resolve) => {
+        settleProvider = resolve;
+      },
+    );
+    const { session, attempts, inputs } = makeNativeSession({
+      screenshotImpl: async () => await providerResult,
+    });
+    const c = new NativeDesktopComputer(session, { abortSignal: controller.signal });
+    const request = c.screenshot();
+    await Promise.resolve();
+    controller.abort();
+    const result = await request.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(result).toBeInstanceOf(ScreenshotReadError);
+    expect((result as ScreenshotReadError).code).toBe("aborted");
+    expect(attempts()).toBe(1);
+
+    settleProvider({
+      png: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      width: 640,
+      height: 400,
+      nativeWidth: 1280,
+      nativeHeight: 800,
+    });
+    await Promise.resolve();
+    await c.click(10, 20, "left");
+    const event = inputs[0];
+    if (event?.$case !== "pointer") throw new Error("expected pointer");
+    expect([event.pointer.x, event.pointer.y]).toEqual([10, 20]);
   });
 
   test("REGRESSION: a persistently empty PNG THROWS (never an empty image_url / blank placeholder)", async () => {
@@ -924,6 +991,26 @@ describe("computer backend selection (native vs xdotool)", () => {
     await computer.click(3, 4, "left");
     expect(inputs.length).toBe(1);
     expect(inputs[0]!.$case).toBe("pointer");
+  });
+
+  test("ComputerUseCapability threads an already-aborted turn fence into native capture", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { session, attempts } = makeNativeSession();
+    const cap = computerUse({
+      abortSignal: controller.signal,
+      readOnly: false,
+      toolMode: "hosted",
+    });
+    cap.bind(session as never).bindModel("responses", structuredModel());
+    const computer = (cap.tools()[0] as unknown as { computer: NativeDesktopComputer }).computer;
+    const result = await computer.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(result).toBeInstanceOf(ScreenshotReadError);
+    expect((result as ScreenshotReadError).code).toBe("aborted");
+    expect(attempts()).toBe(0);
   });
 
   test("ComputerUseCapability bound to a Modal session selects the xdotool SandboxComputer", () => {
