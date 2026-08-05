@@ -111,6 +111,8 @@ It verifies:
 - the source-revision annotations match the source checkout;
 - OpenGeni `ServiceMonitor` and `PrometheusRule` resources exist with the shared
   discovery label;
+- the bundled Grafana, kube-state-metrics, and node-exporter ServiceMonitors
+  carry the same discovery label and have healthy live targets;
 - required rules are declared and loaded by the live Prometheus API;
 - Grafana is healthy and its dashboard provisioner has received the exact files.
 

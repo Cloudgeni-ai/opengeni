@@ -1,8 +1,26 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import { observabilityStackPlanFor } from "./deployment-observability";
 
 describe("observability deployment plan", () => {
+  test("keeps every bundled platform ServiceMonitor inside canonical discovery", () => {
+    const values = Bun.YAML.parse(readFileSync("deploy/observability/values.yaml", "utf8"));
+
+    expect(
+      values["kube-prometheus-stack"].grafana.serviceMonitor.labels["opengeni.ai/monitoring"],
+    ).toBe("enabled");
+    expect(
+      values["kube-prometheus-stack"]["kube-state-metrics"].prometheus.monitor.additionalLabels[
+        "opengeni.ai/monitoring"
+      ],
+    ).toBe("enabled");
+    expect(
+      values["kube-prometheus-stack"]["prometheus-node-exporter"].prometheus.monitor
+        .additionalLabels["opengeni.ai/monitoring"],
+    ).toBe("enabled");
+  });
+
   test("renders a pinned, ordered production plan", () => {
     const plan = observabilityStackPlanFor({
       profile: "production",
@@ -10,7 +28,7 @@ describe("observability deployment plan", () => {
     });
 
     expect(plan.chartPath).toBe("deploy/observability");
-    expect(plan.chartVersion).toBe("0.1.0");
+    expect(plan.chartVersion).toBe("0.1.1");
     expect(plan.kubePrometheusStackVersion).toBe("87.16.1");
     expect(plan.valuesFiles).toEqual(["deploy/observability/values.production.example.yaml"]);
     expect(plan.installCommands.slice(0, 2)).toEqual([

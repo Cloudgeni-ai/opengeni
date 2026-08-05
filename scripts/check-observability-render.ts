@@ -74,6 +74,21 @@ for (const selectorName of ["serviceMonitorNamespaceSelector", "ruleNamespaceSel
   );
 }
 
+for (const applicationName of ["grafana", "kube-state-metrics", "prometheus-node-exporter"]) {
+  const serviceMonitor = exactlyOne(
+    resources.filter(
+      (resource) =>
+        resource.kind === "ServiceMonitor" &&
+        resource.metadata?.labels?.["app.kubernetes.io/name"] === applicationName,
+    ),
+    `${applicationName} ServiceMonitor`,
+  );
+  assert(
+    serviceMonitor.metadata?.labels?.["opengeni.ai/monitoring"] === "enabled",
+    `${applicationName} ServiceMonitor must carry opengeni.ai/monitoring=enabled`,
+  );
+}
+
 const dashboardsDirectory = "deploy/observability/dashboards";
 const dashboardFiles = readdirSync(dashboardsDirectory)
   .filter((name) => name.endsWith(".json"))
