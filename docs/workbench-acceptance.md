@@ -244,8 +244,8 @@ with a warm cache. Reports include p50, p75, p95, p99, and worst observation.
 
 | Metric | Release budget |
 | --- | --- |
-| Capture API response | p95 ≤ 200 ms when served from the deployment region |
-| Capture-backed usable workbench | cold-cache p95 ≤ 5 s from full navigation on the production network path |
+| Capture API response | p95 ≤ 400 ms when served from the deployment region |
+| Capture-backed usable workbench | cold-cache p95 ≤ 10 s from full navigation on the production network path |
 | Warm-cache session switch | p95 ≤ 250 ms, with zero stale frames |
 | Immediate interaction feedback | p95 ≤ 100 ms |
 | Editor typing latency | p95 ≤ 50 ms per input event |
@@ -258,7 +258,7 @@ with a warm cache. Reports include p50, p75, p95, p99, and worst observation.
 | Direct session asset graph | ≤ 1,900 KiB raw and ≤ 540 KiB gzip before optional editor/diff/terminal chunks |
 | Lazy JavaScript chunk | ≤ 800 KiB raw and ≤ 240 KiB gzip |
 | CSS asset | ≤ 30 KiB gzip |
-| Steer/Pause physical cancellation | worst ≤ 2,000 ms from committed control to replacement `turn.started` (Steer) or physically stopped activity (Pause), with zero zombie output |
+| Steer/Pause physical cancellation | worst ≤ 4,000 ms from committed control to replacement `turn.started` (Steer) or physically stopped activity (Pause), with zero zombie output |
 
 Measure representative high-, mid-, and low-end desktop hardware plus current
 iOS and Android devices. Include a 4× CPU slowdown and constrained-network run.

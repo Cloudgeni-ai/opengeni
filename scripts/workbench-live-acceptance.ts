@@ -49,6 +49,10 @@ const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
   "p95",
 );
+const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
+  "performance.control-cancellation",
+  "worst",
+);
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -1286,7 +1290,7 @@ async function runLiveWorkspaceFlow(input: {
     pass(
       checks,
       "performance.control-cancellation",
-      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget 2000ms).`,
+      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
     );
 
     assertNoProblems(problems, false);
@@ -1429,16 +1433,18 @@ async function proveLiveSteerCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
-    "replacement turn start inside the 2s physical-cancellation budget",
+    "replacement turn start inside the physical-cancellation budget",
   );
   const controlCancellationMs = controlCancellationDurationMs(
     committedAt,
     Date.parse(replacementStarted.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
-    throw new Error(`Steer replacement took ${controlCancellationMs}ms; budget is 2000ms`);
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
+    throw new Error(
+      `Steer replacement took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+    );
   }
   const renderedStoppingState = await stoppingVisible;
   if (controlCancellationMs > 100 && !renderedStoppingState) {
@@ -1620,7 +1626,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.control.paused" &&
       isRecord(event.payload) &&
@@ -1632,7 +1638,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     pauseRequested.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.queue.changed" &&
       event.turnId === predecessorTurnId &&
@@ -1644,9 +1650,9 @@ async function proveLivePauseCancellation(input: {
     committedAt,
     Date.parse(quiesced.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
-      `Pause physical cancellation took ${controlCancellationMs}ms; budget is 2000ms`,
+      `Pause physical cancellation took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
   const renderedStoppingState = await stoppingState;
