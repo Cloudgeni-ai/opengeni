@@ -3,6 +3,7 @@
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { SessionEvent } from "@opengeni/sdk";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -138,6 +139,8 @@ export type AppContextValue = {
   setSession: Dispatch<SetStateAction<Session | null>>;
   connectionState: SessionEventsConnectionState;
   setConnectionState: Dispatch<SetStateAction<SessionEventsConnectionState>>;
+  /** The routed session's one shared event feed. Header consumers must never self-stream. */
+  sessionEventFeedStore: SessionEventFeedStore;
   manualRepos: RepoDraft[];
   setManualRepos: Dispatch<SetStateAction<RepoDraft[]>>;
   manualReposOpen: boolean;
@@ -225,6 +228,31 @@ export type AppContextValue = {
   resetWorkspaceIntegrations: () => void;
 };
 
+type SessionEventFeed = { sessionId: string; events: SessionEvent[] } | null;
+
+type SessionEventFeedStore = {
+  getSnapshot: () => SessionEventFeed;
+  subscribe: (listener: () => void) => () => void;
+  set: (feed: SessionEventFeed) => void;
+};
+
+function createSessionEventFeedStore(): SessionEventFeedStore {
+  let snapshot: SessionEventFeed = null;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set: (feed) => {
+      if (snapshot === feed) return;
+      snapshot = feed;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
 const AppContext = createContext<AppContextValue | null>(null);
 
 /** Stable event identity that dispatches only to the latest committed body. */
@@ -279,6 +307,7 @@ export function RootRouteComponent() {
   // No localStorage — only an in-memory default (toggle still works for the session).
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
+  const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
@@ -665,7 +694,9 @@ export function RootRouteComponent() {
       // Re-read on every failure, not only OCC conflicts. A transport failure
       // may have happened after the server committed; blindly restoring
       // `before` would temporarily lie and could overwrite a newer device.
-      const authoritative = await client.getSession(workspaceId, sessionId).catch(() => null);
+      const authoritative = await client
+        .getSession(workspaceId, sessionId, { fresh: true })
+        .catch(() => null);
       if (authoritative) {
         setSession((current) => reconcileFailedSessionPin(current, optimistic, authoritative));
         notifySessionPinChanged(workspaceId, sessionId);
@@ -1013,7 +1044,8 @@ export function RootRouteComponent() {
   const resetSessionView = useCallback(() => {
     setSession(null);
     setConnectionState("idle");
-  }, [setSession]);
+    sessionEventFeedStore.set(null);
+  }, [sessionEventFeedStore, setSession]);
 
   // Session-scoped model/effort: never fall back to the mutable new-session
   // picks — those change while other sessions are open and would bleed across.
@@ -1113,6 +1145,7 @@ export function RootRouteComponent() {
           setSession,
           connectionState,
           setConnectionState,
+          sessionEventFeedStore,
           manualRepos,
           setManualRepos,
           manualReposOpen,
@@ -1216,6 +1249,7 @@ export function RootRouteComponent() {
     selectedRepoIds,
     selectedRepoRefs,
     session,
+    sessionEventFeedStore,
     setModelForSession,
     setSession,
     toolMcpServers,

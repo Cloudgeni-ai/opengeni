@@ -98,6 +98,14 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
     queuedBytes: number;
   }> = [];
   const counters: Array<{ name: string; labels?: Record<string, unknown> }> = [];
+  const gauges: Array<{ name: string; labels?: Record<string, unknown>; value: number }> = [];
+  const observability = {
+    incrementCounter: (input: { name: string; labels?: Record<string, unknown> }) =>
+      counters.push(input),
+    setGauge: (input: { name: string; labels?: Record<string, unknown>; value: number }) =>
+      gauges.push(input),
+    warn: () => {},
+  } as never;
   const stalled = await sseSessionStream(
     fakeDb as never,
     bus,
@@ -108,11 +116,7 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
     {
       stallTimeoutMs: 50,
       onObservation: (observation) => stalledObservations.push(observation),
-      observability: {
-        incrementCounter: (input: { name: string; labels?: Record<string, unknown> }) =>
-          counters.push(input),
-        warn: () => {},
-      } as never,
+      observability,
     },
   );
   const fast = await sseSessionStream(
@@ -122,7 +126,7 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
     SESSION_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 50 },
+    { stallTimeoutMs: 50, observability },
   );
 
   await waitFor(() => subscribers.size === 2 && durableReads.length === 2);
@@ -156,8 +160,17 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
     reason: "stall_timeout",
   });
   expect(
-    counters.every((counter) => counter.name === "opengeni_sse_delivery_bound_events_total"),
-  ).toBeTrue();
+    counters.filter((counter) => counter.name === "opengeni_sse_delivery_bound_events_total")
+      .length,
+  ).toBeGreaterThanOrEqual(2);
+  expect(counters.map((counter) => counter.name)).toContain("opengeni_sse_connections_total");
+  expect(gauges).toContainEqual(
+    expect.objectContaining({
+      name: "opengeni_sse_connections_active",
+      labels: { stream: "session" },
+      value: 2,
+    }),
+  );
 
   // Each initial connection reads one replay page. The two-event live cursor
   // causes one single-row gap read per connection, and the stalled connection
@@ -188,6 +201,11 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   await resumedReader.cancel();
   await fastReader.cancel();
   expect(released).toHaveLength(3);
+  expect(gauges.at(-1)).toMatchObject({
+    name: "opengeni_sse_connections_active",
+    labels: { stream: "session" },
+    value: 0,
+  });
 });
 
 test("an idle session stream closes promptly when periodic host authorization is revoked", async () => {

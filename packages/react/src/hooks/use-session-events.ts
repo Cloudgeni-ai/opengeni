@@ -4,6 +4,7 @@ import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../sessi
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
+import { usePageLiveActivity } from "./internal";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -135,6 +136,8 @@ export function useSessionEvents(
 ): UseSessionEventsResult {
   const { client, workspaceId, reconcileSession } = useEmbeddedSession(options);
   const enabled = options.enabled ?? true;
+  const pageLive = usePageLiveActivity();
+  const streamEnabled = enabled && pageLive;
   const after = options.after ?? 0;
   const replay = options.replay ?? "windowed";
   const fullReplay = replay === "full" || after !== 0;
@@ -224,7 +227,7 @@ export function useSessionEvents(
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-    if (!sessionId || !enabled) {
+    if (!sessionId || !streamEnabled) {
       setConnectionState("idle");
       return;
     }
@@ -399,7 +402,7 @@ export function useSessionEvents(
     workspaceId,
     sessionId,
     after,
-    enabled,
+    streamEnabled,
     fullReplay,
     streamKey,
     streamEpoch,

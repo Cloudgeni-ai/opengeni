@@ -363,6 +363,8 @@ export class OpenGeniClient {
   private readonly baseUrl: string;
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
+  private readonly readInFlight = new Map<string, Promise<unknown>>();
+  private readonly readTrailing = new Map<string, Promise<unknown>>();
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -603,11 +605,13 @@ export class OpenGeniClient {
     );
   }
 
-  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
-    return await this.requestJson<Session>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
-    );
+  async getSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<Session> {
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    return await this.singleFlightRead(path, () => this.requestJson<Session>("GET", path), options);
   }
 
   async updateSession(
@@ -754,10 +758,38 @@ export class OpenGeniClient {
   }
 
   async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
-    return await this.requestJson<SessionLineageResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionLineageResponse>("GET", path),
     );
+  }
+
+  private singleFlightRead<T>(
+    key: string,
+    read: () => Promise<T>,
+    options: { fresh?: boolean } = {},
+  ): Promise<T> {
+    const existing = this.readInFlight.get(key);
+    if (existing) {
+      if (!options.fresh) return existing as Promise<T>;
+      const queued = this.readTrailing.get(key);
+      if (queued) return queued as Promise<T>;
+      const trailing = existing.then(
+        () => this.singleFlightRead(key, read),
+        () => this.singleFlightRead(key, read),
+      );
+      this.readTrailing.set(key, trailing);
+      const clear = () => {
+        if (this.readTrailing.get(key) === trailing) this.readTrailing.delete(key);
+      };
+      void trailing.then(clear, clear);
+      return trailing;
+    }
+    const promise = read().finally(() => {
+      if (this.readInFlight.get(key) === promise) this.readInFlight.delete(key);
+    });
+    this.readInFlight.set(key, promise);
+    return promise;
   }
 
   /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
@@ -1350,9 +1382,9 @@ export class OpenGeniClient {
   // --- Turn queue ------------------------------------------------------------
 
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionQueueSnapshot>("GET", path),
     );
   }
 
@@ -1614,10 +1646,8 @@ export class OpenGeniClient {
 
   /** The session's goal. 404s when the session never had one. */
   async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
-    return await this.requestJson<SessionGoal>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
-    );
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
+    return await this.singleFlightRead(path, () => this.requestJson<SessionGoal>("GET", path));
   }
 
   async updateGoal(

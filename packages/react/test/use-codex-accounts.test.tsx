@@ -7,8 +7,17 @@
 import { describe, expect, test } from "bun:test";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
-import { useCodexAccounts, type CodexAccountsClientLike } from "../src/hooks/use-codex-accounts";
-import type { CodexAccount, CodexAccountsResponse, CodexUsageWindow } from "@opengeni/sdk";
+import {
+  isCodexAccountEvent,
+  useCodexAccounts,
+  type CodexAccountsClientLike,
+} from "../src/hooks/use-codex-accounts";
+import type {
+  CodexAccount,
+  CodexAccountsResponse,
+  CodexUsageWindow,
+  SessionEvent,
+} from "@opengeni/sdk";
 
 registerDom();
 
@@ -60,6 +69,66 @@ function response(accounts: CodexAccount[]): CodexAccountsResponse {
 }
 
 describe("useCodexAccounts — cached usage + refreshUsage", () => {
+  test("refreshes only after the durable post-selection event", () => {
+    expect(isCodexAccountEvent({ type: "turn.started" })).toBe(false);
+    expect(isCodexAccountEvent({ type: "codex.account.switched" })).toBe(true);
+  });
+
+  test("an empty shared feed never opens a fallback session stream", async () => {
+    let reads = 0;
+    let streams = 0;
+    const streamSafeClient = fakeClient({
+      streamEvents: () => {
+        streams += 1;
+        throw new Error("must not self-stream");
+      },
+    });
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        reads += 1;
+        return response([account("a")]);
+      },
+    };
+    const turnStarted = {
+      id: "turn-started",
+      workspaceId: WORKSPACE_ID,
+      sessionId: "session-a",
+      sequence: 1,
+      type: "turn.started",
+      payload: {},
+      occurredAt: new Date().toISOString(),
+    } as SessionEvent;
+    const switched = {
+      ...turnStarted,
+      id: "switched",
+      sequence: 2,
+      type: "codex.account.switched",
+    } as SessionEvent;
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useCodexAccounts({
+          client: streamSafeClient,
+          workspaceId: WORKSPACE_ID,
+          codexClient,
+          sessionId: "session-a",
+          events,
+          pollIntervalMs: 0,
+        }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(1);
+    expect(streams).toBe(0);
+    await hook.rerender([turnStarted]);
+    await flush();
+    expect(reads).toBe(1);
+    await hook.rerender([turnStarted, switched]);
+    await flush();
+    expect(reads).toBe(2);
+    expect(streams).toBe(0);
+    await hook.unmount();
+  });
+
   test("cached fiveHour/weekly windows ride along on accounts", async () => {
     const codexClient: CodexAccountsClientLike = {
       listCodexAccounts: async () =>
