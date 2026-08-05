@@ -93,6 +93,8 @@ describe("resumable transcription recording persistence", () => {
     expect(source).toContain("!canReclaimTranscriptionRecordingAttempt({");
     expect(source).toContain("attemptDeadlineAt: active.attemptDeadlineAt");
     expect(source).toContain("attemptDeadlineAt: input.providerDeadlineAt");
+    expect(source).toContain("attemptStartedAt: input.providerStartedAt");
+    expect(source).toContain("processingStartedAt: input.providerStartedAt");
     expect(source).toContain("attemptDeadlineAt: null");
     expect(source).toContain("startTranscriptionRecordingSegmentProviderCall");
     expect(source).toContain('state: "failed"');
@@ -107,33 +109,56 @@ describe("resumable transcription recording persistence", () => {
   });
 
   test("requires both the durable lease and provider deadline to reclaim", () => {
-    const startedAt = new Date("2026-08-05T00:00:00.000Z");
-    const staleBefore = new Date("2026-08-05T00:15:00.000Z");
-    const now = new Date("2026-08-05T00:15:01.000Z");
+    const providerStartedAt = new Date("2026-08-05T00:06:00.000Z");
+    const providerDeadlineAt = new Date("2026-08-05T00:16:00.000Z");
     expect(
       canReclaimTranscriptionRecordingAttempt({
-        attemptStartedAt: startedAt,
-        attemptDeadlineAt: new Date("2026-08-05T00:20:00.000Z"),
-        staleBefore,
-        now,
+        attemptStartedAt: providerStartedAt,
+        attemptDeadlineAt: providerDeadlineAt,
+        staleBefore: new Date("2026-08-05T00:05:59.999Z"),
+        now: new Date("2026-08-05T00:16:00.000Z"),
       }),
     ).toBe(false);
     expect(
       canReclaimTranscriptionRecordingAttempt({
-        attemptStartedAt: startedAt,
-        attemptDeadlineAt: new Date("2026-08-05T00:10:00.000Z"),
-        staleBefore,
-        now,
+        attemptStartedAt: providerStartedAt,
+        attemptDeadlineAt: providerDeadlineAt,
+        staleBefore: new Date("2026-08-05T00:06:00.001Z"),
+        now: new Date("2026-08-05T00:21:00.000Z"),
       }),
     ).toBe(true);
     expect(
       canReclaimTranscriptionRecordingAttempt({
-        attemptStartedAt: startedAt,
+        attemptStartedAt: providerStartedAt,
         attemptDeadlineAt: null,
-        staleBefore,
-        now,
+        staleBefore: new Date("2026-08-05T00:21:00.000Z"),
+        now: new Date("2026-08-05T00:21:01.000Z"),
       }),
     ).toBe(false);
+  });
+
+  test("keeps a five-minute reclaim margin after slow pre-provider setup", () => {
+    const initialClaimAt = new Date("2026-08-05T00:00:00.000Z");
+    for (const setupMinutes of [0, 4, 5, 6]) {
+      const providerStartedAt = new Date(initialClaimAt.getTime() + setupMinutes * 60_000);
+      const providerDeadlineAt = new Date(providerStartedAt.getTime() + 10 * 60_000);
+      expect(
+        canReclaimTranscriptionRecordingAttempt({
+          attemptStartedAt: providerStartedAt,
+          attemptDeadlineAt: providerDeadlineAt,
+          staleBefore: providerStartedAt,
+          now: new Date(providerDeadlineAt.getTime() + 5 * 60_000),
+        }),
+      ).toBe(false);
+      expect(
+        canReclaimTranscriptionRecordingAttempt({
+          attemptStartedAt: providerStartedAt,
+          attemptDeadlineAt: providerDeadlineAt,
+          staleBefore: new Date(providerStartedAt.getTime() + 1),
+          now: new Date(providerDeadlineAt.getTime() + 5 * 60_000 + 1),
+        }),
+      ).toBe(true);
+    }
   });
 
   test("declares every transcription table in the runtime posture contract", () => {

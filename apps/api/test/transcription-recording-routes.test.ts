@@ -439,12 +439,252 @@ describe("resumable transcription recording routes", () => {
       expect.anything(),
       expect.objectContaining({
         attemptId: firstAttemptId,
+        providerStartedAt: expect.any(Date),
         providerDeadlineAt: expect.any(Date),
       }),
     );
     expect(claimSegment).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ providerDeadlineAt: expect.any(Date) }),
+    );
+  });
+
+  test("keeps provider work resumable when the client request aborts", async () => {
+    const segmentBytes = new Uint8Array([7, 8, 9]);
+    const segmentSha256 = createHash("sha256").update(segmentBytes).digest("hex");
+    const clientAbort = new AbortController();
+    let providerStarted!: () => void;
+    let releaseProvider!: () => void;
+    const providerStartedPromise = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    const providerReleasePromise = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const claimSegment = spyOn(
+      dbModule,
+      "claimNextTranscriptionRecordingSegment",
+    ).mockResolvedValue({
+      recording: response("transcribing", { segmentCount: 1 }),
+      claimed: true,
+      attemptId: CORRELATION_ID,
+      segment: {
+        segmentNumber: 0,
+        durationMilliseconds: 50_000,
+        byteLength: segmentBytes.byteLength,
+        sha256: segmentSha256,
+        objectKey: "segment-0",
+        providerId: "openai",
+      } as never,
+    });
+    const completeSegment = spyOn(
+      dbModule,
+      "completeTranscriptionRecordingSegment",
+    ).mockResolvedValue(
+      response("complete", {
+        segmentCount: 1,
+        completedSegmentCount: 1,
+        transcriptText: "completed after client abort",
+        objectsCleaned: true,
+      }),
+    );
+    const failSegment = spyOn(dbModule, "failTranscriptionRecordingSegment");
+    spyOn(dbModule, "startTranscriptionRecordingSegmentProviderCall").mockResolvedValue(undefined);
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    let observedSignal: AbortSignal | undefined;
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async (input) => {
+        observedSignal = input.signal;
+        providerStarted();
+        await providerReleasePromise;
+        return { text: "completed after client abort", languages: ["en"] };
+      },
+    };
+    const api = app({
+      transcription,
+      segmenter: { available: () => true, segment: async function* () {} },
+      objectStorage: storage({
+        getObjectBytes: async () => ({ bytes: segmentBytes, contentType: "audio/wav" }),
+      }),
+    });
+
+    const request = api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        signal: clientAbort.signal,
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": CORRELATION_ID,
+        },
+      },
+    );
+    await providerStartedPromise;
+    clientAbort.abort();
+    releaseProvider();
+
+    expect((await request).status).toBe(200);
+    expect(observedSignal).toBeUndefined();
+    expect(completeSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ attemptId: CORRELATION_ID }),
+    );
+    expect(failSegment).not.toHaveBeenCalled();
+    expect(claimSegment).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps provider cancellation retryable for same-recording recovery", async () => {
+    const secondAttemptId = "77777777-7777-4777-8777-777777777777";
+    const segmentBytes = new Uint8Array([7, 8, 9]);
+    const segmentSha256 = createHash("sha256").update(segmentBytes).digest("hex");
+    let transcribeCalls = 0;
+    const claimSegment = spyOn(
+      dbModule,
+      "claimNextTranscriptionRecordingSegment",
+    ).mockImplementation(async (_db, input) => ({
+      recording: response("transcribing", { segmentCount: 1 }),
+      claimed: true,
+      attemptId: input.attemptId,
+      segment: {
+        segmentNumber: 0,
+        durationMilliseconds: 50_000,
+        byteLength: segmentBytes.byteLength,
+        sha256: segmentSha256,
+        objectKey: "segment-0",
+        providerId: "openai",
+      } as never,
+    }));
+    const failSegment = spyOn(dbModule, "failTranscriptionRecordingSegment").mockResolvedValue(
+      response("failed", { segmentCount: 1, errorCode: "cancelled", retryable: true }),
+    );
+    const completeSegment = spyOn(
+      dbModule,
+      "completeTranscriptionRecordingSegment",
+    ).mockResolvedValue(
+      response("complete", {
+        segmentCount: 1,
+        completedSegmentCount: 1,
+        transcriptText: "recovered same recording",
+        objectsCleaned: true,
+      }),
+    );
+    spyOn(dbModule, "startTranscriptionRecordingSegmentProviderCall").mockResolvedValue(undefined);
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        transcribeCalls += 1;
+        if (transcribeCalls === 1) {
+          throw new TranscriptionServiceError({
+            code: "cancelled",
+            message: "provider transport cancelled",
+          });
+        }
+        return { text: "recovered same recording", languages: ["en"] };
+      },
+    };
+    const api = app({
+      transcription,
+      segmenter: { available: () => true, segment: async function* () {} },
+      objectStorage: storage({
+        getObjectBytes: async () => ({ bytes: segmentBytes, contentType: "audio/wav" }),
+      }),
+    });
+
+    const first = await api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": CORRELATION_ID,
+        },
+      },
+    );
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({
+      recording: { id: RECORDING_ID, state: "failed", errorCode: "cancelled", retryable: true },
+    });
+
+    const second = await api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": secondAttemptId,
+        },
+      },
+    );
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({
+      recording: {
+        id: RECORDING_ID,
+        state: "complete",
+        transcriptText: "recovered same recording",
+      },
+    });
+    expect(failSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        attemptId: CORRELATION_ID,
+        errorCode: "cancelled",
+        retryable: true,
+      }),
+    );
+    expect(completeSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ attemptId: secondAttemptId }),
+    );
+    expect(claimSegment).toHaveBeenCalledTimes(2);
+  });
+
+  test("keeps explicit discard destructive after resumable provider work", async () => {
+    const discarded = spyOn(dbModule, "discardTranscriptionRecording").mockResolvedValue(
+      response("discarded"),
+    );
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    const api = app({
+      transcription: {
+        limits: () => ({
+          maxDurationSeconds: 50,
+          maxSizeBytes: 25 * 1024 * 1024,
+          acceptedMimeTypes: ["audio/webm"],
+        }),
+        available: () => true,
+        selectProvider: () => "openai",
+        transcribe: async () => ({ text: "unused", languages: [] }),
+      },
+      segmenter: { available: () => true, segment: async function* () {} },
+      objectStorage: storage(),
+    });
+
+    const result = await api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}`,
+      {
+        method: "DELETE",
+        headers: { authorization: await bearer() },
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ recording: { state: "discarded" } });
+    expect(discarded).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ recordingId: RECORDING_ID, subjectId: SUBJECT_ID }),
     );
   });
 

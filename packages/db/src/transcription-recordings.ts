@@ -1007,6 +1007,7 @@ export async function startTranscriptionRecordingSegmentProviderCall(
     recordingId: string;
     segmentNumber: number;
     attemptId: string;
+    providerStartedAt: Date;
     providerDeadlineAt: Date;
   },
 ): Promise<void> {
@@ -1020,9 +1021,18 @@ export async function startTranscriptionRecordingSegmentProviderCall(
     if (recording.state !== "transcribing" || recording.processingOwner !== input.attemptId) {
       throw new TranscriptionRecordingStateError("Provider call start was stale");
     }
+    // The initial attempt lease covers object reads and handler setup. Once the
+    // provider call is admitted, reset the durable lease origin to this exact
+    // boundary. The existing 15-minute stale fence then stays five minutes
+    // beyond the server-owned 10-minute provider deadline, regardless of how
+    // long pre-provider setup took.
     const [updated] = await scopedDb
       .update(schema.transcriptionRecordingSegments)
-      .set({ attemptDeadlineAt: input.providerDeadlineAt, updatedAt: new Date() })
+      .set({
+        attemptStartedAt: input.providerStartedAt,
+        attemptDeadlineAt: input.providerDeadlineAt,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(schema.transcriptionRecordingSegments.recordingId, input.recordingId),
@@ -1033,6 +1043,19 @@ export async function startTranscriptionRecordingSegmentProviderCall(
       )
       .returning({ segmentNumber: schema.transcriptionRecordingSegments.segmentNumber });
     if (!updated) throw new TranscriptionRecordingStateError("Provider call start was stale");
+    const [updatedRecording] = await scopedDb
+      .update(schema.transcriptionRecordings)
+      .set({ processingStartedAt: input.providerStartedAt, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.transcriptionRecordings.id, input.recordingId),
+          eq(schema.transcriptionRecordings.state, "transcribing"),
+          eq(schema.transcriptionRecordings.processingOwner, input.attemptId),
+        ),
+      )
+      .returning({ id: schema.transcriptionRecordings.id });
+    if (!updatedRecording)
+      throw new TranscriptionRecordingStateError("Provider call start was stale");
   });
 }
 

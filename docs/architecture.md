@@ -243,9 +243,13 @@ manifest, uploads contiguous hash-bound chunks to object storage, finalizes exac
 durable totals, and drives bounded ffmpeg normalization plus persisted provider
 segments. The default server ceiling is two hours / 512 MiB / 8 MiB per chunk
 (hard contract maximum eight hours and 1,000 segments); legacy clients retain the
-existing 25 MiB / 600-second one-shot multipart path. Failed or aborted work keeps
-the same recording UUID for local Retry, reload recovery, and same-subject
-cross-browser list/get resume. The first provider chosen for a server recording is
+existing 25 MiB / 600-second one-shot multipart path. Failed or client-aborted work
+keeps the same recording UUID for local Retry, reload recovery, and same-subject
+cross-browser list/get resume; request/network aborts leave server-owned provider
+work retryable and retain audio objects, while explicit Discard is destructive.
+Immediately before a provider call, the server refreshes the durable attempt lease
+origin and starts a shorter server-owned deadline, leaving a five-minute reclaim
+margin. The first provider chosen for a server recording is
 persisted privately on that recording, so every segment and retry stays pinned to
 one vendor. Segment text and deterministic final assembly persist server-side only
 for resumable recovery; provider text is also persisted locally before draft

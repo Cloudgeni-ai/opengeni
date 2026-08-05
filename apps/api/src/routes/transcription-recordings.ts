@@ -382,14 +382,16 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
             false,
           );
         }
+        const providerStartedAt = new Date();
         await startTranscriptionRecordingSegmentProviderCall(deps.db, {
           workspaceId: authority.workspaceId,
           subjectId: authority.subjectId,
           recordingId: uuidParam(c, "recordingId"),
           segmentNumber,
           attemptId,
+          providerStartedAt,
           providerDeadlineAt: new Date(
-            Date.now() + TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
+            providerStartedAt.getTime() + TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
           ),
         });
         const result = await service.transcribe({
@@ -398,7 +400,6 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           audio: stored.bytes,
           mimeType: "audio/wav",
           durationSeconds: claim.segment.durationMilliseconds / 1_000,
-          signal: c.req.raw.signal,
           requestId: attemptId,
           ...(claim.segment.providerId && claim.segment.providerId !== "host"
             ? { providerId: claim.segment.providerId }
@@ -581,6 +582,7 @@ function processingFailure(error: unknown): {
       code: error.code,
       retryable:
         error.retryable ||
+        error.code === "cancelled" ||
         error.code === "network" ||
         error.code === "timeout" ||
         error.code === "unavailable" ||

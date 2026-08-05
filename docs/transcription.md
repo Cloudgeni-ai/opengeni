@@ -114,8 +114,15 @@ chunk from object storage, and checks exact byte length and SHA-256 before ffmpe
 sees it. Segmentation produces mono 16 kHz PCM WAV output. The segment duration
 is the lower of the OpenGeni 50-second target and the selected service's maximum;
 recordings that would require more than 1,000 segments fail before ffmpeg starts.
-Generation and attempt leases become reclaimable after 15 minutes, and stale
-callbacks cannot settle a successor generation or attempt.
+Generation and pre-provider attempt leases become reclaimable after 15 minutes.
+Immediately before a provider call, the server refreshes the durable attempt
+lease origin and starts a 10-minute server-owned provider deadline. Reclaim is
+therefore impossible until at least five minutes after that provider deadline,
+even when object reads or handler setup consumed most of the original lease.
+Request/network aborts do not cancel this server-owned provider work: the same
+recording UUID remains retryable and its objects remain retained. Only explicit
+Discard is destructive. Stale callbacks cannot settle a successor generation or
+attempt.
 
 Each `process-next` request claims at most one segment. The first claim persists
 the recording-wide provider pin. Retryable `network`, `timeout`, `unavailable`,
