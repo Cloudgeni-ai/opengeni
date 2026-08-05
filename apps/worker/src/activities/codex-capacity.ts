@@ -12,6 +12,7 @@ import {
   CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
   isCodexCredentialEligible,
+  isCodexCredentialHealthy,
   selectCodexCredentialLeaseForTurn,
 } from "./codex-rotation";
 import type {
@@ -96,7 +97,15 @@ export function codexCapacityDecision(
     sessionLastCredentialId: context.sessionLastCredentialId,
     now,
   });
-  if (selected.credentialId) {
+  const selectedAccount = selected.credentialId
+    ? context.accounts.find((account) => account.id === selected.credentialId)
+    : undefined;
+  const selectedIsAvailable =
+    selectedAccount !== undefined &&
+    (selectedAccount.id === context.existingCredentialId
+      ? isCodexCredentialHealthy(selectedAccount, now)
+      : isCodexCredentialEligible(selectedAccount, now));
+  if (selected.credentialId && selectedIsAvailable) {
     return {
       kind: "available",
       credentialId: selected.credentialId,

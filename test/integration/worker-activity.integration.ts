@@ -1544,6 +1544,91 @@ describe("worker activities integration", () => {
     });
   });
 
+  test("a rolling-replacement first-party MCP 404 recovers the same goal turn before inference", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "continue after the first-party MCP route returns",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "finish the accepted turn without a synthetic continuation",
+      createdBy: "api",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      {
+        type: "user.message",
+        payload: { text: "continue after the first-party MCP route returns" },
+      },
+    ]);
+    const routeNotReady = Object.assign(new Error("temporary route response"), {
+      status: 404,
+    });
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () => {
+        throw safeMcpTransportError(routeNotReady, { recoverySafeSetup: true });
+      },
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-first-party-mcp-route-replacement",
+        workflowRunId: crypto.randomUUID(),
+      }),
+    ).resolves.toMatchObject({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        code: "mcp_transport_unavailable",
+        reason: "mcp_transport_unavailable",
+        retryable: true,
+        continueDelayMs: 2_000,
+      },
+    );
+    expect(events.some((event) => event.type === "agent.model.request")).toBe(false);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.some((event) => event.type === "goal.continuation")).toBe(false);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
+  });
+
   test("records worker observability when setup fails before a turn starts", async () => {
     const grant = await testGrant(dbClient.db);
     const exported: Array<{ body: any }> = [];

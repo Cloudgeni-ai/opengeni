@@ -233,6 +233,40 @@ test("fails closed on pathological MCP transport error wrappers", () => {
   expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingFields))).toBe(false);
 });
 
+test("recovers only rollout-safe first-party MCP setup 404 and statusless Error shapes", () => {
+  const routeNotReady = Object.assign(new Error("temporary route body with secret detail"), {
+    status: 404,
+  });
+  const statuslessTransport = new Error("fetch failed for a secret first-party URL");
+  const authRejected = Object.assign(new Error("authentication failed"), { status: 401 });
+  const typedProtocolFailure = new TypeError("invalid MCP response shape");
+
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(routeNotReady))).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(routeNotReady, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(statuslessTransport, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(authRejected, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(typedProtocolFailure, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    JSON.stringify(safeMcpTransportError(routeNotReady, { recoverySafeSetup: true })),
+  ).not.toContain("secret detail");
+});
+
 describe("structured human-input runtime boundary", () => {
   const interruption = {
     name: HUMAN_INPUT_TOOL_NAME,
@@ -5142,6 +5176,63 @@ describe("runtime event normalization", () => {
       ).rejects.toThrow();
     } finally {
       broken.close();
+    }
+  });
+
+  test("required first-party setup 404 is recoverable while an external 404 remains terminal", async () => {
+    const unavailable = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("temporary route not found", { status: 404 }),
+    });
+    const url = `http://127.0.0.1:${unavailable.port}/mcp`;
+    const workspaceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    try {
+      let firstPartyFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            opengeniMcpUrl: url,
+            mcpServers: [
+              {
+                id: "opengeni",
+                name: "OpenGeni",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "opengeni" }],
+          { workspaceId },
+        );
+      } catch (error) {
+        firstPartyFailure = error;
+      }
+      expect(firstPartyFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(firstPartyFailure)).toBe(true);
+
+      let externalFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "external-required",
+                name: "External required MCP",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "external-required" }],
+        );
+      } catch (error) {
+        externalFailure = error;
+      }
+      expect(externalFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(externalFailure)).toBe(false);
+    } finally {
+      unavailable.stop(true);
     }
   });
 

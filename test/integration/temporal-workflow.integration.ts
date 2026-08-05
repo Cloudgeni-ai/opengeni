@@ -242,6 +242,67 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "automatically re-dispatches the same turn after recoverable first-party MCP setup loss",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const turn = queuedTurn("event-1");
+      const runs: Array<{ turn: WorkflowTestTurn; attemptId: string }> = [];
+      const goalChecksAtRunCount: number[] = [];
+      const failures: unknown[] = [];
+      const delayMs = 100;
+      let firstRecoveryReturnedAt = 0;
+      let secondAttemptStartedAt = 0;
+      const admission = createTurnAdmission([turn], async (input, admittedTurn) => {
+        runs.push({ turn: admittedTurn, attemptId: input.attemptId });
+        if (runs.length === 1) {
+          firstRecoveryReturnedAt = Date.now();
+          return { status: "recovering", continueDelayMs: delayMs };
+        }
+        secondAttemptStartedAt = Date.now();
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async (input: unknown) => {
+          failures.push(input);
+        },
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        maybeContinueGoal: async () => {
+          goalChecksAtRunCount.push(runs.length);
+          return { action: "none" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId, initialEventId: turn.triggerEventId }],
+        });
+        await handle.result();
+
+        expect(runs.map((entry) => entry.turn)).toEqual([turn, turn]);
+        expect(runs[0]?.attemptId).not.toBe(runs[1]?.attemptId);
+        expect(secondAttemptStartedAt - firstRecoveryReturnedAt).toBeGreaterThanOrEqual(
+          delayMs - 25,
+        );
+        expect(goalChecksAtRunCount).toEqual([2]);
+        expect(failures).toHaveLength(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "re-dispatches the same recovering inference instead of failing the session",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
