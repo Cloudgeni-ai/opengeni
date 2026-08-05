@@ -63,7 +63,7 @@ describe("0178 permissioned secret reads migration", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       name: "Legacy wildcard API key",
-      prefix: `ope97_${suffix.slice(0, 8)}`,
+      prefix: `pk_${suffix.slice(0, 8)}`,
       keyHash: `migration-0178-${suffix}`,
       permissions: [...legacyPermissions],
     });
