@@ -3206,11 +3206,11 @@ describe("OpenGeni Slack bot connection", () => {
     );
     expect(afterRace).toMatchObject({ version: 4, verifiedInstallVersion: 4 });
     expect(afterRace?.verifiedInstallAt).toBe(before.verifiedInstallAt);
-    expect(
-      [personalRaceMetadata.documentDestination, workspaceRaceMetadata.documentDestination].map(
-        (destination) => JSON.stringify(destination),
-      ),
-    ).toContain(JSON.stringify(afterRace?.metadata.documentDestination));
+    expect(afterRace?.metadata.documentDestination).toEqual(
+      firstRace !== null
+        ? personalRaceMetadata.documentDestination
+        : workspaceRaceMetadata.documentDestination,
+    );
 
     const stale = await updateSlackBotDocumentDestination(client.db, {
       ...workspace,
