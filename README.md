@@ -193,13 +193,14 @@ For local MinIO, keep S3-compatible storage and both object-storage endpoints:
 ```bash
 OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible
 OPENGENI_OBJECT_STORAGE_ENDPOINT=http://127.0.0.1:9000
+OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=http://minio:9000
 OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://minio:9000
-OPENGENI_DOCKER_NETWORK=opengeni_default
+# Prefer unset: `bun run dev` sets OPENGENI_DOCKER_NETWORK=${COMPOSE_PROJECT_NAME}_default
 ```
 
-The first endpoint is for the host, browser, and API. The sandbox endpoint is for Docker agent containers joined to the local Compose network, where `minio:9000` resolves to the MinIO service. Presigned URLs generated for one host are not safely interchangeable with the other because the host is part of the S3 signature.
+The public endpoint is embedded in browser-facing signed URLs. The internal endpoint is used by API and worker storage requests, while the sandbox endpoint is supplied to Docker agent containers. The two private endpoints may share the same address when those processes use one Docker network. Presigned URLs generated for one host are not safely interchangeable with another because the host is part of the S3 signature.
 
-`bun run dev` auto-selects alternate Docker Compose host ports when common defaults such as `5432` are already in use, and it rewrites the in-memory runtime URLs for that run. Set `OPENGENI_*_HOST_PORT` values in `.env` when you need fixed local ports.
+`bun run dev` isolates each checkout/worktree (Compose project from the directory name, free host ports, loopback URL rewrite including `nats://`, `.env.runtime` overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless `OPENGENI_PIN_PORTS=1`.
 
 For production deployments, use the native provider object store instead of running MinIO manually:
 
@@ -334,7 +335,7 @@ OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
 
 The generated App configures `<baseUrl>/v1/github/oauth/callback` and requests **Members: read** so GitHub can expose active organization-owner membership. Existing organization installations must approve the added permission before organization-owner self-service can succeed; unavailable proof fails closed.
 
-Existing database rows created without an owner-authority receipt remain visible for audit/unlink as `unverified`, but they cannot enumerate repositories, authorize session resources, or mint installation tokens. Every new binding has a selected-repository allowlist. Session creation, repository listing, first-party GitHub token minting, and GitHub-authenticated worker turn startup recheck the workspace binding, so unlinking or narrowing it revokes queued and scheduled use before a new token is minted. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
+Existing database rows created without an owner-authority receipt remain visible for audit/unlink as `unverified`, but they cannot enumerate repositories, authorize session resources, or mint installation tokens. Every new binding has a selected-repository allowlist. Session creation, repository listing, and GitHub-authenticated worker turn startup recheck the workspace binding, so unlinking or narrowing it revokes queued and scheduled use before a new token is minted. Installation tokens remain host-owned run material: the worker writes and renews them through the sandbox credential-file boundary, and no model-visible MCP/API/SDK tool returns one. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
 
 The generated App does not register GitHub webhooks; repository listing, clone tokens, commits, pushes, and pull requests use installation access tokens.
 

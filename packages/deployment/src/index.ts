@@ -1373,6 +1373,9 @@ export function requiredRuntimeEnvVars(
   } else {
     vars.push("OPENGENI_OPENAI_API_KEY");
   }
+  if (env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
+    vars.push("OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
+  }
   if (runtimeDatabaseUrlRequired(contract)) {
     vars.push("OPENGENI_DATABASE_URL");
   }
@@ -1392,6 +1395,9 @@ export function requiredRuntimeEnvVars(
         "OPENGENI_OBJECT_STORAGE_S3_PROVIDER",
         "OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
       );
+      if (env.OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT) {
+        vars.push("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT");
+      }
     } else if (contract.objectStorage.api === "aws-s3") {
       vars.push("OPENGENI_OBJECT_STORAGE_REGION");
     } else if (contract.objectStorage.api === "azure-blob") {
@@ -2032,6 +2038,12 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_BILLING_MODE", contract.product.billingMode),
     valueEnv("OPENGENI_ENTITLEMENTS_MODE", contract.product.entitlementsMode),
     valueEnv("OPENGENI_USAGE_LIMITS_MODE", contract.product.usageLimitsMode),
+    valueEnv("OPENGENI_ANALYTICS_ENABLED", env.OPENGENI_ANALYTICS_ENABLED),
+    valueEnv("OPENGENI_ANALYTICS_CONSENT_REQUIRED", env.OPENGENI_ANALYTICS_CONSENT_REQUIRED),
+    valueEnv("OPENGENI_ANALYTICS_REO_CLIENT_ID", env.OPENGENI_ANALYTICS_REO_CLIENT_ID),
+    valueEnv("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY", env.OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY),
+    valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
+    valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" || contract.product.accessMode === "configured"
       ? [requiredEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET)]
@@ -2137,7 +2149,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_OPENAI_REASONING_EFFORT", env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low"),
     valueEnv(
       "OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS",
-      env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh",
+      env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max",
     ),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
@@ -2159,6 +2171,9 @@ function runtimeEnvValues(
           requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
         ]
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
+    ...(env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY
+      ? [requiredEnv("OPENGENI_VERCEL_AI_GATEWAY_API_KEY", env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY)]
+      : []),
   ];
 
   if (contract.objectStorage.api === "azure-blob") {
@@ -2247,6 +2262,17 @@ function runtimeEnvValues(
       valueEnv(
         "OPENGENI_OBJECT_STORAGE_S3_PROVIDER",
         env.OPENGENI_OBJECT_STORAGE_S3_PROVIDER ?? "S3Compatible",
+      ),
+    );
+  }
+  if (
+    (contract.objectStorage.api === "s3-compatible" || contract.objectStorage.api === "aws-s3") &&
+    env.OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT
+  ) {
+    entries.push(
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT",
+        env.OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT,
       ),
     );
   }
@@ -2438,7 +2464,20 @@ function addRuntimeConfigHelmValues(
     "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna";
   values["config.OPENGENI_OPENAI_REASONING_EFFORT"] = env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low";
   values["config.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"] =
-    env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh";
+    env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max";
+  for (const key of [
+    "OPENGENI_ANALYTICS_ENABLED",
+    "OPENGENI_ANALYTICS_CONSENT_REQUIRED",
+    "OPENGENI_ANALYTICS_REO_CLIENT_ID",
+    "OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY",
+    "OPENGENI_ANALYTICS_POSTHOG_HOST",
+    "OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID",
+  ] as const) {
+    const value = env[key];
+    if (value) {
+      values[`config.${key}`] = value;
+    }
+  }
   if (publicBaseUrl) {
     values["config.OPENGENI_PUBLIC_BASE_URL"] = publicBaseUrl;
     values["config.OPENGENI_WEB_ALLOWED_HOSTS"] =

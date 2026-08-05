@@ -14,6 +14,11 @@ import {
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import {
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  type EscapedMcpTimeoutRecoveryDetail,
+} from "../activities/types";
+import {
   activity,
   goalActivity,
   turnActivityForTaskQueue,
@@ -36,6 +41,7 @@ import {
 const TURNS_PER_RUN_BACKSTOP = 2_000;
 const CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP = 512;
 const HUMAN_INPUT_EXPIRY_STALE_RETRY_MS = 1_000;
+const ESCAPED_MCP_TIMEOUT_RECOVERY_DELAY_MS = 60_000;
 
 /**
  * The minimum hold for a rotation all-capped idle (`idleUntilReset`). A MANDATORY
@@ -120,6 +126,46 @@ function workerDeathFailure(
 }
 
 /**
+ * Parse only the explicit activity wire contract emitted when a recovered
+ * turn's MCP setup timeout could not finish its DB checkpoint. Numeric -32001
+ * and generic MCP messages remain deliberately insufficient: the activity
+ * writes this non-retryable ApplicationFailure only before any model request,
+ * with immutable turn identity in payload-converted details.
+ */
+export function escapedMcpTimeoutRecoveryDetail(
+  error: unknown,
+): EscapedMcpTimeoutRecoveryDetail | null {
+  if (!(error instanceof ActivityFailure) || error.activityType !== "runAgentTurn") {
+    return null;
+  }
+  const cause = error.cause;
+  if (
+    !(cause instanceof ApplicationFailure) ||
+    cause.type !== ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE ||
+    cause.message !== ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE
+  ) {
+    return null;
+  }
+  const detail = cause.details?.[0] as Partial<EscapedMcpTimeoutRecoveryDetail> | undefined;
+  if (
+    !detail ||
+    typeof detail.turnId !== "string" ||
+    detail.turnId.length === 0 ||
+    typeof detail.triggerEventId !== "string" ||
+    detail.triggerEventId.length === 0 ||
+    !Number.isSafeInteger(detail.executionGeneration) ||
+    (detail.executionGeneration ?? 0) <= 1
+  ) {
+    return null;
+  }
+  return {
+    turnId: detail.turnId,
+    triggerEventId: detail.triggerEventId,
+    executionGeneration: detail.executionGeneration!,
+  };
+}
+
+/**
  * Classify only the exact turn-fence cancellation protocol used to arbitrate a
  * database control commit that reaches the activity just before its Temporal
  * signal reaches this workflow. This shape is never physical-quiescence proof:
@@ -169,6 +215,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   // every new run records v2 and uses the activity-owned receipt contract.
   const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
+  const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -519,7 +566,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   ): Promise<boolean> {
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
     const attemptId = uuid4();
-    const interruptionBaseline = interruptionWakeups;
+    let interruptionBaseline = interruptionWakeups;
 
     const scope = new CancellationScope();
     const workflowExecution = workflowInfo();
@@ -537,39 +584,52 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         trigger,
       }),
     );
-    const racedOutcome:
+    const turnOutcome: Promise<
       | { kind: "result"; result: activities.RunAgentTurnResult }
-      | { kind: "control" }
-      | { kind: "failure"; error: unknown } = await Promise.race([
-      turn.then(
-        (result: activities.RunAgentTurnResult) => ({
-          kind: "result" as const,
-          result,
-        }),
-        (error: unknown) => ({ kind: "failure" as const, error }),
-      ),
-      condition(() => interruptionWakeups !== interruptionBaseline).then(() => ({
-        kind: "control" as const,
-      })),
-    ]);
-    // A Steer/Pause transaction fences the active attempt before its Temporal
-    // signal is necessarily handled. That fence can make the activity's typed
-    // cancellation win Promise.race by one workflow activation. Give only that
-    // confirmed cancellation shape a short deterministic arbitration window;
-    // the durable control signal is authoritative once observed. Ordinary
-    // failures and timeouts never wait here, and a cancellation with no session
-    // control still follows the failure/cancellation path below.
-    if (
-      racedOutcome.kind === "failure" &&
-      isTurnActivityFenceCancellation(racedOutcome.error) &&
-      interruptionWakeups === interruptionBaseline
-    ) {
-      await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
-    }
-    const outcome =
-      interruptionWakeups !== interruptionBaseline ? ({ kind: "control" } as const) : racedOutcome;
+      | { kind: "failure"; error: unknown }
+    > = turn.then(
+      (result: activities.RunAgentTurnResult) => ({
+        kind: "result" as const,
+        result,
+      }),
+      (error: unknown) => ({ kind: "failure" as const, error }),
+    );
+    let outcome:
+      | { kind: "result"; result: activities.RunAgentTurnResult }
+      | { kind: "failure"; error: unknown };
+    while (true) {
+      const racedOutcome:
+        | { kind: "result"; result: activities.RunAgentTurnResult }
+        | { kind: "control" }
+        | { kind: "failure"; error: unknown } = await Promise.race([
+        turnOutcome,
+        condition(() => interruptionWakeups !== interruptionBaseline).then(() => ({
+          kind: "control" as const,
+        })),
+      ]);
+      // A Steer/Pause transaction fences the active attempt before its Temporal
+      // signal is necessarily handled. That fence can make the activity's typed
+      // cancellation win Promise.race by one workflow activation. Give only that
+      // confirmed cancellation shape a short deterministic arbitration window;
+      // the durable control signal is authoritative once observed. Ordinary
+      // failures and timeouts never wait here, and a cancellation with no session
+      // control still follows the failure/cancellation path below.
+      if (
+        racedOutcome.kind === "failure" &&
+        isTurnActivityFenceCancellation(racedOutcome.error) &&
+        interruptionWakeups === interruptionBaseline
+      ) {
+        await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
+      }
+      const observedOutcome =
+        interruptionWakeups !== interruptionBaseline
+          ? ({ kind: "control" } as const)
+          : racedOutcome;
 
-    if (outcome.kind === "control") {
+      if (observedOutcome.kind !== "control") {
+        outcome = observedOutcome;
+        break;
+      }
       if (!receiptGatedCancellation) {
         // Replay-only v1 command order. New histories always take the v2 path
         // below. The current runAgentTurn still owns and writes the truthful
@@ -601,6 +661,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         if (!physicalStopConfirmed) throw termination.error;
         return settlement.action !== "paused";
       }
+      const observedInterruptionWakeups = interruptionWakeups;
       const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
@@ -608,6 +669,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
+      if (staleControlSignalIsOnlyWakeHint && settlement.action === "stale") {
+        // sessionControl is replaceable transport, not authority. Keep
+        // observing the same activity when no durable interruption exists.
+        // Preserve signals received while settlement was in flight so a real
+        // concurrent Pause/Steer is evaluated on the next loop iteration.
+        interruptionBaseline = observedInterruptionWakeups;
+        continue;
+      }
       // The transaction above is the authority fence: every late model/tool/UI
       // write is rejected from this point onward. Request cancellation only
       // after it commits, then stop observing the Temporal activity promise.
@@ -628,6 +697,30 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
         if (capacityWait) {
           await waitForCodexCapacity(capacityWait, capacityWaitEntryBaseline);
+          return true;
+        }
+      }
+      // The turn activity already classified a precise MCP request timeout,
+      // but its DB checkpoint/fanout path itself failed before any model
+      // request. Finish that exact generation-2+ recovery through the bounded
+      // control-activity lane instead of terminalizing the turn and arming a
+      // fresh goal continuation from unchanged history.
+      const escapedMcpTimeout = escapedMcpTimeoutRecoveryDetail(outcome.error);
+      if (escapedMcpTimeout) {
+        const recovery = await activity.recoverEscapedMcpTimeout({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          ...escapedMcpTimeout,
+        });
+        if (recovery.action !== "ineligible") {
+          const seenWakeups = wakeups;
+          const seenInterruptionWakeups = interruptionWakeups;
+          await condition(
+            () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
+            ESCAPED_MCP_TIMEOUT_RECOVERY_DELAY_MS,
+          );
           return true;
         }
       }

@@ -43,6 +43,7 @@ function baseSession() {
     // M2 swappable-sandbox pointer (null == use the group sandbox; epoch 0 default).
     activeSandboxId: null,
     activeEpoch: 0,
+    workingDir: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
     firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
@@ -71,6 +72,7 @@ function baseSession() {
     },
     codexPinnedCredentialId: null,
     codexLastCredentialId: null,
+    codexCompactionMode: "portable",
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
   };

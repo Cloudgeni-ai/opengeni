@@ -16,7 +16,7 @@ import type {
   WorkspaceInferenceControlRequest,
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
-import { reasoningEffortForMetadata } from "@opengeni/contracts";
+import { latencyModeForMetadata, reasoningEffortForMetadata } from "@opengeni/contracts";
 import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
@@ -184,6 +184,7 @@ async function publishAndWakeAgentCommand(
     wakeRevision: number | null;
     shouldSignal: boolean;
     interruptionCount: number;
+    controlRequested?: boolean;
   },
 ): Promise<void> {
   await publishSessionEventIds(deps, input.workspaceId, input.sessionId, input.eventIds);
@@ -195,7 +196,9 @@ async function publishAndWakeAgentCommand(
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       wakeRevision: input.wakeRevision,
-      ...(input.interruptionCount > 0 ? { interruptionRequested: true } : {}),
+      ...(input.controlRequested || input.interruptionCount > 0
+        ? { interruptionRequested: true }
+        : {}),
     });
   } catch (error) {
     console.warn(
@@ -329,6 +332,7 @@ export async function steerAgentSession(
     wakeRevision: result.wakeRevision,
     shouldSignal: result.shouldSignal,
     interruptionCount: result.interruptionCount,
+    controlRequested: true,
   });
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   return result;
@@ -401,6 +405,7 @@ function composerDraft(
     resources: row.resources as ComposerDraft["resources"],
     model: row.model,
     reasoningEffort: row.reasoningEffort as ComposerDraft["reasoningEffort"],
+    latencyMode: row.latencyMode as ComposerDraft["latencyMode"],
     sourceTurnId: row.sourceTurnId,
     sourceTurnVersion: row.sourceTurnVersion,
     updatedAt: row.updatedAt.toISOString(),
@@ -560,7 +565,7 @@ export async function steerHumanQueuePrompt(
   return response;
 }
 
-export async function controlHumanSessionWorkstream(
+export async function controlHumanSessionWorkstreamWithOutcome(
   deps: {
     db: Database;
     bus: EventBus;
@@ -569,7 +574,7 @@ export async function controlHumanSessionWorkstream(
   },
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
-): Promise<SessionControlResponse> {
+): Promise<{ response: SessionControlResponse; replay: boolean }> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
@@ -594,13 +599,24 @@ export async function controlHumanSessionWorkstream(
     ),
     interruptionCount: result.interruptionCount,
     wakeCount: result.wakeCount,
+    cancelledSessionCount: result.cancelledSessionCount,
+    cancelledTurnCount: result.cancelledTurnCount,
   };
-  await publishSessionEventIds(deps, context.workspaceId, context.sessionId, [
-    result.sessionControlEventId,
-  ]);
+  for (const affected of result.affectedSessionEvents) {
+    await publishSessionEventIds(deps, context.workspaceId, affected.sessionId, affected.eventIds);
+  }
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   await requestControlWakeDispatch(deps, result.wakeCount);
-  return response;
+  return { response, replay: result.replay };
+}
+
+/** Backward-compatible response path used by the REST control route. */
+export async function controlHumanSessionWorkstream(
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
+  context: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[1],
+  input: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[2],
+): Promise<SessionControlResponse> {
+  return (await controlHumanSessionWorkstreamWithOutcome(deps, context, input)).response;
 }
 
 export async function controlHumanWorkspace(
@@ -663,6 +679,7 @@ export async function getHumanComposerDraft(
     resources: [],
     model: session.model,
     reasoningEffort: reasoningEffortForMetadata(session.metadata, "medium"),
+    latencyMode: latencyModeForMetadata(session.metadata, "standard"),
     sourceTurnId: null,
     sourceTurnVersion: null,
     updatedAt: null,

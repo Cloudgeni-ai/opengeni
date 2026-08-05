@@ -124,6 +124,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "turn_attempt_fence",
   },
+  "packages/db/src/index.ts#recordStartedContextCompaction": {
+    inserts: 1,
+    contract: "turn_attempt_fence",
+  },
   "packages/db/src/index.ts#recordSkippedContextCompaction": {
     inserts: 1,
     contract: "turn_attempt_fence",
@@ -154,7 +158,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#initializeSessionStartAtomically": {
-    inserts: 2,
+    inserts: 3,
     contract: "canonical",
   },
   "packages/db/src/index.ts#claimSessionWorkForAttempt": {
@@ -162,7 +166,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#markSessionAttemptQuiesced": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
   },
   "packages/db/src/index.ts#settleSessionAttemptInterruptions": {
@@ -223,6 +227,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-control.ts#cancelSessionSubtreeInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
   "packages/db/src/session-queue-commands.ts#moveQueuedTurnInTransaction": {
     inserts: 1,
     contract: "canonical",
@@ -255,6 +263,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-realtime.ts#appendRealtimeLifecycleEvent": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-tool-call-settlement.ts#closePendingSessionToolCallsInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
@@ -274,6 +286,7 @@ const callerOwnedControlWriters = new Set([
 ]);
 
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
+  cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeSessionCurrentDirectionInTransaction: [
     "steerAgentSessionInTransaction",
@@ -282,6 +295,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
+    "cancelSessionSubtreeInTransaction",
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",
     "applySessionTurnSettlement",
@@ -304,6 +318,10 @@ const expectedOutboxWriters: Record<
     inserts: 1,
     contract: "owned_child_lifecycle",
   },
+  "packages/db/src/session-control.ts#enqueueCancelledChildOutboxInTransaction": {
+    inserts: 1,
+    contract: "owned_child_lifecycle",
+  },
   "packages/db/src/index.ts#getOrCreateSessionSystemUpdateOutbox": {
     inserts: 1,
     contract: "canonical_pair",
@@ -311,6 +329,7 @@ const expectedOutboxWriters: Record<
 };
 
 const expectedFailedChildOutboxCallers = ["applySessionTurnSettlement", "recoverSessionDispatch"];
+const expectedCancelledChildOutboxCallers = ["cancelSessionSubtreeInTransaction"];
 
 function productionTypeScriptFiles(): string[] {
   const files: string[] = [];
@@ -539,6 +558,7 @@ describe("session_events writer inventory", () => {
       { count: number; sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }
     >();
     const failedChildOutboxCallers = new Set<string>();
+    const cancelledChildOutboxCallers = new Set<string>();
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
@@ -590,6 +610,9 @@ describe("session_events writer inventory", () => {
           }
           if (called === "enqueueFailedChildOutboxForTurnTx" && enclosing) {
             failedChildOutboxCallers.add(enclosing.name);
+          }
+          if (called === "enqueueCancelledChildOutboxInTransaction" && enclosing) {
+            cancelledChildOutboxCallers.add(enclosing.name);
           }
         }
         if (isTaggedTemplateExpression(node)) {
@@ -690,6 +713,9 @@ describe("session_events writer inventory", () => {
     expect([...failedChildOutboxCallers].sort()).toEqual(
       [...expectedFailedChildOutboxCallers].sort(),
     );
+    expect([...cancelledChildOutboxCallers].sort()).toEqual(
+      [...expectedCancelledChildOutboxCallers].sort(),
+    );
     for (const [key, expected] of Object.entries(expectedOutboxWriters)) {
       const writer = outboxWriters.get(key)!;
       if (expected.contract === "child_lifecycle") {
@@ -715,6 +741,15 @@ describe("session_events writer inventory", () => {
       expect(functionCalls(callerNode, "retryWorkspacePersistence")).toBe(true);
       const firstLock = callPositions(callerNode, "lockChildLifecycleOutboxWriteRowsTx")[0];
       const enqueue = callPositions(callerNode, "enqueueFailedChildOutboxForTurnTx")[0];
+      expect(firstLock).toBeLessThan(enqueue!);
+    }
+    for (const caller of expectedCancelledChildOutboxCallers) {
+      const definitions = functionDefinitions.get(caller) ?? [];
+      expect(definitions).toHaveLength(1);
+      const callerNode = definitions[0]!.functionNode;
+      expect(functionCalls(callerNode, "lockSessionEventWriteRows")).toBe(true);
+      const firstLock = callPositions(callerNode, "lockSessionEventWriteRows")[0];
+      const enqueue = callPositions(callerNode, "enqueueCancelledChildOutboxInTransaction")[0];
       expect(firstLock).toBeLessThan(enqueue!);
     }
 

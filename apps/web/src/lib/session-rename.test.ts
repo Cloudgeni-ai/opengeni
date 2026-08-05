@@ -40,6 +40,7 @@ function session(patch: Partial<Session> = {}): Session {
     createdByContext: {},
     model: "scripted-model",
     sandboxBackend: "none",
+    workingDir: null,
     sandboxOs: "linux",
     sandboxGroupId: "session-1",
     activeSandboxId: null,
@@ -68,6 +69,7 @@ function session(patch: Partial<Session> = {}): Session {
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
     ...patch,
+    policyRole: patch.policyRole ?? null,
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
@@ -83,6 +85,7 @@ function session(patch: Partial<Session> = {}): Session {
       override: null,
       settlement: null,
     },
+    codexCompactionMode: patch.codexCompactionMode ?? "portable",
   };
 }
 

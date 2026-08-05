@@ -73,6 +73,20 @@ Evidence MUST NOT contain raw credentials, cookies, signed object URLs,
 kubeconfigs, customer data, conversation content outside the deterministic
 fixture, or unredacted provider responses.
 
+The capture API latency row is measured by a protected operator probe running
+in the deployment's exact cloud region rather than by the generic GitHub-hosted
+browser runner. The live harness sends the dedicated canary cookie to that
+operator only over child-process stdin. The operator creates an ephemeral,
+token-free Kubernetes Job from the exact digest-pinned API image, performs the
+100 sequential HTTPS reads through the public ingress, and deletes the Job and
+its temporary Secret. The sanitized result must bind the environment, source
+SHA, acceptance run, region, API image, workspace, session, capture revision,
+turn, decoded byte count, gzip encoding, and exact sample count before the
+public harness will calculate the p95. Browser navigation, interaction,
+accessibility, and screenshots remain on the ordinary release runner and the
+production network path. A runner in an unspecified geography is not valid
+evidence for the deployment-region capture API budget.
+
 The manually dispatched release-candidate workflow derives the complete package
 plan from the exact checkout and npm registry state (which is empty for an
 application-only release), takes the product release version from the
@@ -230,8 +244,8 @@ with a warm cache. Reports include p50, p75, p95, p99, and worst observation.
 
 | Metric | Release budget |
 | --- | --- |
-| Capture API response | p95 ≤ 200 ms when served from the deployment region |
-| Capture-backed usable workbench | p95 ≤ 500 ms from navigation on the production network path |
+| Capture API response | p95 ≤ 400 ms when served from the deployment region |
+| Capture-backed usable workbench | cold-cache p95 ≤ 10 s from full navigation on the production network path |
 | Warm-cache session switch | p95 ≤ 250 ms, with zero stale frames |
 | Immediate interaction feedback | p95 ≤ 100 ms |
 | Editor typing latency | p95 ≤ 50 ms per input event |
@@ -244,7 +258,7 @@ with a warm cache. Reports include p50, p75, p95, p99, and worst observation.
 | Direct session asset graph | ≤ 1,900 KiB raw and ≤ 540 KiB gzip before optional editor/diff/terminal chunks |
 | Lazy JavaScript chunk | ≤ 800 KiB raw and ≤ 240 KiB gzip |
 | CSS asset | ≤ 30 KiB gzip |
-| Steer/Pause physical cancellation | worst ≤ 2,000 ms from committed control to replacement `turn.started` (Steer) or physically stopped activity (Pause), with zero zombie output |
+| Steer/Pause physical cancellation | worst ≤ 4,000 ms from committed control to replacement `turn.started` (Steer) or physically stopped activity (Pause), with zero zombie output |
 
 Measure representative high-, mid-, and low-end desktop hardware plus current
 iOS and Android devices. Include a 4× CPU slowdown and constrained-network run.

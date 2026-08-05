@@ -28,27 +28,48 @@ import {
   capabilityReconnectPlan,
   capabilitySourceLabel,
   curatedSkillProvenance,
+  preferredSocialConnection,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
 import { focusCapabilitySuccessor } from "@/lib/capability-focus";
 import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem } from "@/types";
+import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
-  | { type: "oauth"; item: CapabilityCatalogItem }
-  | { type: "api_key"; item: CapabilityCatalogItem; headers: Record<string, string> }
+  | {
+      type: "social_oauth";
+      item: CapabilityCatalogItem;
+      provider: "x" | "reddit";
+      ownership: ConnectionOwnership;
+    }
+  | { type: "disconnect_social"; item: CapabilityCatalogItem; connectionId: string }
+  | { type: "oauth"; item: CapabilityCatalogItem; ownership: ConnectionOwnership }
+  | {
+      type: "api_key";
+      item: CapabilityCatalogItem;
+      ownership: ConnectionOwnership;
+      headers: Record<string, string>;
+    }
   // connectionId is the existing row to reuse, or null when the row was deleted
   // (reconnect then mints a fresh connection and re-enables with its ref).
-  | { type: "reconnect_oauth"; item: CapabilityCatalogItem; connectionId: string | null }
+  | {
+      type: "reconnect_oauth";
+      item: CapabilityCatalogItem;
+      connectionId: string | null;
+      ownership: ConnectionOwnership;
+    }
   | {
       type: "reconnect_api_key";
       item: CapabilityCatalogItem;
       connectionId: string | null;
+      ownership: ConnectionOwnership;
       headers: Record<string, string>;
     }
   | { type: "disable"; item: CapabilityCatalogItem };
+
+export const DEFAULT_CONNECTION_OWNERSHIP: ConnectionOwnership = "workspace";
 
 export function CapabilityDetailSheet({
   item,
@@ -60,6 +81,8 @@ export function CapabilityDetailSheet({
   restoreFocusFallbackRef,
   busy,
   errorMessage,
+  socialConnections,
+  canManageSocial = false,
   onAction,
 }: {
   item: CapabilityCatalogItem | null;
@@ -71,6 +94,8 @@ export function CapabilityDetailSheet({
   restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
   busy: boolean;
   errorMessage: string | null;
+  socialConnections?: SocialConnection[];
+  canManageSocial?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const localRestoreFocusRef = useRef<HTMLElement | null>(null);
@@ -134,6 +159,8 @@ export function CapabilityDetailSheet({
             logoSrc={logoSrc}
             busy={busy}
             errorMessage={errorMessage}
+            socialConnections={socialConnections}
+            canManageSocial={canManageSocial}
             onAction={onAction}
           />
         ) : null}
@@ -148,6 +175,8 @@ function DetailBody({
   logoSrc,
   busy,
   errorMessage,
+  socialConnections,
+  canManageSocial,
   onAction,
 }: {
   item: CapabilityCatalogItem;
@@ -155,12 +184,18 @@ function DetailBody({
   logoSrc: string | null;
   busy: boolean;
   errorMessage: string | null;
+  socialConnections?: SocialConnection[];
+  canManageSocial: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
   // API-key reconnect reveals the credential form in place of the button.
   const [reconnecting, setReconnecting] = useState(false);
   useEffect(() => setReconnecting(false), [item.id]);
+  const [connectionOwnership, setConnectionOwnership] = useState<ConnectionOwnership>(
+    DEFAULT_CONNECTION_OWNERSHIP,
+  );
+  useEffect(() => setConnectionOwnership(DEFAULT_CONNECTION_OWNERSHIP), [item.id]);
 
   const canDisable = item.enabled && item.source !== "built_in" && item.source !== "configured";
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
@@ -237,9 +272,20 @@ function DetailBody({
         <div className="space-y-3 border-t border-border pt-5">
           {errorMessage ? <Notice tone="failed">{errorMessage}</Notice> : null}
 
-          {item.enabled ? (
+          {plan.mode === "social_oauth" ? (
+            <SocialConnectorControls
+              item={item}
+              provider={plan.provider}
+              connections={socialConnections ?? []}
+              ownership={connectionOwnership}
+              onOwnershipChange={setConnectionOwnership}
+              busy={busy}
+              canManage={canManageSocial}
+              onAction={onAction}
+            />
+          ) : item.enabled ? (
             <div className="space-y-3">
-              <ConnectionStatus health={health} />
+              <ConnectionStatus item={item} health={health} />
               {/* Reconnect is the primary repair action when the connection broke;
                 Disable drops to secondary. Healthy items show only Disable. */}
               {reconnect ? (
@@ -253,6 +299,7 @@ function DetailBody({
                         type: "reconnect_oauth",
                         item,
                         connectionId: reconnect.connectionId,
+                        ownership: reconnect.ownership,
                       })
                     }
                   >
@@ -272,6 +319,7 @@ function DetailBody({
                         type: "reconnect_api_key",
                         item,
                         connectionId: reconnect.connectionId,
+                        ownership: reconnect.ownership,
                         headers: next,
                       })
                     }
@@ -304,30 +352,47 @@ function DetailBody({
               )}
             </div>
           ) : plan.mode === "api_key" ? (
-            <CredentialForm
-              fields={plan.fields}
-              itemName={item.name}
-              keyPageUrl={keyPageUrl}
-              submitLabel={`Connect ${item.name}`}
-              submitIcon={<PlugIcon />}
-              busy={busy}
-              onSubmit={(next) => onAction({ type: "api_key", item, headers: next })}
-            />
+            <div className="space-y-3">
+              <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              <CredentialForm
+                fields={plan.fields}
+                itemName={item.name}
+                keyPageUrl={keyPageUrl}
+                submitLabel={
+                  connectionOwnership === "workspace"
+                    ? "Connect for workspace"
+                    : "Connect only for me"
+                }
+                submitIcon={<PlugIcon />}
+                busy={busy}
+                onSubmit={(next) =>
+                  onAction({
+                    type: "api_key",
+                    item,
+                    ownership: connectionOwnership,
+                    headers: next,
+                  })
+                }
+              />
+            </div>
           ) : plan.mode === "oauth" ? (
-            <div className="space-y-2">
+            <div className="space-y-3">
+              <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
               <Button
                 type="button"
                 className="w-full"
                 disabled={busy}
-                onClick={() => onAction({ type: "oauth", item })}
+                onClick={() => onAction({ type: "oauth", item, ownership: connectionOwnership })}
               >
                 {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-                Connect {item.name}
+                {connectionOwnership === "workspace"
+                  ? "Connect for workspace"
+                  : "Connect only for me"}
               </Button>
               <p className="text-center text-xs text-fg-subtle">
-                {plan.providerDomain === "slack.com"
-                  ? "Authorize your own Slack account. Messages are sent as you using @OpenGeni."
-                  : `You'll authorize ${item.name} in a new step, then return here.`}
+                {connectionOwnership === "workspace"
+                  ? `You'll authorize ${item.name} once for this workspace. Provider actions may appear as the account you connect.`
+                  : `You'll authorize ${item.name} for your personal use, then return here.`}
               </p>
             </div>
           ) : (
@@ -349,6 +414,147 @@ function DetailBody({
         </div>
       </div>
     </div>
+  );
+}
+
+export function SocialConnectorControls({
+  item,
+  provider,
+  connections,
+  ownership,
+  onOwnershipChange,
+  busy,
+  canManage,
+  onAction,
+}: {
+  item: CapabilityCatalogItem;
+  provider: "x" | "reddit";
+  connections: SocialConnection[];
+  ownership: ConnectionOwnership;
+  onOwnershipChange: (ownership: ConnectionOwnership) => void;
+  busy: boolean;
+  canManage: boolean;
+  onAction: (action: ConnectAction) => void;
+}) {
+  const connection = preferredSocialConnection(
+    connections.filter((candidate) => candidate.ownership === ownership),
+    provider,
+  );
+  const canConnect = ownership === "personal" || canManage;
+  return (
+    <div className="space-y-3">
+      <OwnershipSelector value={ownership} onChange={onOwnershipChange} />
+      {connection ? (
+        <Notice tone={connection.status === "connected" ? "success" : "waiting"}>
+          <span className="font-medium">
+            {connection.status === "connected"
+              ? `Connected as @${connection.accountHandle}`
+              : connection.status === "needs_reauth"
+                ? `@${connection.accountHandle} needs to reconnect`
+                : `@${connection.accountHandle} is disconnected`}
+          </span>
+        </Notice>
+      ) : null}
+      <Button
+        type="button"
+        className="w-full"
+        disabled={busy || !canConnect}
+        onClick={() => onAction({ type: "social_oauth", item, provider, ownership })}
+      >
+        {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
+        {connection && connection.status !== "disabled"
+          ? `Reconnect ${item.name}`
+          : ownership === "workspace"
+            ? `Connect ${item.name} for workspace`
+            : `Connect ${item.name} only for me`}
+      </Button>
+      <p className="text-center text-xs text-fg-subtle">
+        {ownership === "workspace"
+          ? "Workspace shared. Agents and scheduled automations can use the connected account; connect a brand account rather than a personal one."
+          : "Personal. Used only by work carrying your explicit connection authority, including tasks you create from that authority."}
+      </p>
+      {connection?.status === "connected" ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          disabled={busy || !canConnect}
+          onClick={() => onAction({ type: "disconnect_social", item, connectionId: connection.id })}
+        >
+          <TrashIcon />
+          Disconnect
+        </Button>
+      ) : null}
+      {ownership === "workspace" && !canManage ? (
+        <p className="text-center text-xs text-fg-subtle">
+          Workspace admin permission is required to manage this connection.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function OwnershipSelector({
+  value,
+  onChange,
+}: {
+  value: ConnectionOwnership;
+  onChange: (value: ConnectionOwnership) => void;
+}) {
+  return (
+    <fieldset className="space-y-2">
+      <legend className="text-xs font-medium text-fg-muted">Who can use this connection?</legend>
+      <OwnershipOption
+        checked={value === "workspace"}
+        value="workspace"
+        title="Connect for workspace"
+        description="Shared with agents and automations in this workspace."
+        onChange={() => onChange("workspace")}
+      />
+      <OwnershipOption
+        checked={value === "personal"}
+        value="personal"
+        title="Connect only for me"
+        description="Used only when work is authorized to act as you."
+        onChange={() => onChange("personal")}
+      />
+    </fieldset>
+  );
+}
+
+function OwnershipOption({
+  checked,
+  value,
+  title,
+  description,
+  onChange,
+}: {
+  checked: boolean;
+  value: ConnectionOwnership;
+  title: string;
+  description: string;
+  onChange: () => void;
+}) {
+  return (
+    <label
+      className={cn(
+        "flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors",
+        checked ? "border-brand bg-brand/5" : "border-border bg-bg hover:bg-surface",
+      )}
+    >
+      <input
+        type="radio"
+        name="connection-ownership"
+        value={value}
+        checked={checked}
+        onChange={onChange}
+        className="mt-0.5 size-4 accent-current"
+      />
+      <span className="min-w-0">
+        <span className="block text-sm font-medium text-fg">{title}</span>
+        <span className="mt-0.5 block text-xs leading-5 text-fg-subtle">{description}</span>
+      </span>
+    </label>
   );
 }
 
@@ -490,7 +696,13 @@ function CredentialForm({
   );
 }
 
-function ConnectionStatus({ health }: { health: ConnectionHealth }) {
+export function ConnectionStatus({
+  item,
+  health,
+}: {
+  item: CapabilityCatalogItem;
+  health: ConnectionHealth;
+}) {
   // "none" = enabled without a connection (headers-enabled or credential-free);
   // "unverified" = it has a connection but the connections list didn't load, so we
   // can't check it. Both render a neutral "Enabled" — honest, and never a false
@@ -504,6 +716,9 @@ function ConnectionStatus({ health }: { health: ConnectionHealth }) {
     );
   }
   const attention = health.state === "attention";
+  const personal =
+    item.connectionRef?.subjectScope === "subject" ||
+    (health.connection ? health.connection.subjectId !== null : false);
   return (
     <div className="space-y-1">
       <div
@@ -519,8 +734,10 @@ function ConnectionStatus({ health }: { health: ConnectionHealth }) {
       </div>
       <p className="text-xs text-fg-subtle">
         {attention
-          ? "Reconnect to restore access."
-          : `Connected to ${health.connection.providerDomain}.`}
+          ? `${personal ? "Personal" : "Workspace"} connection needs to be reconnected.`
+          : personal
+            ? `Personal connection to ${health.connection.providerDomain}. Automations use it only when explicitly delegated.`
+            : `Workspace connection to ${health.connection.providerDomain}. Shared with agents and automations here.`}
       </p>
     </div>
   );

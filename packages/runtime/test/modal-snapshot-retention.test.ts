@@ -1,6 +1,18 @@
-import { describe, expect, mock, test } from "bun:test";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, mock, spyOn, test } from "bun:test";
+import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
+import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import { testSettings } from "@opengeni/testing";
 import { ModalClient } from "modal";
-import { installOpenGeniModalSnapshotPolicy } from "../src/sandbox/providers/modal";
+import {
+  OpenGeniModalSandboxClient,
+  installOpenGeniModalSnapshotPolicy,
+  isModalExecAlreadyCompletedError,
+  modalProvider,
+} from "../src/sandbox/providers/modal";
+import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 
@@ -35,6 +47,45 @@ function fakeSession(
   return session;
 }
 
+function modalExecResponse(output: string, exitCode: number): string {
+  return [
+    "Chunk ID: modal-test",
+    "Wall time: 0.0001 seconds",
+    `Process exited with code ${exitCode}`,
+    "Output:",
+    output,
+  ].join("\n");
+}
+
+function fakeModalFilesystemSession(root: string) {
+  const read = async ({ path, maxBytes }: { path: string; maxBytes?: number }) => {
+    const bytes = new Uint8Array(await readFile(path.startsWith("/") ? path : join(root, path)));
+    return typeof maxBytes === "number" ? bytes.subarray(0, maxBytes) : bytes;
+  };
+  const session = Object.assign(fakeSession("tar"), {
+    state: {
+      ...fakeSession("tar").state,
+      manifest: new Manifest({ root }),
+    },
+    readFile: read,
+    execCommand: async ({ cmd }: { cmd: string }) => {
+      const child = Bun.spawn(["/bin/bash", "--noprofile", "--norc", "-c", cmd], {
+        cwd: root,
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      return modalExecResponse(`${stdout}${stderr}`, exitCode);
+    },
+  });
+  return { session, read };
+}
+
 describe("OpenGeni Modal 0.9 snapshot policy", () => {
   test("the runtime resolves the exact supported Modal SDK", () => {
     const modal = new ModalClient({
@@ -60,6 +111,43 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       timeoutMs: 120_000,
       ttlMs: null,
     });
+  });
+
+  test("current configuration replaces a legacy resume-envelope snapshot timeout", async () => {
+    const resumed = fakeSession("snapshot_filesystem", {
+      snapshotFilesystem: async () => ({ imageId: "im-resumed" }),
+    });
+    const resume = spyOn(ModalSandboxClient.prototype, "resume").mockResolvedValue(
+      resumed as never,
+    );
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalAppName: "opengeni-test",
+      modalTokenId: "test-token-id",
+      modalTokenSecret: "test-token-secret",
+      sandboxSnapshotTimeoutMs: 600_000,
+    });
+    const client = modalProvider.build({
+      settings,
+      environment: {},
+      exposedPorts: [],
+    }) as OpenGeniModalSandboxClient;
+    const legacyState = {
+      snapshotFilesystemTimeoutMs: 60_000,
+      durableIdentity: "preserve-me",
+    };
+
+    try {
+      await client.resume(legacyState as never);
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(resume.mock.calls[0]?.[0]).toEqual({
+        snapshotFilesystemTimeoutMs: 600_000,
+        durableIdentity: "preserve-me",
+      });
+      expect(legacyState.snapshotFilesystemTimeoutMs).toBe(60_000);
+    } finally {
+      resume.mockRestore();
+    }
   });
 
   test("passes snapshot_directory timeout and disables provider expiry", async () => {
@@ -110,6 +198,144 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     await session.persistWorkspace();
 
     expect(originalPersistWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  test("adds the missing directory capability required by workspace skill discovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-modal-skills-"));
+    try {
+      const { session, read } = fakeModalFilesystemSession(root);
+      const searchPaths = [{ path: ".agents/skills", source: ".agents/skills" }];
+
+      await expect(
+        discoverWorkspaceSkills(session as unknown as SandboxSessionLike, searchPaths),
+      ).rejects.toThrow(
+        "Workspace skill discovery requires sandbox listDir() and readFile() support",
+      );
+
+      installOpenGeniModalSnapshotPolicy(session);
+      expect(session.readFile).toBe(read);
+      expect(typeof (session as unknown as SandboxSessionLike).listDir).toBe("function");
+      await mkdir(join(root, ".agents/skills"), { recursive: true });
+      const listDir = (session as unknown as Required<Pick<SandboxSessionLike, "listDir">>).listDir;
+      await expect(listDir({ path: join(root, ".agents/skills") })).resolves.toEqual([]);
+      await expect(listDir({ path: join(tmpdir(), "outside-workspace") })).rejects.toThrow(
+        "outside the workspace root",
+      );
+      await expect(
+        discoverWorkspaceSkills(session as unknown as SandboxSessionLike, searchPaths),
+      ).resolves.toEqual([]);
+
+      await mkdir(join(root, ".agents/skills/release"), { recursive: true });
+      await writeFile(
+        join(root, ".agents/skills/release/SKILL.md"),
+        "---\nname: release\ndescription: Prepare a safe release.\n---\n",
+      );
+      await expect(
+        discoverWorkspaceSkills(session as unknown as SandboxSessionLike, searchPaths),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          name: "release",
+          description: "Prepare a safe release.",
+          path: ".agents/skills/release/SKILL.md",
+        }),
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves a provider-native listDir implementation", () => {
+    const listDir = mock(async () => []);
+    const session = Object.assign(fakeSession("tar"), { listDir });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    expect(session.listDir).toBe(listDir);
+  });
+
+  test("turns Modal's exact completed-exec stdin race into an ordinary terminal poll", async () => {
+    const terminal = [
+      "Chunk ID: terminal",
+      "Wall time: 0.001 seconds",
+      "Process exited with code 0",
+      "Output:",
+      "done",
+    ].join("\n");
+    const writeStdin = mock(async (args: { sessionId: number; chars?: string }) => {
+      if (args.chars) {
+        throw Object.assign(new Error("typed Modal completion"), {
+          name: "ClientError",
+          path: "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite",
+          code: 9,
+          details:
+            "Exec has already completed; stdin is no longer accepting writes (Error code: 55IXOOXA)",
+        });
+      }
+      return terminal;
+    });
+    const session = Object.assign(fakeSession("tar"), { writeStdin });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.writeStdin({ sessionId: 7, chars: "input" })).resolves.toBe(terminal);
+    expect(writeStdin.mock.calls).toEqual([
+      [{ sessionId: 7, chars: "input" }],
+      [{ sessionId: 7, chars: "" }],
+    ]);
+  });
+
+  test("falls back to the exact lost-session result after typed completion cleanup fails", async () => {
+    let call = 0;
+    const writeStdin = mock(async () => {
+      call += 1;
+      if (call === 1) {
+        throw Object.assign(new Error("typed Modal completion"), {
+          name: "ClientError",
+          path: "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite",
+          code: 9,
+          details: "Exec has already completed; stdin is no longer accepting writes",
+        });
+      }
+      throw new Error("cleanup transport failed");
+    });
+    const session = Object.assign(fakeSession("tar"), { writeStdin });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.writeStdin({ sessionId: 11, chars: "input" })).resolves.toBe(
+      "write_stdin failed: session not found: 11",
+    );
+  });
+
+  test("does not reinterpret other Modal or untyped stdin failures as terminal proof", async () => {
+    const exact = {
+      name: "ClientError",
+      path: "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite",
+      code: 9,
+      details: "Exec has already completed; stdin is no longer accepting writes",
+    };
+    expect(isModalExecAlreadyCompletedError(exact)).toBe(true);
+    expect(isModalExecAlreadyCompletedError({ ...exact, code: 14 })).toBe(false);
+    expect(isModalExecAlreadyCompletedError({ ...exact, path: "/other/TaskExecStdinWrite" })).toBe(
+      false,
+    );
+    expect(isModalExecAlreadyCompletedError({ ...exact, details: "Sandbox is paused" })).toBe(
+      false,
+    );
+    expect(isModalExecAlreadyCompletedError(new Error(exact.details))).toBe(false);
+
+    const failure = Object.assign(new Error("wrong Modal precondition"), {
+      ...exact,
+      details: "The exec does not expose stdin",
+    });
+    const writeStdin = mock(async () => {
+      throw failure;
+    });
+    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.writeStdin({ sessionId: 13, chars: "input" })).rejects.toBe(failure);
+    expect(writeStdin).toHaveBeenCalledTimes(1);
   });
 
   test("fails closed on an unsupported SDK or native session shape", () => {

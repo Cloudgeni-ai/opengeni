@@ -13,6 +13,7 @@ type WorkflowControlActivities = Pick<
   | "reconcileSessionAttemptQuiescence"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
+  | "recoverEscapedMcpTimeout"
   | "settleSessionInterruptions"
 >;
 

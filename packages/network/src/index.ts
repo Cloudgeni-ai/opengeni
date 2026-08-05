@@ -1,6 +1,6 @@
 // The explicit entrypoint avoids Bun's native `undici` compatibility shim,
 // which exposes an Agent-shaped object without Dispatcher methods.
-import { Agent, fetch as undiciFetchImpl } from "undici/index.js";
+import { Agent, fetch as undiciFetchImpl, request as undiciRequestImpl } from "undici/index.js";
 import { lookup as nodeLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
@@ -38,6 +38,8 @@ export type PinnedFetchOptions = {
   label?: string;
   requireHttpsOutsideLocalTest?: boolean;
 };
+
+const DISPATCHER_CLOSE_TIMEOUT_MS = 100;
 
 export const OAUTH_MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -93,6 +95,18 @@ export class ResponseBodyLimitError extends Error {
   }
 }
 
+/** Raised when a caller-supplied absolute request deadline expires. */
+export class RequestDeadlineError extends Error {
+  constructor(readonly label: string) {
+    super(`${label} timed out`);
+    this.name = "RequestDeadlineError";
+  }
+}
+
+export type BoundedResponseReadOptions = {
+  signal?: AbortSignal;
+};
+
 /**
  * Read a response through its stream with a hard byte ceiling.
  *
@@ -105,6 +119,7 @@ export async function readResponseBodyBounded(
   response: Response,
   maxBytes: number,
   label: string,
+  options: BoundedResponseReadOptions = {},
 ): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new RangeError("response body limit must be a non-negative safe integer");
@@ -131,7 +146,7 @@ export async function readResponseBodyBounded(
   let receivedBytes = 0;
   try {
     for (;;) {
-      const result = await reader.read();
+      const result = await readStreamChunk(reader, options.signal, label);
       if (result.done) {
         break;
       }
@@ -143,10 +158,15 @@ export async function readResponseBodyBounded(
       chunks.push(result.value);
     }
   } catch (error) {
-    await reader.cancel().catch(() => undefined);
+    void reader.cancel(error).catch(() => undefined);
     throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // An aborted read may still own the lock until the underlying transport
+      // observes cancellation. The response is already being cancelled above.
+    }
   }
 
   const body = new Uint8Array(receivedBytes);
@@ -162,16 +182,52 @@ export async function readResponseTextBounded(
   response: Response,
   maxBytes: number,
   label: string,
+  options: BoundedResponseReadOptions = {},
 ): Promise<string> {
-  return new TextDecoder().decode(await readResponseBodyBounded(response, maxBytes, label));
+  return new TextDecoder().decode(
+    await readResponseBodyBounded(response, maxBytes, label, options),
+  );
 }
 
 export async function readResponseJsonBounded<T = unknown>(
   response: Response,
   maxBytes: number,
   label: string,
+  options: BoundedResponseReadOptions = {},
 ): Promise<T> {
-  return JSON.parse(await readResponseTextBounded(response, maxBytes, label)) as T;
+  return JSON.parse(await readResponseTextBounded(response, maxBytes, label, options)) as T;
+}
+
+type ResponseStreamReadResult = Awaited<
+  ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
+>;
+
+async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined,
+  label: string,
+): Promise<ResponseStreamReadResult> {
+  if (!signal) return await reader.read();
+  if (signal.aborted) throw new RequestDeadlineError(label);
+  return await new Promise<ResponseStreamReadResult>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      const error = new RequestDeadlineError(label);
+      void reader.cancel(error).catch(() => undefined);
+      finish(() => reject(error));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void reader.read().then(
+      (result) => finish(() => resolve(result)),
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 export type ResolvePinnedDestinationOptions = {
@@ -206,6 +262,91 @@ const defaultDnsLookup: DnsLookup = async (hostname) => {
 
 const defaultFetch: FetchLike = (input, init) =>
   (undiciFetchImpl as unknown as FetchLike)(input, init);
+
+const pinnedRequestFetch: FetchLike = async (input, init) => {
+  const source = input instanceof Request ? input : null;
+  const url = source?.url ?? input.toString();
+  const method = init?.method ?? source?.method ?? "GET";
+  const headers = new Headers(source?.headers);
+  if (init?.headers) {
+    new Headers(init.headers).forEach((value, name) => headers.set(name, value));
+  }
+  // Undici request() deliberately does not auto-decompress. Asking providers
+  // for identity encoding keeps the returned web Response body truthful.
+  if (!headers.has("accept-encoding")) headers.set("accept-encoding", "identity");
+  const rawBody = init?.body ?? (method !== "GET" && method !== "HEAD" ? source?.body : undefined);
+  const body = await normalizeUndiciRequestBody(rawBody, headers);
+  const dispatcher = (init as (RequestInit & { dispatcher?: unknown }) | undefined)?.dispatcher;
+  const result = await undiciRequestImpl(url, {
+    method: method as never,
+    headers,
+    ...(body !== undefined && body !== null ? { body: body as never } : {}),
+    ...(init?.signal ? { signal: init.signal } : source?.signal ? { signal: source.signal } : {}),
+    ...(dispatcher ? { dispatcher: dispatcher as never } : {}),
+    maxRedirections: 0,
+  });
+  const iterator = result.body[Symbol.asyncIterator]();
+  const responseBody = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const chunk = await iterator.next();
+        if (chunk.done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(
+          chunk.value instanceof Uint8Array ? chunk.value : new Uint8Array(chunk.value),
+        );
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      result.body.destroy(reason instanceof Error ? reason : undefined);
+      await iterator.return?.();
+    },
+  });
+  const responseHeaders = new Headers();
+  for (const [name, value] of Object.entries(result.headers)) {
+    if (Array.isArray(value)) {
+      for (const entry of value) responseHeaders.append(name, entry);
+    } else if (value !== undefined) {
+      responseHeaders.set(name, value);
+    }
+  }
+  const response = new Response(responseBody, {
+    status: result.statusCode,
+    headers: responseHeaders,
+  });
+  Object.defineProperty(response, "url", { value: url });
+  return response;
+};
+
+/**
+ * Preserve Fetch BodyInit semantics for values that Undici request() does not
+ * normalize itself. URLSearchParams is otherwise mistaken for an iterable of
+ * body chunks and each [name, value] tuple reaches the socket as an Array.
+ */
+async function normalizeUndiciRequestBody(
+  body: BodyInit | null | undefined,
+  headers: Headers,
+): Promise<BodyInit | Uint8Array | null | undefined> {
+  if (body instanceof URLSearchParams) {
+    if (!headers.has("content-type")) {
+      headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
+    }
+    return body.toString();
+  }
+  if (body instanceof Blob) {
+    if (body.type && !headers.has("content-type")) headers.set("content-type", body.type);
+    return new Uint8Array(await body.arrayBuffer());
+  }
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (ArrayBuffer.isView(body)) {
+    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  }
+  return body;
+}
 
 /** Undici fetch used by the pinned transport; Bun callers should prefer this over native fetch. */
 export const undiciFetch: FetchLike = defaultFetch;
@@ -286,8 +427,8 @@ export async function resolvePinnedDestination(
 
 /**
  * Fetch through a dispatcher whose lookup is pinned to the result of exactly
- * one policy resolution. The response body owns the agent until completion,
- * cancellation, or stream failure.
+ * one policy resolution. The response body owns the one-shot agent until
+ * completion, cancellation, or stream failure.
  */
 export async function pinnedFetch(
   input: string | URL | Request,
@@ -299,7 +440,7 @@ export async function pinnedFetch(
   const destination = await resolvePinnedDestination(rawUrl, settings, options);
   const dispatcher =
     options.agentFactory?.(destination.addresses) ?? createPinnedAgent(destination.addresses);
-  const fetchImpl = options.fetchImpl ?? defaultFetch;
+  const fetchImpl = options.fetchImpl ?? pinnedRequestFetch;
   const fetchInit = {
     ...init,
     redirect: "manual" as const,
@@ -313,10 +454,10 @@ export async function pinnedFetch(
     throw error;
   }
   if (!response.body) {
-    await closeDispatcher(dispatcher);
+    await closeDispatcher(dispatcher, DISPATCHER_CLOSE_TIMEOUT_MS);
     return response;
   }
-  return responseWithDispatcherLifecycle(response, dispatcher);
+  return responseWithDispatcherLifecycle(response, dispatcher, DISPATCHER_CLOSE_TIMEOUT_MS);
 }
 
 export function isLocalTestEnvironment(environment: string): boolean {
@@ -390,7 +531,10 @@ function createPinnedAgent(addresses: readonly DnsAddress[]): DispatcherLifecycl
         if (options.all) {
           callback(
             null,
-            candidates.map((entry) => ({ address: entry.address, family: entry.family })),
+            candidates.map((entry) => ({
+              address: entry.address,
+              family: entry.family,
+            })),
           );
           return;
         }
@@ -413,13 +557,22 @@ function createPinnedAgent(addresses: readonly DnsAddress[]): DispatcherLifecycl
 function responseWithDispatcherLifecycle(
   response: Response,
   dispatcher: DispatcherLifecycle,
+  closeTimeoutMs: number,
 ): Response {
   const reader = response.body!.getReader();
+  let readerReleased = false;
+  const releaseReader = () => {
+    if (readerReleased) return;
+    readerReleased = true;
+    reader.releaseLock();
+  };
   let disposed: Promise<void> | null = null;
   let cancelled = false;
   const finish = (destroy: boolean, error?: unknown): Promise<void> => {
     if (!disposed) {
-      disposed = destroy ? destroyDispatcher(dispatcher, error) : closeDispatcher(dispatcher);
+      disposed = destroy
+        ? destroyDispatcher(dispatcher, error)
+        : closeDispatcher(dispatcher, closeTimeoutMs);
     }
     return disposed;
   };
@@ -428,12 +581,17 @@ function responseWithDispatcherLifecycle(
       try {
         const chunk = await reader.read();
         if (chunk.done) {
+          // The dispatcher cannot finish gracefully while OpenGeni still owns
+          // the provider response's reader lock. Release it before teardown;
+          // otherwise Undici can wait forever after the complete body arrived.
+          releaseReader();
           await finish(cancelled);
           controller.close();
           return;
         }
         controller.enqueue(chunk.value);
       } catch (error) {
+        releaseReader();
         await finish(true, error);
         controller.error(error);
       }
@@ -443,6 +601,7 @@ function responseWithDispatcherLifecycle(
       try {
         await reader.cancel(reason);
       } finally {
+        releaseReader();
         await finish(true, reason);
       }
     },
@@ -460,11 +619,24 @@ function responseWithDispatcherLifecycle(
   return wrapped;
 }
 
-async function closeDispatcher(dispatcher: DispatcherLifecycle): Promise<void> {
-  try {
-    await dispatcher.close();
-  } catch {
-    await destroyDispatcher(dispatcher);
+async function closeDispatcher(dispatcher: DispatcherLifecycle, timeoutMs: number): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    Promise.resolve()
+      .then(() => dispatcher.close())
+      .then(
+        () => "closed" as const,
+        () => "failed" as const,
+      ),
+    new Promise<"timed_out">((resolve) => {
+      timeout = setTimeout(() => resolve("timed_out"), timeoutMs);
+    }),
+  ]);
+  if (timeout) clearTimeout(timeout);
+  if (outcome !== "closed") {
+    // Destruction starts immediately. Do not await a provider/dispatcher
+    // shutdown promise after the bounded graceful-close deadline has elapsed.
+    void destroyDispatcher(dispatcher);
   }
 }
 

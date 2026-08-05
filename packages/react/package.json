@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "0.30.0",
+  "version": "0.46.2",
   "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -39,6 +39,15 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
+    "./model-policy": {
+      "types": "./src/model-policy.ts",
+      "import": "./src/model-policy.ts",
+      "default": "./src/model-policy.ts"
+    },
+    "./realtime": {
+      "types": "./src/realtime.ts",
+      "default": "./src/realtime.ts"
+    },
     "./styles.css": {
       "types": "./styles/index.d.ts",
       "default": "./styles/index.css"
@@ -57,6 +66,7 @@
     "build": "bun ../../scripts/build-typescript-package.ts",
     "demo": "vite dev demo --port 3100",
     "demo:build": "vite build demo",
+    "demo:build:deployed": "OPENGENI_REACT_DEMO_BASE=/react-demo/ OPENGENI_REACT_DEMO_OUT_DIR=../../../apps/web/dist/react-demo vite build demo",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

@@ -1,8 +1,11 @@
 import { sql } from "drizzle-orm";
+import type { WorkspaceInstructionPolicySnapshotEntry } from "@opengeni/contracts";
 import {
   bigint,
   check,
   index,
+  integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -18,6 +21,8 @@ export const workspaceInstructionPolicyRevisions = pgTable(
   "workspace_instruction_policy_revisions",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    operationId: uuid("operation_id"),
+    requestFingerprint: text("request_fingerprint"),
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     revision: bigint("revision", { mode: "number" })
@@ -35,6 +40,19 @@ export const workspaceInstructionPolicyRevisions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceOperation: uniqueIndex("workspace_instruction_policy_revisions_workspace_operation_uq")
+      .on(table.workspaceId, table.operationId)
+      .where(sql`${table.operationId} is not null`),
+    operationReceipt: check(
+      "workspace_instruction_policy_revisions_operation_receipt_chk",
+      sql`(
+        (${table.operationId} is null and ${table.requestFingerprint} is null)
+        or (
+          ${table.operationId} is not null
+          and ${table.requestFingerprint} ~ '^[0-9a-f]{64}$'
+        )
+      )`,
+    ),
     workspaceRevision: uniqueIndex(
       "workspace_instruction_policy_revisions_workspace_revision_uq",
     ).on(table.workspaceId, table.revision),
@@ -96,6 +114,8 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
   "workspace_instruction_policy_activation_events",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    operationId: uuid("operation_id"),
+    requestFingerprint: text("request_fingerprint"),
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     kind: text("kind").notNull(),
@@ -114,6 +134,19 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceOperation: uniqueIndex("workspace_instruction_policy_events_workspace_operation_uq")
+      .on(table.workspaceId, table.operationId)
+      .where(sql`${table.operationId} is not null`),
+    operationReceipt: check(
+      "workspace_instruction_policy_events_operation_receipt_chk",
+      sql`(
+        (${table.operationId} is null and ${table.requestFingerprint} is null)
+        or (
+          ${table.operationId} is not null
+          and ${table.requestFingerprint} ~ '^[0-9a-f]{64}$'
+        )
+      )`,
+    ),
     workspaceActivationVersion: uniqueIndex(
       "workspace_instruction_policy_events_target_version_uq",
     ).on(
@@ -135,6 +168,130 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
         or (${table.kind} = 'policy' and ${table.scope} = 'global' and ${table.roleKey} is null)
         or (${table.kind} = 'policy' and ${table.scope} = 'role' and ${table.roleKey} is not null)
       )`,
+    ),
+  }),
+);
+
+export const workspaceInstructionPolicyOnboardingProposals = pgTable(
+  "workspace_instruction_policy_onboarding_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    operationId: uuid("operation_id").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    kind: text("kind").notNull(),
+    scope: text("scope").notNull(),
+    roleKey: text("role_key"),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    confidenceBps: integer("confidence_bps").notNull(),
+    baselineRevisionId: uuid("baseline_revision_id"),
+    baselineRevision: bigint("baseline_revision", { mode: "number" }),
+    baselineContentHash: text("baseline_content_hash"),
+    baselineActivationVersion: bigint("baseline_activation_version", { mode: "number" }).notNull(),
+    baselineActivatedAt: timestamp("baseline_activated_at", { withTimezone: true }),
+    draftRevisionId: uuid("draft_revision_id").notNull(),
+    draftRevision: bigint("draft_revision", { mode: "number" }).notNull(),
+    draftContentHash: text("draft_content_hash").notNull(),
+    status: text("status").notNull().default("proposed"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex(
+      "workspace_instruction_policy_onboarding_proposals_workspace_operation_uq",
+    ).on(table.workspaceId, table.operationId),
+    sourceVersionTarget: uniqueIndex(
+      "workspace_instruction_policy_onboarding_proposals_source_version_target_uq",
+    ).on(
+      table.workspaceId,
+      table.kind,
+      table.scope,
+      sql`coalesce(${table.roleKey}, '')`,
+      table.sourceId,
+      table.sourceVersion,
+    ),
+    workspaceTimeline: index(
+      "workspace_instruction_policy_onboarding_proposals_workspace_time_idx",
+    ).on(table.workspaceId, table.createdAt, table.id),
+    operationReceipt: check(
+      "workspace_instruction_policy_onboarding_proposals_operation_receipt_chk",
+      sql`${table.requestFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    target: check(
+      "workspace_instruction_policy_onboarding_proposals_target_chk",
+      sql`(
+        (${table.kind} = 'charter' and ${table.scope} = 'global' and ${table.roleKey} is null)
+        or (${table.kind} = 'policy' and ${table.scope} = 'global' and ${table.roleKey} is null)
+        or (${table.kind} = 'policy' and ${table.scope} = 'role' and ${table.roleKey} is not null)
+      )`,
+    ),
+    source: check(
+      "workspace_instruction_policy_onboarding_proposals_source_chk",
+      sql`length(btrim(${table.sourceId})) between 1 and 512
+        and length(btrim(${table.sourceVersion})) between 1 and 256
+        and ${table.confidenceBps} between 0 and 10000`,
+    ),
+    baseline: check(
+      "workspace_instruction_policy_onboarding_proposals_baseline_chk",
+      sql`(
+        ${table.baselineRevisionId} is null
+        and ${table.baselineRevision} is null
+        and ${table.baselineContentHash} is null
+        and ${table.baselineActivationVersion} = 0
+        and ${table.baselineActivatedAt} is null
+      ) or (
+        ${table.baselineRevisionId} is not null
+        and ${table.baselineRevision} > 0
+        and ${table.baselineContentHash} ~ '^[0-9a-f]{64}$'
+        and ${table.baselineActivationVersion} > 0
+        and ${table.baselineActivatedAt} is not null
+      )`,
+    ),
+    draft: check(
+      "workspace_instruction_policy_onboarding_proposals_draft_chk",
+      sql`${table.draftRevision} > 0
+        and ${table.draftContentHash} ~ '^[0-9a-f]{64}$'
+        and ${table.status} = 'proposed'`,
+    ),
+  }),
+);
+
+export const workspaceInstructionPolicySnapshots = pgTable(
+  "workspace_instruction_policy_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    policyRole: text("policy_role"),
+    roleSource: text("role_source").notNull(),
+    entries: jsonb("entries").$type<WorkspaceInstructionPolicySnapshotEntry[]>().notNull(),
+    entryHash: text("entry_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    attempt: uniqueIndex("workspace_instruction_policy_snapshots_attempt_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.attemptId,
+    ),
+    workspaceTimeline: index("workspace_instruction_policy_snapshots_workspace_time_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+    entriesShape: check(
+      "workspace_instruction_policy_snapshots_entries_chk",
+      sql`jsonb_typeof(${table.entries}) = 'array' and jsonb_array_length(${table.entries}) <= 3`,
+    ),
+    roleSourceValid: check(
+      "workspace_instruction_policy_snapshots_role_source_chk",
+      sql`${table.roleSource} in ('session_binding', 'metadata_fallback', 'none', 'invalid_metadata_fallback')`,
     ),
   }),
 );

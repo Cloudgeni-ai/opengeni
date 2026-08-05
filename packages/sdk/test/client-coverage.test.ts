@@ -21,6 +21,7 @@ const TURN_B = "99999999-9999-4999-8999-999999999992";
 type RecordedRequest = {
   url: string;
   method: string;
+  credentials: RequestCredentials;
   headers: Record<string, string>;
   body: string | null;
   signal: AbortSignal;
@@ -36,6 +37,9 @@ function recordingFetch(responder: (request: RecordedRequest) => Response): {
     const recorded: RecordedRequest = {
       url: request.url,
       method: request.method,
+      // Bun's Request currently reports `include` regardless of the supplied
+      // RequestInit value, so record the caller's explicit policy directly.
+      credentials: init?.credentials ?? request.credentials,
       headers: Object.fromEntries(request.headers.entries()),
       body:
         init?.body !== undefined && init?.body !== null
@@ -86,6 +90,7 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
     tools: [],
     model: "model-x",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     sandboxOs: null,
     metadata: {},
@@ -234,7 +239,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-turn-instructions-v1",
+      apiContractRevision: "2026-07-workspace-artifacts-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [
@@ -430,6 +435,7 @@ describe("OpenGeniClient files", () => {
     const put = requests[1]!;
     expect(put.method).toBe("PUT");
     expect(put.url).toBe(begin.putUrl);
+    expect(put.credentials).toBe("omit");
     expect(put.headers["x-ms-blob-type"]).toBe("BlockBlob");
     // Regression guard: the PUT must send exactly ONE content-type value. If the
     // SDK redundantly sets a `Content-Type` key alongside the backend's lowercase
@@ -1051,14 +1057,30 @@ describe("OpenGeniClient connections", () => {
     expect(updated).toEqual(connection);
     const deleted = await client.deleteConnection(WORKSPACE_ID, connection.id);
     expect(deleted).toEqual(connection);
+    const disconnected = await client.disconnectGoogleDriveConnection(WORKSPACE_ID, connection.id, {
+      expectedVersion: connection.version,
+      idempotencyKey: "disconnect-generation-1",
+    });
+    expect(disconnected).toEqual(connection);
+    const paused = await client.transitionGoogleDriveLifecycle(WORKSPACE_ID, connection.id, {
+      action: "pause",
+      expectedVersion: connection.version,
+    });
+    expect(paused).toEqual(connection);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/connections`,
         `POST /v1/workspaces/${WORKSPACE_ID}/connections`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+        `PATCH /v1/workspaces/${WORKSPACE_ID}/connections/google-drive/${connection.id}/lifecycle`,
       ],
     );
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      expectedVersion: connection.version,
+      idempotencyKey: "disconnect-generation-1",
+    });
   });
 
   test("startConnectionOAuth POSTs to the oauth/start route and returns the authorization URL", async () => {
@@ -1135,6 +1157,32 @@ describe("OpenGeniClient connections", () => {
 });
 
 describe("OpenGeniClient error handling for new endpoints", () => {
+  test("preserves safe structured OAuth failure details", () => {
+    const error = new OpenGeniApiError(
+      408,
+      JSON.stringify({
+        error: {
+          status: 408,
+          code: "upstream_unavailable",
+          message: "Connection setup timed out during authorization-server discovery. Try again.",
+          retryable: true,
+          requestId: "oauth-timeout-test",
+          details: {
+            oauthStage: "authorization_server_metadata",
+            oauthReason: "timeout",
+            ignoredNestedValue: { secret: "not projected" },
+          },
+        },
+      }),
+      { mutation: true },
+    );
+
+    expect(error.details).toEqual({
+      oauthStage: "authorization_server_metadata",
+      oauthReason: "timeout",
+    });
+  });
+
   test("non-2xx responses raise OpenGeniApiError with status and body", async () => {
     const { client } = makeClient(() => new Response("goal not found", { status: 404 }));
     const error = await client.getGoal(WORKSPACE_ID, SESSION_ID).then(

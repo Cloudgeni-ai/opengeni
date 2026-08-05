@@ -21,6 +21,7 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
+  sandboxArchiveCaptureTimeoutMs,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -39,6 +40,7 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
+import { sandboxOperationMetricObserver, type Observability } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 
 import {
@@ -66,6 +68,7 @@ export type ChannelAServices = {
   db: Database;
   settings: Settings;
   bus: EventBus;
+  observability?: Observability | undefined;
 };
 
 export type ChannelAContext = {
@@ -102,6 +105,9 @@ export async function withChannelA<T>(
   fn: (handle: ChannelAHandle) => Promise<T>,
 ): Promise<T> {
   const { db, settings, bus } = services;
+  const onSandboxOperation = services.observability
+    ? sandboxOperationMetricObserver(services.observability)
+    : undefined;
   const { accountId, workspaceId, session } = ctx;
 
   if (session.sandboxBackend === "none") {
@@ -203,7 +209,7 @@ export async function withChannelA<T>(
         backendId: "selfhosted",
       };
       const routed = wrapChannelABoxWithRouting(
-        { db, settings, bus },
+        { db, settings, bus, ...(onSandboxOperation ? { onSandboxOperation } : {}) },
         {
           accountId,
           workspaceId,
@@ -247,6 +253,7 @@ export async function withChannelA<T>(
     os: session.sandboxOs,
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
   });
 
   if (acquired.role === "blocked") {
@@ -352,7 +359,7 @@ export async function withChannelA<T>(
     // routing may be dormant, but its direct mutation admission is mandatory for
     // every persistable provider write.
     const routed = wrapChannelABoxWithRouting(
-      { db, settings, bus },
+      { db, settings, bus, ...(onSandboxOperation ? { onSandboxOperation } : {}) },
       {
         accountId,
         workspaceId,

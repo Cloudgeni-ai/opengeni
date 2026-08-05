@@ -19,6 +19,16 @@ const EntranceAnimationContext = createContext(true);
 export const EntranceAnimationProvider = EntranceAnimationContext.Provider;
 
 /**
+ * Live entrance gate from the nearest provider. Prefer
+ * {@link useEntranceAnimation} for elements that must freeze the decision at
+ * mount; use this when a stable parent (e.g. ActivityRail) needs to animate
+ * later appends after a bulk window clears.
+ */
+export function useEntranceAnimationLive(): boolean {
+  return useContext(EntranceAnimationContext);
+}
+
+/**
  * Whether this element should wear the entrance animation. Captured at mount
  * from the nearest provider (true outside any provider) and stable for the
  * element's lifetime — see the module doctrine above.

@@ -13,6 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
+import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
@@ -474,12 +475,22 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       }
       headers.delete("OpenAI-Beta"); // omit on SSE (spec §1.2); fallback: "responses=experimental" if backend 400s
       headers.delete("x-api-key");
+      // Codex CLI advertises betas via x-codex-beta-features (not OpenAI-Beta).
+      if (ctx.betaFeatures && ctx.betaFeatures.length > 0) {
+        headers.set("x-codex-beta-features", ctx.betaFeatures.join(","));
+      }
+      // Turn analytics / request_kind live in x-codex-turn-metadata — body
+      // metadata is stripped by normalizeCodexRequestBody and rejected upstream.
+      if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
+        headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
+      }
 
       // The backend is streaming-only; force stream=true on the wire but remember
       // the caller's intent so a non-streaming caller (e.g. the compaction
       // summarizer) still gets a single JSON Response back.
       let callerWantsStream = true;
       let model: string | undefined;
+      let requestOpaqueArtifacts: string[] = [];
       const nextInit: RequestInit = { ...init, headers };
       if (typeof init?.body === "string") {
         try {
@@ -488,10 +499,12 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           const normalized = normalizeCodexRequestBody(parsed, ctx.resolveModel);
           model = typeof normalized.model === "string" ? normalized.model : undefined;
           nextInit.body = JSON.stringify(normalized);
+          requestOpaqueArtifacts = opaqueProviderArtifactFingerprints(normalized.input);
         } catch {
           /* leave unparseable bodies untouched (already copied from init) */
         }
       }
+      ctx.onRequestOpaqueArtifacts?.({ requestId, fingerprints: requestOpaqueArtifacts });
       headers.set(
         "Idempotency-Key",
         authenticationAttempt === 0 ? requestId : `${requestId}:auth-${authenticationAttempt}`,

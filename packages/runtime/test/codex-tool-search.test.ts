@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { getClientToolSearchExecutor, type Tool } from "@openai/agents";
+import {
+  getClientToolSearchExecutor,
+  RunContext,
+  RunState,
+  RunToolSearchCallItem,
+  RunToolSearchOutputItem,
+  RunToolApprovalItem,
+  toolSearchTool,
+  type Tool,
+} from "@openai/agents";
 import { SandboxAgent } from "@openai/agents/sandbox";
+import { testSettings } from "@opengeni/testing";
 import {
   applyCodexToolSearch,
   bm25RankTools,
@@ -10,7 +20,7 @@ import {
   isSearchableMcpFunctionTool,
   renderSearchToolDescription,
 } from "../src/codex-tool-search";
-import { neutralizeToolSearchItemsInSerializedRunState } from "../src/history-sanitizer";
+import { buildOpenGeniAgent, prepareRunInput, restoreInterruptedRunState } from "../src";
 
 // Minimal function-tool doubles (only the fields the search + transform read).
 function connectorTool(name: string, description: string, props: string[] = []): Tool {
@@ -241,6 +251,141 @@ describe("applyCodexToolSearch", () => {
     expect(isSearchableMcpFunctionTool(tools[0], mcpServerIds)).toBe(false);
     expect(isSearchableMcpFunctionTool(tools[1], mcpServerIds)).toBe(true);
     expect(isSearchableMcpFunctionTool(tools[5], mcpServerIds)).toBe(false);
+  });
+});
+
+describe("tool_search RunState replay", () => {
+  test("uses recorded output as history without re-executing the search", async () => {
+    const deferred = connectorTool("gmail_send_email", "Send mail", ["to"]);
+    let executions = 0;
+    const search = toolSearchTool({
+      execution: "client",
+      description: "Search available tools",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      execute: async () => {
+        executions += 1;
+        return [deferred];
+      },
+    }) as unknown as Tool;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    agent.getAllTools = async () => [deferred, search];
+    const state = new RunState(new RunContext(), "hello", agent, null);
+    const call = {
+      type: "tool_search_call" as const,
+      call_id: "search-1",
+      status: "completed" as const,
+      execution: "client" as const,
+      arguments: { query: "send mail" },
+    };
+    const output = {
+      type: "tool_search_output" as const,
+      call_id: "search-1",
+      status: "completed" as const,
+      execution: "client" as const,
+      tools: [
+        {
+          type: "function" as const,
+          name: deferred.name,
+          description: deferred.description,
+          parameters: deferred.parameters,
+        },
+      ],
+    };
+    (state as unknown as { _generatedItems: unknown[] })._generatedItems = [
+      new RunToolSearchCallItem(call, agent),
+      new RunToolSearchOutputItem(output, agent),
+    ];
+
+    const serialized = state.toString();
+    // The tool disclosed in the saved turn is no longer in today's catalogue.
+    // The historical output remains a fact and must not execute today's search
+    // callback or reject the resume because that callback now returns nothing.
+    agent.getAllTools = async () => [search];
+    const resumed = await restoreInterruptedRunState(agent, serialized);
+
+    expect(executions).toBe(0);
+    expect(resumed.toString()).toContain('"execution":"client"');
+    expect(resumed.toString()).toContain("codex_apps__gmail_send_email");
+  });
+
+  test("approval resume never reruns or compares a historical search", async () => {
+    const deferred = connectorTool("gmail_send_email", "Send mail", ["to"]);
+    let executions = 0;
+    const search = toolSearchTool({
+      execution: "client",
+      description: "Search available tools",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      execute: async () => {
+        executions += 1;
+        return [];
+      },
+    }) as unknown as Tool;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    agent.getAllTools = async () => [search];
+    const state = new RunState(new RunContext(), "hello", agent, null);
+    const call = {
+      type: "tool_search_call" as const,
+      call_id: "search-approval",
+      status: "completed" as const,
+      execution: "client" as const,
+      arguments: { query: "send mail" },
+    };
+    const output = {
+      type: "tool_search_output" as const,
+      call_id: "search-approval",
+      status: "completed" as const,
+      execution: "client" as const,
+      tools: [
+        {
+          type: "function" as const,
+          name: deferred.name,
+          description: deferred.description,
+          parameters: deferred.parameters,
+        },
+      ],
+    };
+    const approval = new RunToolApprovalItem(
+      {
+        type: "function_call",
+        callId: "approval-1",
+        name: "write_file",
+        arguments: "{}",
+        status: "completed",
+      },
+      agent,
+    );
+    (state as unknown as { _generatedItems: unknown[] })._generatedItems = [
+      new RunToolSearchCallItem(call, agent),
+      new RunToolSearchOutputItem(output, agent),
+      approval,
+    ];
+    (state as unknown as { _currentStep: unknown })._currentStep = {
+      type: "next_step_interruption",
+      data: { interruptions: [approval] },
+    };
+
+    const resumed = await prepareRunInput(agent, {
+      kind: "approval",
+      serializedRunState: state.toString(),
+      approvalId: "approval-1",
+      decision: "approve",
+    });
+
+    expect(executions).toBe(0);
+    expect((resumed.input as RunState<any, any>).toString()).toContain('"execution":"client"');
+    expect((resumed.input as RunState<any, any>).toString()).toContain(
+      "codex_apps__gmail_send_email",
+    );
   });
 });
 
@@ -509,63 +654,5 @@ describe("per-turn description freeze (AM-8 — prefix cache stability)", () => 
       providerData?: { description?: string };
     };
     expect(search2.providerData?.description).toContain("- linear");
-  });
-});
-
-describe("neutralizeToolSearchItemsInSerializedRunState", () => {
-  test("flips frozen tool_search pairs to execution:server in place — counts preserved", () => {
-    const blob = JSON.stringify({
-      originalInput: [
-        { type: "message", role: "user", content: "hi" },
-        { type: "tool_search_call", call_id: "c1", execution: "client", arguments: { query: "x" } },
-        {
-          type: "tool_search_output",
-          call_id: "c1",
-          execution: "client",
-          tools: [{ type: "function", name: "codex_apps__gmail_send_email" }],
-        },
-      ],
-      generatedItems: [
-        {
-          type: "tool_search_call_item",
-          rawItem: { type: "tool_search_call", call_id: "c2", execution: "client", arguments: {} },
-        },
-      ],
-      modelResponses: [
-        {
-          output: [{ type: "tool_search_call", call_id: "c3", execution: "client", arguments: {} }],
-        },
-      ],
-      lastModelResponse: {
-        output: [{ type: "tool_search_output", call_id: "c3", execution: "client", tools: [] }],
-      },
-    });
-    const out = JSON.parse(neutralizeToolSearchItemsInSerializedRunState(blob));
-    // counts preserved everywhere (HOLE E)
-    expect(out.originalInput).toHaveLength(3);
-    expect(out.generatedItems).toHaveLength(1);
-    // every tool_search item flipped to server execution
-    expect(out.originalInput[1].execution).toBe("server");
-    expect(out.originalInput[2].execution).toBe("server");
-    expect(out.generatedItems[0].rawItem.execution).toBe("server");
-    expect(out.modelResponses[0].output[0].execution).toBe("server");
-    expect(out.lastModelResponse.output[0].execution).toBe("server");
-    // pairing keys + disclosure content untouched
-    expect(out.originalInput[1].call_id).toBe("c1");
-    expect(out.originalInput[2].tools).toHaveLength(1);
-    // non-tool_search items untouched
-    expect(out.originalInput[0]).toEqual({ type: "message", role: "user", content: "hi" });
-  });
-
-  test("a blob with no tool_search items comes back by reference (unchanged)", () => {
-    const blob = JSON.stringify({
-      originalInput: [{ type: "message", role: "user", content: "hi" }],
-      generatedItems: [],
-    });
-    expect(neutralizeToolSearchItemsInSerializedRunState(blob)).toBe(blob);
-  });
-
-  test("non-JSON input is forwarded untouched", () => {
-    expect(neutralizeToolSearchItemsInSerializedRunState("not json")).toBe("not json");
   });
 });

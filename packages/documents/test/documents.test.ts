@@ -10,15 +10,173 @@ import {
   heuristicCuration,
   parseCurationOutcome,
   parseDocumentBytes,
+  resolveDocumentAuthority,
+  searchEffectiveDocuments,
 } from "../src";
 
 describe("documents", () => {
-  test("fails closed for private documents without the creating subject", () => {
-    const document = { visibility: "private", createdBy: "subject:owner" } as const;
-    expect(canViewDocument(document, undefined)).toBe(false);
-    expect(canViewDocument(document, "subject:other")).toBe(false);
-    expect(canViewDocument(document, "subject:owner")).toBe(true);
-    expect(canViewDocument({ visibility: "workspace", createdBy: null }, undefined)).toBe(true);
+  test("requires canonical bounded subjects for legacy personal authority", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const document = {
+      authorityKind: "personal",
+      authorityWorkspaceId: workspaceId,
+      authoritySubjectId: "subject:owner",
+    } as const;
+
+    expect(canViewDocument(document, "subject:owner", workspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:other", workspaceId)).toBe(false);
+    expect(canViewDocument(document, undefined, workspaceId)).toBe(false);
+    expect(canViewDocument(document, null, workspaceId)).toBe(false);
+
+    const overlongSubject = "ø".repeat(513);
+    const malformedSubjects: Array<[authoritySubjectId: string, viewerSubjectId: string]> = [
+      ["", ""],
+      ["   ", "   "],
+      [" subject:owner", " subject:owner"],
+      ["subject:owner ", "subject:owner"],
+      ["subject:owner", " subject:owner"],
+      ["subject:owner", "subject:owner "],
+      [overlongSubject, overlongSubject],
+      ["subject:owner", overlongSubject],
+    ];
+    for (const [authoritySubjectId, viewerSubjectId] of malformedSubjects) {
+      expect(
+        canViewDocument({ ...document, authoritySubjectId }, viewerSubjectId, workspaceId),
+      ).toBe(false);
+    }
+  });
+
+  test("keeps legacy authority workspace-anchored and fails closed for ambiguous tuples", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const siblingWorkspaceId = "22222222-2222-4222-8222-222222222222";
+    const document = {
+      authorityKind: "personal",
+      authorityWorkspaceId: workspaceId,
+      authoritySubjectId: "subject:owner",
+    } as const;
+    expect(canViewDocument(document, undefined, workspaceId)).toBe(false);
+    expect(canViewDocument(document, "subject:other", workspaceId)).toBe(false);
+    expect(canViewDocument(document, "subject:owner", workspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:owner", siblingWorkspaceId)).toBe(false);
+    expect(canViewDocument(document, "subject:owner")).toBe(false);
+    expect(
+      canViewDocument(
+        { authorityKind: "personal", authoritySubjectId: "subject:owner" },
+        "subject:owner",
+        workspaceId,
+      ),
+    ).toBe(false);
+    expect(
+      canViewDocument(
+        {
+          authorityKind: "workspace",
+          authorityWorkspaceId: workspaceId,
+          authoritySubjectId: null,
+        },
+        undefined,
+        workspaceId,
+      ),
+    ).toBe(true);
+    expect(
+      canViewDocument(
+        {
+          authorityKind: "workspace",
+          authorityWorkspaceId: workspaceId,
+          authoritySubjectId: null,
+        },
+        undefined,
+        siblingWorkspaceId,
+      ),
+    ).toBe(false);
+    expect(
+      canViewDocument(
+        {
+          authorityKind: "organization",
+          authorityWorkspaceId: null,
+          authoritySubjectId: null,
+        },
+        undefined,
+        siblingWorkspaceId,
+      ),
+    ).toBe(true);
+    expect(
+      canViewDocument(
+        {
+          authorityKind: "legacy-ambiguous",
+          authorityWorkspaceId: workspaceId,
+          authoritySubjectId: null,
+        },
+        "subject:owner",
+        workspaceId,
+      ),
+    ).toBe(false);
+  });
+
+  test("resolves fixed authority tuples and deterministic legacy compatibility", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    expect(resolveDocumentAuthority({ kind: "organization", workspaceId })).toEqual({
+      kind: "organization",
+      workspaceId: null,
+      subjectId: null,
+    });
+    expect(resolveDocumentAuthority({ kind: "workspace", workspaceId })).toEqual({
+      kind: "workspace",
+      workspaceId,
+      subjectId: null,
+    });
+    expect(
+      resolveDocumentAuthority({
+        legacyVisibility: "private",
+        workspaceId,
+        initiatingSubjectId: "subject:owner",
+      }),
+    ).toEqual({ kind: "personal", workspaceId, subjectId: "subject:owner" });
+    expect(() =>
+      resolveDocumentAuthority({ kind: "personal", workspaceId, initiatingSubjectId: null }),
+    ).toThrow("personal documents require an initiating subject");
+    expect(() =>
+      resolveDocumentAuthority({
+        kind: "personal",
+        workspaceId,
+        initiatingSubjectId: "ø".repeat(513),
+      }),
+    ).toThrow("exceeds 1024 UTF-8 bytes");
+    expect(() =>
+      resolveDocumentAuthority({
+        kind: "organization",
+        legacyVisibility: "private",
+        workspaceId,
+        initiatingSubjectId: "subject:owner",
+      }),
+    ).toThrow("conflicts with legacy visibility");
+  });
+
+  test("fails before database or embedding work without an immutable initiating subject", async () => {
+    let embedderCalled = false;
+    await expect(
+      searchEffectiveDocuments(
+        {} as never,
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          query: "network policy",
+          initiatingSubjectId: "   ",
+          surface: "agent",
+        },
+        {
+          embedder: {
+            model: "test",
+            dimensions: 3,
+            embedMany: async () => [],
+            embedQuery: async () => {
+              embedderCalled = true;
+              return [0, 0, 0];
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow("effective document retrieval requires an initiating subject");
+    expect(embedderCalled).toBe(false);
   });
 
   test("parses uploaded text bytes into normalized document text", async () => {

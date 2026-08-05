@@ -14,7 +14,7 @@
 // target lookup), and the selfhosted ControlRpc built over the events bus's NATS
 // request/reply connection.
 
-import type { Settings } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
@@ -44,6 +44,7 @@ import {
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   resolveModalCheckpointProviderBindingForSession,
+  sandboxBackendForSdkBackendId,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -52,6 +53,7 @@ import {
   type RoutableSandbox,
   type ResolvedActiveBackend,
   type RoutingMutationSettlementResult,
+  type RoutingSandboxOperationObserver,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
@@ -78,6 +80,8 @@ export type RoutingWiringServices = {
   /** The per-op observer wired into every selfhosted session this turn builds
    *  (out-of-band telemetry — op metrics + machine.* events). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
+  /** Every physical routed provider call, across cloud and selfhosted homes. */
+  onSandboxOperation?: RoutingSandboxOperationObserver;
   /** The op-stream durable-resume journal (the Temporal adaptation from
    *  op-journal.ts): attach generation + settled-frontier persistence. Absent ⇒
    *  the runtime defaults (generation "1", no persistence) — tests / non-turn
@@ -319,7 +323,8 @@ async function resolveCurrentHomeBackend(
   }
 
   const resumeState = lease.resumeState;
-  const resumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  const durableResumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  const resumeBackend = sandboxBackendForSdkBackendId(durableResumeBackend) ?? durableResumeBackend;
   if (
     !resumeState ||
     resumeBackend !== ids.backend ||
@@ -374,7 +379,8 @@ async function resolveCurrentHomeBackend(
   // The provider identity must agree with the exact durable lease row before
   // any caller can publish or route through this rebound handle. A mismatch is
   // unverifiable local state, not permission to try the old handle.
-  if (rebound.instanceId !== lease.instanceId || rebound.backendId !== resumeBackend) {
+  const reboundBackend = sandboxBackendForSdkBackendId(rebound.backendId) ?? rebound.backendId;
+  if (rebound.instanceId !== lease.instanceId || reboundBackend !== resumeBackend) {
     throw homeRouteRecoveryError(lease, lease.leaseEpoch);
   }
   services.onHomeSandboxRebound?.({
@@ -434,6 +440,7 @@ function beforePersistableHomeMutation(
       expectedEpoch: backend.leaseEpoch,
       expectedInstanceId: backend.providerInstanceId,
       operation: op,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
     });
     return { admission, providerBinding };
   };
@@ -568,6 +575,7 @@ function beforeRetainedProcessMutation(
       sessionId: ids.sessionId,
       processId: process.id,
       operation: op,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
     });
 }
 
@@ -782,6 +790,7 @@ export function wrapTurnBoxWithRouting(
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
@@ -925,6 +934,7 @@ export function wrapLazyTurnBoxWithRouting(
       }
       return routedResolver(pointer);
     },
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),

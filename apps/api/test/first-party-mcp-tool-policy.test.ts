@@ -19,6 +19,23 @@ const workspaceId = crypto.randomUUID();
 const sessionId = crypto.randomUUID();
 const turnId = crypto.randomUUID();
 const attemptId = crypto.randomUUID();
+const DEFAULT_AUTHORIZED_CONNECTOR_TOOLS = [
+  "social_connections_list",
+  "social_posts_recent",
+  "social_daily_analysis_context",
+  "social_search_live",
+  "social_mentions_live",
+  "social_thread_fetch",
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_thread_replies",
+  "slack_bot_list_users",
+  "slack_bot_list_files",
+  "slack_bot_file_info",
+  "slack_bot_file_content",
+  "slack_bot_post_message",
+  "slack_bot_delete_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
 
 function deps(): ApiRouteDeps {
   return {
@@ -67,7 +84,7 @@ function registeredToolNames(server: unknown): string[] {
 }
 
 describe("first-party MCP tool visibility policy", () => {
-  test("omission selects the complete default catalog when the grant authorizes every tool", () => {
+  test("omission selects the complete safe default catalog when the grant authorizes every tool", () => {
     const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
       workspaceMemoryEnabled: true,
     });
@@ -83,6 +100,25 @@ describe("first-party MCP tool visibility policy", () => {
     );
 
     expect(registeredToolNames(server)).toEqual(["set_session_title"]);
+  });
+
+  test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
+    const ordinary = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]),
+    );
+    const connectorSet = new Set<FirstPartyMcpToolName>(DEFAULT_AUTHORIZED_CONNECTOR_TOOLS);
+    expect(
+      registeredToolNames(ordinary).filter((name) =>
+        connectorSet.has(name as FirstPartyMcpToolName),
+      ),
+    ).toEqual([]);
+
+    const explicit = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], [...DEFAULT_AUTHORIZED_CONNECTOR_TOOLS]),
+    );
+    expect(registeredToolNames(explicit)).toEqual([...DEFAULT_AUTHORIZED_CONNECTOR_TOOLS].sort());
   });
 
   test("visibility never substitutes for authorization", () => {
@@ -102,6 +138,7 @@ describe("first-party MCP tool visibility policy", () => {
 
     expect(registeredToolNames(server)).toEqual([...FIRST_PARTY_MCP_TOOL_NAMES].sort());
     expect(registeredToolNames(server)).not.toContain("files_get_download_url");
+    expect(registeredToolNames(server)).not.toContain("github_token");
   });
 
   test("the download URL tool exists only on the dedicated files MCP server", () => {
@@ -118,6 +155,58 @@ describe("first-party MCP tool visibility policy", () => {
 
     expect(registeredToolNames(broad)).not.toContain("files_get_download_url");
     expect(registeredToolNames(files)).toEqual(["files_get_download_url"]);
+  });
+
+  test("Slack write schemas expose threaded posting and bot-owned deletion", async () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["connections:read"], ["slack_bot_post_message", "slack_bot_delete_message"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "slack-write-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      const post = tools.find((tool) => tool.name === "slack_bot_post_message");
+      const remove = tools.find((tool) => tool.name === "slack_bot_delete_message");
+      expect(post?.inputSchema).toMatchObject({
+        required: expect.arrayContaining(["operationId", "text"]),
+        properties: {
+          channelId: { type: "string" },
+          threadTimestamp: { type: "string" },
+        },
+      });
+      expect(remove?.inputSchema).toMatchObject({
+        required: expect.arrayContaining(["operationId", "channelId", "timestamp"]),
+        properties: {
+          operationId: { type: "string" },
+          channelId: { type: "string" },
+          timestamp: { type: "string" },
+        },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("sandbox inventory describes idle home sandboxes as wakeable", async () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["sandboxes_list"]));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "sandbox-inventory-description-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (candidate) => candidate.name === "sandboxes_list",
+      );
+      expect(tool?.description).toContain("operationAvailability");
+      expect(tool?.description).toContain("`wakeable`");
+      expect(tool?.description).toContain("will wake or restore");
+      expect(tool?.description).toContain("not ordinary operation availability");
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
   });
 
   test("the dedicated files tool is also permission-gated at registration", () => {

@@ -664,6 +664,7 @@ describe("api key permission options", () => {
       "GitHub",
       "Goals",
       "Rigs",
+      "Artifacts",
       "Admin & account",
     ]);
   });
@@ -1252,16 +1253,17 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-turn-instructions-v1",
+      apiContractRevision: "2026-07-workspace-artifacts-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
       defaultReasoningEffort: "none",
-      allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
       mcpServers: [],
       fileUploads: { enabled: false, maxSizeBytes: 0 },
       productAccessMode: "local",
       auth: { mode: "none" },
+      analytics: { consentRequired: true, providers: {} },
       structuredServices: {
         fileSystem: false,
         git: false,
@@ -1291,6 +1293,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       "medium",
       "high",
       "xhigh",
+      "max",
     ]);
   });
 
@@ -1312,6 +1315,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       "Medium",
       "High",
       "Extra high",
+      "Max",
     ]);
   });
 });
@@ -1610,8 +1614,8 @@ describe("GitHub repository resources", () => {
       {},
     );
     expect(resources.map((resource) => resource.mountPath)).toEqual([
-      "repos/github.com/acme/app",
-      "repos/gitlab.com/acme/app",
+      "repos/github.com/acme/app.git",
+      "repos/gitlab.com/acme/app.git",
       "repos/dev.azure.com/acme/project/_git/app",
     ]);
     expect(normalizeRepositoryUrl("https://git.example.com:8443/acme/app.git").host).toBe(
@@ -1635,6 +1639,7 @@ describe("GitHub repository resources", () => {
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
+      provider: "github",
       mountPath: "repos/github.com/example/public",
     });
   });
@@ -1644,6 +1649,7 @@ describe("GitHub repository resources", () => {
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
+      provider: "github",
       mountPath: "repos/github.com/example/public",
       githubInstallationId: 123,
       githubRepositoryId: 456,
@@ -1804,6 +1810,7 @@ function session(patch: Partial<Session> = {}): Session {
     sandboxBackend: "none",
     sandboxOs: "linux",
     sandboxGroupId: "session-1",
+    workingDir: null,
     activeSandboxId: null,
     activeEpoch: 0,
     parentSessionId: null,
@@ -1830,10 +1837,12 @@ function session(patch: Partial<Session> = {}): Session {
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
     ...patch,
+    policyRole: patch.policyRole ?? null,
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
     effectiveControl: patch.effectiveControl ?? activeControl(false),
+    codexCompactionMode: patch.codexCompactionMode ?? "portable",
   };
 }
 

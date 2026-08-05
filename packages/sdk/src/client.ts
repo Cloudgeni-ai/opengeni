@@ -14,21 +14,30 @@ import {
 } from "./workspace-control-stream";
 import type {
   AccessContext,
+  ActivateCodexRealtimeConnectionRequest,
   AddWorkspaceMemberRequest,
   ApiKey,
   BillingEntitlementsResponse,
   CodexAccount,
   CodexAccountsResponse,
+  CodexAppsUpdate,
   CodexRotationSettings,
   CodexOverviewResponse,
   CodexAllocatorUpdate,
   CodexConnectionStatus,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  GatewayRealtimeConnectRequest,
+  GatewayRealtimeConnectResponse,
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
   CodexUsageMap,
   BillingSummary,
   BillingUsageResponse,
+  InsightsRange,
+  WorkspaceInsightsResponse,
+  BeginSessionRealtimeRequest,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -37,6 +46,7 @@ import type {
   MoveDocumentRequest,
   ClientConfig,
   WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
@@ -48,6 +58,7 @@ import type {
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
+  SlackReactionChannelListResponse,
   CreateConnectionRequest,
   CreateDocumentBaseRequest,
   CreateFileUploadRequest,
@@ -67,6 +78,7 @@ import type {
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
   MintEnrollTokenResponse,
+  EndSessionRealtimeRequest,
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
@@ -79,6 +91,8 @@ import type {
   GetPackResponse,
   GitHubAppInfo,
   GitHubRepositoriesResponse,
+  GoogleDriveDisconnectRequest,
+  GoogleDriveLifecycleActionRequest,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
@@ -92,6 +106,7 @@ import type {
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
   PackInstallation,
+  LatencyMode,
   ReasoningEffort,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
@@ -113,6 +128,10 @@ import type {
   SessionGoal,
   SessionHumanInputRequest,
   SessionLineageResponse,
+  SessionRealtimeMutationResponse,
+  SyncSessionRealtimeLedgerRequest,
+  SyncSessionRealtimeLedgerResponse,
+  RenewSessionRealtimeRequest,
   SessionMcpCredentialUpdateInput,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
@@ -171,6 +190,10 @@ import type {
   PtyResizeRequest,
   PtyCloseRequest,
   ToolRef,
+  TranscribeAudioResponse,
+  TranscriptionRecordingListResponse,
+  TranscriptionRecordingResponse,
+  UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
@@ -199,10 +222,13 @@ import type {
   ConnectionResponse,
   OAuthStartRequest,
   OAuthStartResponse,
+  SocialConnection,
+  SocialOAuthStartRequest,
 } from "./types";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
+  CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
   ImportLegacyWorkspaceInstructionPolicyDraftRequest,
   RollbackWorkspaceInstructionPolicyRequest,
   WorkspaceInstructionPolicyActivationResponse,
@@ -210,9 +236,16 @@ import type {
   WorkspaceInstructionPolicyDiffResponse,
   WorkspaceInstructionPolicyListOptions,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOnboardingProposal,
+  WorkspaceInstructionPolicyOnboardingProposalListOptions,
+  WorkspaceInstructionPolicyOnboardingProposalListResponse,
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
-import type { WorkspaceStateResponse } from "./workspace-state";
+import type {
+  WorkspaceStateExportResponse,
+  WorkspaceStateGetOptions,
+  WorkspaceStateResponse,
+} from "./workspace-state";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -281,6 +314,7 @@ export type SendMessageInput = {
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
   clientEventId?: string;
   controlEtag?: string;
   expectedDraftRevision?: number;
@@ -294,6 +328,35 @@ export type SteerMessageResult = {
   turn: SessionTurn;
 };
 
+export type TranscribeAudioInput = {
+  audio: Blob | File | Uint8Array;
+  mimeType: string;
+  durationSeconds?: number | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+export type CreateTranscriptionRecordingInput = {
+  recordingId: string;
+  mimeType: string;
+  signal?: AbortSignal | undefined;
+};
+
+export type UploadTranscriptionRecordingChunkInput = {
+  audio: Blob | File | Uint8Array;
+  mimeType: string;
+  sha256: string;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  signal?: AbortSignal | undefined;
+};
+
+export type FinalizeTranscriptionRecordingInput = {
+  chunkCount: number;
+  totalBytes: number;
+  totalDurationMilliseconds: number;
+  signal?: AbortSignal | undefined;
+};
+
 /**
  * Typed client for the OpenGeni public API. Framework-agnostic: only needs
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
@@ -303,6 +366,8 @@ export class OpenGeniClient {
   private readonly baseUrl: string;
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
+  private readonly readInFlight = new Map<string, Promise<unknown>>();
+  private readonly readTrailing = new Map<string, Promise<unknown>>();
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -312,6 +377,207 @@ export class OpenGeniClient {
   }
 
   // --- Session lifecycle ---------------------------------------------------
+
+  /** Make one finalization attempt for a recording; callers may retry retained audio. */
+  async transcribeAudio(
+    workspaceId: string,
+    input: TranscribeAudioInput,
+  ): Promise<TranscribeAudioResponse> {
+    const correlationId = crypto.randomUUID();
+    const form = new FormData();
+    const filename = filenameForAudioMimeType(input.mimeType);
+    const audio =
+      input.audio instanceof File
+        ? input.audio
+        : input.audio instanceof Uint8Array
+          ? new File([Uint8Array.from(input.audio)], filename, { type: input.mimeType })
+          : new File([input.audio], filename, { type: input.mimeType || input.audio.type });
+    form.append("audio", audio, filename);
+    form.append("mimeType", input.mimeType);
+    if (input.durationSeconds !== undefined) {
+      form.append("durationSeconds", String(input.durationSeconds));
+    }
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
+        method: "POST",
+        headers: { ...this.headers(correlationId), Accept: "application/json" },
+        body: form,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      throw mutationTransportError(correlationId);
+    }
+    assertApiContractResponse(response);
+    if (!response.ok) throw await apiErrorFromResponse(response, { method: "POST", correlationId });
+    await assertJsonResponse(response, { method: "POST", correlationId });
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new OpenGeniApiError(response.status, "Invalid transcription response.", {
+        code: "invalid_response",
+        mutation: true,
+        correlationId,
+      });
+    }
+    if (!isTranscribeAudioResponse(body)) {
+      throw new OpenGeniApiError(response.status, "Invalid transcription response.", {
+        code: "invalid_response",
+        mutation: true,
+        correlationId,
+      });
+    }
+    return body;
+  }
+
+  async createTranscriptionRecording(
+    workspaceId: string,
+    input: CreateTranscriptionRecordingInput,
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings`,
+        { recordingId: input.recordingId, mimeType: input.mimeType },
+        {},
+        input.signal ? { signal: input.signal } : {},
+      ),
+    );
+  }
+
+  async getTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "GET",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
+        undefined,
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
+
+  async listTranscriptionRecordings(
+    workspaceId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingListResponse> {
+    const body = await this.requestJson<unknown>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/transcription-recordings`,
+      undefined,
+      {},
+      options.signal ? { signal: options.signal } : {},
+    );
+    if (!isTranscriptionRecordingListResponse(body)) {
+      throw new OpenGeniApiError(502, "Invalid transcription recording list response.", {
+        code: "invalid_response",
+      });
+    }
+    return body;
+  }
+
+  async uploadTranscriptionRecordingChunk(
+    workspaceId: string,
+    recordingId: string,
+    chunkNumber: number,
+    input: UploadTranscriptionRecordingChunkInput,
+  ): Promise<UploadTranscriptionRecordingChunkResponse> {
+    const correlationId = crypto.randomUUID();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        this.url(
+          `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/chunks/${chunkNumber}`,
+        ),
+        {
+          method: "PUT",
+          headers: {
+            ...this.headers(correlationId),
+            Accept: "application/json",
+            "Content-Type": input.mimeType,
+            "x-opengeni-chunk-sha256": input.sha256,
+            "x-opengeni-chunk-start-milliseconds": String(input.startMilliseconds),
+            "x-opengeni-chunk-duration-milliseconds": String(input.durationMilliseconds),
+          },
+          body: input.audio instanceof Uint8Array ? Uint8Array.from(input.audio) : input.audio,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+      );
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      throw mutationTransportError(correlationId);
+    }
+    assertApiContractResponse(response);
+    if (!response.ok) throw await apiErrorFromResponse(response, { method: "PUT", correlationId });
+    await assertJsonResponse(response, { method: "PUT", correlationId });
+    const body = await response.json().catch(() => null);
+    if (!isUploadTranscriptionRecordingChunkResponse(body)) {
+      throw new OpenGeniApiError(response.status, "Invalid transcription chunk response.", {
+        code: "invalid_response",
+        mutation: true,
+        correlationId,
+      });
+    }
+    return body;
+  }
+
+  async finalizeTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    input: FinalizeTranscriptionRecordingInput,
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/finalize`,
+        {
+          chunkCount: input.chunkCount,
+          totalBytes: input.totalBytes,
+          totalDurationMilliseconds: input.totalDurationMilliseconds,
+        },
+        {},
+        input.signal ? { signal: input.signal } : {},
+      ),
+    );
+  }
+
+  async processNextTranscriptionRecordingSegment(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/process-next`,
+        {},
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
+
+  async discardTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "DELETE",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
+        undefined,
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
 
   async createSession(
     workspaceId: string,
@@ -342,11 +608,13 @@ export class OpenGeniClient {
     );
   }
 
-  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
-    return await this.requestJson<Session>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
-    );
+  async getSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<Session> {
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    return await this.singleFlightRead(path, () => this.requestJson<Session>("GET", path), options);
   }
 
   async updateSession(
@@ -493,16 +761,149 @@ export class OpenGeniClient {
   }
 
   async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
-    return await this.requestJson<SessionLineageResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionLineageResponse>("GET", path),
+    );
+  }
+
+  private singleFlightRead<T>(
+    key: string,
+    read: () => Promise<T>,
+    options: { fresh?: boolean } = {},
+  ): Promise<T> {
+    const existing = this.readInFlight.get(key);
+    if (existing) {
+      if (!options.fresh) return existing as Promise<T>;
+      const queued = this.readTrailing.get(key);
+      if (queued) return queued as Promise<T>;
+      const trailing = existing.then(
+        () => this.singleFlightRead(key, read),
+        () => this.singleFlightRead(key, read),
+      );
+      this.readTrailing.set(key, trailing);
+      const clear = () => {
+        if (this.readTrailing.get(key) === trailing) this.readTrailing.delete(key);
+      };
+      void trailing.then(clear, clear);
+      return trailing;
+    }
+    const promise = read().finally(() => {
+      if (this.readInFlight.get(key) === promise) this.readInFlight.delete(key);
+    });
+    this.readInFlight.set(key, promise);
+    return promise;
+  }
+
+  /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
+  async negotiateCodexRealtimeWebrtc(
+    workspaceId: string,
+    sessionId: string,
+    request: CodexRealtimeWebrtcRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<CodexRealtimeWebrtcResponse> {
+    return await this.requestJson<CodexRealtimeWebrtcResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/webrtc`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Mint a short-lived browser token for one AI Gateway realtime connection. */
+  async negotiateGatewayRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<GatewayRealtimeConnectResponse> {
+    return await this.requestJson<GatewayRealtimeConnectResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/gateway`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Promote a negotiated connection only after its browser data channel is ready. */
+  async activateCodexRealtimeConnection(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    connectionId: string,
+    request: ActivateCodexRealtimeConnectionRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/connections/${connectionId}/activate`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Atomically enter realtime mode for this ordinary session. */
+  async beginSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: BeginSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime`,
+      request,
+    );
+  }
+
+  /** Renew the exact authenticated browser owner's realtime lease. */
+  async heartbeatSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: RenewSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/heartbeat`,
+      request,
+    );
+  }
+
+  /** Persist finalized V3 events, acknowledge delivery, and replay pending outbound context. */
+  async syncSessionRealtimeLedger(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: SyncSessionRealtimeLedgerRequest,
+  ): Promise<SyncSessionRealtimeLedgerResponse> {
+    return await this.requestJson<SyncSessionRealtimeLedgerResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/sync`,
+      request,
+    );
+  }
+
+  /** End realtime mode and restore ordinary text workflow admission. */
+  async endSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: EndSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}`,
+      request,
     );
   }
 
   async listTurns(
     workspaceId: string,
     sessionId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; latestStarted?: boolean } = {},
   ): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "GET",
@@ -510,8 +911,15 @@ export class OpenGeniClient {
       undefined,
       {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.latestStarted ? { latestStarted: "1" } : {}),
       },
     );
+  }
+
+  /** Newest turn that durably emitted `turn.started`, or null before any admission. */
+  async getLatestStartedTurn(workspaceId: string, sessionId: string): Promise<SessionTurn | null> {
+    const turns = await this.listTurns(workspaceId, sessionId, { latestStarted: true });
+    return turns[0] ?? null;
   }
 
   // --- Bring-your-own-compute: Machines dashboard + metrics (M10) ------------
@@ -977,9 +1385,9 @@ export class OpenGeniClient {
   // --- Turn queue ------------------------------------------------------------
 
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionQueueSnapshot>("GET", path),
     );
   }
 
@@ -1058,7 +1466,7 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: {
-      action: "pause" | "resume";
+      action: "pause" | "resume" | "cancel";
       reason?: string;
       clientEventId: string;
       expectedControlEtag?: string;
@@ -1082,6 +1490,24 @@ export class OpenGeniClient {
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "resume",
+      clientEventId: options.clientEventId ?? crypto.randomUUID(),
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),
+    });
+  }
+
+  /**
+   * Terminally cancel a session subtree. Unlike pause, cancellation drains
+   * queued work and permanently fences new prompts for the session and every
+   * descendant.
+   */
+  async cancelSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, {
+      action: "cancel",
       clientEventId: options.clientEventId ?? crypto.randomUUID(),
       ...(options.reason ? { reason: options.reason } : {}),
       ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),
@@ -1223,10 +1649,8 @@ export class OpenGeniClient {
 
   /** The session's goal. 404s when the session never had one. */
   async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
-    return await this.requestJson<SessionGoal>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
-    );
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
+    return await this.singleFlightRead(path, () => this.requestJson<SessionGoal>("GET", path));
   }
 
   async updateGoal(
@@ -1656,6 +2080,16 @@ export class OpenGeniClient {
     );
   }
 
+  /** Authenticated realtime voice models and credential readiness. */
+  async getWorkspaceRealtimeModelCatalog(
+    workspaceId: string,
+  ): Promise<WorkspaceRealtimeModelCatalogResponse> {
+    return await this.requestJson<WorkspaceRealtimeModelCatalogResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/realtime-model-catalog`,
+    );
+  }
+
   /** The caller's access context: subject, account + workspace grants, defaults. */
   async getAccessContext(): Promise<AccessContext> {
     return await this.requestJson<AccessContext>("GET", "/v1/access/me");
@@ -1674,10 +2108,30 @@ export class OpenGeniClient {
   }
 
   /** Read-time, secret-safe inventory of policy heads and visible workspace knowledge. */
-  async getWorkspaceState(workspaceId: string): Promise<WorkspaceStateResponse> {
+  async getWorkspaceState(
+    workspaceId: string,
+    options: WorkspaceStateGetOptions = {},
+  ): Promise<WorkspaceStateResponse> {
+    const params = new URLSearchParams();
+    if (options.attemptId) params.set("attemptId", options.attemptId);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
     return await this.requestJson<WorkspaceStateResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/workspace-state`,
+      `/v1/workspaces/${workspaceId}/workspace-state${query}`,
+    );
+  }
+
+  /** Download the canonical, explicitly sanitized Workspace State export. */
+  async exportWorkspaceState(
+    workspaceId: string,
+    options: WorkspaceStateGetOptions = {},
+  ): Promise<WorkspaceStateExportResponse> {
+    const params = new URLSearchParams();
+    if (options.attemptId) params.set("attemptId", options.attemptId);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<WorkspaceStateExportResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/workspace-state/export${query}`,
     );
   }
 
@@ -1722,6 +2176,32 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceInstructionPolicyRevision>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/drafts`,
+      request,
+    );
+  }
+
+  /** List the newest immutable onboarding proposals and their inactive policy drafts. */
+  async listWorkspaceInstructionPolicyOnboardingProposals(
+    workspaceId: string,
+    options: WorkspaceInstructionPolicyOnboardingProposalListOptions = {},
+  ): Promise<WorkspaceInstructionPolicyOnboardingProposalListResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return await this.requestJson<WorkspaceInstructionPolicyOnboardingProposalListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/instruction-policies/onboarding-proposals${query ? `?${query}` : ""}`,
+    );
+  }
+
+  /** Create one draft-only proposal against an exact active-policy baseline. */
+  async createWorkspaceInstructionPolicyOnboardingProposal(
+    workspaceId: string,
+    request: CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
+  ): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+    return await this.requestJson<WorkspaceInstructionPolicyOnboardingProposal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/instruction-policies/onboarding-proposals`,
       request,
     );
   }
@@ -2326,6 +2806,11 @@ export class OpenGeniClient {
     });
     const putResponse = await this.fetchImpl(upload.putUrl, {
       method: "PUT",
+      // Signed object-storage URLs carry their own short-lived authority.
+      // Browser cookies and HTTP auth must never accompany this cross-origin
+      // request: credentialed fetches are incompatible with wildcard CORS and
+      // can leak ambient credentials to a caller-selected storage endpoint.
+      credentials: "omit",
       // The backend's requiredHeaders already carry the canonical lowercase
       // `content-type` for every storage backend (Azure/S3/GCS). Do NOT also set
       // a `Content-Type` key here: WHATWG Headers treats the two casings as the
@@ -2887,6 +3372,19 @@ export class OpenGeniClient {
     );
   }
 
+  async listOpenGeniSlackReactionChannels(
+    workspaceId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<SlackReactionChannelListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    if (cursor) query.set("cursor", cursor);
+    return await this.requestJson<SlackReactionChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/reaction-channels?${query}`,
+    );
+  }
+
   async updateConnection(
     workspaceId: string,
     connectionId: string,
@@ -2908,6 +3406,32 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  async disconnectGoogleDriveConnection(
+    workspaceId: string,
+    connectionId: string,
+    request: GoogleDriveDisconnectRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}`,
+      request,
+    );
+    return response.connection;
+  }
+
+  async transitionGoogleDriveLifecycle(
+    workspaceId: string,
+    connectionId: string,
+    request: GoogleDriveLifecycleActionRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/connections/google-drive/${connectionId}/lifecycle`,
+      request,
+    );
+    return response.connection;
+  }
+
   /** Start an OAuth connection flow; redirect the user to the returned `authorizationUrl`. */
   async startConnectionOAuth(
     workspaceId: string,
@@ -2920,6 +3444,41 @@ export class OpenGeniClient {
       request,
       {},
       options,
+    );
+  }
+
+  /**
+   * Start a first-party social OAuth flow (X / Reddit); redirect the user to
+   * the returned `authorizationUrl`. The completed connection lands in
+   * `listSocialConnections`.
+   */
+  async startSocialOAuth(
+    workspaceId: string,
+    request: SocialOAuthStartRequest,
+  ): Promise<OAuthStartResponse> {
+    return await this.requestJson<OAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/social/oauth/start`,
+      request,
+    );
+  }
+
+  /** Connected social accounts (X / Reddit / pushed custom providers). */
+  async listSocialConnections(workspaceId: string): Promise<SocialConnection[]> {
+    return await this.requestJson<SocialConnection[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/social/connections`,
+    );
+  }
+
+  /** Drop the stored social OAuth credential and disable the connection. */
+  async disconnectSocialConnection(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<SocialConnection> {
+    return await this.requestJson<SocialConnection>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/social/connections/${connectionId}`,
     );
   }
 
@@ -3020,6 +3579,26 @@ export class OpenGeniClient {
       ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
     });
+  }
+
+  async getWorkspaceInsights(
+    workspaceId: string,
+    options: {
+      range?: InsightsRange;
+      provider?: string;
+      model?: string;
+    } = {},
+  ): Promise<WorkspaceInsightsResponse> {
+    return await this.requestJson<WorkspaceInsightsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/insights`,
+      undefined,
+      {
+        range: options.range ?? "week",
+        ...(options.provider !== undefined ? { provider: options.provider } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+      },
+    );
   }
 
   async getBillingEntitlements(
@@ -3141,11 +3720,37 @@ export class OpenGeniClient {
     );
   }
 
-  /** P3: enable/disable Codex auto-rotation and/or pick the strategy. Returns the effective settings. */
+  /** Designate one owner-connected subscription for Apps only. */
+  async designateCodexAppsAccount(
+    workspaceId: string,
+    accountId: string,
+    expectedVersion: number,
+  ): Promise<CodexAppsUpdate> {
+    return await this.requestJson<CodexAppsUpdate>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/codex/apps`,
+      { accountId, expectedVersion },
+    );
+  }
+
+  /** Clear the Apps credential without changing any inference selection. */
+  async clearCodexAppsAccount(
+    workspaceId: string,
+    expectedVersion: number,
+  ): Promise<CodexAppsUpdate> {
+    return await this.requestJson<CodexAppsUpdate>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/codex/apps`,
+      { expectedVersion },
+    );
+  }
+
+  /** Enable or disable Codex auto-rotation. Returns the effective settings. */
   async setCodexRotationSettings(
     workspaceId: string,
     patch: {
       rotationEnabled?: boolean;
+      /** @deprecated Rotation now has one effective sharded strategy. */
       rotationStrategy?: CodexRotationSettings["rotationStrategy"];
     },
   ): Promise<CodexRotationSettings> {
@@ -3206,7 +3811,7 @@ export class OpenGeniClient {
     );
   }
 
-  private async requestJson<T>(
+  protected async requestJson<T>(
     method: string,
     path: string,
     body?: unknown,
@@ -3278,6 +3883,116 @@ function assertApiContractResponse(response: Response): void {
   const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
+  }
+}
+
+function isTranscribeAudioResponse(value: unknown): value is TranscribeAudioResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.text === "string" &&
+    Array.isArray(record.languages) &&
+    record.languages.every((language) => typeof language === "string")
+  );
+}
+
+function isUploadTranscriptionRecordingChunkResponse(
+  value: unknown,
+): value is UploadTranscriptionRecordingChunkResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (!isTranscriptionRecordingResponse({ recording: record.recording, segments: [] })) {
+    return false;
+  }
+  if (!record.chunk || typeof record.chunk !== "object" || Array.isArray(record.chunk)) {
+    return false;
+  }
+  const chunk = record.chunk as Record<string, unknown>;
+  return (
+    typeof chunk.chunkNumber === "number" &&
+    typeof chunk.byteLength === "number" &&
+    typeof chunk.sha256 === "string" &&
+    typeof chunk.startMilliseconds === "number" &&
+    typeof chunk.durationMilliseconds === "number" &&
+    typeof chunk.deduplicated === "boolean"
+  );
+}
+
+function isTranscriptionRecordingResponse(value: unknown): value is TranscriptionRecordingResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  if (
+    !response.recording ||
+    typeof response.recording !== "object" ||
+    Array.isArray(response.recording)
+  ) {
+    return false;
+  }
+  const recording = response.recording as Record<string, unknown>;
+  return (
+    typeof recording.id === "string" &&
+    typeof recording.workspaceId === "string" &&
+    typeof recording.mimeType === "string" &&
+    typeof recording.state === "string" &&
+    typeof recording.nextChunkNumber === "number" &&
+    typeof recording.chunkCount === "number" &&
+    typeof recording.totalBytes === "number" &&
+    typeof recording.totalDurationMilliseconds === "number" &&
+    typeof recording.segmentCount === "number" &&
+    typeof recording.completedSegmentCount === "number" &&
+    (recording.transcriptText === null || typeof recording.transcriptText === "string") &&
+    Array.isArray(recording.languages) &&
+    (recording.errorCode === null || typeof recording.errorCode === "string") &&
+    typeof recording.retryable === "boolean" &&
+    typeof recording.objectsCleaned === "boolean" &&
+    typeof recording.createdAt === "string" &&
+    typeof recording.updatedAt === "string" &&
+    typeof recording.expiresAt === "string" &&
+    (response.retryAfterMilliseconds === undefined ||
+      (typeof response.retryAfterMilliseconds === "number" &&
+        Number.isInteger(response.retryAfterMilliseconds) &&
+        response.retryAfterMilliseconds > 0 &&
+        response.retryAfterMilliseconds <= 60_000)) &&
+    Array.isArray(response.segments)
+  );
+}
+
+function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
+  if (isTranscriptionRecordingResponse(value)) return value;
+  throw new OpenGeniApiError(502, "Invalid transcription recording response.", {
+    code: "invalid_response",
+  });
+}
+
+function isTranscriptionRecordingListResponse(
+  value: unknown,
+): value is TranscriptionRecordingListResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const recordings = (value as Record<string, unknown>).recordings;
+  return (
+    Array.isArray(recordings) &&
+    recordings.length <= 50 &&
+    recordings.every((recording) => isTranscriptionRecordingResponse({ recording, segments: [] }))
+  );
+}
+
+function filenameForAudioMimeType(mimeType: string): string {
+  const bare = mimeType.trim().toLowerCase().split(";")[0] ?? "audio/webm";
+  switch (bare) {
+    case "audio/mp4":
+    case "audio/m4a":
+      return "audio.mp4";
+    case "audio/ogg":
+      return "audio.ogg";
+    case "audio/mpeg":
+    case "audio/mp3":
+      return "audio.mp3";
+    case "audio/wav":
+    case "audio/x-wav":
+      return "audio.wav";
+    case "audio/webm":
+    default:
+      return "audio.webm";
   }
 }
 

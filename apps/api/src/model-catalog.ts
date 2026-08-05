@@ -2,6 +2,7 @@ import {
   configuredModels,
   configuredProviders,
   withCodexCatalogProvider,
+  withWorkspaceGatewayCatalogProvider,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -34,20 +35,31 @@ export const MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
 
 /** Static, client-safe definition projection. No provider secret is reachable. */
 export function projectClientModel(model: ConfiguredModel): ClientModel {
+  const source =
+    model.credentialSource.kind === "connected_subscription"
+      ? "codex"
+      : model.credentialSource.kind === "workspace_connection"
+        ? "workspace_gateway"
+        : "opengeni";
+  const publicProvider =
+    source === "codex"
+      ? { provider: "codex", providerLabel: "Codex" }
+      : source === "workspace_gateway"
+        ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+        : { provider: "opengeni", providerLabel: "OpenGeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
-    provider: model.providerId,
-    providerLabel: model.providerLabel,
+    ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+    ...publicProvider,
+    source,
     api: model.api,
     ...(model.contextWindowTokens === undefined
       ? {}
       : { contextWindowTokens: model.contextWindowTokens }),
     schemaVersion: model.schemaVersion,
     aliases: model.aliases,
-    deployment: model.deployment,
     executionLimits: model.executionLimits,
-    credentialSource: model.credentialSource,
     billing: model.billing,
     capabilities: model.capabilities,
     ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
@@ -119,6 +131,7 @@ function credentialReadinessFor(input: {
   model: ConfiguredModel;
   provider: ReturnType<typeof configuredProviders>[number] | undefined;
   codexSubscriptionActive: boolean;
+  workspaceGatewayConnectionActive: boolean;
   observation: ModelCredentialReadinessObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -126,6 +139,16 @@ function credentialReadinessFor(input: {
   const source = input.model.credentialSource;
   if (source.kind === "connected_subscription") {
     return input.codexSubscriptionActive
+      ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
+      : {
+          status: "not_ready",
+          reason: "needs_reauth",
+          basis: "connection",
+          checkedAt: null,
+        };
+  }
+  if (source.kind === "workspace_connection") {
+    return input.workspaceGatewayConnectionActive
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {
           status: "not_ready",
@@ -146,7 +169,7 @@ function credentialReadinessFor(input: {
   }
   return observedCredentialReadiness({
     observation: input.observation,
-    basis: source.kind === "workspace_connection" ? "connection" : "resolver",
+    basis: "resolver",
     nowMs: input.nowMs,
     maxAgeMs: input.maxAgeMs,
   });
@@ -286,6 +309,7 @@ export function buildWorkspaceModelCatalog(input: {
   settings: Settings;
   policy: WorkspaceModelPolicyContract | null;
   codexSubscriptionActive: boolean;
+  workspaceGatewayConnectionActive?: boolean;
   credentialReadinessObservations?:
     | Readonly<Record<string, ModelCredentialReadinessObservation>>
     | undefined;
@@ -293,9 +317,10 @@ export function buildWorkspaceModelCatalog(input: {
   now?: Date | undefined;
   credentialReadinessMaxAgeMs?: number | undefined;
 }): WorkspaceModelCatalogResponseType {
-  const catalogSettings = input.settings.codexSubscriptionEnabled
+  const codexSettings = input.settings.codexSubscriptionEnabled
     ? withCodexCatalogProvider(input.settings)
     : input.settings;
+  const catalogSettings = withWorkspaceGatewayCatalogProvider(codexSettings);
   const providers = new Map(
     configuredProviders(catalogSettings).map((provider) => [provider.id, provider]),
   );
@@ -316,6 +341,7 @@ export function buildWorkspaceModelCatalog(input: {
       model,
       provider,
       codexSubscriptionActive: input.codexSubscriptionActive,
+      workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
       observation: input.credentialReadinessObservations?.[model.definitionVersion],
       nowMs,
       maxAgeMs,

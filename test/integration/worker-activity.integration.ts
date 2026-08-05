@@ -47,6 +47,7 @@ import {
   updateSessionMcpServerCredentials,
   updateScheduledTask,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
   type Database,
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -60,6 +61,7 @@ import { createObservability } from "@opengeni/observability";
 import {
   createProductionAgentRuntime,
   MaxTurnsExceededError,
+  safeMcpTransportError,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
@@ -198,7 +200,11 @@ describe("worker activities integration", () => {
     const runtime = {
       prepareTools: async (settings: Parameters<OpenGeniRuntime["prepareTools"]>[0]) => {
         preparedSettings = settings;
-        return { mcpServers: [], close: async () => {} };
+        return {
+          mcpServers: [],
+          resolvedMcpConnectionIds: new Map<string, string>(),
+          close: async () => {},
+        };
       },
     };
     const runSettings = await settingsWithSessionMcpServersForRun(
@@ -1462,6 +1468,167 @@ describe("worker activities integration", () => {
     );
   });
 
+  test("a sanitized required-MCP connection refusal recovers the same turn", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "continue after required MCP reconnects",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      {
+        type: "user.message",
+        payload: { text: "continue after required MCP reconnects" },
+      },
+    ]);
+    const raw = new Error("MCP connect failed for https://private.example/token-value");
+    raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+      code: "ECONNREFUSED",
+    });
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () => {
+        throw safeMcpTransportError(raw);
+      },
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-required-mcp-connectivity",
+        workflowRunId: crypto.randomUUID(),
+      }),
+    ).resolves.toMatchObject({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        code: "mcp_transport_unavailable",
+        reason: "mcp_transport_unavailable",
+        retryable: true,
+        continueDelayMs: 2_000,
+      },
+    );
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("private.example");
+    expect(JSON.stringify(events)).not.toContain("127.0.0.1");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+  });
+
+  test("a rolling-replacement first-party MCP 404 recovers the same goal turn before inference", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "continue after the first-party MCP route returns",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "finish the accepted turn without a synthetic continuation",
+      createdBy: "api",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      {
+        type: "user.message",
+        payload: { text: "continue after the first-party MCP route returns" },
+      },
+    ]);
+    const routeNotReady = Object.assign(new Error("temporary route response"), {
+      status: 404,
+    });
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () => {
+        throw safeMcpTransportError(routeNotReady, { recoverySafeSetup: true });
+      },
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-first-party-mcp-route-replacement",
+        workflowRunId: crypto.randomUUID(),
+      }),
+    ).resolves.toMatchObject({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        code: "mcp_transport_unavailable",
+        reason: "mcp_transport_unavailable",
+        retryable: true,
+        continueDelayMs: 2_000,
+      },
+    );
+    expect(events.some((event) => event.type === "agent.model.request")).toBe(false);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.some((event) => event.type === "goal.continuation")).toBe(false);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
+  });
+
   test("records worker observability when setup fails before a turn starts", async () => {
     const grant = await testGrant(dbClient.db);
     const exported: Array<{ body: any }> = [];
@@ -1639,7 +1806,11 @@ describe("worker activities integration", () => {
       configure: () => {},
       resolveTurnModel: () => null,
       buildAgent: () => ({}) as never,
-      prepareTools: async () => ({ mcpServers: [], close: async () => {} }),
+      prepareTools: async () => ({
+        mcpServers: [],
+        resolvedMcpConnectionIds: new Map<string, string>(),
+        close: async () => {},
+      }),
       prepareInput: async (_agent, input) => {
         expect(input.kind).toBe("approval");
         return { input: "approved" };
@@ -2288,6 +2459,7 @@ describe("worker activities integration", () => {
       baseId: base.id,
       fileId: file.id,
     });
+    let parserCalled = false;
     let embedderCalled = false;
     const activities = createWorkerActivities({
       settings: testSettings({
@@ -2307,13 +2479,16 @@ describe("worker activities integration", () => {
       documentServices: {
         parser: {
           name: "test-text",
-          parse: async (bytes, inputFile) => ({
-            text: new TextDecoder().decode(bytes),
-            metadata: {
-              filename: inputFile.filename,
-              contentType: inputFile.contentType,
-            },
-          }),
+          parse: async (bytes, inputFile) => {
+            parserCalled = true;
+            return {
+              text: new TextDecoder().decode(bytes),
+              metadata: {
+                filename: inputFile.filename,
+                contentType: inputFile.contentType,
+              },
+            };
+          },
         },
         chunker: {
           chunk: (parsed, inputFile) => [
@@ -2335,14 +2510,31 @@ describe("worker activities integration", () => {
       } satisfies DocumentServices,
     });
 
+    await expect(
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: document.id,
+        authorityKind: "organization",
+        authorityWorkspaceId: null,
+        authoritySubjectId: null,
+      }),
+    ).rejects.toThrow("document authority changed before indexing");
+    expect(parserCalled).toBe(false);
+    expect(embedderCalled).toBe(false);
+
     const indexed = await activities.indexDocument({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       documentId: document.id,
+      authorityKind: document.authorityKind,
+      authorityWorkspaceId: document.authorityWorkspaceId,
+      authoritySubjectId: document.authoritySubjectId,
     });
 
     expect(indexed.status).toBe("failed");
     expect(indexed.error).toContain("insufficient OpenGeni credits");
+    expect(parserCalled).toBe(true);
     expect(embedderCalled).toBe(false);
     const usage = await listUsageEvents(dbClient.db, {
       accountId: grant.accountId,
@@ -2350,6 +2542,138 @@ describe("worker activities integration", () => {
       limit: 20,
     });
     expect(usage.some((event) => event.eventType === "document.indexed")).toBe(false);
+  });
+
+  test("resolves historical document indexing authority and rejects partial or stale tuples", async () => {
+    const grant = await testGrant(dbClient.db);
+    const base = await createDocumentBase(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "Historical replay docs",
+    });
+    const createPersonalDocument = async (label: string) => {
+      const upload = await createOwnedFileUpload(dbClient.db, grant, {
+        fileId: crypto.randomUUID(),
+        filename: `${label}.txt`,
+        safeFilename: `${label}.txt`,
+        contentType: "text/plain",
+        sizeBytes: 24,
+        bucket: "test",
+        objectKey: `workspaces/${grant.workspaceId}/files/${label}.txt`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const file = await completeFileUpload(dbClient.db, grant.workspaceId, upload.uploadId);
+      return await addDocumentToBase(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        baseId: base.id,
+        fileId: file.id,
+        authorityKind: "personal",
+        createdBy: grant.subjectId,
+        initiatingSubjectId: grant.subjectId,
+        access: { viewerSubjectId: grant.subjectId },
+      });
+    };
+    const historicalDocument = await createPersonalDocument("historical-replay");
+    const partialDocument = await createPersonalDocument("partial-replay");
+    const staleDocument = await createPersonalDocument("stale-replay");
+    let parserCalls = 0;
+    let embedderCalls = 0;
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      objectStorage: fakeObjectStorage("Historical document replay content."),
+      documentServices: {
+        parser: {
+          name: "test-text",
+          parse: async (bytes, inputFile) => {
+            parserCalls += 1;
+            return {
+              text: new TextDecoder().decode(bytes),
+              metadata: { filename: inputFile.filename, contentType: inputFile.contentType },
+            };
+          },
+        },
+        chunker: {
+          chunk: (parsed, inputFile) => [
+            { text: parsed.text, metadata: { filename: inputFile.filename, chunkIndex: 0 } },
+          ],
+        },
+        embedder: {
+          model: "test-embedder",
+          dimensions: DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+          embedMany: async (chunks) => {
+            embedderCalls += 1;
+            return chunks.map((chunk) =>
+              deterministicEmbedding(chunk, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
+            );
+          },
+          embedQuery: async (query) =>
+            deterministicEmbedding(query, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
+        },
+      } satisfies DocumentServices,
+    });
+
+    const replayed = await activities.indexDocument({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      documentId: historicalDocument.id,
+    });
+    expect(replayed).toMatchObject({
+      status: "ready",
+      authorityKind: "personal",
+      authorityWorkspaceId: grant.workspaceId,
+      authoritySubjectId: grant.subjectId,
+      chunkCount: 1,
+    });
+
+    const exact = await activities.indexDocument({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      documentId: historicalDocument.id,
+      authorityKind: historicalDocument.authorityKind,
+      authorityWorkspaceId: historicalDocument.authorityWorkspaceId,
+      authoritySubjectId: historicalDocument.authoritySubjectId,
+    });
+    expect(exact.status).toBe("ready");
+
+    await expect(
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: partialDocument.id,
+        authorityKind: partialDocument.authorityKind,
+      } as never),
+    ).rejects.toThrow("document authority tuple is partial");
+    await expect(
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: staleDocument.id,
+        authorityKind: "workspace",
+        authorityWorkspaceId: grant.workspaceId,
+        authoritySubjectId: null,
+      }),
+    ).rejects.toThrow("document authority changed before indexing");
+
+    const untouched = await withWorkspaceSubjectRls(
+      dbClient.db,
+      grant.workspaceId,
+      grant.subjectId,
+      async (scopedDb) =>
+        await scopedDb.execute<{ document_id: string }>(dbSql`
+          select document_id
+          from document_chunks
+          where document_id in (${partialDocument.id}, ${staleDocument.id})
+        `),
+    );
+    expect(untouched).toHaveLength(0);
+    expect(parserCalls).toBe(2);
+    expect(embedderCalls).toBe(2);
   });
 
   test("serializes concurrent document indexing against monthly chunk caps", async () => {
@@ -2444,11 +2768,17 @@ describe("worker activities integration", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         documentId: documentOne.id,
+        authorityKind: documentOne.authorityKind,
+        authorityWorkspaceId: documentOne.authorityWorkspaceId,
+        authoritySubjectId: documentOne.authoritySubjectId,
       }),
       activities.indexDocument({
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         documentId: documentTwo.id,
+        authorityKind: documentTwo.authorityKind,
+        authorityWorkspaceId: documentTwo.authorityWorkspaceId,
+        authoritySubjectId: documentTwo.authoritySubjectId,
       }),
     ]);
 

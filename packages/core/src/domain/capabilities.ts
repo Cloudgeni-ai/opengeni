@@ -11,6 +11,7 @@ import {
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
+  type SocialConnection,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -28,6 +29,8 @@ import {
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
+  getCodexAppsCredentialAuthorizationForRun,
+  getWorkspaceGrant,
   getPackInstallation,
   getStoredCapabilityHeaderCiphertext,
   getVariableSet,
@@ -36,6 +39,7 @@ import {
   listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
   listPackInstallations,
+  listSocialConnections,
   mcpServerIdForCapability,
   updatePackInstallationStatus,
   upsertCapabilityCatalogItem,
@@ -43,6 +47,7 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { hasPermission } from "../access";
 import {
   getSkillLibraryEntry,
   listSkillLibraryEntries,
@@ -70,12 +75,14 @@ export async function buildCapabilityCatalog(input: {
   db: Database;
   workspaceId: string;
   settings: Settings;
+  subjectId?: string | null;
 }): Promise<CapabilityCatalogResponse> {
   const [
     persistedItems,
     capabilityInstallations,
     packInstallations,
     workspacePacks,
+    socialConnections,
     bundledSkills,
     curatedLibrarySkills,
   ] = await Promise.all([
@@ -83,6 +90,7 @@ export async function buildCapabilityCatalog(input: {
     listCapabilityInstallations(input.db, input.workspaceId),
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
+    listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
     discoverBundledSkills(),
     discoverCuratedSkillLibraryItems(),
   ]);
@@ -100,7 +108,7 @@ export async function buildCapabilityCatalog(input: {
       packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
     ),
     ...configuredMcpCatalogItems(input.settings),
-    ...platformApiCatalogItems(),
+    ...platformApiCatalogItems(socialConnections),
     ...bundledSkills,
     ...curatedLibrarySkills,
   ];
@@ -130,6 +138,15 @@ export async function createCatalogItem(input: {
   if (id.startsWith("skill:")) {
     throw new HTTPException(422, {
       message: "skill ids are managed by the OpenGeni skill library or runtime adapters",
+    });
+  }
+  if (
+    input.payload.kind === "mcp" &&
+    typeof input.payload.metadata.mcpServerId === "string" &&
+    input.payload.metadata.mcpServerId.trim() === CODEX_APPS_MCP_SERVER_ID
+  ) {
+    throw new HTTPException(422, {
+      message: `${CODEX_APPS_MCP_SERVER_ID} is reserved for the canonical Codex Apps service`,
     });
   }
   const source =
@@ -716,36 +733,76 @@ export async function settingsWithEnabledCapabilityMcpServers(
   workspaceId: string,
   settings: Settings,
 ): Promise<Settings> {
-  const enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
-  return settingsWithCodexAppsMcpServer(settingsWithMcpCapabilityServers(settings, enabled));
+  const [enabled, codexAppsCredentialId] = await Promise.all([
+    listEnabledMcpCapabilityServers(db, workspaceId),
+    resolveCodexAppsCredentialIdForRun(db, workspaceId),
+  ]);
+  return settingsWithCodexAppsMcpServer(
+    settingsWithMcpCapabilityServers(settings, enabled),
+    codexAppsCredentialId !== null,
+  );
 }
 
 /**
- * Register Codex Apps as an optional runtime MCP when the deployment enables
- * it. Registration only makes the server selectable; the session tool policy
- * decides whether the model sees it, and Codex credential resolution
- * independently decides whether calls can authenticate.
+ * Resolve executable Apps authority. The connector must remain active and its
+ * exact owner must still hold workspace connection-management permission.
  */
-export function settingsWithCodexAppsMcpServer(settings: Settings): Settings {
+export async function resolveCodexAppsCredentialIdForRun(
+  db: Database,
+  workspaceId: string,
+): Promise<string | null> {
+  const authorization = await getCodexAppsCredentialAuthorizationForRun(db, workspaceId);
+  if (!authorization) return null;
+  const grant = await getWorkspaceGrant(db, authorization.ownerSubjectId, workspaceId);
+  return grant && hasPermission(grant.permissions, "connections:write")
+    ? authorization.credentialId
+    : null;
+}
+
+/**
+ * Register Codex Apps as an optional runtime MCP only when the deployment is
+ * enabled and this workspace has an active explicit Apps designation.
+ * Registration only makes the server selectable; session policy decides
+ * whether the model sees it.
+ */
+export function settingsWithCodexAppsMcpServer(
+  settings: Settings,
+  credentialAvailable: boolean,
+): Settings {
+  const canonicalServer = {
+    id: CODEX_APPS_MCP_SERVER_ID,
+    name: CODEX_APPS_MCP_SERVER_NAME,
+    url: CODEX_APPS_MCP_URL,
+    timeoutMs: CODEX_APPS_STARTUP_TIMEOUT_MS,
+    // Availability is credential-specific, so discover on every run.
+    cacheToolsList: false,
+  };
+  // The id is a credential-routing trust boundary. Discard every configured or
+  // capability-provided claimant before optionally appending the one canonical
+  // endpoint; preserving an existing id could send the designated bearer to an
+  // attacker-controlled URL.
+  const withoutReservedId = settings.mcpServers.filter(
+    (server) => server.id !== CODEX_APPS_MCP_SERVER_ID,
+  );
+  if (!settings.codexConnectedAppsEnabled || !credentialAvailable) {
+    return withoutReservedId.length === settings.mcpServers.length
+      ? settings
+      : { ...settings, mcpServers: withoutReservedId };
+  }
+  const existing = settings.mcpServers.at(-1);
   if (
-    !settings.codexConnectedAppsEnabled ||
-    settings.mcpServers.some((server) => server.id === CODEX_APPS_MCP_SERVER_ID)
+    withoutReservedId.length === settings.mcpServers.length - 1 &&
+    existing !== undefined &&
+    Object.keys(existing).length === Object.keys(canonicalServer).length &&
+    Object.entries(canonicalServer).every(
+      ([key, value]) => existing[key as keyof typeof existing] === value,
+    )
   ) {
     return settings;
   }
   return {
     ...settings,
-    mcpServers: [
-      ...settings.mcpServers,
-      {
-        id: CODEX_APPS_MCP_SERVER_ID,
-        name: CODEX_APPS_MCP_SERVER_NAME,
-        url: CODEX_APPS_MCP_URL,
-        timeoutMs: CODEX_APPS_STARTUP_TIMEOUT_MS,
-        // Availability is credential-specific, so discover on every run.
-        cacheToolsList: false,
-      },
-    ],
+    mcpServers: [...withoutReservedId, canonicalServer],
   };
 }
 
@@ -898,6 +955,19 @@ function packCatalogItem(
   pack: ReturnType<typeof listCapabilityPacks>[number],
   source: "built_in" | "manual",
 ): CapabilityCatalogItem {
+  const customMetadata = { ...pack.metadata };
+  for (const key of [
+    "packId",
+    "version",
+    "connectors",
+    "knowledge",
+    "scheduledTaskTemplates",
+    "sandboxImage",
+    "sandboxProviderImages",
+    "skills",
+  ]) {
+    delete customMetadata[key];
+  }
   return CapabilityCatalogItem.parse({
     id: `pack:${pack.id}`,
     kind: "pack",
@@ -912,6 +982,7 @@ function packCatalogItem(
       notes: "Enables role-scoped tools, connectors, knowledge, and scheduled-task templates.",
     },
     metadata: {
+      ...customMetadata,
       packId: pack.id,
       version: pack.version,
       connectors: pack.connectors,
@@ -919,8 +990,8 @@ function packCatalogItem(
       scheduledTaskTemplates: pack.scheduledTaskTemplates,
       // Runtime composition surface only: skill names, never file content.
       ...(pack.sandboxImage ? { sandboxImage: pack.sandboxImage } : {}),
+      ...(pack.sandboxProviderImages ? { sandboxProviderImages: pack.sandboxProviderImages } : {}),
       ...(pack.skills.length > 0 ? { skills: pack.skills.map((skill) => skill.name) } : {}),
-      ...pack.metadata,
     },
   });
 }
@@ -954,8 +1025,52 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
   );
 }
 
-function platformApiCatalogItems(): CapabilityCatalogItem[] {
-  return [
+function platformApiCatalogItems(socialConnections: SocialConnection[]): CapabilityCatalogItem[] {
+  const xConnection = preferredSocialConnection(socialConnections, "x");
+  const xEnabled = xConnection?.status === "connected" || xConnection?.status === "needs_reauth";
+  const x = CapabilityCatalogItem.parse({
+    id: "api:x",
+    kind: "api",
+    source: "built_in",
+    name: "X",
+    description:
+      "Connect an X account for live search, mentions, thread context, post sync, and permission-controlled replies.",
+    category: "social-media",
+    tags: ["api", "x", "twitter", "social", "marketing"],
+    homepageUrl: "https://x.com",
+    authModel: "oauth2_authorization_code_pkce",
+    providerDomain: "x.com",
+    surfaceType: "first_party_social",
+    authKind: "oauth2",
+    tools: [{ kind: "mcp", id: "opengeni" }],
+    runtime: {
+      available: true,
+      mcpServerId: "opengeni",
+      notes: "Account access is provided through OpenGeni's first-party social tools.",
+    },
+    enabled: xEnabled,
+    enabledReason: xEnabled
+      ? xConnection.status === "connected"
+        ? `${xConnection.ownership} social account connected`
+        : `${xConnection.ownership} social account needs reconnection`
+      : null,
+    metadata: {
+      connectorMode: "first_party_social",
+      provider: "x",
+      ownership: xConnection?.ownership ?? "workspace",
+      firstPartyMcpTools: [
+        "social_connections_list",
+        "social_posts_recent",
+        "social_daily_analysis_context",
+        "social_search_live",
+        "social_mentions_live",
+        "social_thread_fetch",
+        "social_posts_sync",
+        "social_post_reply",
+      ],
+    },
+  });
+  const platformApis = [
     {
       id: "api:github-app",
       name: "GitHub App",
@@ -1005,6 +1120,25 @@ function platformApiCatalogItems(): CapabilityCatalogItem[] {
         endpointPath: item.endpointPath,
       },
     }),
+  );
+  return [x, ...platformApis];
+}
+
+function preferredSocialConnection(
+  connections: SocialConnection[],
+  provider: "x" | "reddit",
+): SocialConnection | null {
+  const statusRank = (status: SocialConnection["status"]): number =>
+    status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
+  return (
+    connections
+      .filter((connection) => connection.provider === provider)
+      .sort(
+        (left, right) =>
+          statusRank(left.status) - statusRank(right.status) ||
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          left.id.localeCompare(right.id),
+      )[0] ?? null
   );
 }
 
@@ -1135,6 +1269,12 @@ export function applyCapabilityEnablement(
       enabled,
       enabledReason: enabled ? "enabled" : null,
     };
+  }
+  if (item.surfaceType === "first_party_social") {
+    // Social connector state is derived from the authoritative workspace
+    // connection row while the catalog is built. Being built in means the
+    // connector is browseable, not that an account is already connected.
+    return { ...item, connectionRef: null };
   }
   if (item.source === "built_in" || item.source === "configured") {
     return {

@@ -405,6 +405,37 @@ describe("embedding host session authorization routes", () => {
     expect(new Set(decisions)).toEqual(new Set(["session.mcp.approval_policy.write"]));
   });
 
+  test("authorizes browser activation as realtime control before validating its body", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const decisions: Array<{ operation: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, surface }) => {
+        decisions.push({ operation, surface });
+        return { allowed: true, relatedSessionAccess: "target" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const response = await app.request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}` +
+        `/realtime/${crypto.randomUUID()}/connections/${crypto.randomUUID()}/activate`,
+      {
+        method: "POST",
+        headers: {
+          authorization: value.authorization,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+
+    expect(response.status).toBe(422);
+    expect(decisions).toContainEqual({
+      operation: "session.realtime.control",
+      surface: "http",
+    });
+  });
+
   test("public turn and queue reads omit host instructions while the worker claim retains them", async () => {
     if (!available) return;
     const value = await fixture();

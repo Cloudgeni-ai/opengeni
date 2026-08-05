@@ -6,10 +6,12 @@ import {
   isCreditExhaustion,
   tryParseJson,
 } from "../lib/format";
+import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import type {
   AgentMessageItem,
   ActivityItem,
   AuthNeededItem,
+  ContextCompactionItem,
   GoalItem,
   MachineInputBatchItem,
   MemoryItem,
@@ -21,12 +23,8 @@ import type {
   ToolCallItem,
   WorkerItem,
 } from "./types";
-/** Readable label for a tool call, without leaking an MCP server prefix. */
-export function toolDisplayName(name: string): string {
-  const boundary = name.indexOf("__");
-  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
-  return toolPart.replace(/[_-]+/g, " ").trim();
-}
+
+export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
 /* ----------------------------------------------------------------------------
    Timeline projection
@@ -42,9 +40,27 @@ export function toolDisplayName(name: string): string {
    memoized, unit-tested, and re-run incrementally as new events stream in.
    -------------------------------------------------------------------------- */
 
-/** Tool names on the first-party OpenGeni MCP server that operate on sessions. */
+/** Tool leaves on the first-party OpenGeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
+
+/**
+ * Tools whose durable side-effect events already own the timeline (MemoryRow).
+ * Emitting a generic tool-call too is double chrome — skip the call.
+ *
+ * Goal tools are intentionally NOT landmark-only: an agent `goal_set` /
+ * `goal_update` / `goal_complete` / `goal_pause` stays an in-cluster tool row,
+ * and the matching `goal.*` session event is suppressed below when `actor` is
+ * `"agent"`. That keeps mid-turn goal tools from splitting the step rail with
+ * a breakaway GoalRow pill. Non-agent goal events (API, create-session,
+ * system auto-pause, continuations) still render as landmarks.
+ *
+ * Solo `goal_continuation` machine-input batches are also suppressed: the
+ * paired `goal.continuation` GoalRow already marks the tick; rendering both
+ * restates the goal text. Mixed batches (continuation + other kinds) still
+ * render as machine-input rows.
+ */
+const LANDMARK_ONLY_TOOL_LEAVES = new Set(["memory_save", "memory_correct"]);
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
@@ -113,10 +129,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           });
           break;
         }
+        const voiceMessage = realtimeVoiceMessage(payload);
         items.push({
           kind: "user-message",
           id: event.id,
-          text: stringValue(payload.text),
+          text: voiceMessage?.text ?? stringValue(payload.text),
+          ...(voiceMessage ? { presentation: voiceMessage.presentation } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           occurredAt: event.occurredAt,
@@ -127,6 +145,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "system.update.delivered": {
         const inputs = machineInputMembers(payload.members);
         if (inputs.length === 0) break;
+        // Goal continuations already land as `goal.continuation` GoalRows.
+        // A solo continuation batch would duplicate that landmark + dump the
+        // model-facing prompt — skip chrome for that case only.
+        if (inputs.every((member) => member.kind === "goal_continuation")) {
+          break;
+        }
         closeStreamingTail();
         items.push({
           kind: "machine-input-batch",
@@ -185,6 +209,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             open.text = text || open.text;
           }
           open.streaming = false;
+          // Completion time is what the footer shows ("finished at"); keep the
+          // first-delta stamp only until this event arrives.
+          open.occurredAt = event.occurredAt;
           // The SDK can emit a hosted-tool item only after its provider-native
           // operation has completed, even though answer deltas were already
           // streamed. The completed message event is the durable ordering
@@ -236,19 +263,46 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
-        if (name === WORKER_SPAWN_TOOL || name === WORKER_MESSAGE_TOOL) {
+        if (
+          toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ||
+          toolMatchesLeaf(name, WORKER_MESSAGE_TOOL)
+        ) {
           items.push({
             kind: "worker",
             id: event.id,
             turnId,
             callId,
-            action: name === WORKER_SPAWN_TOOL ? "spawn" : "message",
+            action: toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ? "spawn" : "message",
             prompt: workerPrompt(args),
             workerSessionId: extractSessionRef(args),
             status: "running",
             occurredAt: event.occurredAt,
           });
           break;
+        }
+        if (LANDMARK_ONLY_TOOL_LEAVES.has(mcpToolLeaf(name))) {
+          // Goal/memory landmarks arrive as goal.* / memory.* events.
+          break;
+        }
+        // Live Responses `web_search_call` events and the later SDK
+        // `RunToolCallItem` share the same item id. Merge so mid-stream cards
+        // do not duplicate when the step finally materializes.
+        if (callId) {
+          const existing = [...items]
+            .reverse()
+            .find(
+              (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
+            );
+          if (existing) {
+            if (args != null) {
+              existing.arguments = args;
+            }
+            if (payload.raw !== undefined) {
+              existing.raw = mergeToolCallRaw(existing.raw, payload.raw);
+            }
+            existing.status = providerNativeToolStatus(existing.raw);
+            break;
+          }
         }
         items.push({
           kind: "tool-call",
@@ -397,7 +451,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (previous?.status === status) {
           break;
         }
-        items.push({ kind: "session-status", id: event.id, status, occurredAt: event.occurredAt });
+        items.push({
+          kind: "session-status",
+          id: event.id,
+          status,
+          occurredAt: event.occurredAt,
+        });
         break;
       }
 
@@ -413,24 +472,36 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "session.context.compaction.requested":
+      case "session.context.compaction.started": {
+        closeStreamingTail();
+        settleOrPushContextCompaction(items, {
+          id: event.id,
+          turnId,
+          phase: "started",
+          trigger: compactionTrigger(payload),
+          estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
+          estimatedTokensAfter: null,
+          skipReason: null,
+          implementation:
+            typeof payload.implementation === "string" ? payload.implementation : null,
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "session.context.compacted": {
         closeStreamingTail();
-        const before =
-          typeof payload.estimatedTokensBefore === "number"
-            ? Math.round(payload.estimatedTokensBefore).toLocaleString("en-US")
-            : null;
-        const after =
-          typeof payload.estimatedTokensAfter === "number"
-            ? Math.round(payload.estimatedTokensAfter).toLocaleString("en-US")
-            : null;
-        items.push({
-          kind: "notice",
+        settleOrPushContextCompaction(items, {
           id: event.id,
-          tone: "waiting",
-          text:
-            before && after
-              ? `Active conversation history compacted from approximately ${before} to ${after} tokens.`
-              : "Context compacted so the turn could continue.",
+          turnId,
+          phase: "compacted",
+          trigger: compactionTrigger(payload),
+          estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
+          estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
+          skipReason: null,
+          implementation:
+            typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -438,21 +509,16 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "session.context.compaction.skipped": {
         closeStreamingTail();
-        const reason = typeof payload.reason === "string" ? payload.reason : null;
-        items.push({
-          kind: "notice",
+        settleOrPushContextCompaction(items, {
           id: event.id,
-          tone: reason === "summarization_failed" ? "failed" : "waiting",
-          text:
-            reason === "no_history"
-              ? "Context compaction skipped because there is no active history to compact."
-              : reason === "replacement_not_smaller"
-                ? "Context compaction skipped because the generated checkpoint would not reduce the context."
-                : reason === "replacement_unchanged"
-                  ? "Context compaction stopped because it reproduced the same checkpoint without making progress."
-                  : reason === "summarization_failed"
-                    ? "Context compaction failed without replacing the active conversation history. Request it again to retry."
-                    : "Context compaction was not needed.",
+          turnId,
+          phase: "skipped",
+          trigger: compactionTrigger(payload),
+          estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
+          estimatedTokensAfter: null,
+          skipReason: typeof payload.reason === "string" ? payload.reason : null,
+          implementation:
+            typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -499,8 +565,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "turn.completed": {
         // A standalone manual compaction uses the turn ledger for fencing and
         // recovery, but it is maintenance rather than a conversational turn.
-        // The dedicated session.context.compacted notice is the complete UI
-        // truth; adding a generic turn chip would falsely make it look like an
+        // The dedicated context-compaction landmark is the complete UI truth;
+        // adding a generic turn chip would falsely make it look like an
         // extra agent response.
         if (payload.maintenance === "context_compaction") {
           finalizeOpen(turnId);
@@ -606,6 +672,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "goal.resumed":
       case "goal.cleared":
       case "goal.continuation": {
+        // Agent tool mutations already appear as tool-call rows in the activity
+        // cluster. Re-emitting them as GoalRow landmarks splits "N steps" mid-turn.
+        if (shouldSuppressAgentGoalLandmark(event.type, payload)) {
+          break;
+        }
         items.push({
           kind: "goal",
           id: event.id,
@@ -629,6 +700,24 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   return items;
 }
 
+function realtimeVoiceMessage(payload: Record<string, unknown>): {
+  text: string;
+  presentation: {
+    kind: "realtime_voice" | "realtime_voice_handoff";
+    context: string;
+  };
+} | null {
+  const presentation = asRecord(payload.presentation);
+  const visibleText = stringValue(payload.text);
+  if (presentation.kind === "realtime_voice" || presentation.kind === "realtime_voice_handoff") {
+    const context = stringValue(presentation.context);
+    return visibleText && context
+      ? { text: visibleText, presentation: { kind: presentation.kind, context } }
+      : null;
+  }
+  return null;
+}
+
 function providerNativeToolStatus(rawValue: unknown): ToolCallItem["status"] {
   const raw = asRecord(rawValue);
   if (raw.type !== "hosted_tool_call") {
@@ -645,6 +734,38 @@ function providerNativeToolStatus(rawValue: unknown): ToolCallItem["status"] {
     default:
       return "running";
   }
+}
+
+/**
+ * Prefer newer status/fields, but keep earlier providerData.action when a
+ * progress-only Responses event arrives without the search query payload.
+ */
+function mergeToolCallRaw(existingValue: unknown, nextValue: unknown): unknown {
+  const existing = asRecord(existingValue);
+  const next = asRecord(nextValue);
+  if (Object.keys(next).length === 0) {
+    return existingValue;
+  }
+  const existingProvider = asRecord(existing.providerData);
+  const nextProvider = asRecord(next.providerData);
+  const providerData = {
+    ...existingProvider,
+    ...nextProvider,
+  };
+  if (
+    existingProvider.action != null &&
+    (nextProvider.action == null ||
+      (typeof nextProvider.action === "object" &&
+        nextProvider.action !== null &&
+        Object.keys(nextProvider.action as object).length === 0))
+  ) {
+    providerData.action = existingProvider.action;
+  }
+  return {
+    ...existing,
+    ...next,
+    ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
+  };
 }
 
 /**
@@ -736,7 +857,11 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
       if (open?.kind === "activity" && open.outcome === undefined) {
         open.items.push(item);
       } else {
-        groups.push({ kind: "activity", id: `activity-${item.id}`, items: [item] });
+        groups.push({
+          kind: "activity",
+          id: `activity-${item.id}`,
+          items: [item],
+        });
       }
       continue;
     }
@@ -823,7 +948,12 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     }
   }
 
-  return { queuedTurnByTrigger, startSeqByTrigger, cancelledBeforeStartTriggers, startedTurnIds };
+  return {
+    queuedTurnByTrigger,
+    startSeqByTrigger,
+    cancelledBeforeStartTriggers,
+    startedTurnIds,
+  };
 }
 
 function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan): SessionEvent[] {
@@ -1010,6 +1140,13 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   }
 
   const firstOccurredAt = groupStartedAt(body[0]) ?? turnEnd.occurredAt;
+  const prior = startIndex > 0 ? groups[startIndex - 1] : undefined;
+  const contextCompactionCount =
+    prior?.kind === "item" &&
+    prior.item.kind === "context-compaction" &&
+    prior.item.phase === "compacted"
+      ? 1
+      : 0;
   const turnGroup: TimelineGroup = {
     kind: "turn",
     id: `turn-${turnEnd.turnId ?? turnEnd.id}`,
@@ -1017,6 +1154,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     startedAt: firstOccurredAt,
     endedAt: turnEnd.occurredAt,
     groups: body,
+    ...(contextCompactionCount > 0 ? { contextCompactionCount } : {}),
   };
   if (turnEnd.failureText) {
     turnGroup.failureText = turnEnd.failureText;
@@ -1034,6 +1172,7 @@ function isTurnBoundary(group: TimelineGroup | undefined): boolean {
     group?.kind === "turn" ||
     (group?.kind === "item" &&
       (group.item.kind === "user-message" ||
+        group.item.kind === "context-compaction" ||
         (group.item.kind === "notice" && group.item.tone === "input")))
   );
 }
@@ -1098,6 +1237,61 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function compactionTrigger(payload: Record<string, unknown>): ContextCompactionItem["trigger"] {
+  const trigger = payload.trigger;
+  return trigger === "auto" ||
+    trigger === "operator" ||
+    trigger === "proactive" ||
+    trigger === "overflow"
+    ? trigger
+    : null;
+}
+
+/**
+ * Keep one landmark per turn: a later started/compacted/skipped settles the
+ * open started row instead of stacking notices.
+ */
+function settleOrPushContextCompaction(
+  items: TimelineItem[],
+  next: Omit<ContextCompactionItem, "kind">,
+): void {
+  const openIndex = findOpenContextCompactionIndex(items, next.turnId);
+  if (openIndex >= 0) {
+    const open = items[openIndex];
+    if (open?.kind === "context-compaction") {
+      items[openIndex] = {
+        ...open,
+        ...next,
+        // Prefer the settled event id so keys stay stable with the finish row.
+        id: next.phase === "started" ? open.id : next.id,
+        trigger: next.trigger ?? open.trigger,
+        estimatedTokensBefore: next.estimatedTokensBefore ?? open.estimatedTokensBefore,
+        implementation: next.implementation ?? open.implementation,
+      };
+      return;
+    }
+  }
+  items.push({ kind: "context-compaction", ...next });
+}
+
+function findOpenContextCompactionIndex(items: TimelineItem[], turnId: string | null): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind !== "context-compaction" || item.phase !== "started") {
+      continue;
+    }
+    if (turnId && item.turnId && item.turnId !== turnId) {
+      continue;
+    }
+    return index;
+  }
+  return -1;
 }
 
 function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
@@ -1286,6 +1480,22 @@ function goalText(payload: Record<string, unknown>): string | null {
 }
 
 /**
+ * Agent-owned goal mutations already have an in-cluster tool row. Suppress the
+ * breakaway landmark for those only. `goal.completed` has no actor field today
+ * and is only emitted by the agent tool, so it is always suppressed. API /
+ * system / create-session / continuation landmarks stay visible.
+ */
+function shouldSuppressAgentGoalLandmark(type: string, payload: Record<string, unknown>): boolean {
+  if (type === "goal.completed") {
+    return true;
+  }
+  if (type === "goal.set" || type === "goal.updated" || type === "goal.paused") {
+    return payload.actor === "agent";
+  }
+  return false;
+}
+
+/**
  * Fold a `memory.saved` / `memory.corrected` event into a {@link MemoryItem}.
  * Reads DEFENSIVELY (the payload is untyped `unknown`, no Zod schema): a missing
  * memory id means a malformed event, so we return null and the case drops it.
@@ -1328,6 +1538,7 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "expired",
   "insufficient_scope",
   "refresh_failed",
+  "personal_authority_unavailable",
   "unsupported_auth",
   "resource_scope_unavailable",
 ]);
@@ -1398,6 +1609,15 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
     return null;
   }
   const record = value as Record<string, unknown>;
+  const receiptResource = asRecord(record.resource);
+  if (
+    record.receiptVersion === "mcp-mutation-receipt.v1" &&
+    receiptResource.type === "session" &&
+    typeof receiptResource.id === "string" &&
+    looksLikeId(receiptResource.id)
+  ) {
+    return receiptResource.id;
+  }
   if (typeof record.sessionId === "string" && looksLikeId(record.sessionId)) {
     return record.sessionId;
   }
@@ -1425,14 +1645,3 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
 function looksLikeId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
-
-/**
- * Readable label for a tool call ("session_create" -> "session create").
- *
- * MCP tools are namespaced `<serverId>__<toolName>` (see prefixedMcpToolName),
- * and for catalog-imported servers that serverId is an opaque slug+hash
- * ("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8"). De-slugging the
- * whole thing leaked that id into the timeline; strip the server prefix and show
- * just the tool ("list organizations"). Names without the `__` boundary (plain
- * built-ins like "session_create") are unaffected.
- */

@@ -27,6 +27,10 @@ export const SUMMARY_BUFFER_TOKENS = 20_000;
 // A single cumulative budget for all retained real user messages, matching
 // Codex core's build_compacted_history_with_limit (not a per-message allowance).
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
+/** Codex CLI remote compaction v2 retained-message budget (codex-rs). */
+export const REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
+export const REMOTE_COMPACTION_V2_IMPLEMENTATION = "responses_compaction_v2" as const;
+export const REMOTE_COMPACTION_V2_BETA_FEATURE = "remote_compaction_v2" as const;
 // 0.9: compact as LATE as possible — retained context is worth more than early
 // headroom now that declared per-model windows are honest. Model-catalog
 // explicit limits take precedence; the ratio is used for models without one.
@@ -512,8 +516,67 @@ function projectNativeImages(value: unknown, seen: WeakSet<object>): NativeImage
   return { value: projected, imageTokens, imageCount, imageFallbackCount };
 }
 
+/**
+ * Codex CLI `estimate_reasoning_length`: opaque encrypted payloads are not
+ * model-visible as raw JSON/base64. Visible bytes ≈ `len * 3/4 - 650`.
+ */
+export function estimateOpaqueEncryptedModelVisibleBytes(encodedLen: number): number {
+  const length = Math.max(0, Math.floor(encodedLen));
+  return Math.max(0, Math.floor((length * 3) / 4) - 650);
+}
+
+/** Codex CLI bytes→tokens for opaque encrypted content (`ceil(bytes / 4)`). */
+export function estimateOpaqueEncryptedTokens(encodedLen: number): number {
+  const bytes = estimateOpaqueEncryptedModelVisibleBytes(encodedLen);
+  return bytes === 0 ? 0 : Math.ceil(bytes / 4);
+}
+
+/**
+ * Length of opaque encrypted content that must use the Codex encrypted
+ * estimator instead of JSON.stringify (compaction blobs and reasoning).
+ */
+export function opaqueEncryptedContentLength(item: unknown): number | null {
+  if (!item || typeof item !== "object") return null;
+  const record = item as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  if (
+    (type === "compaction" || type === "context_compaction" || type === "reasoning") &&
+    typeof record.encrypted_content === "string" &&
+    record.encrypted_content.length > 0
+  ) {
+    return record.encrypted_content.length;
+  }
+  if (type === "reasoning") {
+    const providerData =
+      record.providerData && typeof record.providerData === "object"
+        ? (record.providerData as Record<string, unknown>)
+        : null;
+    const nested =
+      providerData && typeof providerData.encrypted_content === "string"
+        ? providerData.encrypted_content
+        : providerData && typeof providerData.encryptedContent === "string"
+          ? providerData.encryptedContent
+          : null;
+    if (nested && nested.length > 0) return nested.length;
+  }
+  return null;
+}
+
 /** Native-image-aware item estimate for pre-call accounting and retained budgets. */
 export function estimateItemTokenBreakdown(item: CompactionItem): ModelInputTokenBreakdown {
+  const opaqueLen = opaqueEncryptedContentLength(item);
+  if (opaqueLen !== null) {
+    // Match Codex: Compaction / encrypted reasoning use the opaque byte
+    // heuristic only — never JSON-stringify the ciphertext into the budget.
+    const textTokens = estimateOpaqueEncryptedTokens(opaqueLen);
+    return {
+      totalTokens: textTokens,
+      textTokens,
+      imageTokens: 0,
+      imageCount: 0,
+      imageFallbackCount: 0,
+    };
+  }
   const projected = projectNativeImages(item, new WeakSet<object>());
   let text: string;
   try {
@@ -589,7 +652,7 @@ export type ProviderContextTokenSignal = {
 
 export type CompleteModelInputEstimate = {
   tokens: number;
-  source: "complete_estimate" | "provider_plus_local";
+  source: "provider_plus_local";
   inputTokens: number;
   inputTextTokens: number;
   inputImageTokens: number;
@@ -601,37 +664,22 @@ export type CompleteModelInputEstimate = {
 };
 
 /**
- * Match Codex history accounting: after one provider response, start from its
+ * Match Codex history accounting after one provider response: start from its
  * authoritative TOTAL token count and add only local items placed after the
  * newest model-generated item. System instructions and tool schemas are
  * compared with the exact request footprint that produced the provider count;
- * positive growth is added. Without a bound anchor, estimate the entire
- * outgoing request rather than trusting stale usage from an earlier turn.
+ * positive growth is added. Callers must bind both values to the immediately
+ * preceding request; there is deliberately no whole-request fallback.
  */
 export function estimateCompleteModelInput(input: {
   current: CompleteModelInputFootprint;
-  provider?: ProviderContextTokenSignal | null;
-  providerRequestFootprint?: CompleteModelInputFootprint | null;
+  provider: ProviderContextTokenSignal;
+  providerRequestFootprint: CompleteModelInputFootprint;
 }): CompleteModelInputEstimate {
   const inputEstimate = estimateTokensBreakdown(input.current.input);
   const inputTokens = inputEstimate.totalTokens;
   const instructionsTokens = input.current.instructionsTokens;
   const toolSchemaTokens = input.current.toolSchemaTokens;
-  if (!input.provider || !input.providerRequestFootprint || input.provider.totalTokens <= 0) {
-    return {
-      tokens: inputTokens + instructionsTokens + toolSchemaTokens,
-      source: "complete_estimate",
-      inputTokens,
-      inputTextTokens: inputEstimate.textTokens,
-      inputImageTokens: inputEstimate.imageTokens,
-      inputImageCount: inputEstimate.imageCount,
-      inputImageFallbackCount: inputEstimate.imageFallbackCount,
-      instructionsTokens,
-      toolSchemaTokens,
-      appendedAfterModelTokens: 0,
-    };
-  }
-
   const appended = itemsAfterLastModelGeneratedItem(input.current.input);
   const appendedAfterModelTokens = estimateTokens(appended);
   const instructionGrowth = Math.max(
@@ -730,11 +778,12 @@ export function decideCompaction(input: {
     typeof input.lastInputTokens === "number" && input.lastInputTokens > 0
       ? input.lastInputTokens
       : 0;
-  const activeHistoryEstimate = estimateTokens(input.items);
-  // A durable provider count belongs to an earlier request. The full active
-  // estimate is a conservative cross-turn floor until an exact same-run anchor
-  // is available in the per-call guard.
-  const signalTokens = Math.max(recorded, activeHistoryEstimate);
+  // Automatic compaction is provider-accounted. A local history estimate is
+  // useful for shaping a compaction request and describing its replacement,
+  // but it is not authoritative enough to decide that an ordinary request must
+  // be compacted. A missing provider count therefore means "try the request";
+  // a genuine provider overflow enters the same recovery path.
+  const signalTokens = recorded;
   if (input.items.length === 0) {
     return {
       shouldCompact: false,
@@ -770,13 +819,13 @@ export function decideCompaction(input: {
 export class CompactionNeededError extends Error {
   readonly signalTokens: number;
   readonly thresholdTokens: number;
-  readonly signalSource: "provider" | "estimate";
+  readonly signalSource: "provider" | "operator";
   readonly trigger: "threshold" | "operator";
 
   constructor(input: {
     signalTokens: number;
     thresholdTokens: number;
-    signalSource: "provider" | "estimate";
+    signalSource: "provider" | "operator";
     trigger?: "threshold" | "operator";
   }) {
     const trigger = input.trigger ?? "threshold";
@@ -991,6 +1040,105 @@ export function buildCompactionReplacementHistory(
   return history;
 }
 
+/** True for a Codex remote-compaction output item with opaque encrypted content. */
+export function isRemoteCompactionItem(item: unknown): item is CompactionItem {
+  if (!item || typeof item !== "object") return false;
+  const record = item as Record<string, unknown>;
+  return (
+    record.type === "compaction" &&
+    typeof record.encrypted_content === "string" &&
+    record.encrypted_content.length > 0
+  );
+}
+
+/** Messages retained beside a remote v2 compaction blob (user + developer). */
+export function isRetainedRemoteV2Message(item: unknown): boolean {
+  if (isCompactionSummary(item) || itemType(item) === "compaction") return false;
+  const role = itemRole(item);
+  return itemType(item) === "message" && (role === "user" || role === "developer");
+}
+
+/**
+ * Build the active history after Codex remote compaction v2:
+ * newest retained user/developer messages within the CLI 64k budget plus the
+ * opaque `{ type: "compaction", encrypted_content }` item.
+ *
+ * Unlike the portable rebuild, retained messages keep `input_image` parts
+ * (Codex CLI `truncate_retained_messages_for_remote_compaction`). Image-only
+ * messages charge at least 1 token against the retain budget, matching CLI
+ * `message_text_token_count(...).max(1)`.
+ */
+export function buildRemoteV2ReplacementHistory(
+  items: readonly CompactionItem[],
+  compactionItem: CompactionItem,
+): CompactionItem[] {
+  if (!isRemoteCompactionItem(compactionItem)) {
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_compaction_item" });
+  }
+  const retainedReversed: CompactionItem[] = [];
+  let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
+  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = items[index]!;
+    if (!isRetainedRemoteV2Message(item)) continue;
+    const textTokens = estimateTextTokens(messageText(item));
+    const chargeTokens = Math.max(1, textTokens);
+    if (chargeTokens <= remaining) {
+      retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+      remaining -= chargeTokens;
+      continue;
+    }
+    retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+    remaining = 0;
+    break;
+  }
+  const history = retainedReversed.reverse();
+  history.push({
+    type: "compaction",
+    encrypted_content: compactionItem.encrypted_content,
+    ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
+  });
+  return history;
+}
+
+/**
+ * Append the transient compaction_trigger used only for the remote v2 request.
+ *
+ * The OpenAI Agents SDK's Responses converter rejects a bare
+ * `{ type: "compaction_trigger" }` (`UserError: Unsupported item`). It does
+ * accept `type: "unknown"` and forwards `providerData` onto the wire, which is
+ * how we deliver the Codex-only trigger through CompactionResponsesModel into
+ * the Codex fetch normalizer (which allowlists top-level `compaction_trigger`).
+ */
+export function buildRemoteCompactionV2PromptInput(
+  items: readonly CompactionItem[],
+): CompactionItem[] {
+  return [
+    ...items,
+    {
+      type: "unknown",
+      providerData: { type: "compaction_trigger" },
+    },
+  ];
+}
+
+/** Extract exactly one compaction output item from a Responses payload. */
+export function extractRemoteCompactionV2OutputItem(response: unknown): CompactionItem {
+  if (!response || typeof response !== "object") {
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_extract", reason: "no_response" });
+  }
+  const record = response as Record<string, unknown>;
+  const output = Array.isArray(record.output) ? record.output : [];
+  const compactionItems = output.filter(isRemoteCompactionItem);
+  if (compactionItems.length !== 1) {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_extract",
+      reason: "expected_exactly_one_compaction",
+      found: compactionItems.length,
+    });
+  }
+  return compactionItems[0]!;
+}
+
 export function compactionReplacementFingerprint(items: readonly CompactionItem[]): string {
   // PostgreSQL JSONB does not preserve JavaScript object-key insertion order.
   // Canonicalize recursively so a replacement has the same identity before
@@ -1048,6 +1196,33 @@ function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): C
   }
   next.content = contentWithoutImages(item);
   return next;
+}
+
+/**
+ * Retain a remote_v2 suffix message: keep images, truncate text only when the
+ * text budget is exceeded (CLI keeps InputImage parts through truncation).
+ */
+function compactRemoteV2RetainedMessage(item: CompactionItem, maxTokens: number): CompactionItem {
+  const text = messageText(item);
+  const next = { ...item };
+  if (estimateTextTokens(text) <= maxTokens) {
+    return next;
+  }
+  const truncated = truncateMiddleByEstimatedTokens(text, maxTokens);
+  const content = (item as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    next.content = truncated;
+    return next;
+  }
+  const imageParts = content.filter(isImageContentPart);
+  next.content = [{ type: "input_text", text: truncated }, ...imageParts];
+  return next;
+}
+
+function isImageContentPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false;
+  const type = (part as { type?: unknown }).type;
+  return type === "input_image" || type === "image_url";
 }
 
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {

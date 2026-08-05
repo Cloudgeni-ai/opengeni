@@ -177,9 +177,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.keyboard.press("Enter");
     await initialPinMutation;
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
-    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(64);
+    // Session navigation now starts the real capture-backed workbench while the
+    // session record is still loading. Keep a bounded render budget that includes
+    // that intentional parallel surface instead of measuring the rail alone.
+    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(72);
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
-    await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pinnedA.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     await pageA.waitForFunction(() =>
       document.activeElement?.getAttribute("aria-label")?.startsWith("Actions for Master"),
     );
@@ -194,7 +197,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const sameDeviceTab = await deviceA.newPage();
     await sameDeviceTab.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
     const sameTabPinned = sameDeviceTab.getByRole("group", { name: "Pinned" });
-    const sameTabPinnedTarget = sameTabPinned.getByRole("button", {
+    const sameTabPinnedTarget = sameTabPinned.getByRole("link", {
       name: /^Open Master pin target/,
     });
     await sameTabPinnedTarget.waitFor();
@@ -237,10 +240,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageB.reload();
     await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedB = pageB.getByRole("group", { name: "Pinned" });
-    await pinnedB.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     expect(
       await pinnedB
-        .getByRole("button", { name: /^Open / })
+        .getByRole("link", { name: /^Open / })
         .first()
         .getAttribute("aria-label"),
     ).toStartWith("Open Master pin target");
@@ -262,13 +265,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const search = pageB.getByRole("searchbox", { name: "Search sessions" });
     await search.fill("Master pin target");
     await pageB.getByText("1 matching session.").waitFor();
-    await pinnedB.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
-    expect(
-      await pageB.getByRole("button", { name: /^Open Newer unrelated activity/ }).count(),
-    ).toBe(0);
+    await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
+    expect(await pageB.getByRole("link", { name: /^Open Newer unrelated activity/ }).count()).toBe(
+      0,
+    );
     await search.fill("");
     await pageB
-      .getByRole("button", { name: /^Open Newer unrelated activity/ })
+      .getByRole("link", { name: /^Open Newer unrelated activity/ })
       .waitFor({ timeout: 10_000 });
 
     // Pagination is also exercised through the normal authenticated browser API
@@ -293,16 +296,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
     // The rail uses real roving focus. Arrow navigation changes document focus,
     // Home returns to the pin, and Enter activates the currently focused row.
-    const targetRow = pinnedB.getByRole("button", {
+    const targetRow = pinnedB.getByRole("link", {
       name: /^Open Master pin target/,
     });
 
     // A boundary key is a navigation no-op. If it records the already-current
     // row as an intent, moving to that row's actions and then refreshing the
     // list incorrectly steals focus back to the row.
-    const boundaryRow = pageB
-      .locator("[data-sessionpin-session-list] button[data-session-row]")
-      .first();
+    const boundaryRow = pageB.locator("[data-sessionpin-session-list] a[data-session-row]").first();
     const boundarySessionId = await boundaryRow.getAttribute("data-session-row");
     if (!boundarySessionId) throw new Error("expected a visible boundary session row");
     await boundaryRow.focus();
@@ -343,7 +344,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await createSessionThroughApi(pageB, apiBaseUrl, workspaceId, "Refresh-only activity");
     await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
     await pageB
-      .getByRole("button", { name: /^Open Refresh-only activity/ })
+      .getByRole("link", { name: /^Open Refresh-only activity/ })
       .waitFor({ timeout: 10_000 });
     expect(await pageB.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
       focusedBeforeRefresh,
@@ -523,8 +524,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(secondPage.sessions).toHaveLength(50);
       expect(secondPage.nextCursor).toBeTruthy();
       const retainedId = secondPage.sessions[0]!.id;
-      const visibleRows = page.locator("[data-sessionpin-session-list] button[data-session-row]");
-      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+      const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
       expect(await visibleRows.count()).toBe(100);
 
       // A generic 500 is not treated as cursor expiry: loaded rows stay put and
@@ -552,7 +553,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await retryOlder.waitFor({ timeout: 10_000 });
       expect(injectedFailure).toBe(true);
       expect(await visibleRows.count()).toBe(100);
-      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
       // Delete the exact server-owned snapshot named by the live continuation.
       // The API must type that response as 410; the client then creates one new
@@ -594,7 +595,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       expect(rebasedSecond.sessions).toHaveLength(50);
       expect(await visibleRows.count()).toBe(100);
-      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
       // The rebased page-two response exposes the last cursor. All 106 matching
       // rows remain reachable exactly once, including the oldest sentinel.
@@ -611,7 +612,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
-      await page.locator(`button[data-session-row="${sentinel!.id}"]`).waitFor();
+      await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor();
       const visibleIds = await visibleRows.evaluateAll((rows) =>
         rows.map((row) => row.getAttribute("data-session-row")),
       );
@@ -702,14 +703,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const pinnedList = page.getByRole("list", { name: "Pinned sessions" });
       await pinnedList.waitFor();
       const topLevelPin = (sessionId: string) =>
-        pinnedList.locator(
-          `:scope > [role="listitem"] > div > button[data-session-row="${sessionId}"]`,
-        );
+        pinnedList.locator(`:scope > [role="listitem"] > div > a[data-session-row="${sessionId}"]`);
       const topLevelPinItem = (sessionId: string) => topLevelPin(sessionId).locator("xpath=../..");
       await topLevelPin(descendant.id).waitFor();
       await topLevelPin(manager.id).waitFor();
       const hierarchyPinOrder = await pinnedList
-        .locator(':scope > [role="listitem"] > div > button[data-session-row]')
+        .locator(':scope > [role="listitem"] > div > a[data-session-row]')
         .evaluateAll(
           (rows, hierarchyIds) =>
             rows
@@ -731,14 +730,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const managerChildren = managerItem.getByRole("list", {
         name: "Spawned sessions from Pinned hierarchy manager",
       });
-      await managerChildren.getByRole("button", { name: /^Open Ordinary manager child/ }).waitFor();
+      await managerChildren.getByRole("link", { name: /^Open Ordinary manager child/ }).waitFor();
       await managerChildren
-        .getByRole("button", { name: /^Open Lazy hierarchy intermediary/ })
+        .getByRole("link", { name: /^Open Lazy hierarchy intermediary/ })
         .waitFor();
       expect(await topLevelPin(descendant.id).count()).toBe(1);
-      expect(
-        await managerChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
-      ).toBe(0);
+      expect(await managerChildren.locator(`a[data-session-row="${descendant.id}"]`).count()).toBe(
+        0,
+      );
 
       // The intermediary retains an expand affordance for its ordinary child
       // even while pin ownership prunes the direct pinned child. Its lazy page
@@ -759,10 +758,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         name: "Spawned sessions from Lazy hierarchy intermediary",
       });
       await intermediaryChildren
-        .locator(`button[data-session-row="${intermediarySibling.id}"]`)
+        .locator(`a[data-session-row="${intermediarySibling.id}"]`)
         .waitFor();
       expect(
-        await intermediaryChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
+        await intermediaryChildren.locator(`a[data-session-row="${descendant.id}"]`).count(),
       ).toBe(0);
 
       // The descendant shortcut owns its unpinned leaf. Its nested list is
@@ -773,7 +772,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const descendantChildren = descendantItem.getByRole("list", {
         name: "Spawned sessions from Pinned hierarchy descendant",
       });
-      await descendantChildren.locator(`button[data-session-row="${leaf.id}"]`).waitFor();
+      await descendantChildren.locator(`a[data-session-row="${leaf.id}"]`).waitFor();
       const descendantRow = topLevelPin(descendant.id);
       await descendantRow.focus();
       await page.keyboard.press("ArrowDown");
@@ -785,7 +784,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await page.evaluate(() => document.activeElement?.getAttribute("data-session-row")),
       ).toBe(manager.id);
       const visiblePinIds = await pinnedList
-        .locator("button[data-session-row]")
+        .locator("a[data-session-row]")
         .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
       expect(new Set(visiblePinIds).size).toBe(visiblePinIds.length);
       await expectNoAxeViolations(page, ["[data-sessionpin-session-list]"]);
@@ -816,12 +815,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.evaluate(() => window.dispatchEvent(new Event("focus")));
       await Promise.all([pinsOnlyRefresh, descendantPointRead]);
       const topLevelPinnedDescendant = page.locator(
-        `[role="list"][aria-label="Pinned sessions"] > [role="listitem"] > div > button[data-session-row="${descendant.id}"]`,
+        `[role="list"][aria-label="Pinned sessions"] > [role="listitem"] > div > a[data-session-row="${descendant.id}"]`,
       );
       await waitFor(async () => (await topLevelPinnedDescendant.count()) === 0, {
         timeoutMs: 10_000,
       });
-      await intermediaryChildren.locator(`button[data-session-row="${descendant.id}"]`).waitFor();
+      await intermediaryChildren.locator(`a[data-session-row="${descendant.id}"]`).waitFor();
       expect(ordinaryChild.id).toBeTruthy();
     } finally {
       await context.close();
@@ -898,26 +897,33 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
       const managerUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`;
       await desktopPage.goto(managerUrl);
-      const queue = desktopPage.getByTestId("queue-surface");
-      const goal = desktopPage.getByTestId("goal-surface");
-      const agents = desktopPage.getByTestId("composer-agents-pill");
+      const chrome = desktopPage.getByTestId("session-chrome");
+      const queueChip = desktopPage.getByTestId("session-chrome-queue");
+      const goalChip = desktopPage.getByTestId("session-chrome-goal");
+      const agentsChip = desktopPage.getByTestId("session-chrome-agents");
       const composer = desktopPage.getByLabel("Message the agent");
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
-      await goal.waitFor();
-      await agents.waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await goalChip.waitFor();
+      await agentsChip.waitFor();
       await composer.waitFor();
-      expect(await desktopPage.getByTestId("queue-surface").count()).toBe(1);
-      expect(await desktopPage.getByTestId("composer-agents-pill").count()).toBe(1);
+      expect(await desktopPage.getByTestId("session-chrome").count()).toBe(1);
+      expect(await desktopPage.getByTestId("session-chrome-agents").count()).toBe(1);
 
       // Enter appends an ordinary human prompt to the one visible queue. The
       // inert workflow client keeps both rows waiting so the browser can inspect
       // the exact server-authoritative order.
       await composer.fill("A second prompt queued from the composer");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
-      await queue.getByRole("button", { name: /2 queued prompts/ }).click();
-      await queue.getByRole("list", { name: "Queued prompts" }).waitFor();
-      const queuedRows = queue.getByRole("listitem");
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
+      await queueChip.click();
+      await chrome.getByRole("list", { name: "Queued prompts" }).waitFor();
+      const queuePanel = chrome.locator('[data-og-session-chrome-panel-frame="queue"]');
+      await waitFor(
+        async () =>
+          (await queuePanel.evaluate((element) => Number(getComputedStyle(element).opacity))) >= 1,
+        { timeoutMs: 2_000 },
+      );
+      const queuedRows = chrome.getByRole("list", { name: "Queued prompts" }).getByRole("listitem");
       expect(await queuedRows.count()).toBe(2);
       expect(await queuedRows.nth(0).innerText()).toContain(
         "Inspect the full session-control surface",
@@ -932,36 +938,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
         await expectNoPageOverflow(desktopPage);
-        await expectNoAxeViolations(desktopPage, ["[data-testid=queue-surface]"]);
+        await expectNoAxeViolations(desktopPage, ["[data-testid=session-chrome]"]);
         await desktopPage.screenshot({
           path: `/tmp/opengeni-session-control-queue-expanded-${theme}.png`,
           fullPage: true,
         });
       }
 
-      // Menu reorder and keyboard drag both mutate the one durable queue. The
-      // server remains the order authority after every operation.
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Move to top" }).click();
+      // Move controls mutate the one durable queue. The server remains the
+      // order authority after every operation.
+      await chrome.getByRole("button", { name: "Move queued prompt 2 up" }).click();
       await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer");
-      const secondHandle = queue.getByRole("button", {
-        name: "Reorder queued prompt 2",
-      });
-      await secondHandle.focus();
-      await desktopPage.keyboard.press("Space");
-      await queue
-        .getByText(
-          "Lifted queued prompt 2 of 2. Use arrow keys to move it, then press Space to drop.",
-          { exact: true },
-        )
-        .waitFor();
-      // Keep focus on the lifted handle for the full gesture. The projected
-      // order is visible immediately, but remains local until Space commits
-      // the move to the durable server-owned queue.
-      await desktopPage.keyboard.press("ArrowUp");
-      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
-      await desktopPage.keyboard.press("Space");
-      await queue.getByText("Queued prompt moved to position 1.", { exact: true }).waitFor();
+      await chrome.getByRole("button", { name: "Move queued prompt 1 down" }).click();
       await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 
       // Edit is a checkout: it removes the exact queue row and restores the
@@ -969,41 +957,43 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // A pre-existing draft is never silently destroyed: the queue row stays
       // put until the user explicitly confirms replacement.
       await composer.fill("Unsent local draft that must not be overwritten");
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
-      await queue.getByText("Replace it with this queued prompt?").waitFor();
+      await chrome.getByRole("button", { name: "Edit queued prompt 2" }).click();
+      await chrome.getByText("Replace it with this queued prompt?").waitFor();
       expect(await queuedRows.count()).toBe(2);
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
-      await queue.getByRole("button", { name: "Keep current draft" }).click();
+      await chrome.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
       await composer.fill("");
       await waitForComposerDraftText(desktopPage, apiBaseUrl, workspaceId, manager.id, "");
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
+      await chrome.getByRole("button", { name: "Edit queued prompt 2" }).click();
       await waitFor(
         async () => (await composer.inputValue()) === "A second prompt queued from the composer",
         { timeoutMs: 10_000 },
       );
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
-      // it preserves that row, moves it to the head, and resumes the branch.
+      // it moves that row to the head and resumes the branch. The accepted row
+      // is presented separately as the active direction, never as still queued.
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
-      await queue.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
-      await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer (edited)");
+      await chrome.getByText("Changing direction…", { exact: true }).waitFor();
+      await chrome.getByText("A second prompt queued from the composer (edited)").waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 
-      // Delete removes only the selected waiting prompt. Add one final prompt so
-      // the same two-row surface can still be exercised in the mobile pass.
-      await queue.getByRole("button", { name: "Delete queued prompt 2" }).click();
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      // Remove deletes only the selected waiting prompt. Add one final prompt so
+      // the queue surface can still be exercised in the mobile pass.
+      await chrome.getByRole("button", { name: "Remove queued prompt 1" }).click();
+      await queueChip.waitFor({ state: "detached" });
       await composer.fill("A replacement prompt after delete");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       const timeline = desktopPage.getByTestId("session-timeline");
       expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
       expect(await timeline.getByText("A second prompt queued from the composer").count()).toBe(0);
@@ -1035,7 +1025,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await deepComposer.press("Enter");
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       await desktopPage
-        .getByTestId("queue-surface")
+        .getByTestId("session-chrome-queue")
         .getByText("1 queued prompt", { exact: true })
         .waitFor();
 
@@ -1045,25 +1035,22 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
+      // The session record and lineage tree are independent reads. Navigation
+      // must not require one to block the other, so await the lineage-owned chip
+      // before asserting the settled control stack.
+      await agentsChip.waitFor();
 
-      const boxes = await Promise.all([
-        queue.boundingBox(),
-        goal.boundingBox(),
-        agents.boundingBox(),
-        composer.boundingBox(),
-      ]);
+      const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();
       expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
-      expect(boxes[1]!.y).toBeLessThan(boxes[2]!.y);
-      expect(boxes[2]!.y).toBeLessThan(boxes[3]!.y);
+      expect(await goalChip.count()).toBe(1);
+      expect(await agentsChip.count()).toBe(1);
 
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
         await expectNoPageOverflow(desktopPage);
         await expectNoAxeViolations(desktopPage, [
-          "[data-testid=queue-surface]",
-          "[data-testid=goal-surface]",
-          "[data-testid=composer-agents-pill]",
+          "[data-testid=session-chrome]",
           "textarea[aria-label='Message the agent']",
         ]);
         await desktopPage.screenshot({
@@ -1088,14 +1075,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await expectContainedInViewport(mobileAncestry, 390);
       await expectNoPageOverflow(mobilePage);
       await mobilePage.goto(managerUrl);
-      await mobilePage.getByTestId("queue-surface").waitFor();
-      await mobilePage.getByTestId("goal-surface").waitFor();
-      await mobilePage.getByTestId("composer-agents-pill").waitFor();
+      await mobilePage.getByTestId("session-chrome").waitFor();
+      await mobilePage.getByTestId("session-chrome-goal").waitFor();
+      await mobilePage.getByTestId("session-chrome-agents").waitFor();
       await expectNoPageOverflow(mobilePage);
-      await expectTouchTarget(
-        mobilePage.getByTestId("queue-surface").getByRole("button", { name: /2 queued prompts/ }),
-      );
-      await expectTouchTarget(mobilePage.getByTestId("composer-agents-pill"));
+      await expectTouchTarget(mobilePage.getByTestId("session-chrome-queue"));
+      await expectTouchTarget(mobilePage.getByTestId("session-chrome-agents"));
       await mobilePage.screenshot({
         path: "/tmp/opengeni-session-control-stack-mobile.png",
         fullPage: true,
@@ -1127,6 +1112,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       `Mobile pin ${"long title ".repeat(20)}`.slice(0, 200),
     );
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+    // Wait for the session shell before sampling React commits — a cold goto can
+    // read the probe at 0 before the first paint registers.
+    await page.getByRole("button", { name: "Pin session" }).waitFor();
     const initialCommits = await reactCommitCount(page);
     expect(initialCommits).toBeGreaterThan(0);
     await page.getByRole("button", { name: "Pin session" }).click();
@@ -1173,15 +1161,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe(
           "Session navigation",
         );
-        const targetRow = navigation.getByRole("button", { name: /^Open Mobile pin/ });
+        const targetRow = navigation.getByRole("link", { name: /^Open Mobile pin/ });
         await targetRow.waitFor();
         // The active route row can render from its point read before the global
         // pin page arrives. Wait for a seeded shortcut so the count below
         // measures the fully loaded pinned section rather than that transient.
-        await navigation.getByRole("button", { name: /^Open Pinned mobile stress 7/ }).waitFor();
+        await navigation.getByRole("link", { name: /^Open Pinned mobile stress 7/ }).waitFor();
         expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
         expect(
-          await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
+          await navigation.getByRole("link", { name: /^Open Pinned mobile stress/ }).count(),
         ).toBe(7);
         await expectTouchTarget(targetRow);
         await expectTouchTarget(
@@ -1758,11 +1746,23 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     } else {
       document.documentElement.removeAttribute("data-og-theme");
     }
-    // Theme tokens affect independently composited panels. Wait for two paint
-    // frames so retained visual evidence cannot mix layers from both themes.
+    // Theme tokens affect independently composited panels. Let the browser
+    // start their CSS transitions, then wait for the session chrome transitions
+    // themselves so neither Axe nor retained evidence sees mixed-theme colors.
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
+    const transitions = document.getAnimations().filter((animation) => {
+      const target = animation.effect instanceof KeyframeEffect ? animation.effect.target : null;
+      return (
+        animation.constructor.name === "CSSTransition" &&
+        target instanceof Element &&
+        target.closest('[data-testid="session-chrome"]') !== null
+      );
+    });
+    await Promise.all(
+      transitions.map(async (transition) => await transition.finished.catch(() => undefined)),
+    );
   }, theme);
 }
 

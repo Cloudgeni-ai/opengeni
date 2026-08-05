@@ -1,5 +1,249 @@
 # @opengeni/contracts
 
+## 0.39.1
+
+### Patch Changes
+
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+
+## 0.39.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+## 0.38.3
+
+### Patch Changes
+
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+
+## 0.38.2
+
+### Patch Changes
+
+- 4502474: Add workspace-default and explicitly personal ownership for first-party social connections, preserve causal personal authority for agent work, and retain actionable structured gateway errors.
+
+## 0.38.1
+
+### Patch Changes
+
+- c9d8b69: Make Connected Machine project paths portable and diagnosable: session responses now expose `workingDir`, and the native agent consistently supports the service user's `~` path across exec, filesystem, git, and terminal operations while reporting missing working directories accurately.
+
+## 0.38.0
+
+### Minor Changes
+
+- bef5920: Add subject-scoped Workspace State preference and document-authority inventory
+  metadata plus a canonical, explicitly sanitized export API and SDK method.
+
+### Patch Changes
+
+- b6e39fc: Polish session chrome and apply_patch rendering; clarify realtime voice-end handoff.
+
+  SessionChrome gets denser selected-chip UX and Codex function-tool apply_patch shapes render in the specialized diff UI. Solo goal_continuation machine-input rows are suppressed in favor of the GoalRow landmark. The realtime transcript-tail instruction now keeps in-flight work going after voice ends.
+
+## 0.37.0
+
+### Minor Changes
+
+- fd13ba9: Add one immutable organization, workspace, or personal document destination contract for connector configuration, and make Google Drive persist and consume that authority independently from optional collections.
+
+## 0.36.1
+
+### Patch Changes
+
+- abe0de6: Persist timesliced composer voice recordings in browser storage with reload-safe document ownership, opener/duplicate-tab fencing, oldest-first recovery, byte-ceiling enforcement, and durable transcript-before-draft handoff. Interrupted audio retries reuse the same recording, uncertain saved transcripts require explicit insertion instead of automatic retranscription or duplicate append, and transient handed-off cleanup failures are retried and garbage-collected owner-safely.
+
+## 0.36.0
+
+### Minor Changes
+
+- 00f7d3b: Add durable, tenant-isolated onboarding proposals that atomically create inactive instruction-policy drafts with typed replay, stale-baseline, conflict, and audit contracts, plus a bounded Workspace State admin composer.
+
+## 0.35.0
+
+### Minor Changes
+
+- b121e7c: Add durable Google Drive pause, resume, disconnect, reconnect, revoked-token,
+  removed-app, and permission re-consent lifecycle handling with version-fenced
+  state transitions, generation-bound disconnect idempotency, stale-replay
+  protection, and secret-safe provider error classification.
+
+## 0.34.0
+
+### Minor Changes
+
+- b83af7a: Add replay-safe workspace instruction policy administration across the API,
+  contracts, database, and SDK, including immutable operation receipts that reject
+  changed requests reusing the same operation identifier.
+
+## 0.33.0
+
+### Minor Changes
+
+- d1f0c3d: Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.
+- 1d0f2ae: Expose one effective document retrieval contract across REST, SDK, and MCP that binds the immutable initiating subject outside caller input, filters organization/workspace/personal authority before ranking, and preserves source plus authorization provenance in typed results.
+- 3e4842d: Add subject-authorized accepted-attempt governance inspection to Workspace State,
+  including immutable policy/preference snapshot metadata and deterministic current
+  drift classification without exposing prompt or personal preference content.
+
+## 0.32.0
+
+### Minor Changes
+
+- 13b961e: Add an atomic terminal session-subtree cancellation command that drains queued work, fences concurrent prompts and child creation, interrupts live attempts, durably reports cancelled children to surviving parents, and exposes the operation through the API/core/SDK control surface.
+- e03397d: Freeze workspace instruction policies and structured preference descriptors at
+  the accepted logical-turn boundary, add immutable per-session policy roles, and
+  compose the resulting exact-attempt governance into agent and compaction prompts.
+- 3baaebd: Add configurable Slack emoji-reaction summons with a least-privilege manifest, bounded thread context, and workspace-admin settings.
+
+### Patch Changes
+
+- ecc4288: Add a deterministic, fail-closed Google Drive OAuth scope-capability contract and
+  require recursive selected-source read access before callback persistence or
+  source browsing.
+- 4f15920: Add an authorized, server-mediated connected-Codex GPT-Live V3 WebRTC SDP path with credential-safe negotiation and browser lifecycle helpers.
+
+## 0.31.2
+
+### Patch Changes
+
+- e62495f: Allow session creators to explicitly opt out of a workspace default rig, and make live release acceptance prove its fixture command completed before waiting for a workspace capture.
+- b4982fa: Expose GPT-5.6 Max reasoning end to end for managed and connected Codex models.
+
+## 0.31.1
+
+### Patch Changes
+
+- 9c4d73d: Add curated OpenGeni-credit and workspace-key Vercel AI Gateway model paths for
+  DeepSeek V4 Flash and Kimi K3, including exact provider routing, cache-aware
+  pricing and metering, Responses tool continuity, provider-blind catalog UX, and
+  stable remote-compaction cache prefixes.
+
+## 0.31.0
+
+### Minor Changes
+
+- 8b3e46f: Allow a digest-pinned capability-pack sandbox image to bind an immutable Modal image ID. OpenGeni now preserves the logical OCI digest on the lease, starts the provider-native image through `ModalImageSelector.fromId`, records the actual ID in the Modal session envelope, clears lower-precedence IDs when a rig overrides the image, and keeps catalog image metadata aligned with the runtime manifest.
+
+## 0.30.0
+
+### Minor Changes
+
+- 2321119: Add the provider-neutral scoped knowledge provenance, lifecycle, ACL, and normalized claim foundation for organization, workspace, and initiating-user personal evidence.
+
+## 0.29.0
+
+### Minor Changes
+
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+
+## 0.28.1
+
+### Patch Changes
+
+- 659b3ff: Harden Slack-triggered session delivery, identity linking, provider backoff, explicit connection-tool selection, and replay-safe bounded progress/final delivery.
+
+## 0.28.0
+
+### Minor Changes
+
+- ec0bc02: Add an opt-in browser analytics runtime contract with consent-gated, allowlisted
+  Reo, PostHog, and GA4 provider configuration. Self-hosted deployments remain
+  disabled by default, and public client configuration exposes no provider
+  administrative credentials. Third-party modules load lazily, Reo clipboard/AI
+  capture is disabled, query-bearing routes are excluded, and consent can be
+  withdrawn without destabilizing the console.
+- 5a4c559: Add first-party X and Reddit social connectors: OAuth connect flows (X PKCE
+  S256, Reddit permanent grant) with encrypted token storage and just-in-time
+  refresh, live first-party MCP tools (search, mentions, thread fetch, own-post
+  sync, permission-gated reply publishing), a reddit provider in the marketing
+  pack, operator config via OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON, and SDK
+  startSocialOAuth/listSocialConnections.
+
+### Patch Changes
+
+- d4d8960: Keep Personal Slack UI, reconnect, and broker credential selection on one deterministic legacy-duplicate ordering.
+
+## 0.27.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- dcc35c5: Add authenticated Slack mentions, commands, message shortcuts, atomically private bot-DM sessions, durable thread continuation, and globally bounded idempotent progress delivery.
+
+## 0.26.1
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+
+## 0.26.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+## 0.25.0
+
+### Minor Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- 9f3b931: Add the canonical personal Slack hosted-MCP resource constant and a dedicated account-linking experience that keeps subject-owned OAuth status, reconnect, and disconnect controls separate from workspace bot installation.
+
+## Unreleased
+
+### Minor Changes
+
+- Add native voice-input contracts: `ClientConfig.voiceInput`, `WorkspaceVoiceInputSettings`,
+  `TranscribeAudioResponse`, MIME/duration/size ceilings, and
+  `resolveWorkspaceVoiceInputEnabled` (maps legacy `transcription.enabled` for one release).
+  Expand transcription error codes with `unavailable` / `too_large` / `invalid_audio`.
+
+## 0.24.3
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+
+## 0.24.2
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+
+## 0.24.1
+
+### Patch Changes
+
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+
 ## 0.24.0
 
 ### Minor Changes

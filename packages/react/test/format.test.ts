@@ -3,6 +3,7 @@ import {
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
   CREDIT_EXHAUSTION_MESSAGE,
   composerSubmissionErrorMessage,
+  formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
   isCreditExhaustion,
@@ -11,6 +12,16 @@ import {
   tryParseJson,
 } from "../src/lib/format";
 import { OpenGeniApiError } from "@opengeni/sdk";
+
+describe("formatClockTime", () => {
+  test("formats date + time and rejects invalid input", () => {
+    expect(formatClockTime("not-a-date")).toBe("");
+    const formatted = formatClockTime("2026-07-15T08:04:00");
+    expect(formatted.toLowerCase()).toMatch(/jul/);
+    expect(formatted).toMatch(/15/);
+    expect(formatted).toMatch(/\d/);
+  });
+});
 
 describe("formatRelativeTime", () => {
   const now = new Date("2026-06-12T12:00:00Z");

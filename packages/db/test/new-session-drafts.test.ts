@@ -391,6 +391,44 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect(revisionZero).toBe(false);
   });
 
+  test("creates a realtime-first idle shell without a user event, turn, or workflow wake", async () => {
+    const context = await fixture();
+    await saveDraft(context, 0, { text: "private pre-session draft" });
+    const session = await createUninitializedSession(context);
+
+    const initialized = await initializeSessionStartAtomically(client.db, {
+      accountId: context.grant.accountId,
+      workspaceId: context.grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      consumeNewSessionDraft: { subjectId: context.subjectId, expectedRevision: 1 },
+      deferInitialTurn: true,
+    });
+
+    expect(initialized.turn).toBeNull();
+    expect(initialized.workflowWakeRevision).toBeNull();
+    expect(initialized.events.map((event) => event.type)).toEqual(["session.created"]);
+    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
+      revision: 2,
+      text: "",
+    });
+
+    const [state] = await shared.admin<
+      Array<{ status: string; eventTypes: string[]; turns: number; wakes: number }>
+    >`
+      select
+        s.status,
+        coalesce(array_agg(e.type order by e.sequence) filter (where e.id is not null), '{}') as "eventTypes",
+        (select count(*)::int from session_turns t where t.session_id = s.id) as turns,
+        (select count(*)::int from session_workflow_wake_outbox w where w.session_id = s.id) as wakes
+      from sessions s
+      left join session_events e on e.session_id = s.id
+      where s.id = ${session.id}
+      group by s.id`;
+    expect(state).toEqual({ status: "idle", eventTypes: ["session.created"], turns: 0, wakes: 0 });
+  });
+
   test("an idempotent initialization retry cannot consume a later draft with a reused revision", async () => {
     const context = await fixture();
     await saveDraft(context, 0, { text: "accepted draft" });

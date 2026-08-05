@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
+  CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
   ImportLegacyWorkspaceInstructionPolicyDraftRequest,
   RollbackWorkspaceInstructionPolicyRequest,
   WorkspaceInstructionPolicyActivationResponse,
@@ -9,21 +11,35 @@ import {
   WorkspaceInstructionPolicyDiffResponse,
   WorkspaceInstructionPolicyListQuery,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOnboardingProposal,
+  WorkspaceInstructionPolicyOnboardingProposalConflictResponse,
+  WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse,
+  WorkspaceInstructionPolicyOnboardingProposalListQuery,
+  WorkspaceInstructionPolicyOnboardingProposalListResponse,
+  WorkspaceInstructionPolicyOnboardingProposalStaleResponse,
+  WorkspaceInstructionPolicyOperationReuseResponse,
   WorkspaceInstructionPolicyRevision,
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
 } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   activateWorkspaceInstructionPolicyRevision,
   createWorkspaceInstructionPolicyDraft,
+  createWorkspaceInstructionPolicyOnboardingProposal,
   diffWorkspaceInstructionPolicyRevisions,
   getWorkspaceInstructionPolicyRevision,
   importLegacyWorkspaceInstructionPolicyDraft,
   listWorkspaceInstructionPolicyRevisions,
+  listWorkspaceInstructionPolicyOnboardingProposals,
   rollbackWorkspaceInstructionPolicyRevision,
   WorkspaceInstructionPolicyConflictError,
   WorkspaceInstructionPolicyInvalidOperationError,
   WorkspaceInstructionPolicyLegacyUnavailableError,
   WorkspaceInstructionPolicyNotFoundError,
+  WorkspaceInstructionPolicyOnboardingProposalConflictError,
+  WorkspaceInstructionPolicyOnboardingProposalContentError,
+  WorkspaceInstructionPolicyOnboardingProposalStaleError,
+  WorkspaceInstructionPolicyOperationReuseError,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -46,6 +62,46 @@ function policyErrorResponse(context: Context, error: unknown): Response {
         code: error.code,
         message: error.message,
         currentHead: error.currentHead,
+      }),
+      409,
+    );
+  }
+  if (error instanceof WorkspaceInstructionPolicyOperationReuseError) {
+    return context.json(
+      WorkspaceInstructionPolicyOperationReuseResponse.parse({
+        code: error.code,
+        message: error.message,
+      }),
+      409,
+    );
+  }
+  if (error instanceof WorkspaceInstructionPolicyOnboardingProposalContentError) {
+    return context.json(
+      WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse.parse({
+        code: error.code,
+        message: error.message,
+        maxChars: WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+      }),
+      422,
+    );
+  }
+  if (error instanceof WorkspaceInstructionPolicyOnboardingProposalStaleError) {
+    return context.json(
+      WorkspaceInstructionPolicyOnboardingProposalStaleResponse.parse({
+        code: error.code,
+        message: error.message,
+        currentHead: error.currentHead,
+      }),
+      409,
+    );
+  }
+  if (error instanceof WorkspaceInstructionPolicyOnboardingProposalConflictError) {
+    return context.json(
+      WorkspaceInstructionPolicyOnboardingProposalConflictResponse.parse({
+        code: error.code,
+        message: error.message,
+        existingProposalId: error.existingProposalId,
+        existingDraftRevisionId: error.existingDraftRevisionId,
       }),
       409,
     );
@@ -117,6 +173,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyRevision.parse(
           await createWorkspaceInstructionPolicyDraft(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             createdBySubjectId: grant.subjectId,
@@ -145,10 +202,63 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyRevision.parse(
           await importLegacyWorkspaceInstructionPolicyDraft(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             createdBySubjectId: grant.subjectId,
             supersedesRevisionId: request.supersedesRevisionId,
+          }),
+        ),
+        201,
+      );
+    } catch (error) {
+      return policyErrorResponse(context, error);
+    }
+  });
+
+  app.get(`${base}/onboarding-proposals`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const parsed = WorkspaceInstructionPolicyOnboardingProposalListQuery.safeParse({
+      limit: context.req.query("limit"),
+    });
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "Invalid workspace instruction-policy onboarding-proposal query",
+      });
+    }
+    return context.json(
+      WorkspaceInstructionPolicyOnboardingProposalListResponse.parse(
+        await listWorkspaceInstructionPolicyOnboardingProposals(deps.db, workspaceId, parsed.data),
+      ),
+    );
+  });
+
+  app.post(`${base}/onboarding-proposals`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    assertBoundedActor(grant.subjectId);
+    const request = await parseBody(
+      context,
+      CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
+    );
+    try {
+      return context.json(
+        WorkspaceInstructionPolicyOnboardingProposal.parse(
+          await createWorkspaceInstructionPolicyOnboardingProposal(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
+            accountId: grant.accountId,
+            workspaceId,
+            createdBySubjectId: grant.subjectId,
+            kind: request.kind,
+            scope: request.scope,
+            roleKey: request.roleKey,
+            content: request.content,
+            sourceId: request.sourceId,
+            sourceVersion: request.sourceVersion,
+            confidenceBps: request.confidenceBps,
+            expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+            expectedActivationVersion: request.expectedActivationVersion,
           }),
         ),
         201,
@@ -188,10 +298,14 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyActivationResponse.parse(
           await rollbackWorkspaceInstructionPolicyRevision(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             targetRevisionId: request.targetRevisionId,
             expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+            ...(request.expectedActivationVersion === undefined
+              ? {}
+              : { expectedActivationVersion: request.expectedActivationVersion }),
             actorSubjectId: grant.subjectId,
             reason: request.reason,
           }),
@@ -227,10 +341,14 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyActivationResponse.parse(
           await activateWorkspaceInstructionPolicyRevision(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             revisionId,
             expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+            ...(request.expectedActivationVersion === undefined
+              ? {}
+              : { expectedActivationVersion: request.expectedActivationVersion }),
             actorSubjectId: grant.subjectId,
             reason: request.reason,
           }),

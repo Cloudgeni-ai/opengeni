@@ -10,6 +10,7 @@ import type {
 import {
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
+  normalizeRepositoryTransportUri,
   resourceMountPathCollisionKey,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
@@ -64,7 +65,12 @@ export const reasoningEffortOrder: IntelligenceEffort[] = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ];
+
+export function isIntelligenceEffort(value: unknown): value is IntelligenceEffort {
+  return typeof value === "string" && (reasoningEffortOrder as readonly string[]).includes(value);
+}
 
 export function labelEffort(value: IntelligenceEffort): string {
   if (value === "xhigh") {
@@ -198,6 +204,7 @@ export function buildResources(
         repositoryId: repo.id,
         installationId: repo.installationId,
         private: repo.private,
+        provider: "github" as const,
       })),
     ...manualRepos.map((repo) => ({
       url: repo.url.trim(),
@@ -205,6 +212,7 @@ export function buildResources(
       repositoryId: null,
       installationId: null,
       private: false,
+      provider: null,
     })),
   ].filter((repo) => repo.url.length > 0);
   const mountPaths = new Set<string>();
@@ -212,9 +220,10 @@ export function buildResources(
     if (!repo.ref) {
       throw new Error("Repository ref is required.");
     }
-    const parsed = normalizeRepositoryUrl(repo.url);
-    const uri = `https://${parsed.host}/${parsed.repo}.git`;
-    const mountPath = defaultRepositoryMountPath(uri);
+    const uri = normalizeRepositoryTransportUri(
+      repo.url.includes("://") ? repo.url : `https://${repo.url}`,
+    );
+    const mountPath = defaultRepositoryMountPath(uri, repo.provider);
     const mountKey = resourceMountPathCollisionKey(mountPath);
     if (mountPaths.has(mountKey)) {
       throw new Error(`Duplicate repository mount path: ${mountPath}`);
@@ -225,6 +234,7 @@ export function buildResources(
       uri,
       ref: repo.ref,
       mountPath,
+      ...(repo.provider ? { provider: repo.provider } : {}),
       ...(repo.private && repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
       ...(repo.private && repo.installationId ? { githubInstallationId: repo.installationId } : {}),
     };
@@ -235,13 +245,13 @@ export function gitHubRepositoryResource(
   repo: GitHubRepository,
   ref: string,
 ): Extract<ResourceRef, { kind: "repository" }> {
-  const parsed = normalizeRepositoryUrl(repo.cloneUrl);
-  const uri = `https://${parsed.host}/${parsed.repo}.git`;
+  const uri = normalizeRepositoryTransportUri(repo.cloneUrl);
   return {
     kind: "repository",
     uri,
     ref: ref.trim() || repo.defaultBranch,
-    mountPath: defaultRepositoryMountPath(uri),
+    provider: "github",
+    mountPath: defaultRepositoryMountPath(uri, "github"),
     ...(repo.private
       ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId }
       : {}),

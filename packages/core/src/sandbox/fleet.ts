@@ -95,6 +95,7 @@ export async function buildFleetContextForSession(
 
 /** The dominant liveness of a fleet member, surfaced to the dock + the agent. */
 export type FleetLiveness = "online" | "reconnecting" | "offline";
+export type FleetOperationAvailability = "ready" | "wakeable" | "recovering" | "unavailable";
 
 /**
  * A fleet member as the agent + the dock see it (the M8b/M9 UI seam — the
@@ -117,6 +118,11 @@ export type FleetSandboxEntry = {
   enrollmentId: string | null;
   /** Whether this target can be attached/swapped to right now (live + addressable). */
   attachable: boolean;
+  /** Whether an ordinary shell/files operation can use this target. This is
+   * deliberately separate from `attachable`: an idle managed home sandbox can
+   * be wakeable even while its holderless lease is cold/draining and therefore
+   * not an already-live swap target. */
+  operationAvailability: FleetOperationAvailability;
   /** Selfhosted only: whether whole-machine + screen-control consent is acked. */
   consented?: boolean;
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
@@ -254,6 +260,22 @@ export async function listFleet(
       groupLease.recovery.restore.status === "restoring" ||
       groupLease.recovery.restore.status === "verifying"),
   );
+  const groupRecoveryUnavailable = Boolean(
+    groupLease &&
+    (groupLease.recovery.restore.status === "degraded" ||
+      groupLease.recovery.restore.status === "unrecoverable" ||
+      groupLease.recovery.workspace.status === "degraded" ||
+      groupLease.recovery.workspace.status === "unrecoverable"),
+  );
+  const groupOperationAvailability: FleetOperationAvailability = groupOnline
+    ? "ready"
+    : groupRecoveryUnavailable
+      ? "unavailable"
+      : groupRecovering
+        ? "recovering"
+        : ctx.sessionBackend === "selfhosted"
+          ? "unavailable"
+          : "wakeable";
   entries.push({
     id: ctx.sessionGroupId,
     kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
@@ -263,6 +285,7 @@ export async function listFleet(
     isSessionGroup: true,
     enrollmentId: null,
     attachable: groupOnline,
+    operationAvailability: groupOperationAvailability,
     providerStatus: groupLease?.recovery.provider.status ?? "not_created",
     leaseLiveness: groupLease?.liveness ?? null,
     routeStatus: groupActive ? "attached" : "detached",
@@ -296,6 +319,12 @@ export async function listFleet(
       isSessionGroup: false,
       enrollmentId: sandbox.enrollmentId,
       attachable: probe.liveness === "online",
+      operationAvailability:
+        probe.liveness === "online"
+          ? "ready"
+          : probe.liveness === "reconnecting"
+            ? "recovering"
+            : "unavailable",
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
       lastSeenAt: enrollment?.lastSeenAt ?? null,
@@ -510,6 +539,8 @@ export type RunOnResult = {
   target: string;
   kind: string;
   ok: boolean;
+  /** Display name of the target sandbox when known (from the sandboxes row). */
+  targetName?: string;
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
@@ -628,6 +659,7 @@ export async function runOnSandbox(
   if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
     return {
       target,
+      targetName: sandbox.name,
       kind: op.kind,
       ok: false,
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
@@ -635,10 +667,16 @@ export async function runOnSandbox(
   }
   const enrollment = await getEnrollment(services.db, ctx.workspaceId, sandbox.enrollmentId);
   if (!enrollment || enrollment.status !== "active") {
-    return { target, kind: op.kind, ok: false, reason: `sandbox ${target} is not enrolled/active` };
+    return {
+      target,
+      targetName: sandbox.name,
+      kind: op.kind,
+      ok: false,
+      reason: `sandbox ${target} is not enrolled/active`,
+    };
   }
 
-  return executeRunOnSelfhostedMachine(
+  const result = await executeRunOnSelfhostedMachine(
     {
       workspaceId: ctx.workspaceId,
       agentId: sandbox.enrollmentId,
@@ -650,6 +688,7 @@ export async function runOnSandbox(
     target,
     op,
   );
+  return { ...result, targetName: sandbox.name };
 }
 
 export type ProvisionResult =

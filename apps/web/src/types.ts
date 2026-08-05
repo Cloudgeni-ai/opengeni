@@ -19,16 +19,22 @@ export type {
   ClientConfig,
   ConnectionKind,
   ConnectionMetadata,
+  ConnectionOwnership,
   ConnectionStatus,
+  ConnectorDocumentDestination,
+  ConnectorDocumentDestinationAuthority,
+  ConnectorDocumentDestinationSelection,
   CreateConnectionRequest,
   CreateFileUploadResponse,
   CreateRigRequest,
   ProposeRigChangeRequest,
   McpServerConnectionRef,
+  McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
   CreateWorkspaceRequest,
   Document as IndexedDocument,
+  DocumentAuthorityKind,
   DocumentBase,
   DocumentCurationStatus,
   DocumentSearchMode,
@@ -43,6 +49,18 @@ export type {
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
+  GoogleDriveBrowseItem,
+  GoogleDriveBrowseResponse,
+  GoogleDriveConnectionLifecycle,
+  GoogleDriveConnectionLifecycleState,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
+  GoogleDriveLifecycleActionRequest,
+  GoogleDriveOAuthStartResponse,
+  GoogleDriveReadPolicy,
+  GoogleDriveSelectedSource,
+  GoogleDriveSyncCadence,
+  GoogleDriveTargetScope,
   GoalSpec,
   CreateKnowledgeMemoryRequest,
   KnowledgeMemory,
@@ -51,6 +69,7 @@ export type {
   KnowledgeSourceKind,
   PackInstallation,
   Permission as SdkPermission,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   Rig,
@@ -71,6 +90,7 @@ export type {
   SessionGoal,
   SessionStatus,
   SessionTurn,
+  SocialConnection,
   ToolRef,
   UpdateKnowledgeMemoryRequest,
   UpdateWorkspaceMemberRequest,
@@ -92,6 +112,7 @@ export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type {
   GoalSpec,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   SandboxBackend,
@@ -107,6 +128,7 @@ export type TurnSubmission = {
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
   sandboxBackend?: SandboxBackend;
   variableSetId?: string;
   /**  use variableSetId */

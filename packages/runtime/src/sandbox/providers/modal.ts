@@ -4,6 +4,7 @@ import {
   type ModalSandboxSession,
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
+import type { SandboxDirectoryEntry } from "@openai/agents/sandbox";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -11,6 +12,7 @@ import {
   type ModalCheckpointProviderBinding,
 } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
+import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
 import type { ProviderRegistration } from "./types";
 
@@ -18,6 +20,7 @@ export type { ModalCheckpointProviderBinding } from "@opengeni/contracts";
 
 const MODAL_ORPHAN_SWEEP_LIMIT = 50;
 const OPENGENI_MODAL_SDK_VERSION = "0.9.0";
+const MODAL_LIST_DIR_MAX_ENTRIES = 20_000;
 // A provider box is invisible to the lease until Modal create + manifest
 // materialization returns and the creation callback records its instance id.
 // Production baseline (2026-07-15, all 8 turn workers): 155/155 completed creates
@@ -84,15 +87,105 @@ type MutableModalSandboxSession = {
   modal?: { version?: () => string };
   sandbox?: MutableModalSnapshotSandbox;
   state?: {
+    manifest?: { root?: string };
     workspacePersistence?: string;
     snapshotFilesystemTimeoutMs?: number;
   };
+  execCommand?: ChannelASession["execCommand"];
+  readFile?: ChannelASession["readFile"];
+  listDir?: (args: { path: string; runAs?: string }) => Promise<SandboxDirectoryEntry[]>;
   persistWorkspace?: () => Promise<Uint8Array>;
+  writeStdin?: (args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<string>;
 };
 
 const modalRetentionWrappedSessions = new WeakSet<object>();
 const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
+
+function modalWorkspaceRelativePath(path: string, workspaceRoot: string): string {
+  if (!path.startsWith("/")) return path;
+  const root = workspaceRoot.replace(/\/+$/, "") || "/";
+  const normalized = path.replace(/\/+$/, "") || "/";
+  if (normalized === root) return "";
+  if (root === "/") return normalized.slice(1);
+  if (normalized.startsWith(`${root}/`)) return normalized.slice(root.length + 1);
+  throw new Error(`Modal listDir path is outside the workspace root: ${path}`);
+}
+
+function modalWorkspaceAbsolutePath(path: string, workspaceRoot: string): string {
+  const root = workspaceRoot.replace(/\/+$/, "") || "/";
+  if (!path) return root;
+  return root === "/" ? `/${path}` : `${root}/${path}`;
+}
+
+function installModalListDirCompatibility(session: MutableModalSandboxSession): void {
+  if (typeof session.listDir === "function") return;
+  if (typeof session.execCommand !== "function" || typeof session.readFile !== "function") return;
+  const workspaceRoot = session.state?.manifest?.root;
+  if (!workspaceRoot) {
+    throw new Error("Modal listDir compatibility requires a manifest workspace root");
+  }
+  session.listDir = async (args) => {
+    const absoluteResultPaths = args.path.startsWith("/");
+    const relativePath = modalWorkspaceRelativePath(args.path, workspaceRoot);
+    const service = new SandboxChannelAService({
+      session: session as ChannelASession,
+      workspaceRoot,
+      ...(args.runAs ? { runAs: args.runAs } : {}),
+    });
+    const listed = await service.fsList({
+      path: relativePath,
+      depth: 1,
+      maxEntries: MODAL_LIST_DIR_MAX_ENTRIES,
+      includeHidden: true,
+    });
+    if (listed.truncated || listed.root.truncated) {
+      throw new Error(
+        `Modal listDir exceeded the ${MODAL_LIST_DIR_MAX_ENTRIES}-entry safety bound`,
+      );
+    }
+    return (listed.root.children ?? []).map((entry) => ({
+      name: entry.name,
+      path: absoluteResultPaths
+        ? modalWorkspaceAbsolutePath(entry.path, workspaceRoot)
+        : entry.path,
+      type: entry.type === "file" || entry.type === "dir" ? entry.type : "other",
+    }));
+  };
+}
+
+const MODAL_EXEC_STDIN_WRITE_PATH =
+  "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite";
+const MODAL_EXEC_ALREADY_COMPLETED_DETAILS =
+  /^Exec has already completed; stdin is no longer accepting writes(?: \(Error code: [A-Z0-9]+\))?$/;
+
+/**
+ * Modal proves that the exact exec has already terminated with a typed
+ * FAILED_PRECONDITION from its stdin-write RPC. Keep this deliberately
+ * structural and exact: other FAILED_PRECONDITION errors are not process
+ * lifetime authority.
+ */
+export function isModalExecAlreadyCompletedError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as {
+    name?: unknown;
+    path?: unknown;
+    code?: unknown;
+    details?: unknown;
+  };
+  return (
+    record.name === "ClientError" &&
+    record.path === MODAL_EXEC_STDIN_WRITE_PATH &&
+    record.code === 9 &&
+    typeof record.details === "string" &&
+    MODAL_EXEC_ALREADY_COMPLETED_DETAILS.test(record.details)
+  );
+}
 
 function assertPinnedModalSdk(session: MutableModalSandboxSession): void {
   const actualVersion = session.modal?.version?.();
@@ -157,10 +250,42 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
   modalDirectoryRetentionWrappedSandboxes.add(sandbox);
 }
 
+function installModalExecCompletionRecovery(session: MutableModalSandboxSession): void {
+  const writeStdin = session.writeStdin;
+  if (typeof writeStdin !== "function") return;
+  session.writeStdin = async (args) => {
+    try {
+      return await writeStdin.call(session, args);
+    } catch (error) {
+      if (
+        !isModalExecAlreadyCompletedError(error) ||
+        !Number.isSafeInteger(args.sessionId) ||
+        args.sessionId <= 0
+      ) {
+        throw error;
+      }
+      // Agents Extensions checks its local active-process map before writing,
+      // but the process can finish before Modal receives TaskExecStdinWrite.
+      // An empty retry performs no side effect: it lets the adapter observe the
+      // already-terminal process, delete its stale map entry, and return the
+      // ordinary exact exit banner consumed by OpenGeni's durable settlement.
+      // If that cleanup poll itself loses transport, the original typed
+      // completion is still authoritative and the canonical lost-session
+      // result lets OpenGeni close the exact retained process without failing
+      // the turn or replaying stdin.
+      try {
+        return await writeStdin.call(session, { ...args, chars: "" });
+      } catch {
+        return `write_stdin failed: session not found: ${args.sessionId}`;
+      }
+    }
+  };
+}
+
 /**
- * Bridge the pinned Agents Extensions Modal adapter to Modal 0.9's snapshot
- * options. The wrapper re-checks the private provider sandbox on every capture
- * because snapshot_filesystem hydration replaces that object.
+ * Bridge the pinned Agents Extensions Modal adapter to Modal 0.9's provider
+ * contracts. The wrapper re-checks the private provider sandbox on every
+ * capture because snapshot_filesystem hydration replaces that object.
  */
 export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T): T {
   const mutable = session as MutableModalSandboxSession;
@@ -169,7 +294,9 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     throw new Error("Modal session does not expose workspace persistence");
   }
   assertPinnedModalSdk(mutable);
+  installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
+  installModalExecCompletionRecovery(mutable);
 
   const persistWorkspace = mutable.persistWorkspace.bind(session);
   mutable.persistWorkspace = async () => {
@@ -182,6 +309,13 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
 }
 
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
+  readonly #snapshotFilesystemTimeoutMs: number | undefined;
+
+  constructor(...args: ConstructorParameters<typeof ModalSandboxClient>) {
+    super(...args);
+    this.#snapshotFilesystemTimeoutMs = args[0]?.snapshotFilesystemTimeoutMs;
+  }
+
   override async create(
     args?: Parameters<ModalSandboxClient["create"]>[0],
     manifestOptions?: Parameters<ModalSandboxClient["create"]>[1],
@@ -191,7 +325,21 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   }
 
   override async resume(state: ModalSandboxSessionState): Promise<ModalSandboxSession> {
-    const session = await super.resume(state);
+    // Snapshot timeout is an operator-controlled execution budget, not durable
+    // provider identity. Older resume envelopes legitimately retain the value
+    // that was current when the box was created; letting that stale value win
+    // makes a later production increase ineffective exactly when a large
+    // workspace needs it. Rebind only this operational field while preserving
+    // every provider-identity and filesystem field byte-for-byte.
+    const effectiveState =
+      this.#snapshotFilesystemTimeoutMs === undefined ||
+      state.snapshotFilesystemTimeoutMs === this.#snapshotFilesystemTimeoutMs
+        ? state
+        : {
+            ...state,
+            snapshotFilesystemTimeoutMs: this.#snapshotFilesystemTimeoutMs,
+          };
+    const session = await super.resume(effectiveState);
     return installOpenGeniModalSnapshotPolicy(session);
   }
 }
@@ -210,12 +358,22 @@ export const modalProvider: ProviderRegistration = {
     if (!settings.modalAppName) {
       throw new SandboxConfigError("modal", "OPENGENI_MODAL_APP_NAME is required");
     }
+    if (settings.modalImageId && !settings.modalImageRef) {
+      throw new SandboxConfigError(
+        "modal",
+        "OPENGENI_MODAL_IMAGE_ID requires OPENGENI_MODAL_IMAGE_REF for logical image provenance",
+      );
+    }
   },
   build({ settings, environment, exposedPorts }) {
     const options: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]> = {
       appName: settings.modalAppName,
       timeoutMs: settings.modalTimeoutSeconds * 1000,
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
+      // The Agents Extensions session persists this value in its provider
+      // state and passes it to persistWorkspace(). Keep it aligned with the
+      // same current setting that bounds OpenGeni's outer capture operation.
+      snapshotFilesystemTimeoutMs: settings.sandboxSnapshotTimeoutMs,
       exposedPorts,
       env: environment,
       // A registry image's own CMD is not a sandbox keepalive contract (for
@@ -256,7 +414,12 @@ export const modalProvider: ProviderRegistration = {
 type ModalModule = typeof import("modal");
 type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
 
-// --- Private-registry image resolution (OPENGENI_MODAL_IMAGE_REGISTRY_SECRET) ------
+// --- Modal provider-native / private-registry image resolution --------------------
+//
+// OPENGENI_MODAL_IMAGE_ID is the preferred immutable provider-native path. The
+// Agents extension resolves it with ModalImageSelector.fromId and serializes the
+// actual imageId into the session state, while modalImageRef remains the logical
+// digest persisted on the OpenGeni lease.
 //
 // The Agents-extension Modal backend resolves `modalImageRef` via
 // `Image.fromRegistry(tag)` with NO secret, so it can only pull PUBLIC images. To run
@@ -299,6 +462,12 @@ export async function ensureModalRegistryImage(
   settings: Settings,
   loadModal: ModalModuleLoader = defaultModalLoader,
 ): Promise<void> {
+  // A provider-native immutable image ID bypasses registry import entirely.
+  // ModalImageSelector.fromId resolves it during sandbox creation and the
+  // provider session state records that exact ID.
+  if (settings.modalImageId) {
+    return;
+  }
   if (!settings.modalImageRegistrySecret || !settings.modalImageRef) {
     return;
   }
@@ -342,6 +511,7 @@ function cachedModalRegistryImage(settings: Settings): unknown | undefined {
 
 /**
  * Choose the image selector for a Modal sandbox client from settings. Returns:
+ *  - `fromId(modalImageId)` when a provider-native immutable ID is configured;
  *  - `fromImage(resolved)` when a private-registry secret is configured AND the
  *    image has been resolved (ensureModalRegistryImage ran before create);
  *  - `fromTag(modalImageRef)` for the public path (no secret, or cold cache — the
@@ -350,6 +520,9 @@ function cachedModalRegistryImage(settings: Settings): unknown | undefined {
  * Exported for unit tests.
  */
 export function resolveModalImageSelector(settings: Settings): ModalImageSelector | undefined {
+  if (settings.modalImageId) {
+    return ModalImageSelector.fromId(settings.modalImageId);
+  }
   if (!settings.modalImageRef) {
     return undefined;
   }

@@ -1,5 +1,366 @@
 # @opengeni/runtime
 
+## 0.18.18
+
+### Patch Changes
+
+- 41f7ae3: Treat the SDK's exact UnixLocal missing-workspace proof as provider loss so stale local leases can recover or drain cleanly, and expose ordinary sandbox-operation availability separately from live attach/swap readiness.
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
+## 0.18.17
+
+### Patch Changes
+
+- 55f6ad0: Use one terminal-response ordinal for provider context binding, and clear the
+  durable input-token signal when the latest provider response supplies no usable
+  usage instead of retaining an older response's count.
+- 18eea76: Apply the configured Modal snapshot timeout to new sandboxes, rebind legacy resume envelopes to the current operational timeout without changing provider identity, and normalize durable SDK backend identifiers before product-provider lookup.
+
+## 0.18.16
+
+### Patch Changes
+
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
+## 0.18.15
+
+### Patch Changes
+
+- Updated dependencies [8135dbb]
+  - @opengeni/config@0.10.14
+
+## 0.18.14
+
+### Patch Changes
+
+- c6c9acb: Recover required MCP setup when a transient socket failure is wrapped by the MCP SDK, while preserving only secret-safe transport classification.
+
+## 0.18.13
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- c0f8e40: Prevent model-visible GitHub installation credential exposure and duplicate brokered MCP side effects after ambiguous 401 responses.
+- Updated dependencies [69bc207]
+- Updated dependencies [c0f8e40]
+  - @opengeni/codex@0.2.11
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+
+## 0.18.12
+
+### Patch Changes
+
+- 8105c25: Honor explicit non-TTY sandbox commands without injecting terminal control bytes while preserving marker-bound process-group cancellation.
+
+## 0.18.11
+
+### Patch Changes
+
+- 1ea5e62: Honor explicit shell and login selections when commands run on Connected Machines instead of substituting the machine service's ambient default shell.
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/config@0.10.12
+
+## 0.18.10
+
+### Patch Changes
+
+- Updated dependencies [664c1d8]
+  - @opengeni/network@0.2.0
+
+## 0.18.9
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/config@0.10.11
+
+## 0.18.8
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+
+## 0.18.7
+
+### Patch Changes
+
+- Updated dependencies [4976e1c]
+  - @opengeni/network@0.1.2
+
+## 0.18.6
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/config@0.10.9
+
+## 0.18.5
+
+### Patch Changes
+
+- Updated dependencies [abe0de6]
+  - @opengeni/config@0.10.8
+  - @opengeni/contracts@0.36.1
+
+## 0.18.4
+
+### Patch Changes
+
+- Updated dependencies [00f7d3b]
+  - @opengeni/contracts@0.36.0
+  - @opengeni/config@0.10.7
+
+## 0.18.3
+
+### Patch Changes
+
+- Updated dependencies [b121e7c]
+  - @opengeni/contracts@0.35.0
+  - @opengeni/config@0.10.6
+
+## 0.18.2
+
+### Patch Changes
+
+- Updated dependencies [b83af7a]
+  - @opengeni/contracts@0.34.0
+  - @opengeni/config@0.10.5
+
+## 0.18.1
+
+### Patch Changes
+
+- 74bd3a5: Project image content and image-only tools from the model capability catalogue without mutating durable session history.
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [74bd3a5]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/config@0.10.4
+
+## 0.18.0
+
+### Minor Changes
+
+- e03397d: Freeze workspace instruction policies and structured preference descriptors at
+  the accepted logical-turn boundary, add immutable per-session policy roles, and
+  compose the resulting exact-attempt governance into agent and compaction prompts.
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/codex@0.2.10
+  - @opengeni/config@0.10.3
+
+## 0.17.2
+
+### Patch Changes
+
+- b4982fa: Pin DeepSeek V4 Flash and Kimi K3 to ordered, approved Vercel AI Gateway
+  provider routes, meter managed usage from Gateway-reported cost, and preserve
+  Kimi Responses tool continuity without exposing provider details in the UI.
+- 70e6d56: Preserve the intentional connected-machine manifest no-op while retaining
+  in-provider materialization visibility checks for managed sandboxes.
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/config@0.10.2
+
+## 0.17.1
+
+### Patch Changes
+
+- 9c4d73d: Add curated OpenGeni-credit and workspace-key Vercel AI Gateway model paths for
+  DeepSeek V4 Flash and Kimi K3, including exact provider routing, cache-aware
+  pricing and metering, Responses tool continuity, provider-blind catalog UX, and
+  stable remote-compaction cache prefixes.
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+
+## 0.17.0
+
+### Minor Changes
+
+- 8b3e46f: Allow a digest-pinned capability-pack sandbox image to bind an immutable Modal image ID. OpenGeni now preserves the logical OCI digest on the lease, starts the provider-native image through `ModalImageSelector.fromId`, records the actual ID in the Modal session envelope, clears lower-precedence IDs when a rig overrides the image, and keeps catalog image metadata aligned with the runtime manifest.
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+
+## 0.16.3
+
+### Patch Changes
+
+- e07eb52: Enforce frozen Allow, Ask, and Block connector action policies before provider execution while persisting metadata-only approval, decision, and outcome evidence.
+
+## 0.16.2
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+  - @opengeni/config@0.9.3
+
+## 0.16.1
+
+### Patch Changes
+
+- f4fa05c: Preserve structured exec results when routing to execCommand-only sandbox backends so file, Git, and PTY operations retain provider output and process authority.
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+- Updated dependencies [dd71248]
+  - @opengeni/contracts@0.29.0
+  - @opengeni/config@0.9.2
+
+## 0.16.0
+
+### Minor Changes
+
+- 38ba6bc: Add bounded routed-sandbox provider operation observations and the fail-safe
+  Prometheus observer used by API-direct and worker turn execution.
+
+## 0.15.3
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/config@0.9.1
+
+## 0.15.2
+
+### Patch Changes
+
+- 3b8d653: Allow Modal-backed repository sessions to enumerate workspace skill directories so optional discovery does not fail before a turn and repository skills remain available after resume. Keep the shared filesystem confinement path functional on stock macOS as well as GNU/Linux.
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/config@0.9.0
+
+## 0.15.1
+
+### Patch Changes
+
+- Updated dependencies [8243ffe]
+  - @opengeni/config@0.8.1
+
+## 0.15.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/config@0.8.0
+  - @opengeni/contracts@0.27.0
+
+## 0.14.16
+
+### Patch Changes
+
+- cb4d78d: Preserve exact-source CI dogfood image aliases when promoting versioned release candidates.
+
+## 0.14.15
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- Updated dependencies [c52acc0]
+  - @opengeni/codex@0.2.9
+  - @opengeni/config@0.7.22
+  - @opengeni/contracts@0.26.1
+
+## 0.14.14
+
+### Patch Changes
+
+- 11cdf20: Allow hosted Linux sandbox cancellation to validate process identity through `/proc` when a minimal image omits `ps`.
+
+## 0.14.13
+
+### Patch Changes
+
+- Updated dependencies [f413e6c]
+  - @opengeni/contracts@0.26.0
+  - @opengeni/config@0.7.21
+
+## 0.14.12
+
+### Patch Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/config@0.7.20
+
+## 0.14.11
+
+### Patch Changes
+
+- b7df541: Prevent provider-native checkpoint capture from racing sandbox operations while
+  the provider has paused the source box. Capture now owns a durable
+  lease/epoch/instance/generation claim, blocks new holders and mutations, drains
+  provider-local reads before entering the exclusive snapshot call, and retains
+  ownership through late provider settlement and exact stale-claim recovery.
+  Modal's typed completed-exec stdin race is also normalized into a side-effect-free
+  terminal poll, so an exec that exits between local lookup and the provider write
+  settles its retained process instead of failing the enclosing turn.
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+
+## 0.14.10
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+
+## 0.14.9
+
+### Patch Changes
+
+- 3450ee5: Estimate typed images as bounded native media only after validating PNG IHDR CRCs, preserve exact model-history prefixes across requests, and fail closed for computer use whenever hosted or structured-image transport is omitted or unproven so screenshots cannot become base64 function text.
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/config@0.7.17
+
 ## 0.14.8
 
 ### Patch Changes

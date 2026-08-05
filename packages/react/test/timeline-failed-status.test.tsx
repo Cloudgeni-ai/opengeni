@@ -215,6 +215,16 @@ const CASES: Case[] = [
     }),
   },
   {
+    label: "ToolSearchRenderer — failed",
+    kind: "tool",
+    item: toolItem({
+      name: "tool_search",
+      arguments: { query: "send email" },
+      raw: { type: "tool_search_call", call_id: "ts-fail" },
+      output: { type: "text", text: "search executor crashed" },
+    }),
+  },
+  {
     label: "GenericRenderer (fallback) — failed",
     kind: "tool",
     item: toolItem({
@@ -776,6 +786,16 @@ const CANCELLED_CASES: CancelledCase[] = [
     item: cancelledToolItem({
       name: "environment_set_variable",
       arguments: JSON.stringify({ name: "MY_VAR", value: "secret" }),
+      output: undefined,
+    }),
+  },
+  {
+    label: "ToolSearchRenderer — cancelled",
+    kind: "tool",
+    item: cancelledToolItem({
+      name: "tool_search",
+      arguments: { query: "send email" },
+      raw: { type: "tool_search_call", call_id: "ts-cancel" },
       output: undefined,
     }),
   },

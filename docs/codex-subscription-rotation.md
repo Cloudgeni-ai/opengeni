@@ -41,8 +41,8 @@ When `OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED=true`, every Codex turn calls
    transaction remains held.
 3. Reap expired workspace leases and read all workspace credentials plus the
    count of unexpired leases held by other turns.
-4. Offer a live same-turn lease or validated frozen run-state credential to the
-   pure strategy against the complete workspace rows. Only if this is a new
+4. Offer an exact live same-turn lease to the pure strategy against the complete
+   workspace rows. A saved approval RunState does not own a credential. Only if this is a new
    allocation may an optional downstream policy filter the candidate rows. Run
    the strategy and revalidate its chosen id against that resulting set.
 5. Upsert the unique `(workspace_id, turn_id)` lease and increment the selected
@@ -75,8 +75,8 @@ wait. A `policy` pin is a sharded cache-affinity home and may be re-sharded over
 eligible candidates when that home caps. Policy pin writes use an observed-state
 CAS inside the rotation-row-first capacity-mutation transaction, so a stale
 sharding decision cannot overwrite a concurrent manual pin. Policy pins are
-ignored and lazily cleared outside the active `sharded` strategy. A live/frozen
-same-turn holder is reused before either pin policy or future membership
+ignored and lazily cleared outside the active `sharded` strategy. A live
+same-turn lease is reused before either pin policy or future membership
 filtering, so cache policy never moves in-flight work. `rotation_enabled=false`
 and `drain_then_next` remain explicit sticky product policies.
 
@@ -90,7 +90,7 @@ transaction. The filter chooses candidates from exactly one resolved primary or
 fallback scope and may return downstream-owned per-pool unavailable/reset
 diagnostics; credential allocator never union-ranks memberships and stores no pool table or
 membership rule. `CodexCredentialLeaseResult<T, TUnavailableDiagnostic>` returns
-those diagnostics. The new-allocation filter runs only after exact live/frozen
+those diagnostics. The new-allocation filter runs only after exact live
 same-turn reuse, so a later membership/default change cannot move an already
 accepted holder.
 
@@ -98,8 +98,8 @@ accepted holder.
 new-allocation gate (default `true`); it is not credential health. Setting it
 false excludes the row from new automatic, pinned, proactive, and reactive
 selection without changing `status`, encrypted credentials, refresh behavior,
-or quota history. An exact same-turn live lease or frozen approval/preemption
-checkpoint may continue on that healthy row; reconnect and token refresh never
+or quota history. An exact same-turn live lease may continue on that healthy
+row; reconnect and token refresh never
 flip allocator eligibility. account eligibility policy owns toggle OCC/audit and product controls.
 
 ## Quota overview, allocator control, and reset-credit redemption
@@ -122,7 +122,7 @@ Codex quota adds three deliberately separate product seams:
   a stale expected version; a conflicting stale transition returns the current
   version. One real change and one audit row share a transaction. Credential
   token `version`, health, connection, cooldown, quota history, active leases,
-  and frozen turns remain independent; reconnect, refresh and redemption never
+  and accepted turns remain independent; reconnect, refresh and redemption never
   auto-enable the row.
 - **Reset redemption** has no SDK method, MCP/Toolspace tool, worker activity,
   scheduled/background hook, or allocator/rotation call. Its REST mutation

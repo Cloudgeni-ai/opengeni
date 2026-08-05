@@ -40,6 +40,8 @@ networkPolicy:
   enabled: false
   egress:
     enabled: false
+    # Environment-specific rules appended after OpenGeni's canonical recording
+    # and alert rules. This list never replaces the built-in safety catalog.
     rules: []
   ingressController:
     namespaceSelector: {}
@@ -323,6 +325,13 @@ worker:
 
 web:
   enabled: true
+  # Server-side target for the public React reference demo's same-origin
+  # /demo-api proxy. Empty uses this release's in-cluster API service when the
+  # API is enabled; set an explicit http(s) URL only for split deployments.
+  demoApiBaseUrl: ""
+  # Optional dedicated Secret containing `api-key` and/or `access-key` data
+  # entries. It is mounted read-only; do not reuse the full runtime Secret.
+  demoApiCredentialsSecret: ""
   replicaCount: 2
   strategy:
     type: RollingUpdate
@@ -891,6 +900,9 @@ observability:
     # Optional Prometheus Operator starter alerts. The template is also guarded
     # on monitoring.coreos.com/v1 being installed.
     enabled: false
+    # Must cover at least three configured sandbox reaper periods; Helm rejects
+    # an incompatible pairing before generating a rule that would age out live data.
+    inventoryFreshnessSeconds: 300
     labels: {}
     annotations: {}
     rules: []

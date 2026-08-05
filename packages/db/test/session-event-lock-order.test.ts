@@ -1919,6 +1919,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
                   childSessionId: child.sessionId,
                   parentSessionId: parent.sessionId,
                 },
+                personalConnectionDelegations: [],
               });
           }
         };

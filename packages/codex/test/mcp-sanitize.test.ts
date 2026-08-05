@@ -187,7 +187,7 @@ describe("sanitizeMcpJsonBody", () => {
     expect(sanitizeMcpJsonBody("not json")).toBe("not json");
   });
 
-  // P4 (Part B.1): the connector-namespace sink captures the ORIGINAL dotted
+  // The connector-namespace sink captures the ORIGINAL dotted
   // namespace before the dot is sanitized away.
   test("namespace sink accumulates the original connector namespace (before dot rewrite)", () => {
     const sink = new Set<string>();

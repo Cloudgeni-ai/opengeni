@@ -1,23 +1,49 @@
 # Northstar support agent example
 
-A small fictional SaaS product showing the complete OpenGeni integration:
+A small fictional customer-support SaaS showing the complete OpenGeni
+integration as a clear before/after:
 
-1. The browser renders product UI plus `@opengeni/react` session components.
-2. The product backend creates OpenGeni sessions and proxies workspace-scoped
+1. Open the product with OpenGeni off and use it as a small support SaaS:
+   search and filter the queue, switch between four tickets, inspect customer
+   signals, change fields, add internal notes, and reply.
+2. Turn on the frontend-only **OpenGeni** switch to embed the agent workspace in
+   the same product.
+3. The product backend creates OpenGeni sessions and proxies workspace-scoped
    API/SSE traffic, keeping the OpenGeni API key server-side.
-3. OpenGeni calls the product's authenticated Streamable HTTP MCP server.
-4. MCP tools read and mutate product data.
-5. Product SSE updates the ticket immediately while OpenGeni SSE updates the
+4. OpenGeni calls the product's authenticated Streamable HTTP MCP server.
+5. MCP tools read and mutate the same ticket data used by the human workflow.
+6. Product SSE updates the ticket immediately while OpenGeni SSE updates the
    agent timeline independently.
+7. The composer uses the SDK workspace model catalog and `ModelPolicyPicker`,
+   starts with Codex Luna, and opens directly to compact Codex model names (no
+   provider-selection detour). The operator can switch among the available
+   Codex models plus reasoning/latency options for follow-up turns without a
+   backend model constant.
+8. The session composer also includes the provider-neutral realtime voice control
+   from `@opengeni/react/realtime`; this workspace exposes Codex Live as the
+   available voice model.
+9. The panel uses the SDK's `data-og-density="compact"` preset. Typography,
+   composer sizing, picker geometry, and the portalled picker/voice menus all
+   come from public `--og-*` tokens; the demo only supplies Northstar colors and
+   product-specific layout.
 
-The demo deliberately exposes four tools over one ticket: `get_ticket`,
+The demo deliberately exposes four tools over the selected ticket: `get_ticket`,
 `get_customer`, `update_ticket`, and `add_internal_note`. Mutations are
 pre-approved and idempotent so the full loop is easy to demonstrate.
+
+The example depends on `@opengeni/sdk` and `@opengeni/react` through
+`workspace:*`, so a repository checkout always runs against the current SDK and
+component source rather than a stale published copy.
 
 ## Run against managed OpenGeni
 
 Requirements: Bun, an OpenGeni workspace API key, and a public HTTPS tunnel for
 the MCP endpoint.
+
+The product API key needs `workspace:read`, `sessions:create`, `sessions:read`,
+`sessions:control`, `mcp_servers:attach`, `files:upload`, and `files:read`.
+These are workspace capabilities, not browser-origin registrations; file bytes
+still travel through short-lived signed storage URLs.
 
 ```bash
 cd examples/northstar-support
@@ -46,7 +72,8 @@ Open <http://127.0.0.1:3101>. If not using ngrok, set
 
 - `src/server.ts`: backend session creation, scoped API proxy, MCP tools, dummy
   domain state, and product SSE.
-- `src/support-agent-panel.tsx`: OpenGeni React timeline, status, and composer.
+- `src/support-agent-panel.tsx`: OpenGeni React timeline, status, the SDK
+  policy-aware model picker in the composer, and realtime voice control.
 - `src/support-tool-renderers.tsx`: product-specific rendering of MCP activity.
 - `src/use-support-demo.ts`: product SSE plus missed-event reconciliation.
 

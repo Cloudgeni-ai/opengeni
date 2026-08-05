@@ -59,6 +59,7 @@ type ActiveShellSession = {
   sessionId: number;
   markerPath: string | null;
   token: string | null;
+  interactive: boolean;
   runContext: Parameters<FunctionToolInvoke>[0];
   execInvoke: FunctionToolInvoke;
   writeInvoke: FunctionToolInvoke | null;
@@ -308,15 +309,53 @@ function shellMarkerPath(token: string): string {
   return `${SHELL_MARKER_DIR}/${token}`;
 }
 
+function processInspectionCommandLines(): string[] {
+  return [
+    "__opengeni_process_group_id() {",
+    '  __opengeni_lookup_pid="$1"',
+    '  __opengeni_lookup_pgid=""',
+    "  if command -v ps >/dev/null 2>&1; then",
+    '    __opengeni_lookup_pgid="$(command ps -o pgid= -p "$__opengeni_lookup_pid" 2>/dev/null | command tr -d \'[:space:]\')"',
+    "  fi",
+    '  case "$__opengeni_lookup_pgid" in',
+    '    ""|*[!0-9]*) ;;',
+    "    *) command printf '%s\\n' \"$__opengeni_lookup_pgid\"; return 0 ;;",
+    "  esac",
+    '  [ -r "/proc/$__opengeni_lookup_pid/stat" ] || return 1',
+    '  IFS= read -r __opengeni_lookup_stat < "/proc/$__opengeni_lookup_pid/stat" || return 1',
+    '  __opengeni_lookup_tail="${__opengeni_lookup_stat##*) }"',
+    '  [ "$__opengeni_lookup_tail" != "$__opengeni_lookup_stat" ] || return 1',
+    "  set -- $__opengeni_lookup_tail",
+    '  [ "$#" -ge 3 ] || return 1',
+    '  case "$3" in ""|*[!0-9]*) return 1 ;; esac',
+    "  command printf '%s\\n' \"$3\"",
+    "}",
+    "__opengeni_process_args() {",
+    '  __opengeni_lookup_pid="$1"',
+    '  __opengeni_lookup_args=""',
+    "  if command -v ps >/dev/null 2>&1; then",
+    '    __opengeni_lookup_args="$(command ps -ww -o args= -p "$__opengeni_lookup_pid" 2>/dev/null)"',
+    "  fi",
+    '  if [ -n "$__opengeni_lookup_args" ]; then',
+    "    command printf '%s\\n' \"$__opengeni_lookup_args\"",
+    "    return 0",
+    "  fi",
+    '  [ -r "/proc/$__opengeni_lookup_pid/cmdline" ] || return 1',
+    "  command tr '\\000' ' ' < \"/proc/$__opengeni_lookup_pid/cmdline\"",
+    "}",
+  ];
+}
+
 function cancellableGroupLeaderCommand(command: string, markerPath: string): string {
   const marker = singleQuote(markerPath);
   const markerDir = singleQuote(SHELL_MARKER_DIR);
   return [
+    ...processInspectionCommandLines(),
     `__opengeni_marker=${marker}`,
     "umask 077",
     `command mkdir -p ${markerDir} || exit 125`,
     '__opengeni_pid="$$"',
-    '__opengeni_pgid="$(command ps -o pgid= -p "$__opengeni_pid" 2>/dev/null | command tr -d \'[:space:]\')"',
+    '__opengeni_pgid="$(__opengeni_process_group_id "$__opengeni_pid")"',
     'case "$__opengeni_pid:$__opengeni_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     '[ "$__opengeni_pid" -gt 1 ] && [ "$__opengeni_pgid" -gt 1 ] || exit 125',
     // Never signal a provider/container-wide process group. A cancellable PTY
@@ -335,8 +374,9 @@ function cancellableGroupLeaderCommand(command: string, markerPath: string): str
 export function cancellableShellCommand(command: string, markerPath: string): string {
   const groupLeaderCommand = cancellableGroupLeaderCommand(command, markerPath);
   return [
+    ...processInspectionCommandLines(),
     '__opengeni_outer_pid="$$"',
-    '__opengeni_outer_pgid="$(command ps -o pgid= -p "$__opengeni_outer_pid" 2>/dev/null | command tr -d \'[:space:]\')"',
+    '__opengeni_outer_pgid="$(__opengeni_process_group_id "$__opengeni_outer_pid")"',
     'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
@@ -400,15 +440,16 @@ function identityGuardScript(
   if (!identity || !state.token) return `exit ${missingIdentityExitCode}`;
   const token = singleQuote(state.token);
   return [
+    ...processInspectionCommandLines(),
     `__opengeni_pid=${identity.pid}`,
     `__opengeni_pgid=${identity.processGroupId}`,
     `__opengeni_token=${token}`,
-    // The randomized token lands late in the wrapped command line. Procps
-    // otherwise truncates `args` to the terminal width, which can make a live
-    // group look stale and open the quiescence fence without signalling it.
-    '__opengeni_args="$(command ps -ww -o args= -p "$__opengeni_pid" 2>/dev/null)"',
+    // The randomized token lands late in the wrapped command line. Procps needs
+    // `-ww` to avoid terminal-width truncation; minimal Linux images may omit ps,
+    // so the same exact command line is read from /proc instead.
+    `__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")" || exit ${missingIdentityExitCode}`,
     'case "$__opengeni_args" in *"$__opengeni_token"*) ;; *) exit 0 ;; esac',
-    '__opengeni_live_pgid="$(command ps -o pgid= -p "$__opengeni_pid" 2>/dev/null | command tr -d \'[:space:]\')"',
+    `__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")" || exit ${missingIdentityExitCode}`,
     '[ "$__opengeni_live_pgid" = "$__opengeni_pgid" ] || exit 0',
     body,
   ].join("\n");
@@ -571,6 +612,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
       const useRemoteOpCancellation =
         Boolean(session.cancelExecCommand) && session.supportsPty?.() === false;
+      const interactive = args.tty ?? true;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
           ? this.registerRemoteExec(
@@ -585,7 +627,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         ...(args.shell ? { shell: args.shell } : {}),
         ...(args.login !== undefined ? { login: args.login } : {}),
         ...(args.runAs ? { run_as: args.runAs } : {}),
-        tty: useRemoteOpCancellation ? args.tty : true,
+        tty: useRemoteOpCancellation ? args.tty : interactive,
         yield_time_ms: useRemoteOpCancellation
           ? args.yieldTimeMs
           : cappedYield(args.yieldTimeMs, TURN_EXEC_YIELD_MS),
@@ -643,6 +685,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         sessionId,
         markerPath,
         token,
+        interactive,
         runContext: lifecycleRunContext,
         execInvoke: invokeExec,
         writeInvoke: invokeWrite,
@@ -736,6 +779,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             // cloud/local sessions use the portable SDK session + POSIX marker.
             const useRemoteOpCancellation =
               Boolean(cancelExecCommand) && cancellationSession?.supportsPty?.() === false;
+            const interactive = parsed.tty !== false;
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
                 ? this.registerRemoteExec(
@@ -748,10 +792,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               : JSON.stringify({
                   ...parsed,
                   cmd: cancellableShellCommand(parsed.cmd, markerPath),
-                  // The SDK's only provider-neutral live-process interrupt is a PTY.
-                  // The process marker provides TERM/KILL escalation when Ctrl-C is
-                  // ignored; the short yield exposes the provider session promptly.
-                  tty: true,
+                  // Preserve an explicit pipe-mode request. When tty is omitted,
+                  // retain the historical PTY default and Ctrl-C fast path. Every
+                  // mode keeps the process marker plus TERM/KILL escalation, and
+                  // the short yield exposes the provider session promptly.
+                  tty: interactive,
                   yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_EXEC_YIELD_MS),
                 });
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
@@ -778,6 +823,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   sessionId: retainedProcess.providerSessionId,
                   markerPath,
                   token,
+                  interactive,
                   runContext,
                   execInvoke: tool.invoke,
                   writeInvoke: this.rawWriteInvoke,
@@ -798,6 +844,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 sessionId,
                 markerPath,
                 token,
+                interactive,
                 runContext,
                 execInvoke: tool.invoke,
                 writeInvoke: this.rawWriteInvoke,
@@ -856,6 +903,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     sessionId,
                     markerPath: null,
                     token: null,
+                    interactive: true,
                     runContext,
                     execInvoke: this.rawExecInvoke ?? tool.invoke,
                     writeInvoke: tool.invoke,
@@ -1070,8 +1118,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // A retained provider session must remain pinned until its process group is
     // absent. Polling it first could settle/delete the durable route while an
     // ignored-signal descendant still lives, making the exact helper backend
-    // unavailable. Generic legacy sessions retain their Ctrl-C fast path.
-    if (!state.processSession && state.writeInvoke) {
+    // unavailable. Generic interactive sessions retain their Ctrl-C fast path;
+    // pipe-mode commands never receive terminal control bytes.
+    if (!state.processSession && state.writeInvoke && state.interactive) {
       await this.rawWrite(state, "\u0003", SHELL_POLL_MS);
       if (!(await this.identityAlive(state))) {
         await this.forgetShellSessionAfterExactSettlement(state);

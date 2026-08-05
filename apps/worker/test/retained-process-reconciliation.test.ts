@@ -1322,7 +1322,7 @@ describe("retained-process terminal-owner reconciliation", () => {
 });
 
 describe("retained-process metric contracts", () => {
-  test("normalizes fixed labels, zeros absent series, records growth, failures, and expired drain state", async () => {
+  test("normalizes fixed labels and zeros absent retained-process and drain series", async () => {
     const observability = createObservability(SETTINGS, {
       component: "worker-retained-process-metrics",
     });
@@ -1350,9 +1350,6 @@ describe("retained-process metric contracts", () => {
       /opengeni_retained_processes_active\{[^}]*owner_state="unknown"[^}]*\} 3/,
     );
     expect(metrics).toMatch(
-      /opengeni_retained_process_terminal_owner_backlog_growth_total\{[^}]*\} 3/,
-    );
-    expect(metrics).toMatch(
       /opengeni_retained_process_reconciliation_total\{[^}]*outcome="settlement_failed"[^}]*\} 1/,
     );
     expect(metrics).toMatch(
@@ -1364,5 +1361,12 @@ describe("retained-process metric contracts", () => {
     expect(metrics).toMatch(
       /opengeni_sandbox_leases_expired_draining\{[^}]*age_bucket="lt_5m"[^}]*backend="modal"[^}]*\} 0/,
     );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_leases_expired_draining\{[^}]*age_bucket="lt_5m"[^}]*backend="cloudflare"[^}]*\} 0/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_leases_expired_draining\{[^}]*age_bucket="lt_5m"[^}]*backend="vercel"[^}]*\} 0/,
+    );
+    expect(metrics).not.toContain("opengeni_retained_process_terminal_owner_backlog_growth_total");
   });
 });

@@ -11,11 +11,20 @@ import {
   UpdateConnectionRequest,
 } from "@opengeni/contracts";
 import {
+  GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
+  GoogleDriveLifecycleActionRequest,
+  GoogleDriveOAuthStartRequest,
+  GoogleDriveOAuthStartResponse,
+} from "@opengeni/contracts/google-drive";
+import {
   hasPermission,
   hasReservedOpenGeniSlackBotMetadata,
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
 } from "@opengeni/core";
 import {
@@ -39,6 +48,14 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  browseGoogleDrive,
+  completeGoogleDriveOAuthCallback,
+  disconnectGoogleDrive,
+  saveGoogleDriveSource,
+  startGoogleDriveOAuth,
+  transitionGoogleDriveLifecycle,
+} from "../integrations/google-drive";
+import {
   completeMcpOAuthCallback,
   integrationBaseUrl,
   startMcpOAuth,
@@ -52,7 +69,7 @@ import {
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
 } from "@opengeni/contracts";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
@@ -93,9 +110,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
     const key = requireEnvironmentEncryption(settings);
-    const subjectId = writableSubjectId(payload.subjectId, grant.subjectId);
+    const subjectId = createConnectionSubjectId(payload, grant.subjectId);
     const providerDomain = canonicalProviderDomain(payload.providerDomain);
     assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
+    assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
     const connection = await createConnection(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -139,7 +157,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     const authorizationUrl = new URL("https://slack.com/oauth/v2/authorize");
     authorizationUrl.searchParams.set("client_id", slack.clientId);
-    authorizationUrl.searchParams.set("scope", OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(","));
+    authorizationUrl.searchParams.set("scope", OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(","));
     authorizationUrl.searchParams.set("redirect_uri", redirectUri);
     authorizationUrl.searchParams.set("state", state);
     return c.json(
@@ -243,6 +261,108 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
+  app.post("/v1/workspaces/:workspaceId/connections/google-drive/install", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const parsed = GoogleDriveOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid Google Drive install request" });
+    }
+    return c.json(
+      GoogleDriveOAuthStartResponse.parse(
+        await startGoogleDriveOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload: parsed.data,
+        }),
+      ),
+    );
+  });
+
+  app.get("/v1/integrations/google-drive/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const result = await completeGoogleDriveOAuthCallback(deps, {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    });
+    return c.redirect(result.redirectTo, 302);
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/lifecycle",
+    async (c) => {
+      assertIntegrationsEnabled();
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+      const parsed = GoogleDriveLifecycleActionRequest.safeParse(await c.req.json());
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid Google Drive lifecycle request" });
+      }
+      return c.json(
+        ConnectionResponse.parse({
+          connection: await transitionGoogleDriveLifecycle(deps, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            connectionId: c.req.param("connectionId"),
+            payload: parsed.data,
+          }),
+        }),
+      );
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
+    async (c) => {
+      assertIntegrationsEnabled();
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+      return c.json(
+        await browseGoogleDrive(deps, {
+          workspaceId,
+          subjectId: grant.subjectId,
+          connectionId: c.req.param("connectionId"),
+          parentId: c.req.query("parentId") ?? "root",
+          ...(c.req.query("pageToken") ? { pageToken: c.req.query("pageToken") } : {}),
+        }),
+      );
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
+    async (c) => {
+      assertIntegrationsEnabled();
+      const workspaceId = c.req.param("workspaceId");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:write",
+      );
+      const { grant } = authorization;
+      const connection = await saveGoogleDriveSource(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        connectionId: c.req.param("connectionId"),
+        payload: await c.req.json(),
+        canManageOrganizationDestination:
+          authorization.accountGrant?.permissions.includes("account:admin") === true,
+        canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+        canManagePersonalDestination:
+          authorization.contextIntegrity &&
+          authorization.authenticatedSubjectId === grant.subjectId,
+      });
+      return c.json(ConnectionResponse.parse({ connection }));
+    },
+  );
+
   app.get("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
@@ -274,11 +394,18 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
       });
     }
+    if (existing && GoogleDriveConnectionMetadata.safeParse(existing.metadata).success) {
+      throw new HTTPException(422, {
+        message: "use the dedicated Google Drive reconnect or source-selection flow",
+      });
+    }
     if (existing) {
-      assertNotDirectPersonalSlackOAuth(
-        canonicalProviderDomain(payload.providerDomain ?? existing.providerDomain),
-        payload.kind ?? existing.kind,
+      const providerDomain = canonicalProviderDomain(
+        payload.providerDomain ?? existing.providerDomain,
       );
+      const kind = payload.kind ?? existing.kind;
+      assertNotDirectPersonalSlackOAuth(providerDomain, kind);
+      assertNotDirectGoogleDriveOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
     }
     // Status is not a free-form field: revocation goes through DELETE, and the
     // broker owns needs_reauth/error. Reactivating a connection is only
@@ -335,18 +462,43 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    const connection = isOpenGeniSlackBotConnection(existing)
-      ? await revokeConnectionWithSlackBotSuccessAudit(db, {
-          accountId: grant.accountId,
+    const isGoogleDrive =
+      existing.subjectId === grant.subjectId &&
+      existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
+      existing.kind === "oauth2" &&
+      GoogleDriveConnectionMetadata.safeParse(existing.metadata).success;
+    const googleDriveDisconnect = isGoogleDrive
+      ? GoogleDriveDisconnectRequest.safeParse(await c.req.json().catch(() => null))
+      : null;
+    if (googleDriveDisconnect && !googleDriveDisconnect.success) {
+      throw new HTTPException(400, {
+        message:
+          googleDriveDisconnect.error.issues[0]?.message ??
+          "invalid Google Drive disconnect request",
+      });
+    }
+    if (existing.status === "revoked" && !isGoogleDrive) {
+      return c.json(ConnectionResponse.parse({ connection: existing }));
+    }
+    const connection = isGoogleDrive
+      ? await disconnectGoogleDrive(deps, {
           workspaceId,
           subjectId: grant.subjectId,
-          connectionId,
-          expectedVersion: existing.version,
-          credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-          credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-          slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+          connection: existing,
+          payload: googleDriveDisconnect!.data,
         })
-      : await revokeConnection(db, workspaceId, connectionId, grant.subjectId);
+      : isOpenGeniSlackBotConnection(existing)
+        ? await revokeConnectionWithSlackBotSuccessAudit(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            connectionId,
+            expectedVersion: existing.version,
+            credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+            credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+            slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+          })
+        : await revokeConnection(db, workspaceId, connectionId, grant.subjectId, existing.version);
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
@@ -365,7 +517,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const payload = parsed.data;
     const result = await startMcpOAuth(
-      { db, settings, observability },
+      { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
         accountId: grant.accountId,
         workspaceId,
@@ -380,7 +532,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     const result = await completeMcpOAuthCallback(
-      { db, settings, observability },
+      { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
       {
         code: c.req.query("code"),
         state: c.req.query("state"),
@@ -415,7 +567,7 @@ async function persistOpenGeniSlackBotConnection(input: {
   const { db, settings } = input.deps;
   const key = requireEnvironmentEncryption(settings);
   const credentialEncrypted = encryptCredentialBundle(key, slackBotCredentialBundle(input.token));
-  const existing = input.state.connectionId
+  const requestedExisting = input.state.connectionId
     ? await getConnectionMetadata(
         db,
         input.state.workspaceId,
@@ -423,7 +575,7 @@ async function persistOpenGeniSlackBotConnection(input: {
         input.state.subjectId,
       )
     : null;
-  if (input.state.connectionId && !existing) {
+  if (input.state.connectionId && !requestedExisting) {
     throw new SlackInstallCallbackError(
       404,
       "connection_conflict",
@@ -431,7 +583,7 @@ async function persistOpenGeniSlackBotConnection(input: {
       "principal_validation",
     );
   }
-  if (existing && !isOpenGeniSlackBotConnection(existing)) {
+  if (requestedExisting && !isOpenGeniSlackBotConnection(requestedExisting)) {
     throw new SlackInstallCallbackError(
       422,
       "connection_conflict",
@@ -439,7 +591,7 @@ async function persistOpenGeniSlackBotConnection(input: {
       "principal_validation",
     );
   }
-  if (existing?.version !== input.state.connectionVersion) {
+  if (requestedExisting && requestedExisting.version !== input.state.connectionVersion) {
     throw new SlackInstallCallbackError(
       409,
       "connection_conflict",
@@ -447,6 +599,13 @@ async function persistOpenGeniSlackBotConnection(input: {
       "principal_validation",
     );
   }
+  const existing =
+    requestedExisting ??
+    (await findMatchingOpenGeniSlackBotConnection(
+      db,
+      input.state.workspaceId,
+      input.verified.metadata,
+    ));
   const existingMetadata = existing ? openGeniSlackBotMetadata(existing.metadata) : null;
   if (existingMetadata && existingMetadata.slackTeamId !== input.verified.metadata.slackTeamId) {
     throw new SlackInstallCallbackError(
@@ -524,6 +683,28 @@ async function persistOpenGeniSlackBotConnection(input: {
     );
   }
   return connection;
+}
+
+async function findMatchingOpenGeniSlackBotConnection(
+  db: ApiRouteDeps["db"],
+  workspaceId: string,
+  verified: Awaited<ReturnType<typeof verifyOpenGeniSlackBotCredential>>["metadata"],
+) {
+  const connections = await listConnectionsMetadata(db, workspaceId, null);
+  return (
+    connections.find((connection) => {
+      const metadata = openGeniSlackBotMetadata(connection.metadata);
+      return (
+        connection.subjectId === null &&
+        connection.providerDomain === "slack.com" &&
+        connection.kind === "app_install" &&
+        metadata?.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE &&
+        metadata.slackTeamId === verified.slackTeamId &&
+        metadata.botId === verified.botId &&
+        metadata.botUserId === verified.botUserId
+      );
+    }) ?? null
+  );
 }
 
 function requireOpenGeniSlackOAuthSettings(settings: ApiRouteDeps["settings"]): {
@@ -685,6 +866,21 @@ function assertNotDirectPersonalSlackOAuth(providerDomain: string, kind: string)
   }
 }
 
+function assertNotDirectGoogleDriveOAuth(
+  providerDomain: string,
+  kind: string,
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (
+    (providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN && kind === "oauth2") ||
+    GoogleDriveConnectionMetadata.safeParse(metadata).success
+  ) {
+    throw new HTTPException(422, {
+      message: "Google Drive credentials must use the dedicated OAuth connection flow",
+    });
+  }
+}
+
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {
   if (hasReservedOpenGeniSlackBotMetadata(metadata)) {
     throw new HTTPException(422, {
@@ -704,6 +900,22 @@ function writableSubjectId(
     throw new HTTPException(403, { message: "cannot write a connection for another subject" });
   }
   return requested;
+}
+
+function createConnectionSubjectId(
+  payload: Pick<CreateConnectionRequest, "ownership" | "subjectId">,
+  grantSubjectId: string,
+): string | null {
+  if (payload.ownership === undefined) {
+    return writableSubjectId(payload.subjectId, grantSubjectId);
+  }
+  const subjectId = payload.ownership === "personal" ? grantSubjectId : null;
+  if (payload.subjectId !== undefined && payload.subjectId !== subjectId) {
+    throw new HTTPException(422, {
+      message: "ownership and subjectId describe different connection owners",
+    });
+  }
+  return subjectId;
 }
 
 function encryptCredentialBundle(key: Uint8Array, credential: Record<string, unknown>): string {

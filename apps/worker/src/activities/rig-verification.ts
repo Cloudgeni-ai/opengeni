@@ -1,4 +1,5 @@
 import type { AccessGrant, Rig, RigChange, RigVersion } from "@opengeni/contracts";
+import { sandboxArchiveCaptureTimeoutMs } from "@opengeni/config";
 import {
   recordRigAuditEvent,
   classifyRigVerificationOutcome,
@@ -492,6 +493,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       rigVersionId: input.rigVersionId,
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
       warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(input.settings),
     });
     acquired = true;
     expectedEpoch = lease.lease.leaseEpoch;

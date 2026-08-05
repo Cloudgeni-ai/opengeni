@@ -107,6 +107,7 @@ function queueSnapshot(
     pendingInputs: [],
     pendingInputAttachment: null,
     ...overrides,
+    activePersonalConnections: overrides.activePersonalConnections ?? [],
   };
 }
 
@@ -1254,7 +1255,9 @@ describe("useSessionMcpApprovalPolicy", () => {
     await flushing(async () => {
       await hook.result.current.update(["write_record"]);
     });
-    expect(reads).toBe(2);
+    // The authoritative post-mutation read queues behind the older read rather
+    // than overlapping it. The mutation response remains the visible truth.
+    expect(reads).toBe(1);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {
@@ -1264,6 +1267,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         mcpServers: [metadata(false)],
       });
     });
+    expect(reads).toBe(2);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {
@@ -1493,6 +1497,8 @@ describe("useSessionControl", () => {
       },
       interruptionCount: 0,
       wakeCount: controlState === "active" ? 1 : 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
     });
     const client = fakeClient({
       pauseSession: async (_ws, _session, options) => {
@@ -1640,6 +1646,8 @@ describe("useSessionControl", () => {
         },
         interruptionCount: 1,
         wakeCount: 0,
+        cancelledSessionCount: 0,
+        cancelledTurnCount: 0,
       });
       expect(await stalePause).toBeNull();
     });
@@ -1695,6 +1703,130 @@ describe("useComposer queue-vs-steer", () => {
     expect(typeof input.clientEventId).toBe("string");
     await hook.unmount();
   });
+
+  test("projects Steer immediately, keeps it accepted, then settles when execution starts", async () => {
+    let resolveSteer!: (value: { accepted: SessionEvent; turn: SessionTurn }) => void;
+    const pendingSteer = new Promise<{ accepted: SessionEvent; turn: SessionTurn }>((resolve) => {
+      resolveSteer = resolve;
+    });
+    const turn = fakeTurn({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+    const accepted = makeEvent(10, "user.message", { delivery: "steer" });
+    const client = fakeClient({
+      steerMessage: async () => await pendingSteer,
+    });
+    type Props = { events: SessionEvent[] };
+    const hook = await renderHook(
+      (props: Props) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+
+    let result!: Promise<boolean>;
+    await reactAct(async () => {
+      result = hook.result.current.steer("Focus on the authentication failure first");
+      await Promise.resolve();
+    });
+    expect(hook.result.current.steering).toMatchObject({
+      phase: "submitting",
+      text: "Focus on the authentication failure first",
+      turnId: null,
+    });
+
+    await reactAct(async () => {
+      resolveSteer({ accepted, turn });
+      expect(await result).toBe(true);
+    });
+    expect(hook.result.current.steering).toMatchObject({
+      phase: "accepted",
+      triggerEventId: accepted.id,
+      turnId: turn.id,
+    });
+
+    await hook.rerender({
+      events: [
+        accepted,
+        {
+          ...makeEvent(11, "turn.started", { triggerEventId: accepted.id }),
+          turnId: turn.id,
+        },
+      ],
+    });
+    expect(hook.result.current.steering).toBeNull();
+    await hook.unmount();
+  });
+
+  test("reconciles a Steer that started before a standalone event stream went live", async () => {
+    const turn = fakeTurn({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+    let accepted: SessionEvent | null = null;
+    let reconciliations = 0;
+    const client = fakeClient({
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        accepted = {
+          ...makeEvent(20, "user.message", { delivery: "steer" }),
+          clientEventId: typeof input === "string" ? undefined : input.clientEventId,
+        };
+        return { accepted, turn };
+      },
+      getSession: async () => ({ lastSequence: 21 }) as never,
+      listEvents: async () => {
+        reconciliations += 1;
+        return accepted
+          ? [
+              accepted,
+              {
+                ...makeEvent(21, "turn.started", { triggerEventId: accepted.id }),
+                turnId: turn.id,
+              },
+            ]
+          : [];
+      },
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          yield* [] as SessionEvent[];
+        })(),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+        }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.steer("Use the smaller patch")).toBe(true);
+    });
+    await flush();
+
+    expect(reconciliations).toBe(1);
+    expect(hook.result.current.steering).toBeNull();
+    await hook.unmount();
+  });
+
+  test("removes the optimistic Steer projection when admission fails", async () => {
+    const client = fakeClient({
+      steerMessage: async () => {
+        throw new Error("Steer was rejected");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await reactAct(async () => hook.result.current.setValue("Keep this draft"));
+    await flushing(async () => {
+      expect(await hook.result.current.steer()).toBe(false);
+    });
+    expect(hook.result.current.steering).toBeNull();
+    expect(hook.result.current.value).toBe("Keep this draft");
+    expect(hook.result.current.error?.message).toBe("Steer was rejected");
+    await hook.unmount();
+  });
 });
 
 describe("useComposer durable draft and control binding", () => {
@@ -1736,6 +1868,145 @@ describe("useComposer durable draft and control binding", () => {
     ]);
     await flush();
     expect(reads).toBe(3);
+    await hook.unmount();
+  });
+
+  test("soft draft reload after settle does not assert draftLoading", async () => {
+    let reads = 0;
+    let releaseSecond: (() => void) | null = null;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) {
+          await new Promise<void>((resolve) => {
+            releaseSecond = resolve;
+          });
+        }
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.draftLoading).toBe(false);
+
+    // Reconcile / queue-changed soft reload (loadOlder SSE reconnect path).
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+    expect(reads).toBe(2);
+    expect(hook.result.current.draftLoading).toBe(false);
+    expect(releaseSecond).not.toBeNull();
+    // Soft reload must not flip draftLoading. Resolve + settle under one act so
+    // the deferred read's setState commits never escape the warning-free gate.
+    await flushing(async () => {
+      releaseSecond!();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hook.result.current.draftLoading).toBe(false);
+    expect(hook.result.current.value).toBe("read-2");
+    await hook.unmount();
+  });
+
+  test("explicit reloadDraft still asserts draftLoading while in flight", async () => {
+    let reads = 0;
+    let releaseReload: (() => void) | null = null;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) {
+          await new Promise<void>((resolve) => {
+            releaseReload = resolve;
+          });
+        }
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.draftLoading).toBe(false);
+
+    let reloadDone: Promise<void> = Promise.resolve();
+    await flushing(() => {
+      reloadDone = hook.result.current.reloadDraft();
+    });
+    // In-flight hard reload must blank the picker (unlike soft reconcile).
+    expect(hook.result.current.draftLoading).toBe(true);
+    expect(reads).toBe(2);
+    expect(releaseReload).not.toBeNull();
+    // Resolving outside act was the clean-gate failure: draft setState escaped.
+    await flushing(async () => {
+      releaseReload!();
+      await reloadDone;
+    });
+    expect(hook.result.current.draftLoading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("draft hydration cannot overwrite a latency selection made while the read is in flight", async () => {
+    let resolveDraft!: (draft: ComposerDraft) => void;
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        await new Promise<ComposerDraft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+    });
+    const applied: ComposerDraft[] = [];
+    const hook = await renderHook<ReturnType<typeof useComposer>, "standard" | "fast">(
+      (latencyMode: "standard" | "fast") =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode },
+          onDraftApplied: (draft) => applied.push(draft),
+        }),
+      "standard",
+    );
+
+    await flush();
+    await hook.rerender("fast");
+    await flushing(async () => {
+      resolveDraft({
+        revision: 1,
+        text: "restored text",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      });
+      await Promise.resolve();
+    });
+
+    expect(hook.result.current.value).toBe("restored text");
+    expect(applied).toEqual([]);
     await hook.unmount();
   });
 
@@ -1888,6 +2159,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
+      latencyMode: "fast" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -1913,7 +2185,7 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           effectiveControl: queueSnapshot([]).effectiveControl,
-          sendExtras: { model: "model-x", reasoningEffort: "medium" },
+          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode: "fast" },
         }),
       undefined,
     );
@@ -1924,12 +2196,126 @@ describe("useComposer durable draft and control binding", () => {
     expect(saved.at(-1)).toMatchObject({
       expectedRevision: 4,
       text: "edited locally",
+      latencyMode: "fast",
     });
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
     expect(sent.at(-1)).toMatchObject({
       text: "edited locally",
       expectedDraftRevision: 5,
       controlEtag: "control-3",
+      latencyMode: "fast",
+    });
+    await hook.unmount();
+  });
+
+  test("a reconnect does not duplicate a ready file across the durable draft and live attachment", async () => {
+    const fileId = "33333333-3333-4333-8333-333333333333";
+    const canonicalFile = {
+      kind: "file" as const,
+      mountPath: `.opengeni/files/${fileId}`,
+      fileId,
+    };
+    let serverDraft: ComposerDraft = {
+      revision: 0,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const canonicalizeResources = (
+      resources: ComposerDraft["resources"],
+    ): ComposerDraft["resources"] =>
+      resources.map((resource) =>
+        resource.kind === "file"
+          ? {
+              kind: "file" as const,
+              mountPath: resource.mountPath ?? `.opengeni/files/${resource.fileId}`,
+              fileId: resource.fileId,
+            }
+          : resource,
+      );
+    const admissionMismatches: string[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        expect(request.expectedRevision).toBe(serverDraft.revision);
+        serverDraft = {
+          ...serverDraft,
+          ...request,
+          revision: serverDraft.revision + 1,
+          resources: canonicalizeResources(request.resources),
+          updatedAt: new Date().toISOString(),
+        };
+        return serverDraft;
+      },
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        const submitted = input as SendMessageInput;
+        const normalizedResources = canonicalizeResources(submitted.resources ?? []).filter(
+          (resource, index, resources) =>
+            resources.findIndex(
+              (candidate) => JSON.stringify(candidate) === JSON.stringify(resource),
+            ) === index,
+        );
+        const savedContent = JSON.stringify({
+          text: serverDraft.text,
+          resources: serverDraft.resources,
+          model: serverDraft.model,
+          reasoningEffort: serverDraft.reasoningEffort,
+        });
+        const submittedContent = JSON.stringify({
+          text: submitted.text,
+          resources: normalizedResources,
+          model: submitted.model ?? "model-x",
+          reasoningEffort: submitted.reasoningEffort ?? "medium",
+        });
+        if (
+          submitted.expectedDraftRevision === serverDraft.revision &&
+          savedContent !== submittedContent
+        ) {
+          admissionMismatches.push("Submitted content is not the saved draft");
+          throw new Error("Submitted content is not the saved draft");
+        }
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId }],
+            model: "model-x",
+            reasoningEffort: "medium",
+          }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(() => hook.result.current.setValue("Inspect the attached image."));
+    await flush(600);
+    expect(serverDraft).toMatchObject({
+      revision: 1,
+      resources: [canonicalFile],
+    });
+
+    // Reconnect reconciliation reloads the canonical server resource while
+    // the browser-local ready attachment card still supplies its bare ref.
+    await flushing(async () => await hook.result.current.reloadDraft());
+    expect(hook.result.current.restoredResources).toEqual([canonicalFile]);
+
+    let accepted = false;
+    await flushing(async () => {
+      accepted = await hook.result.current.send();
+    });
+
+    expect({ accepted, admissionMismatches }).toEqual({
+      accepted: true,
+      admissionMismatches: [],
     });
     await hook.unmount();
   });
@@ -2396,7 +2782,12 @@ describe("useComposer durable draft and control binding", () => {
     const client = fakeClient({
       getComposerDraft: async () => initial,
       saveComposerDraft: async () => {
-        throw new OpenGeniApiError(409, "draft changed");
+        // Persistently conflict even after the stale-revision retry adopts
+        // the server revision — surfaces the keep_mine / use_remote banner.
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+        );
       },
     });
     const hook = await renderHook(
@@ -2407,7 +2798,57 @@ describe("useComposer durable draft and control binding", () => {
     await flushing(async () => hook.result.current.setValue("mine remains"));
     await flush(600);
     expect(hook.result.current.value).toBe("mine remains");
-    expect(hook.result.current.draftConflict?.message).toContain("409");
+    expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
+    await hook.unmount();
+  });
+
+  test("autosave recovers a stale revision after tab-sleep OCC without surfacing a conflict", async () => {
+    const initial = {
+      revision: 1,
+      text: "remote one",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let saves = 0;
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        saves === 0
+          ? initial
+          : {
+              ...initial,
+              revision: 2,
+              text: "remote one",
+            },
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        saves += 1;
+        if (request.expectedRevision === 1) {
+          throw new OpenGeniApiError(
+            409,
+            JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+          );
+        }
+        return {
+          ...initial,
+          revision: request.expectedRevision + 1,
+          text: request.text,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => hook.result.current.setValue("mine remains"));
+    await flush(600);
+    expect(hook.result.current.value).toBe("mine remains");
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.draft?.revision).toBe(3);
+    expect(saves).toBe(2);
     await hook.unmount();
   });
 

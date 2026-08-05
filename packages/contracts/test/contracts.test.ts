@@ -19,11 +19,15 @@ import {
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
+  DocumentSearchResponse,
   EnablePackRequest,
   ErrorEnvelope,
   GitCredentialBindingId,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  gitRemoteIdentity,
+  gitRemotePathAliases,
+  gitRemoteUriAliases,
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
@@ -42,6 +46,7 @@ import {
   SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES,
   SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES,
   SESSION_MCP_SERVERS_MAX,
+  Session,
   SessionGoal,
   SessionMcpServerMetadata,
   SteerSessionMessageRequest,
@@ -58,8 +63,10 @@ import {
   defaultRepositoryMountPath,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
   readTurnExecutionPolicyV1,
+  resourceMountPath,
   resourceMountPathCollisionKey,
   turnExecutionPolicyAuditMetadata,
   TurnExecutionPolicyV1,
@@ -477,6 +484,46 @@ describe("contracts", () => {
     expect(payload.metadata).toEqual({});
   });
 
+  test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "review the release",
+        policyRole: "  Release   Reviewer  ",
+      }).policyRole,
+    ).toBe("release-reviewer");
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "review the release",
+        policyRole: "../../workspace-owner",
+      }).success,
+    ).toBe(false);
+
+    expect(Session.shape.policyRole.parse(undefined)).toBeNull();
+  });
+
+  test("accepts an explicit rig-less session", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      rigId: null,
+    });
+    expect(payload.rigId).toBeNull();
+  });
+
+  test("accepts only an explicit realtime start without an initial message", () => {
+    expect(CreateSessionRequest.parse({ startMode: "realtime" })).toMatchObject({
+      startMode: "realtime",
+      resources: [],
+      tools: [],
+    });
+    expect(CreateSessionRequest.safeParse({}).success).toBe(false);
+    expect(
+      CreateSessionRequest.safeParse({
+        startMode: "realtime",
+        initialMessage: "do not fabricate this turn",
+      }).success,
+    ).toBe(false);
+  });
+
   test("accepts validated inline session skills", () => {
     const parsed = CreateSessionRequest.parse({
       initialMessage: "prepare release",
@@ -555,17 +602,17 @@ describe("contracts", () => {
   });
 
   test("derives portable host-aware repository mount paths", () => {
-    expect(defaultRepositoryMountPath("https://github.com/acme/app.git")).toBe(
+    expect(defaultRepositoryMountPath("https://github.com/acme/app.git", "github")).toBe(
       "repos/github.com/acme/app",
     );
-    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git")).toBe(
+    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git", "gitlab")).toBe(
       "repos/gitlab.com/acme/app",
     );
-    expect(defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app")).toBe(
-      "repos/dev.azure.com/acme/project/_git/app",
-    );
+    expect(
+      defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app.git", "azure_devops"),
+    ).toBe("repos/dev.azure.com/acme/project/_git/app.git");
     expect(defaultRepositoryMountPath("https://git.example.com:8443/acme/app.git")).toBe(
-      "repos/git.example.com%3A8443/acme/app",
+      "repos/git.example.com%3A8443/acme/app.git",
     );
     expect(() => defaultRepositoryMountPath("ssh://git.example.com/acme/app.git")).toThrow(
       "invalid repository URI",
@@ -579,11 +626,44 @@ describe("contracts", () => {
     expect(resourceMountPathCollisionKey("repos/example.com/acme/caf\u00e9")).toBe(
       resourceMountPathCollisionKey("repos/example.com/acme/cafe\u0301"),
     );
-    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git")).toThrow(
+    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git", "github")).toThrow(
       "invalid resource mount path",
     );
     expect(normalizeResourceMountPath("repos/github.com/acme/aux-repository")).toBe(
       "repos/github.com/acme/aux-repository",
+    );
+  });
+
+  test("preserves transport paths and applies only provider-declared aliases", () => {
+    expect(normalizeRepositoryTransportUri("https://bot@GIT.EXAMPLE/acme/repo")).toBe(
+      "https://git.example/acme/repo",
+    );
+    expect(gitRemoteUriAliases("https://github.com/acme/repo.git", "github")).toEqual([
+      "https://github.com/acme/repo.git",
+      "https://github.com/acme/repo",
+    ]);
+    expect(gitRemotePathAliases("https://gitlab.com/acme/repo", "gitlab")).toEqual([
+      "acme/repo",
+      "acme/repo.git",
+    ]);
+    expect(
+      gitRemoteUriAliases("https://dev.azure.com/acme/project/_git/repo.git", "azure_devops"),
+    ).toEqual(["https://dev.azure.com/acme/project/_git/repo.git"]);
+    expect(gitRemoteUriAliases("https://git.example/acme/repo.git", null)).toEqual([
+      "https://git.example/acme/repo.git",
+    ]);
+    expect(gitRemoteIdentity("https://github.com/acme/repo.git", "github")).toBe(
+      "https://github.com/acme/repo",
+    );
+    expect(
+      gitRemoteIdentity("https://dev.azure.com/acme/project/_git/repo.git", "azure_devops"),
+    ).toBe("https://dev.azure.com/acme/project/_git/repo.git");
+  });
+
+  test("keeps uploaded files in the private OpenGeni workspace directory by default", () => {
+    expect(resourceMountPath({ kind: "file", fileId: "file-1" })).toBe(".opengeni/files/file-1");
+    expect(resourceMountPath({ kind: "file", fileId: "file-1", mountPath: "inputs/current" })).toBe(
+      "inputs/current",
     );
   });
 
@@ -944,9 +1024,43 @@ describe("contracts", () => {
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
+    expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     // models defaults to [] for back-compat (callers reading only allowedModels
     // are unaffected when the host hasn't populated the richer list).
     expect(payload.models).toEqual([]);
+  });
+
+  test("accepts allowlisted browser analytics providers", () => {
+    const payload = ClientConfig.parse({
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      deploymentRevision: "test-sha",
+      defaultModel: "gpt-5.6-sol",
+      allowedModels: ["gpt-5.6-sol"],
+      defaultReasoningEffort: "high",
+      allowedReasoningEfforts: ["high"],
+      fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
+      productAccessMode: "managed",
+      analytics: {
+        consentRequired: true,
+        providers: {
+          reo: { clientId: "reo_client-1" },
+          posthog: { projectKey: "phc_test", host: "https://eu.i.posthog.com" },
+          ga4: { measurementId: "G-ABC123" },
+        },
+      },
+    });
+
+    expect(payload.analytics.providers.reo?.clientId).toBe("reo_client-1");
+    expect(payload.analytics.providers.ga4?.measurementId).toBe("G-ABC123");
+    expect(() =>
+      ClientConfig.parse({
+        ...payload,
+        analytics: {
+          consentRequired: true,
+          providers: { reo: { clientId: "r".repeat(129) } },
+        },
+      }),
+    ).toThrow();
   });
 
   test("round-trips the provider-grouped models list on client config", () => {
@@ -993,6 +1107,26 @@ describe("contracts", () => {
         api: "grpc",
       }),
     ).toThrow();
+  });
+
+  test("accepts an optional curated shortLabel on ClientModel", () => {
+    const withShort = ClientModel.parse({
+      id: "deepseek-v4-flash-0731",
+      label: "DeepSeek V4 Flash 0731",
+      shortLabel: "V4 Flash",
+      provider: "opengeni-gateway",
+      providerLabel: "OpenGeni Gateway",
+      api: "responses",
+    });
+    expect(withShort.shortLabel).toBe("V4 Flash");
+    const without = ClientModel.parse({
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      api: "responses",
+    });
+    expect(without.shortLabel).toBeUndefined();
   });
 
   test("accepts additive normalized model definitions and authenticated availability", () => {
@@ -1255,7 +1389,6 @@ describe("contracts", () => {
           kind: "text",
           prompt: "Anything else?",
           required: false,
-          validation: { maxLength: 200 },
         },
       ],
       allowSkip: true,
@@ -1263,6 +1396,19 @@ describe("contracts", () => {
     });
     expect(input.questions[0]).toMatchObject({ required: true, allowOther: false });
     expect(input.questions[1]?.options).toEqual([]);
+
+    // Agent-invented text char bounds are not in the contract — strip on parse.
+    const stripped = RequestHumanInputToolInput.parse({
+      questions: [
+        {
+          id: "notes",
+          kind: "text",
+          prompt: "Notes?",
+          validation: { minLength: 50, maxLength: 200, minSelections: 1 },
+        },
+      ],
+    });
+    expect(stripped.questions[0]?.validation).toEqual({ minSelections: 1 });
 
     const response = SubmitHumanInputResponseRequest.parse({
       outcome: "answered",
@@ -1392,6 +1538,43 @@ describe("contracts", () => {
       mode: "hybrid",
       sourceKinds: ["repository"],
     });
+    expect(
+      DocumentSearchResponse.parse({
+        results: [
+          {
+            chunkId: "00000000-0000-4000-8000-000000000011",
+            workspaceId: "00000000-0000-4000-8000-000000000012",
+            documentId: "00000000-0000-4000-8000-000000000013",
+            baseId: "00000000-0000-4000-8000-000000000014",
+            fileId,
+            title: "Network policy",
+            text: "Private endpoints require the approved policy.",
+            score: 0.75,
+            matchType: "keyword",
+            vectorScore: null,
+            keywordScore: 0.75,
+            chunkIndex: 0,
+            metadata: {},
+            sourceKind: "repository",
+            sourceUri: "https://example.test/runbook",
+            sourceExternalId: "runbook-1",
+            sourceTitle: "Network policy",
+            sourceAuthor: "Platform",
+            sourceCreatedAt: null,
+            sourceUpdatedAt: null,
+            sourceVersion: "v1",
+            aclTags: ["platform"],
+            authorityKind: "personal",
+            authorityWorkspaceId: "00000000-0000-4000-8000-000000000012",
+            authoritySubjectId: "user:initiator",
+          },
+        ],
+      }).results[0],
+    ).toMatchObject({
+      sourceKind: "repository",
+      authorityKind: "personal",
+      authoritySubjectId: "user:initiator",
+    });
   });
 
   test("accepts knowledge memory contracts", () => {
@@ -1474,6 +1657,7 @@ describe("capability pack runtime manifest fields", () => {
   test("packs without runtime fields keep their existing shape", () => {
     const pack = CapabilityPack.parse(baseManifest);
     expect(pack.sandboxImage).toBeUndefined();
+    expect(pack.sandboxProviderImages).toBeUndefined();
     expect(pack.skills).toEqual([]);
   });
 
@@ -1490,6 +1674,32 @@ describe("capability pack runtime manifest fields", () => {
       "SKILL.md",
       "references/runbook.md",
     ]);
+  });
+
+  test("binds a digest-pinned logical image to an immutable Modal image ID", () => {
+    const pack = CapabilityPack.parse({
+      ...baseManifest,
+      sandboxImage:
+        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sandboxProviderImages: {
+        modal: { imageId: "im-1234567890123456789012" },
+      },
+    });
+    expect(pack.sandboxProviderImages?.modal?.imageId).toBe("im-1234567890123456789012");
+  });
+
+  test("rejects a Modal image ID without digest-pinned logical provenance", () => {
+    for (const sandboxImage of [undefined, "example.com/infra-sandbox:latest"]) {
+      expect(() =>
+        CapabilityPack.parse({
+          ...baseManifest,
+          ...(sandboxImage ? { sandboxImage } : {}),
+          sandboxProviderImages: {
+            modal: { imageId: "im-1234567890123456789012" },
+          },
+        }),
+      ).toThrow();
+    }
   });
 
   test("requires every skill to include a top-level SKILL.md", () => {

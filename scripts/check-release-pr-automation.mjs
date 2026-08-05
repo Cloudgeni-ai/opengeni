@@ -840,12 +840,19 @@ export async function recoverReleaseHeadEvidence(options = {}) {
       "release-head pull-request timeline",
     ),
   ]);
-  invariant(
-    source.treeSha === head.treeSha,
-    "release-head merged source tree differs from the reviewed head",
-  );
   assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
-  const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
+  // A provider squash can be based on a newer, disjoint main commit than the
+  // PR's event base. In that case the merged source tree correctly contains
+  // both the reviewed head delta and the intervening main delta, so whole-tree
+  // equality is not a valid retention precondition. The provider-owned merged
+  // PR identity and timeline event above bind the exact base, head, merge SHA,
+  // actor, and timestamp; historical source admission below independently
+  // proves the reviewed base→head file manifest. The ordinary release verifier
+  // remains responsible for proving the final source composition.
+  const mergeMethod =
+    source.treeSha === head.treeSha
+      ? await classifyMergeOutcome(api, source, pullIdentity)
+      : "provider-verified-moving-main";
   await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
   const historicalAdmission = await verifyHistoricalSourceAdmission({
     number: context.prNumber,
@@ -871,6 +878,7 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     JSON.stringify(preMutationEvidence) === JSON.stringify(initialEvidence),
     "release head evidence moved before recovery mutation",
   );
+  let existingRetention;
   if (initialEvidence === null) {
     invariant(
       preMutationChecks.every(
@@ -883,7 +891,7 @@ export async function recoverReleaseHeadEvidence(options = {}) {
       ...context,
       releaseHeadRelease: initialEvidence.releaseHeadRelease,
     };
-    await findCheckRun(
+    existingRetention = await findCheckRun(
       api,
       retentionContext,
       checkIdentity("release-head-retention", retentionContext),
@@ -931,19 +939,21 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     context.headSha,
     sourceAdmissionIdentity.externalId,
   );
-  await upsertCheckRun(
-    api,
-    checkContext,
-    "release-head-retention",
-    {
-      status: "in_progress",
-      title: "Recovering immutable release-head retention evidence",
-      summary:
-        `Recovering the provider check for retained head ${context.headSha} ` +
-        `from merged source ${context.sourceSha}.`,
-    },
-    now,
-  );
+  if (!existingRetention) {
+    await upsertCheckRun(
+      api,
+      checkContext,
+      "release-head-retention",
+      {
+        status: "in_progress",
+        title: "Recovering immutable release-head retention evidence",
+        summary:
+          `Recovering the provider check for retained head ${context.headSha} ` +
+          `from merged source ${context.sourceSha}.`,
+      },
+      now,
+    );
+  }
 
   const [terminalMain, terminalPull, terminalEvidence] = await Promise.all([
     api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
@@ -960,21 +970,23 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     JSON.stringify(terminalEvidence.releaseHeadRelease) === JSON.stringify(releaseHeadRelease),
     "release head immutable release moved during recovery",
   );
-  await upsertCheckRun(
-    api,
-    checkContext,
-    "release-head-retention",
-    {
-      status: "completed",
-      conclusion: "success",
-      title: "Release head retention evidence recovered",
-      summary:
-        `PR #${context.prNumber} exact head ${context.headSha} remains retained at ` +
-        `${releaseHead.ref} by immutable prerelease ${releaseHeadRelease.id}; ` +
-        `the accepted merge source is ${context.sourceSha}.`,
-    },
-    now,
-  );
+  if (!existingRetention) {
+    await upsertCheckRun(
+      api,
+      checkContext,
+      "release-head-retention",
+      {
+        status: "completed",
+        conclusion: "success",
+        title: "Release head retention evidence recovered",
+        summary:
+          `PR #${context.prNumber} exact head ${context.headSha} remains retained at ` +
+          `${releaseHead.ref} by immutable prerelease ${releaseHeadRelease.id}; ` +
+          `the accepted merge source is ${context.sourceSha}.`,
+      },
+      now,
+    );
+  }
   logger.log(
     `Recovered release-head retention check for ${context.headSha} ` +
       `from merged source ${context.sourceSha}.`,
@@ -1146,11 +1158,9 @@ function checkIdentity(kind, context) {
 }
 
 async function findCheckRun(api, context, identity) {
-  const matches = [];
-  const acceptedExternalIds = new Set([
-    identity.externalId,
-    ...(identity.migrationExternalIds ?? []),
-  ]);
+  const canonicalMatches = [];
+  const migrationMatches = [];
+  const migrationExternalIds = new Set(identity.migrationExternalIds ?? []);
   const acceptedExternalIdPatterns = identity.migrationExternalIdPatterns ?? [];
   for (let page = 1; page <= maximumPages; page += 1) {
     const response = record(
@@ -1165,10 +1175,11 @@ async function findCheckRun(api, context, identity) {
     invariant(Array.isArray(response.check_runs), "check-run records are missing");
     for (const check of response.check_runs) {
       const externalId = check?.external_id;
-      if (
-        !acceptedExternalIds.has(externalId) &&
-        !acceptedExternalIdPatterns.some((pattern) => pattern.test(externalId ?? ""))
-      ) {
+      const canonical =
+        externalId === identity.externalId ||
+        acceptedExternalIdPatterns.some((pattern) => pattern.test(externalId ?? ""));
+      const migration = migrationExternalIds.has(externalId);
+      if (!canonical && !migration) {
         if (!identity.exclusive) continue;
         invariant(
           check?.head_sha === context.headSha,
@@ -1183,13 +1194,25 @@ async function findCheckRun(api, context, identity) {
         Number.isSafeInteger(check?.id) && check.id > 0,
         "existing check-run ID is invalid",
       );
-      matches.push(check);
+      (canonical ? canonicalMatches : migrationMatches).push(check);
     }
     if (response.check_runs.length < recordsPerPage) break;
     invariant(page < maximumPages, "check-run listing exceeded its page limit");
   }
-  invariant(matches.length <= 1, "multiple check runs share the idempotency marker");
-  return matches[0];
+  if (canonicalMatches.length > 1) {
+    const suiteIds = new Set(canonicalMatches.map((check) => check?.check_suite?.id));
+    invariant(
+      identity.exclusive &&
+        suiteIds.size === 1 &&
+        Number.isSafeInteger(canonicalMatches[0]?.check_suite?.id) &&
+        canonicalMatches.every(
+          (check) => check?.status === "completed" && check?.conclusion === "success",
+        ),
+      "multiple check runs share the idempotency marker",
+    );
+  }
+  if (canonicalMatches.length >= 1) return canonicalMatches[0];
+  return migrationMatches.length === 1 ? migrationMatches[0] : undefined;
 }
 
 async function upsertCheckRun(api, context, kind, state, now) {

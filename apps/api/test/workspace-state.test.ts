@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   signDelegatedAccessToken,
   WORKSPACE_STATE_MAX_BASES,
+  WorkspaceStateExportResponse,
   WorkspaceStateResponse,
   type Permission,
 } from "@opengeni/contracts";
@@ -93,7 +94,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function request(permissions: Permission[]): Promise<Response> {
+async function request(
+  permissions: Permission[],
+  attemptId?: string,
+  mode: "state" | "export" = "state",
+): Promise<Response> {
   const bearer = await signDelegatedAccessToken(DELEGATION_SIGNING_FIXTURE, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -104,9 +109,12 @@ async function request(permissions: Permission[]): Promise<Response> {
   });
   const headers = new Headers();
   headers.set("authorization", ["Bearer", bearer].join(" "));
-  return await app.request(`http://x/v1/workspaces/${grant.workspaceId}/workspace-state`, {
-    headers,
-  });
+  const query = attemptId ? `?attemptId=${encodeURIComponent(attemptId)}` : "";
+  const suffix = mode === "export" ? "/export" : "";
+  return await app.request(
+    `http://x/v1/workspaces/${grant.workspaceId}/workspace-state${suffix}${query}`,
+    { headers },
+  );
 }
 
 async function readyFile(name: string, targetGrant = grant): Promise<string> {
@@ -146,7 +154,32 @@ describe("workspace state API authorization", () => {
       source: "workspace_override",
       workspaceOverrideConfigured: true,
     });
+    expect(body.preferences).toMatchObject({
+      authority: "preference_registry_preferences",
+      activeDescriptorCount: 0,
+      scopeCounts: { organization: 0, workspace: 0, user: 0 },
+      truncated: false,
+    });
     expect(JSON.stringify(body)).not.toContain("PRIVATE LEGACY WORKSPACE INSTRUCTIONS");
+  });
+
+  test("filters knowledge before producing the canonical sanitized export", async () => {
+    const response = await request(["workspace:read"], undefined, "export");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(response.headers.get("content-disposition")).toContain("sanitized.json");
+    const serialized = await response.text();
+    const exported = WorkspaceStateExportResponse.parse(JSON.parse(serialized));
+    expect(exported.state.knowledge).toEqual({
+      availability: "unavailable",
+      reason: "missing_permission",
+      requiredPermission: "documents:search",
+    });
+    expect(exported.omissions).toContain("secret_values_and_credentials");
+    expect(exported.stateSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(serialized.endsWith("\n")).toBe(true);
+    expect(serialized).not.toContain("PRIVATE LEGACY WORKSPACE INSTRUCTIONS");
   });
 
   test("returns an empty visible inventory only with document search permission", async () => {
@@ -163,6 +196,20 @@ describe("workspace state API authorization", () => {
         { code: "no_memory_records", relatedCount: 0 },
       ],
     });
+  });
+
+  test("does not disclose whether an unavailable attempt exists", async () => {
+    const response = await request(["workspace:read"], crypto.randomUUID());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const body = WorkspaceStateResponse.parse(await response.json());
+    expect(body.truth.attemptGovernance).toEqual({
+      status: "unavailable",
+      reason: "attempt_not_found_or_not_authorized",
+      driftStatus: "unavailable",
+    });
+    expect(JSON.stringify(body.truth.attemptGovernance)).not.toContain("sessionId");
+    expect(JSON.stringify(body.truth.attemptGovernance)).not.toContain("turnId");
   });
 
   test("bounds base rows while aggregating all and only subject-visible documents", async () => {
@@ -193,6 +240,8 @@ describe("workspace state API authorization", () => {
       sourceKind: "email",
       visibility: "private",
       createdBy: grant.subjectId,
+      initiatingSubjectId: grant.subjectId,
+      access: { viewerSubjectId: grant.subjectId },
     });
     await addDocumentToBase(client.db, {
       accountId: grant.accountId,
@@ -203,6 +252,8 @@ describe("workspace state API authorization", () => {
       sourceKind: "chat",
       visibility: "private",
       createdBy: "user:another-subject",
+      initiatingSubjectId: "user:another-subject",
+      access: { viewerSubjectId: "user:another-subject" },
     });
 
     const response = await request(["workspace:read", "documents:search"]);
@@ -217,6 +268,7 @@ describe("workspace state API authorization", () => {
       inspectedVisibleDocumentCount: 2,
       documentStatusCounts: { queued: 2, indexing: 0, ready: 0, failed: 0 },
       sourceKindCounts: { repository: 1, email: 1, chat: 0 },
+      authorityKindCounts: { organization: 0, workspace: 1, personal: 1 },
     });
     expect(body.knowledge.bases).toHaveLength(WORKSPACE_STATE_MAX_BASES);
     expect(body.knowledge.bases.find((base) => base.id === targetBase.id)).toMatchObject({
@@ -281,6 +333,8 @@ describe("workspace state API authorization", () => {
       title: "hidden private topics",
       visibility: "private",
       createdBy: "user:another-subject",
+      initiatingSubjectId: "user:another-subject",
+      access: { viewerSubjectId: "user:another-subject" },
     });
     const malformedTopics: unknown[] = [{ label: "object-label" }, true, 7, ["nested-label"], null];
     await shared.admin`
@@ -348,6 +402,8 @@ describe("workspace state API authorization", () => {
       title: "owner private normalized topics",
       visibility: "private",
       createdBy: grant.subjectId,
+      initiatingSubjectId: grant.subjectId,
+      access: { viewerSubjectId: grant.subjectId },
     });
     const otherAccess = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -437,6 +493,11 @@ describe("workspace state API authorization", () => {
       { name: "valid", documentCount: 1 },
     ]);
     expect(mixedBody.knowledge.documentStatusCounts.ready).toBe(5);
+    expect(mixedBody.knowledge.authorityKindCounts).toEqual({
+      organization: 0,
+      workspace: 5,
+      personal: 2,
+    });
     expect(mixedBody.knowledge.gaps.map((gap) => gap.code)).not.toContain("missing_topic_coverage");
     const topicLabels = JSON.stringify(mixedBody.knowledge.topics);
     expect(topicLabels).not.toContain("private-hidden");

@@ -15,7 +15,9 @@ import {
   commitWarmingToWarm,
   createDb,
   createSession,
+  forceDrainOverLimitViewerOnlyBoxes,
   getSession,
+  listSessionEvents,
   listSessionMcpServersForRun,
   listSessionTurns,
   reapStaleLeaseHolders,
@@ -39,6 +41,7 @@ import {
 } from "../src/sandbox/viewer";
 import { withChannelA } from "../src/sandbox/channel-a";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { HTTPException } from "hono/http-exception";
 
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
 // API-direct viewer-holder lifecycle, driven through the REAL packages/db lease
@@ -187,6 +190,25 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     );
     // Queued work is not yet the session's active execution pointer.
     expect(session.activeTurnId).toBeNull();
+  }, 60_000);
+
+  test("realtime-first create returns an idle session without fabricating an initial turn", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSessionForRequest(
+      deps(new MemoryEventBus()),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { startMode: "realtime" },
+    );
+
+    expect(session.status).toBe("idle");
+    expect(session.initialTurnId).toBeNull();
+    expect(session.activeTurnId).toBeNull();
+    expect(await listSessionTurns(db, workspaceId, session.id)).toEqual([]);
+    expect(
+      (await listSessionEvents(db, workspaceId, session.id)).map((event) => event.type),
+    ).toEqual(["session.created"]);
   }, 60_000);
 
   test("from-inside-a-session (parent claim) ⇒ default 'shared' (joins the creator's group)", async () => {
@@ -1168,6 +1190,54 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const lease1 = await readLease(db, workspaceId, sandboxGroupId);
     expect(lease1?.liveness).toBe("warm");
     expect(lease1?.viewerHolders).toBe(1);
+  }, 60_000);
+
+  test("an over-limit viewer receives the typed billing response and cannot re-arm until a fresh evaluation clears the gate", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+
+    await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId,
+      balanceMicros: 0,
+      enforceBalance: true,
+      maxWarmSecondsPerWorkspace: 0,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+
+    let blocked: unknown;
+    try {
+      await attachViewer({ db, settings }, { accountId, workspaceId, session: session! });
+    } catch (error) {
+      blocked = error;
+    }
+    expect(blocked).toBeInstanceOf(HTTPException);
+    expect((blocked as HTTPException).status).toBe(402);
+    expect((blocked as Error).message).toContain("insufficient OpenGeni credits");
+    expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
+      liveness: "draining",
+      refcount: 0,
+      viewerHolders: 0,
+    });
+
+    await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId,
+      balanceMicros: 1,
+      enforceBalance: true,
+      maxWarmSecondsPerWorkspace: 0,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+    const attached = await attachViewer(
+      { db, settings },
+      { accountId, workspaceId, session: session! },
+    );
+    expect(attached.liveness).toBe("warm");
+    expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
+      liveness: "warm",
+      refcount: 1,
+      viewerHolders: 1,
+    });
   }, 60_000);
 
   test("fleet readiness returns a live viewer hold until its route owner releases it", async () => {

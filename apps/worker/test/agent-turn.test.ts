@@ -1,5 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
@@ -20,8 +20,8 @@ import {
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
-  CompactionProviderResponseError,
   CompactionNeededError,
+  CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
@@ -33,6 +33,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertModelResponseLatencyMode,
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
@@ -41,11 +42,12 @@ import {
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
   createCompactionModelUsageEventState,
-  createModelResponseUsageEventState,
+  createModelResponseEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
+  escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   headerSecretRedactions,
   historyRowsToAppend,
@@ -54,17 +56,21 @@ import {
   isTransientProviderError,
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
-  modelAcceptsTypedAttachmentContentForTurn,
+  modelAttachmentInputPolicyForTurn,
+  modelSupportsImageInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
-  modelResponseUsageContextSignal,
+  modelResponseContextSignal,
   managedSandboxOwnershipForTurn,
   pointerReconcileReason,
   processCompactionModelUsageEvent,
-  processModelResponseUsageEvent,
+  processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
+  providerRecoveryCountFromMetadata,
+  providerRetryAfterMs,
   providerRecoveryResult,
+  requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
   safeErrorDiagnostic,
   sandboxDeadlineRotationRecoveryDelayMs,
@@ -73,8 +79,10 @@ import {
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
   stableHumanInputRequestId,
+  structuredToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
+  unavailableMcpTurnInstructions,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
@@ -86,6 +94,29 @@ import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("disconnected MCP turn instructions", () => {
+  test("warns the model without exposing an unbounded unavailable registry", () => {
+    expect(
+      unavailableMcpTurnInstructions({
+        droppedIds: ["cap-linear", "cap-slack"],
+        droppedCount: 4,
+      }),
+    ).toBe(
+      'MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: "cap-linear", "cap-slack", plus 2 additional unavailable server(s). Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.',
+    );
+  });
+
+  test("is absent when no selected server was dropped", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
+  });
+
+  test("keeps a generic warning when legacy ids cannot be projected safely", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 1 })).toContain(
+      "1 unavailable server(s)",
+    );
+  });
+});
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -135,12 +166,27 @@ function citedAssistantMessage() {
 }
 
 describe("turn credential subject authority", () => {
-  test("passes only a frozen human initiator to personal connection resolution", () => {
+  test("passes only a direct human/API turn to broad personal connection resolution", () => {
     expect(
-      credentialSubjectIdForTurnInitiator({ kind: "subject", subjectId: "subject-alice" }),
+      credentialSubjectIdForTurnInitiator({
+        source: "user",
+        initiator: { kind: "subject", subjectId: "subject-alice" },
+        initiatorContext: {},
+      }),
     ).toBe("subject-alice");
     expect(
-      credentialSubjectIdForTurnInitiator({ kind: "service", subjectId: "scheduler" }),
+      credentialSubjectIdForTurnInitiator({
+        source: "goal",
+        initiator: { kind: "service", subjectId: "goal-continuation" },
+        initiatorContext: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      credentialSubjectIdForTurnInitiator({
+        source: "system",
+        initiator: { kind: "subject", subjectId: "subject-alice" },
+        initiatorContext: { via: [{ sessionId: crypto.randomUUID() }] },
+      }),
     ).toBeUndefined();
   });
 });
@@ -467,11 +513,14 @@ describe("accepted turn execution identity", () => {
           source,
           model: "xai/grok-4.5",
           reasoningEffort: "high",
+          latencyMode: "fast",
         }),
       ).toMatchObject({
         requestedModelId: "xai/grok-4.5",
         modelSource: "explicit",
         reasoningSource: "explicit",
+        latencyMode: "fast",
+        latencyModeSource: "explicit",
       });
     }
     for (const source of ["goal", "system", "compaction"] as const) {
@@ -480,11 +529,14 @@ describe("accepted turn execution identity", () => {
           source,
           model: "codex/gpt-5.6-sol",
           reasoningEffort: "xhigh",
+          latencyMode: "fast",
         }),
       ).toMatchObject({
         requestedModelId: null,
         modelSource: "continuation",
         reasoningSource: "continuation",
+        latencyMode: "fast",
+        latencyModeSource: "continuation",
       });
     }
   });
@@ -1000,6 +1052,53 @@ describe("completed model-call metering at ownership fences", () => {
 });
 
 describe("production model-response usage callback authority", () => {
+  test("fails Fast turns when the raw provider response omits or downgrades service_tier", () => {
+    const terminal = (serviceTier?: string) =>
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: {
+          type: "response.completed",
+          response: {
+            id: "resp-fast",
+            ...(serviceTier ? { service_tier: serviceTier } : {}),
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        },
+      } as any);
+
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("priority"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal(),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=missing/);
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=default/);
+    // Codex ChatGPT auth: response service_tier is not an end-to-end honor signal.
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "codex/gpt-5.6-luna",
+        providerId: "codex-subscription",
+      }),
+    ).not.toThrow();
+  });
+
   test("claims the pinned SDK terminal pair once and cannot bind stale usage after restart", async () => {
     const response = {
       id: "resp-sdk-terminal-pair",
@@ -1063,11 +1162,11 @@ describe("production model-response usage callback authority", () => {
           };
         }),
       });
-      const fencedInputs: number[] = [];
-      const state = createModelResponseUsageEventState();
+      const fencedInputs: Array<number | null> = [];
+      const state = createModelResponseEventState();
       const emittedSourceKeys = new Set<string>();
       const process = (event: any, targetState = state, dispatchId = "activity-A") =>
-        processModelResponseUsageEvent({
+        processModelResponseTerminalEvent({
           event,
           state: targetState,
           dispatchId,
@@ -1103,7 +1202,7 @@ describe("production model-response usage callback authority", () => {
         }),
         {
           throwOnCompactionNeeded: true,
-          contextCompactionSignal: () => modelResponseUsageContextSignal(state),
+          contextCompactionSignal: () => modelResponseContextSignal(state),
         },
       );
       const first = [{ type: "message", role: "user", content: "start" }] as any;
@@ -1117,9 +1216,8 @@ describe("production model-response usage callback authority", () => {
 
       expect((await process(normalizedTerminal)).status).toBe("processed");
       expect((await process(rawTerminal)).status).toBe("duplicate");
-      expect(state.responseUsageCount).toBe(1);
-      expect(state.providerContextRevision).toBe(1);
-      expect(state.lastProviderContextTokensObserved).toBe(120);
+      expect(state.responseCount).toBe(1);
+      expect(state.contextSignal).toEqual({ revision: 1, totalTokens: 120 });
       expect(fencedInputs).toEqual([100]);
       expect(durableUsageSourceKeys).toEqual(new Set([response.id]));
       expect([...billingRows.values()]).toEqual([
@@ -1142,8 +1240,8 @@ describe("production model-response usage callback authority", () => {
       );
 
       // The duplicate terminal callback must not advance the old response to
-      // revision 2. Revision 1 cannot bind to request 2, so the complete estimate
-      // (including the large new assistant output) still triggers compaction.
+      // revision 2. Revision 1 cannot bind to request 2, and an unbound local
+      // estimate must not force compaction.
       const third = [
         ...second,
         {
@@ -1155,16 +1253,16 @@ describe("production model-response usage callback authority", () => {
       ] as any;
       await expect(
         filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
-      ).rejects.toBeInstanceOf(CompactionNeededError);
+      ).resolves.toMatchObject({ input: third });
 
       // A worker restart/re-dispatch rebuilds local state. The stable provider
       // response id reaches the durable fences again, but duplicate authority
       // prevents every local metric/context/fenced-input effect and the DB-level
       // idempotency key keeps one billing row.
-      const restartedState = createModelResponseUsageEventState();
+      const restartedState = createModelResponseEventState();
       const restartedInputsBefore = fencedInputs.length;
       const restartedEmittedSourceKeys = new Set<string>();
-      const restarted = await processModelResponseUsageEvent({
+      const restarted = await processModelResponseTerminalEvent({
         event: normalizedTerminal as any,
         state: restartedState,
         dispatchId: "activity-B",
@@ -1197,15 +1295,124 @@ describe("production model-response usage callback authority", () => {
         authoritative: false,
         sourceKey: response.id,
       });
-      expect(restartedState.responseUsageCount).toBe(1);
-      expect(restartedState.providerContextRevision).toBe(0);
-      expect(restartedState.lastProviderContextTokensObserved).toBeNull();
+      expect(restartedState.responseCount).toBe(1);
+      expect(restartedState.contextSignal).toBeNull();
       expect(fencedInputs).toHaveLength(restartedInputsBefore);
       expect(billingRows).toHaveLength(1);
       const metricsAfterRestart = await observability.prometheusMetrics();
       expect(metricsAfterRestart).toMatch(
         /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
       );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("clears missing usage and uses the same response ordinal when usage resumes", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async () => undefined,
+    );
+    try {
+      const state = createModelResponseEventState();
+      const fencedInputs: Array<number | null> = [];
+      const emittedSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })),
+      });
+      const process = (event: RunRawModelStreamEvent) =>
+        processModelResponseTerminalEvent({
+          event,
+          state,
+          dispatchId: "activity-missing-usage",
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          turnAttemptId: "attempt-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          metricProvider: "codex-subscription",
+          externallyBilled: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys,
+          renewLease: async () => undefined,
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+          setLastInputTokens: async (tokens) => {
+            fencedInputs.push(tokens);
+          },
+        });
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () => modelResponseContextSignal(state),
+        },
+      );
+
+      const first = [{ type: "message", role: "user", content: "start" }] as any;
+      await filter({ modelData: { input: first, instructions: "system" }, agent: {} as any });
+      const missingUsage = new RunRawModelStreamEvent({
+        type: "response_done",
+        response: { id: "resp-1", output: [] },
+      } as any);
+      expect(await process(missingUsage)).toMatchObject({
+        status: "processed",
+        authoritative: true,
+      });
+      expect(state).toMatchObject({
+        responseCount: 1,
+        contextSignal: null,
+      });
+      expect(fencedInputs).toEqual([null]);
+
+      const second = [
+        ...first,
+        { type: "message", role: "assistant", content: "first response" },
+        { type: "message", role: "user", content: "continue" },
+      ] as any;
+      await filter({ modelData: { input: second, instructions: "system" }, agent: {} as any });
+      const validUsage = new RunRawModelStreamEvent({
+        type: "response_done",
+        response: {
+          id: "resp-2",
+          output: [],
+          usage: { inputTokens: 11_000, outputTokens: 1_000, totalTokens: 12_000 },
+        },
+      } as any);
+      expect(await process(validUsage)).toMatchObject({
+        status: "processed",
+        authoritative: true,
+      });
+      expect(state).toMatchObject({
+        responseCount: 2,
+        contextSignal: { revision: 2, totalTokens: 12_000 },
+      });
+      expect(fencedInputs).toEqual([null, 11_000]);
+
+      const third = [
+        ...second,
+        { type: "message", role: "assistant", content: "second response" },
+        { type: "message", role: "user", content: "continue again" },
+      ] as any;
+      await expect(
+        filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
+      ).rejects.toBeInstanceOf(CompactionNeededError);
     } finally {
       recordUsageSpy.mockRestore();
     }
@@ -1248,10 +1455,10 @@ describe("production model-response usage callback authority", () => {
             },
           },
         } as any);
-      const state = createModelResponseUsageEventState();
+      const state = createModelResponseEventState();
       const emittedSourceKeys = new Set<string>();
       const process = (event: RunRawModelStreamEvent) =>
-        processModelResponseUsageEvent({
+        processModelResponseTerminalEvent({
           event,
           state,
           dispatchId: "activity-A",
@@ -1280,7 +1487,7 @@ describe("production model-response usage callback authority", () => {
 
       const beforeCompaction = await process(terminal(100, 20));
       // The compaction retry re-enters the stream callback with this same
-      // activity-wide state rather than resetting responseUsageCount.
+      // activity-wide state rather than resetting responseCount.
       const afterCompaction = await process(terminal(200, 30));
 
       expect(beforeCompaction).toMatchObject({
@@ -1293,7 +1500,7 @@ describe("production model-response usage callback authority", () => {
         sourceKey: "activity-A:response-2",
         authoritative: true,
       });
-      expect(state.responseUsageCount).toBe(2);
+      expect(state.responseCount).toBe(2);
       expect(durableUsageSourceKeys).toEqual(
         new Set(["activity-A:response-1", "activity-A:response-2"]),
       );
@@ -1948,6 +2155,17 @@ describe("turn-time Modal private-registry warm", () => {
       "modal",
       ensureRegistryImage,
     );
+    await ensureTurnModalRegistryImage(
+      testSettings({
+        sandboxBackend: "modal",
+        modalImageRef:
+          "acr.example.com/[redacted:MODAL_PROFILE]/f4c-gecko@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        modalImageId: "im-1234567890123456789012",
+        modalImageRegistrySecret: "acr-credentials-gecko",
+      }),
+      "modal",
+      ensureRegistryImage,
+    );
     expect(ensureRegistryImage).not.toHaveBeenCalled();
   });
 });
@@ -2542,6 +2760,17 @@ describe("Codex credential lease deadline fence", () => {
 });
 
 describe("sandbox file materialization note", () => {
+  test("uses the active backend when deciding whether attachments need signed delivery", () => {
+    const modalHome = testSettings({
+      sandboxBackend: "modal",
+      objectStorageBackend: "s3-compatible",
+    });
+    expect(requiresSignedFileResourceDownloads(modalHome, "modal")).toBe(false);
+    expect(requiresSignedFileResourceDownloads(modalHome, "selfhosted")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "docker")).toBe(true);
+    expect(requiresSignedFileResourceDownloads(modalHome, "none")).toBe(false);
+  });
+
   test("filters downloads already materialized on the current box", () => {
     const downloads = [
       {
@@ -2677,6 +2906,129 @@ describe("escaped MCP transport timeout classifier", () => {
     expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
   });
+
+  test("recovers a sanitized nested MCP connection refusal without exposing transport detail", () => {
+    const raw = new Error("MCP connect failed for https://private.example/token-value");
+    raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+      code: "ECONNREFUSED",
+    });
+    const sanitized = safeMcpTransportError(raw);
+
+    expect(classifyMcpTransportTimeoutError(sanitized)).toBeNull();
+    expect(agentRunFailurePayload(sanitized)).toEqual({
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
+    });
+    expect(
+      providerRecoveryResult({
+        failureCode: "mcp_transport_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+    expect(JSON.stringify({ sanitized, payload: agentRunFailurePayload(sanitized) })).not.toContain(
+      "private.example",
+    );
+    expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+  });
+
+  test("keeps sanitized MCP client and ambiguous failures terminal", () => {
+    const rejected = safeMcpTransportError(
+      Object.assign(new Error("request rejected with secret body"), {
+        status: 401,
+        cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+      }),
+    );
+    const ambiguous = safeMcpTransportError(
+      Object.assign(new Error("policy refused the connection"), {
+        code: "CONNECTION_REFUSED_BY_POLICY",
+      }),
+    );
+
+    expect(agentRunFailurePayload(rejected)).toEqual({
+      error: "MCP transport operation failed (Error 401)",
+    });
+    expect(agentRunFailurePayload(ambiguous)).toEqual({
+      error: "MCP transport operation failed (Error)",
+    });
+  });
+
+  test("recovers rollout-safe first-party setup loss but keeps auth and typed defects terminal", () => {
+    const routeNotReady = safeMcpTransportError(
+      Object.assign(new Error("temporary first-party route"), { status: 404 }),
+      { recoverySafeSetup: true },
+    );
+    const statusless = safeMcpTransportError(new Error("fetch failed"), {
+      recoverySafeSetup: true,
+    });
+    const authRejected = safeMcpTransportError(
+      Object.assign(new Error("authentication failed"), { status: 401 }),
+      { recoverySafeSetup: true },
+    );
+    const typedProtocolFailure = safeMcpTransportError(new TypeError("invalid response"), {
+      recoverySafeSetup: true,
+    });
+
+    for (const recoverable of [routeNotReady, statusless]) {
+      expect(agentRunFailurePayload(recoverable)).toEqual({
+        error:
+          "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+        code: "mcp_transport_unavailable",
+        retryable: true,
+      });
+    }
+    expect(agentRunFailurePayload(authRejected)).toEqual({
+      error: "MCP transport operation failed (Error 401)",
+    });
+    expect(agentRunFailurePayload(typedProtocolFailure)).toEqual({
+      error: "MCP transport operation failed (TypeError)",
+    });
+  });
+
+  test("emits a typed workflow recovery obligation only before a generation-2 model request", () => {
+    const detail = {
+      turnId: "turn-2",
+      triggerEventId: "trigger-1",
+      executionGeneration: 2,
+    };
+    const escaped = escapedMcpTimeoutRecoveryFailure({
+      failureCode: "mcp_transport_timeout",
+      modelRequestStarted: false,
+      detail,
+    });
+    expect(escaped).toBeInstanceOf(ApplicationFailure);
+    expect(escaped).toMatchObject({
+      type: "EscapedMcpTimeoutRecoveryFailure",
+      nonRetryable: true,
+      details: [detail],
+    });
+
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: true,
+        detail,
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "provider_unavailable",
+        modelRequestStarted: false,
+        detail,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("Codex response timeout fail-closed settlement", () => {
@@ -2779,9 +3131,11 @@ describe("transient provider error classifier", () => {
       retryable: true,
     });
     expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
-    expect(providerRecoveryResult()).toEqual({
+    expect(
+      providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber: 1 }),
+    ).toEqual({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
   });
 
@@ -2961,9 +3315,14 @@ describe("transient provider error classifier", () => {
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });
-    expect(providerRecoveryResult()).toEqual({
+    expect(
+      providerRecoveryResult({
+        failureCode: "upstream_connectivity_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
 
     // HTTP status remains authoritative: a request-owned 4xx with the same body
@@ -3093,10 +3452,73 @@ describe("transient provider error classifier", () => {
       }),
     );
     expect(failure.retryable).toBe(true); // enters the recovery branch (not the terminal one)
-    expect(providerRecoveryResult()).toEqual({
+    expect(
+      providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber: 1 }),
+    ).toEqual({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
+  });
+
+  test("provider recovery backs off connectivity failures and honors rate-limit hints", () => {
+    expect(
+      [1, 2, 3, 4, 5, 6].map(
+        (attemptNumber) =>
+          providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber })
+            .continueDelayMs,
+      ),
+    ).toEqual([2_000, 5_000, 15_000, 30_000, 60_000, 60_000]);
+    expect(
+      providerRecoveryResult({
+        failureCode: "provider_rate_limited",
+        attemptNumber: 1,
+      }).continueDelayMs,
+    ).toBe(PROVIDER_BACKPRESSURE_DELAY_MS);
+    expect(
+      providerRecoveryResult({
+        failureCode: "provider_rate_limited",
+        attemptNumber: 1,
+        retryAfterMs: 12_000,
+      }).continueDelayMs,
+    ).toBe(12_000);
+    expect(
+      providerRecoveryResult({
+        failureCode: "provider_unavailable",
+        attemptNumber: 1,
+        retryAfterMs: 7_000,
+      }).continueDelayMs,
+    ).toBe(7_000);
+    expect(
+      providerRetryAfterMs(
+        Object.assign(new Error("rate limited"), {
+          headers: new Headers({ "retry-after": "7" }),
+        }),
+      ),
+    ).toBe(7_000);
+    expect(
+      providerRetryAfterMs(
+        Object.assign(new Error("gateway rate limited"), {
+          responseHeaders: { "Retry-After": "9" },
+        }),
+      ),
+    ).toBe(9_000);
+    expect(providerRecoveryCountFromMetadata({})).toBe(0);
+    expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: 3 })).toBe(3);
+    expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: -1 })).toBe(0);
+  });
+
+  test("recognizes SDK statusCode when status is not present", () => {
+    const transient = Object.assign(new Error("provider unavailable"), { statusCode: 503 });
+    expect(isTransientProviderError(transient)).toBe(true);
+    expect(agentRunFailurePayload(transient)).toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("invalid provider request"), { statusCode: 400 }),
+      ),
+    ).toBe(false);
   });
 
   test("agentRunFailurePayload keeps a ChatGPT/Codex usage cap non-retryable (429 that won't clear)", () => {
@@ -3118,8 +3540,11 @@ describe("transient provider error classifier", () => {
 // EXPLICIT computer-use tool transport there instead of letting the runtime string-sniff
 // the model instance's constructor name. This seam pins the provider→mode mapping.
 describe("computerToolModeForTurn (explicit computer-use transport derivation)", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi) =>
-    ({ provider: { kind, api } }) as Parameters<typeof computerToolModeForTurn>[0];
+  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, image = true) =>
+    ({
+      provider: { kind, api },
+      configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
+    }) as Parameters<typeof computerToolModeForTurn>[0];
 
   test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
     // api is irrelevant once kind is codex-subscription — codex wins.
@@ -3137,8 +3562,40 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
   });
 
+  test("any text-only model → disabled before provider transport selection", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "responses", false))).toBe("disabled");
+    expect(computerToolModeForTurn(resolved("codex-subscription", "responses", false))).toBe(
+      "disabled",
+    );
+  });
+
+  test("Gateway Responses models do not inherit OpenAI hosted computer tools", () => {
+    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
+      "disabled",
+    );
+    expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
+      "disabled",
+    );
+  });
+
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("structuredToolTransportForTurn", () => {
+  const resolved = (kind: RegistryProviderKind) =>
+    ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+
+  test("keeps hosted tool types off Codex and both Gateway credential paths", () => {
+    expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-managed"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
+  });
+
+  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+    expect(structuredToolTransportForTurn(null)).toBe(true);
   });
 });
 
@@ -3160,17 +3617,45 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   });
 });
 
-describe("modelAcceptsTypedAttachmentContentForTurn", () => {
-  const resolved = (api: ModelProviderApi) =>
-    ({ provider: { api } }) as Parameters<typeof modelAcceptsTypedAttachmentContentForTurn>[0];
+describe("modelAttachmentInputPolicyForTurn", () => {
+  const resolved = (api: ModelProviderApi, image: boolean, files: string[] = []) =>
+    ({
+      provider: { api },
+      configured: {
+        capabilities: {
+          inputModalities: image ? ["text", "image"] : ["text"],
+          inputFileMediaTypes: files,
+        },
+      },
+    }) as Parameters<typeof modelAttachmentInputPolicyForTurn>[0];
 
-  test("accepts built-in and registry Responses transports", () => {
-    expect(modelAcceptsTypedAttachmentContentForTurn(null)).toBe(true);
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("responses"))).toBe(true);
+  test("keeps image and file capabilities independent on Responses", () => {
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", true, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: ["application/pdf"] });
+    expect(
+      modelAttachmentInputPolicyForTurn(resolved("responses", false, ["application/pdf"])),
+    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: ["application/pdf"] });
   });
 
-  test("keeps chat-completions providers on the sandbox-path fallback", () => {
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("chat"))).toBe(false);
+  test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
+    expect(modelAttachmentInputPolicyForTurn(resolved("chat", true, ["application/pdf"]))).toEqual({
+      supportsImageInput: false,
+      inputFileMediaTypes: [],
+    });
+  });
+});
+
+describe("modelSupportsImageInputForTurn", () => {
+  const resolved = (inputModalities: string[]) =>
+    ({ configured: { capabilities: { inputModalities } } }) as Parameters<
+      typeof modelSupportsImageInputForTurn
+    >[0];
+
+  test("derives image support only from the model capability contract", () => {
+    expect(modelSupportsImageInputForTurn(null)).toBe(true);
+    expect(modelSupportsImageInputForTurn(resolved(["text", "image"]))).toBe(true);
+    expect(modelSupportsImageInputForTurn(resolved(["text"]))).toBe(false);
   });
 });
 
@@ -3193,5 +3678,9 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   });
 });
 
-type RegistryProviderKind = "api-key" | "codex-subscription";
+type RegistryProviderKind =
+  | "api-key"
+  | "codex-subscription"
+  | "vercel-gateway-managed"
+  | "vercel-gateway-workspace";
 type ModelProviderApi = "responses" | "chat";

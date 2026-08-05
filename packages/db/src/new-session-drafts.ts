@@ -1,12 +1,13 @@
 import type {
   NewSessionDraftOptions,
+  LatencyMode,
   ReasoningEffort,
   RepositoryResourceRef,
   ResourceRef,
   ToolRef,
 } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 
 export type NewSessionDraftRow = typeof schema.newSessionDrafts.$inferSelect;
@@ -86,6 +87,7 @@ export async function saveNewSessionDraftInTransaction(
     toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
+    latencyMode?: LatencyMode;
     options: NewSessionDraftOptions;
     /** API-key and delegated service subjects have no workspace-membership row. */
     requireWorkspaceMembership?: boolean;
@@ -126,6 +128,7 @@ export async function saveNewSessionDraftInTransaction(
     tools: input.tools,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
+    latencyMode: input.latencyMode ?? "standard",
     // Keep the explicit/omitted policy in the existing JSONB extension point;
     // adding a column here would turn a client preference into a migration.
     sessionOptions: storedOptions(input.options, input.toolsProvided),
@@ -248,6 +251,7 @@ export async function seedNewSessionDraftInTransaction(
       tools: newSessionDraftToolsProvided(current) ? current.tools : [],
       model: current.model,
       reasoningEffort: current.reasoningEffort,
+      latencyMode: current.latencyMode,
       sessionOptions: storedOptions(safeOptions, newSessionDraftToolsProvided(current)),
       updatedAt: new Date(),
     })

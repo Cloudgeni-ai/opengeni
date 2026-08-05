@@ -18,6 +18,34 @@ export default defineConfig({
     // initial graph and every chunk by gzip size; 800 kB remains a hard raw cap.
     chunkSizeWarningLimit: 800,
     manifest: true,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              // Keep every Radix package in one chunk. entriesAware session
+              // merging otherwise splits Popper scopes across lazy route
+              // share-chunks and crashes /settings
+              // (`createPopperScope is not a function`).
+              name: "radix",
+              test: /(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/))/,
+              priority: 15,
+            },
+            {
+              // The session workbench is the primary interactive route. Keep
+              // its static graph route-aware, but coalesce tiny shared groups
+              // so a cold navigation does not fan out into dozens of requests.
+              name: "session",
+              test: /src[\\/]routes[\\/]session\.tsx$/,
+              includeDependenciesRecursively: true,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 128 * 1024,
+              priority: 2,
+            },
+          ],
+        },
+      },
+    },
   },
   server: {
     port: 3000,
@@ -31,10 +59,18 @@ export default defineConfig({
     alias: {
       "@": path.resolve(dirname, "src"),
     },
+    dedupe: ["react", "react-dom", "radix-ui"],
   },
   plugins: [
     tanstackRouter({ target: "react", enableRouteGeneration: false }),
     viteReact(),
     tailwindcss(),
+    {
+      name: "compact-index-html",
+      transformIndexHtml: {
+        order: "post",
+        handler: (html) => html.replace(/>\s+</g, "><").trim(),
+      },
+    },
   ],
 });

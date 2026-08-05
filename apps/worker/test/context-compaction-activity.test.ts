@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 import {
   addSessionSystemUpdate,
   bootstrapWorkspace,
@@ -241,6 +242,7 @@ describe("standalone context compaction execution", () => {
       limit: 100,
     });
     expect(events.map((event) => event.type)).toContain("session.context.compaction.requested");
+    expect(events.map((event) => event.type)).toContain("session.context.compaction.started");
     expect(events.map((event) => event.type)).toContain("session.context.compacted");
     expect(events.map((event) => event.type)).toContain("turn.completed");
     expect(events.filter((event) => event.type === "agent.model.usage")).toEqual([
@@ -338,6 +340,104 @@ describe("standalone context compaction execution", () => {
     expect(summarizerInput.length).toBeGreaterThan(0);
     expect(summarizerInput.some((item) => item.type === "reasoning")).toBe(false);
     expect(JSON.stringify(summarizerInput)).not.toContain("must-never-replay");
+  });
+
+  test("compacts the model-safe view while retaining canonical attachment refs", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Attachment compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Attachment compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const attachmentRefs = [{ kind: "file", fileId: "00000000-0000-4000-8000-000000000081" }];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          item: {
+            type: "message",
+            role: "user",
+            content: "inspect the retained attachment",
+            [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
+          },
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "working notes ".repeat(20_000) }],
+          },
+        },
+      ]);
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    let summarizerInput: Array<Record<string, unknown>> = [];
+
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 10_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+      },
+      null,
+      async (_settings, input) => {
+        summarizerInput = input;
+        return "The user asked to inspect the retained attachment.";
+      },
+      {
+        force: true,
+        trigger: "operator",
+        projectModelInput: async (items) =>
+          items.map((item) => {
+            if (!(MODEL_ATTACHMENT_REFS_FIELD in item)) return item;
+            const projected = { ...item };
+            delete projected[MODEL_ATTACHMENT_REFS_FIELD];
+            return projected;
+          }),
+      },
+    );
+
+    expect(outcome).toMatchObject({ compacted: true });
+    expect(JSON.stringify(summarizerInput)).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
+    const active = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    expect(active.find((item) => item.role === "user")).toMatchObject({
+      [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
+    });
   });
 
   test("a failed standalone summary consumes the request once and preserves active history", async () => {
@@ -719,6 +819,7 @@ describe("standalone context compaction execution", () => {
       }),
       prepareTools: async () => ({
         mcpServers: [],
+        resolvedMcpConnectionIds: new Map<string, string>(),
         codexConnectorNamespaces: new Set<string>(),
         close: async () => undefined,
       }),
@@ -1161,7 +1262,10 @@ describe("standalone context compaction execution", () => {
       compacted: false,
       reason: "replacement_not_smaller",
       requestConsumed: true,
-      events: [expect.objectContaining({ type: "session.context.compaction.skipped" })],
+      events: [
+        expect.objectContaining({ type: "session.context.compaction.started" }),
+        expect.objectContaining({ type: "session.context.compaction.skipped" }),
+      ],
     });
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       false,
@@ -1248,6 +1352,10 @@ describe("standalone context compaction execution", () => {
     expect(outcome).toMatchObject({
       compacted: true,
       events: [
+        expect.objectContaining({
+          type: "session.context.compaction.started",
+          payload: expect.objectContaining({ trigger: "overflow" }),
+        }),
         expect.objectContaining({
           type: "session.context.compacted",
           payload: expect.objectContaining({ trigger: "overflow" }),

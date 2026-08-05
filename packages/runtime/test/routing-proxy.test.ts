@@ -113,6 +113,134 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("observes each physical provider attempt without changing provider outcomes", async () => {
+    const observations: Array<{
+      backend: string;
+      op: string;
+      outcome: string;
+      durationMs: number;
+    }> = [];
+    const success = new FakeBackend("success");
+    const expected = new Error("provider rejected read");
+    const failure: RoutableBackendSession = {
+      async readFile() {
+        throw expected;
+      },
+    };
+    let selected: ResolvedActiveBackend = {
+      session: success,
+      sandboxId: null,
+      kind: "modal",
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({
+        activeSandboxId: selected.sandboxId,
+        activeEpoch: 0,
+      }),
+      resolveActiveBackend: async () => selected,
+      onOperation: (observation) => observations.push(observation),
+    });
+
+    await expect(proxy.exec({ cmd: "true" })).resolves.toEqual({ stdout: "success", exitCode: 0 });
+    selected = { session: failure, sandboxId: "failed", kind: "docker" };
+    // Force the per-epoch cache to resolve the selected failure backend.
+    const failedProxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: "failed", activeEpoch: 1 }),
+      resolveActiveBackend: async () => selected,
+      onOperation: (observation) => observations.push(observation),
+    });
+    expect(await failedProxy.readFile({ path: "x" }).catch((error) => error)).toBe(expected);
+
+    expect(observations.map(({ backend, op, outcome }) => ({ backend, op, outcome }))).toEqual([
+      { backend: "modal", op: "exec", outcome: "ok" },
+      { backend: "docker", op: "readFile", outcome: "failed" },
+    ]);
+    expect(observations.every(({ durationMs }) => durationMs >= 0)).toBe(true);
+  });
+
+  test("an observer failure cannot change a provider result", async () => {
+    const backend = new FakeBackend("authoritative");
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onOperation: () => {
+        throw new Error("metrics registry failed");
+      },
+    });
+
+    await expect(proxy.exec({ cmd: "go" })).resolves.toEqual({
+      stdout: "authoritative",
+      exitCode: 0,
+    });
+  });
+
+  test("exec preserves structured output and PTY authority on an execCommand-only backend", async () => {
+    const promotions: Array<number | null> = [];
+    const backend: RoutableBackendSession = {
+      async execCommand(args) {
+        return (args as { tty?: boolean }).tty
+          ? "Chunk ID: pty\nWall time: 0.25 seconds\nProcess running with session ID 81\nOutput:\nroot@box:/workspace# "
+          : "Chunk ID: read\nWall time: 0.01 seconds\nProcess exited with code 7\nOutput:\nstructured output";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "admission",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions.push(retainedProcess?.providerSessionId ?? null);
+      },
+    });
+
+    await expect(proxy.exec({ cmd: "read" })).resolves.toEqual({
+      output: "structured output",
+      stdout: "structured output",
+      stderr: "",
+      wallTimeSeconds: 0,
+      exitCode: 7,
+    });
+    await expect(proxy.exec({ cmd: "/bin/bash", tty: true })).resolves.toEqual({
+      output: "root@box:/workspace# ",
+      stdout: "root@box:/workspace# ",
+      stderr: "",
+      wallTimeSeconds: 0,
+      sessionId: 81,
+    });
+    expect(promotions).toEqual([null, 81]);
+    expect(proxy.retainedProcessIdentity(81)).toMatchObject({ providerSessionId: 81 });
+  });
+
+  test("a fenced read retry produces one observation per physical attempt", async () => {
+    const pointer = mutablePointer({ activeSandboxId: "old", activeEpoch: 1 });
+    const observations: Array<{ backend: string; outcome: string }> = [];
+    const old: RoutableBackendSession = {
+      async readFile() {
+        pointer.swap("new");
+        const error = Object.assign(new Error("stale route"), { fenced: true });
+        throw error;
+      },
+    };
+    const replacement: RoutableBackendSession = {
+      async readFile() {
+        return "new contents";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: pointer.read,
+      resolveActiveBackend: async (active) =>
+        active.activeSandboxId === "old"
+          ? { session: old, sandboxId: "old", kind: "modal" }
+          : { session: replacement, sandboxId: "new", kind: "docker" },
+      onOperation: ({ backend, outcome }) => observations.push({ backend, outcome }),
+    });
+
+    await expect(proxy.readFile({ path: "x" })).resolves.toBe("new contents");
+    expect(observations).toEqual([
+      { backend: "modal", outcome: "failed" },
+      { backend: "docker", outcome: "ok" },
+    ]);
+  });
+
   test("materializeEntry verifies the destination from inside the provider", async () => {
     const calls: string[] = [];
     const backend: RoutableBackendSession = {
@@ -162,6 +290,35 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     await expect(proxy.materializeEntry({ path: ".agents/example", entry: {} })).rejects.toThrow(
       "provider cannot read the destination path",
     );
+  });
+
+  test("materializeEntry preserves the connected-machine no-op contract", async () => {
+    const calls: string[] = [];
+    const backend: RoutableBackendSession = {
+      async materializeEntry() {
+        calls.push("materialize");
+      },
+      async execCommand() {
+        calls.push("verify");
+        return "";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: "machine", activeEpoch: 3 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: "machine",
+        kind: "selfhosted",
+        activeEpoch: 3,
+        leaseEpoch: 7,
+        providerInstanceId: "enrollment-1",
+      }),
+    });
+
+    await expect(
+      proxy.materializeEntry({ path: "files/example", entry: {} }),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual(["materialize"]);
   });
 
   test("mutation admission runs after exact route resolution and before the provider", async () => {
@@ -285,6 +442,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     const oldWrites: Array<Record<string, unknown>> = [];
     const newCalls: string[] = [];
     const processEvents: string[] = [];
+    const operationEvents: string[] = [];
     let retainedId: string | null = null;
     const oldBackend: RoutableBackendSession = {
       async execCommand(args) {
@@ -335,6 +493,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
         expect(outcome).toBe("resolved");
         processEvents.push("stdin-settled");
       },
+      onOperation: ({ op, outcome }) => operationEvents.push(`${op}:${outcome}`),
     });
 
     expect(await proxy.execCommand({ cmd: "start" })).toContain("session ID 73");
@@ -354,6 +513,12 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(oldWrites).toHaveLength(2);
     expect(newCalls).toEqual([]);
     expect(processEvents).toEqual(["parent-promoted", "stdin-admitted", "stdin-settled"]);
+    expect(operationEvents).toEqual([
+      "execCommand:ok",
+      "writeStdin:ok",
+      "writeStdin:ok",
+      "execCommand:ok",
+    ]);
   });
 
   test("a process-scoped stdin terminal result settles its mutation and parent exactly once", async () => {

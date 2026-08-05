@@ -86,6 +86,7 @@ export type SessionClientLike = Pick<
   | "updateWorkspace"
   | "setWorkspaceInferenceState"
   | "getWorkspace"
+  | "getWorkspaceModelCatalog"
   | "listWorkspaceControlEvents"
   | "streamWorkspaceControlEvents"
   | "getBillingUsage"
@@ -170,3 +171,16 @@ export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionEventClientLike
 /** Exact client surface required by MCP approval-policy hooks. */
 export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionEventClientLike &
   Pick<OpenGeniClient, "updateSessionMcpApprovalPolicy">;
+
+/** Exact client surface required by the public realtime React subpath. */
+export type EmbeddedRealtimeSessionClientLike = Pick<
+  OpenGeniClient,
+  | "getWorkspaceRealtimeModelCatalog"
+  | "beginSessionRealtime"
+  | "heartbeatSessionRealtime"
+  | "negotiateCodexRealtimeWebrtc"
+  | "negotiateGatewayRealtime"
+  | "activateCodexRealtimeConnection"
+  | "syncSessionRealtimeLedger"
+  | "endSessionRealtime"
+>;

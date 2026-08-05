@@ -168,6 +168,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if $root.Values.minio.enabled }}
 - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
   value: {{ $objectStorageEndpoint | quote }}
+- name: OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT
+  value: {{ include "opengeni.minioInternalEndpoint" $root | quote }}
 - name: OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT
   value: {{ include "opengeni.minioSandboxEndpoint" $root | quote }}
 - name: OPENGENI_OBJECT_STORAGE_BACKEND

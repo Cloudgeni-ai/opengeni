@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -9,8 +10,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
@@ -28,7 +31,9 @@ import {
 } from "@opengeni/config";
 import {
   CLEARED_RUN_STATE_BLOB,
+  MODEL_ATTACHMENT_REFS_FIELD,
   sessionSystemUpdateBatchHistoryItem,
+  type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
@@ -36,6 +41,7 @@ import {
   pinProvidedSessionManifestEnvironment,
   azureCliLoginCommand,
   azureOpenAIDefaultQuery,
+  buildAgentCapabilities,
   buildOpenGeniAgent,
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
@@ -63,18 +69,27 @@ import {
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
+  modelResponseServiceTierFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
   modelResponseUsageFromSdkEvent,
+  modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
   prepareRunInput,
+  runAgentStream,
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
+  incrementalModelInputProjectionFilter,
+  isMcpTransportConnectivityError,
+  projectModelInputForCapabilities,
+  projectModelInputForImageSupport,
   prefixedMcpToolName,
   prepareAgentTools,
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  safeMcpTransportError,
   serializeApprovals,
   serializeHumanInputRequests,
   refreshToolspaceTokenFile,
@@ -87,24 +102,25 @@ import {
   withSandboxLifecycleHooks,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
+  type ConnectorActionPolicyHooks,
 } from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
-import { startTestMcpServer, testSettings } from "@opengeni/testing";
+import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
-  codexRequestStorage,
-  type CodexRequestContext,
+  CODEX_APPS_MCP_URL,
   type CodexTokenSnapshot,
 } from "@opengeni/codex";
 
-function makeCodexContext(
-  overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {},
-): CodexRequestContext {
+function makeCodexAppsAuth(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): {
+  clientVersion: string;
+  withAuthorization: <T>(use: (token: CodexTokenSnapshot) => Promise<T>) => Promise<T>;
+} {
   const token: CodexTokenSnapshot = overrides.token ?? {
     accessToken: "tok-123",
     chatgptAccountId: "acct-9",
@@ -112,22 +128,27 @@ function makeCodexContext(
   };
   return {
     clientVersion: "0.0.0-test",
-    getToken: overrides.tokenError
+    withAuthorization: overrides.tokenError
       ? async () => {
           throw overrides.tokenError;
         }
-      : async () => token,
-    refresh: async () => token,
-    resolveModel: (slug: string) => slug,
+      : async (use) => await use(token),
   };
 }
 
-const CODEX_APPS_ENTRY = (url: string) => ({
+const CODEX_APPS_ENTRY = () => ({
   id: "codex_apps",
   name: "codex_apps",
-  url,
+  url: CODEX_APPS_MCP_URL,
   cacheToolsList: false,
 });
+
+const codexAppsTestFetch =
+  (url: string): typeof globalThis.fetch =>
+  async (input, init) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    return await globalThis.fetch(raw === CODEX_APPS_MCP_URL ? url : input, init);
+  };
 
 test("Agents SDK debug logging omits model and tool payload data", () => {
   const logger = getLogger("opengeni:test-sensitive-logging");
@@ -153,6 +174,97 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
       connectTimeoutMs: 5,
     }),
   ).rejects.toThrow("MCP server connect timed out after 5ms");
+});
+
+test("sanitizes nested MCP connectivity failures into an allowlisted marker", () => {
+  const raw = new Error("MCP connect failed for https://private.example/token-value");
+  raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+    code: "ECONNREFUSED",
+  });
+
+  const sanitized = safeMcpTransportError(raw);
+
+  expect(isMcpTransportConnectivityError(raw)).toBe(false);
+  expect(isMcpTransportConnectivityError(sanitized)).toBe(true);
+  expect(sanitized).toMatchObject({
+    name: "McpTransportError",
+    message: "MCP transport operation failed (Error)",
+    mcpTransportFailureKind: "connectivity_unavailable",
+  });
+  expect(JSON.stringify(sanitized)).not.toContain("private.example");
+  expect(JSON.stringify(sanitized)).not.toContain("token-value");
+  expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+});
+
+test("does not turn MCP client failures or arbitrary codes into connectivity recovery", () => {
+  const clientFailure = Object.assign(new Error("request rejected"), {
+    status: 401,
+    cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+  });
+  const arbitrary = Object.assign(new Error("provider-specific failure"), {
+    code: "CONNECTION_REFUSED_BY_POLICY",
+  });
+
+  expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
+  expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
+  expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
+});
+
+test("fails closed on pathological MCP transport error wrappers", () => {
+  let deeplyWrapped: Record<string, unknown> = { code: "ECONNREFUSED" };
+  for (let depth = 0; depth < 10; depth += 1) {
+    deeplyWrapped = { cause: deeplyWrapped };
+  }
+  const throwingWrapper = {
+    code: "ECONNRESET",
+    get cause(): unknown {
+      throw new Error("unsafe transport getter");
+    },
+  };
+  const throwingFields = {
+    get code(): unknown {
+      throw new Error("unsafe code getter");
+    },
+  };
+
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(deeplyWrapped))).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingWrapper))).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingFields))).toBe(false);
+});
+
+test("recovers only rollout-safe first-party MCP setup 404 and statusless Error shapes", () => {
+  const routeNotReady = Object.assign(new Error("temporary route body with secret detail"), {
+    status: 404,
+  });
+  const statuslessTransport = new Error("fetch failed for a secret first-party URL");
+  const authRejected = Object.assign(new Error("authentication failed"), { status: 401 });
+  const typedProtocolFailure = new TypeError("invalid MCP response shape");
+
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(routeNotReady))).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(routeNotReady, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(statuslessTransport, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(authRejected, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      safeMcpTransportError(typedProtocolFailure, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    JSON.stringify(safeMcpTransportError(routeNotReady, { recoverySafeSetup: true })),
+  ).not.toContain("secret detail");
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -362,6 +474,22 @@ describe("runtime event normalization", () => {
     expect(normalizeSdkEvent(event)).toEqual([]);
   });
 
+  test("recognizes a terminal response when the provider omitted usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage" },
+      },
+    } as any;
+
+    expect(modelTerminalResponseFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
+  });
+
   test("extracts raw Responses usage without manufacturing a durable event", () => {
     const event = new RunRawModelStreamEvent({
       type: "model",
@@ -372,6 +500,7 @@ describe("runtime event normalization", () => {
         type: "response.completed",
         response: {
           id: "resp-2",
+          service_tier: "priority",
           usage: {
             input_tokens: 20,
             output_tokens: 8,
@@ -386,6 +515,7 @@ describe("runtime event normalization", () => {
 
     expect(usage).toEqual({
       responseId: "resp-2",
+      serviceTier: "priority",
       usage: {
         inputTokens: 20,
         outputTokens: 8,
@@ -394,7 +524,66 @@ describe("runtime event normalization", () => {
         outputTokensDetails: { reasoning_tokens: 6 },
       },
     });
+    expect(modelResponseServiceTierFromSdkEvent(event)).toEqual({
+      source: "provider",
+      serviceTier: "priority",
+    });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("extracts bounded Gateway route billing from raw and normalized responses", () => {
+    const metadata = {
+      gateway: {
+        routing: { finalProvider: "novita" },
+        inferenceCost: "0.00000325",
+      },
+    };
+    const direct = modelResponseUsageFromResponse({
+      id: "resp-gateway-raw",
+      usage: {
+        input_tokens: 405,
+        output_tokens: 4,
+        input_tokens_details: { cached_tokens: 331 },
+      },
+      provider_metadata: {
+        gateway: {
+          routing: { finalProvider: "novita" },
+          cost: "0.00000325",
+        },
+      },
+    });
+    const normalized = modelResponseUsageFromResponse({
+      id: "resp-gateway-normalized",
+      usage: { inputTokens: 9, outputTokens: 8 },
+      providerData: { provider_metadata: metadata },
+    });
+
+    expect(direct?.gatewayBilling).toEqual({
+      finalProvider: "novita",
+      inferenceCostUsd: "0.00000325",
+    });
+    expect(normalized?.gatewayBilling).toEqual(direct?.gatewayBilling);
+    expect(direct?.usage).toMatchObject({
+      inputTokens: 405,
+      outputTokens: 4,
+      inputTokensDetails: { cached_tokens: 331 },
+    });
+  });
+
+  test("drops malformed Gateway billing metadata without dropping token usage", () => {
+    const usage = modelResponseUsageFromResponse({
+      id: "resp-gateway-invalid",
+      usage: { input_tokens: 9, output_tokens: 8 },
+      provider_metadata: {
+        gateway: {
+          routing: { finalProvider: "../../not-a-provider" },
+          inferenceCost: "NaN",
+        },
+      },
+    });
+
+    expect(usage?.gatewayBilling).toBeUndefined();
+    expect(usage?.usage).toMatchObject({ inputTokens: 9, outputTokens: 8 });
   });
 
   test("normalizes model-call usage telemetry fields and supported aliases", () => {
@@ -735,6 +924,70 @@ describe("runtime event normalization", () => {
     ]);
   });
 
+  test("maps live Responses web_search_call output items into tool events", () => {
+    const [created] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.added",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "in_progress",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect(created).toEqual({
+      type: "agent.toolCall.created",
+      payload: {
+        id: "ws_live_1",
+        name: "web_search_call",
+        arguments: { type: "search", query: "hexagonal diamond" },
+        raw: {
+          type: "hosted_tool_call",
+          id: "ws_live_1",
+          name: "web_search_call",
+          status: "in_progress",
+          providerData: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      },
+    });
+
+    const [completed] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.done",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "completed",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect((completed?.payload as { raw?: { status?: string } } | undefined)?.raw?.status).toBe(
+      "completed",
+    );
+  });
+
   test("does not persist raw SDK reasoning items", () => {
     const events = normalizeSdkEvent({
       type: "run_item_stream_event",
@@ -944,6 +1197,23 @@ describe("runtime event normalization", () => {
     expect(await (wrappedError as any).invoke(undefined, "{}", undefined)).toBe(
       "image path `/tmp/missing.png` was not found",
     );
+  });
+
+  test("text-only models do not receive the filesystem view_image tool", () => {
+    const toolNames = (supportsImageInput: boolean) => {
+      const [filesystemCapability] = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport: false,
+        supportsImageInput,
+      });
+      const bound = (filesystemCapability as any).bind({
+        createEditor: () => ({}),
+        viewImage: async () => ({ type: "image", image: { data: "aGk=" } }),
+      });
+      return bound.tools().map((tool: { name?: string }) => tool.name);
+    };
+
+    expect(toolNames(false)).toEqual(["apply_patch"]);
+    expect(toolNames(true)).toEqual(["view_image", "apply_patch"]);
   });
 
   describe("failed MCP tool calls carry an isError flag", () => {
@@ -1186,6 +1456,379 @@ describe("runtime event normalization", () => {
         inner.close();
       }
     });
+
+    async function connectorPolicyFixture(input: {
+      connectorDecision: "allow" | "ask" | "block";
+      legacyApproval?: boolean;
+      begin?: ConnectorActionPolicyHooks["begin"];
+      complete?: ConnectorActionPolicyHooks["complete"];
+      sandboxBackend?: "none" | "modal";
+    }) {
+      const mcp = startTestMcpServer();
+      const baseConfig = {
+        id: "docs",
+        name: "Document Search",
+        url: mcp.url,
+        cacheToolsList: false,
+        ...(input.legacyApproval ? { requireApproval: true as const } : {}),
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
+      const calls: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
+          return { managed: true, decision: input.connectorDecision };
+        },
+        begin:
+          input.begin ??
+          (async (call) => {
+            calls.push(`begin:${call.approvalId}:${String((call.arguments as any).query)}`);
+            return input.connectorDecision === "block"
+              ? {
+                  allowed: false,
+                  managed: true,
+                  requestId: "request-1",
+                  reason: "blocked",
+                }
+              : {
+                  allowed: true,
+                  managed: true,
+                  requestId: "request-1",
+                };
+          }),
+        complete:
+          input.complete ??
+          (async ({ requestId, outcome }) => {
+            calls.push(`complete:${requestId}:${outcome}`);
+          }),
+      };
+      const settings = testSettings({
+        sandboxBackend: input.sandboxBackend ?? "none",
+        mcpServers: [
+          {
+            ...baseConfig,
+            connectionRef: {
+              connectionId: "connection-1",
+              providerDomain: "example.test",
+            },
+          },
+        ],
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      return { agent, calls, mcp, prepared };
+    }
+
+    test("connector Allow executes once and preserves an existing Ask requirement", async () => {
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "allow",
+        legacyApproval: true,
+      });
+      try {
+        const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "needle" }, "call-allow")).toBe(
+          true,
+        );
+        const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "needle" }), {
+          toolCall: { callId: "call-allow" },
+        } as any);
+        expect(output).toBeDefined();
+        expect(fixture.mcp.calls).toEqual([
+          { tool: "search_documents", args: { query: "needle" } },
+        ]);
+        expect(fixture.calls).toEqual([
+          "prepare:call-allow:needle",
+          "begin:call-allow:needle",
+          "complete:request-1:completed",
+        ]);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("connector Ask pauses and Block/reject paths never invoke the provider", async () => {
+      for (const connectorDecision of ["ask", "block"] as const) {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision,
+          begin: async () => ({
+            allowed: false,
+            managed: true,
+            requestId: `request-${connectorDecision}`,
+            reason: connectorDecision === "ask" ? "approval_required" : "blocked",
+          }),
+        });
+        try {
+          const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: "top-secret-query" },
+              `call-${connectorDecision}`,
+            ),
+          ).toBe(connectorDecision === "ask");
+          await expect(
+            tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
+              toolCall: { callId: `call-${connectorDecision}` },
+            } as any),
+          ).rejects.toThrow("Connector action was not executed");
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("connector execution retry is denied and the clone path retains enforcement", async () => {
+      let begins = 0;
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "allow",
+        sandboxBackend: "modal",
+        begin: async () => {
+          begins += 1;
+          return begins === 1
+            ? { allowed: true, managed: true, requestId: "request-retry" }
+            : {
+                allowed: false,
+                managed: true,
+                requestId: "request-retry",
+                reason: "already_executed",
+              };
+        },
+      });
+      try {
+        const clone = (
+          fixture.agent as unknown as { clone: (config: unknown) => ApprovalAgent }
+        ).clone({});
+        const [tool] = (await clone.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        const details = { toolCall: { callId: "call-retry" } } as any;
+        await tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details);
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details),
+        ).rejects.toThrow("already_executed");
+        expect(fixture.mcp.calls).toHaveLength(1);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("subject-scoped generic refs enforce Allow/Ask/Block with the broker-frozen connection", async () => {
+      const connectionId = "11111111-1111-4111-8111-111111111111";
+      const initiatingSubjectId = "user:immutable-initiator";
+      const rawRequestValue = "raw-request-must-not-bypass-policy";
+
+      for (const decision of ["allow", "ask", "block"] as const) {
+        const mcp = startTestMcpServer();
+        const serverConfig = {
+          id: "docs",
+          name: "Personal Documents",
+          url: mcp.url,
+          cacheToolsList: false,
+          connectionRef: {
+            providerDomain: "example.test",
+            kind: "oauth2" as const,
+            subjectScope: "subject" as const,
+          },
+        };
+        const settings = testSettings({
+          sandboxBackend: "none",
+          mcpServers: [serverConfig],
+        });
+        const resolverCalls: ResolveConnectionCredentialInput[] = [];
+        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          credentialSubjectId: initiatingSubjectId,
+          resolveCredential: async (request) => {
+            resolverCalls.push(request);
+            return {
+              status: "ok",
+              connectionId,
+              headers: { authorization: "Bearer broker-token" },
+            };
+          },
+        });
+        let approved = decision !== "ask";
+        const policyCalls: Array<{
+          phase: "prepare" | "begin";
+          call: Parameters<ConnectorActionPolicyHooks["prepare"]>[0];
+        }> = [];
+        const completions: Array<{ requestId: string; outcome: "completed" | "uncertain" }> = [];
+        const hooks: ConnectorActionPolicyHooks = {
+          prepare: async (call) => {
+            policyCalls.push({ phase: "prepare", call });
+            return { managed: true, decision };
+          },
+          begin: async (call) => {
+            policyCalls.push({ phase: "begin", call });
+            if (decision === "block") {
+              return {
+                allowed: false,
+                managed: true,
+                requestId: "request-block",
+                reason: "blocked",
+              };
+            }
+            if (!approved) {
+              return {
+                allowed: false,
+                managed: true,
+                requestId: "request-ask",
+                reason: "approval_required",
+              };
+            }
+            return {
+              allowed: true,
+              managed: true,
+              requestId: `request-${decision}`,
+            };
+          },
+          complete: async (completion) => {
+            completions.push(completion);
+          },
+        };
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
+          connectorActionPolicy: hooks,
+        });
+
+        try {
+          expect(prepared.resolvedMcpConnectionIds.get("docs")).toBe(connectionId);
+          expect(resolverCalls.length).toBeGreaterThan(0);
+          expect(
+            resolverCalls.every(
+              (request) =>
+                request.subjectId === initiatingSubjectId &&
+                request.connectionRef.subjectScope === "subject" &&
+                request.connectionRef.connectionId === undefined,
+            ),
+          ).toBe(true);
+
+          const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: rawRequestValue },
+              `call-${decision}`,
+            ),
+          ).toBe(decision === "ask");
+
+          if (decision === "ask") approved = true;
+          const invocation = tool.invoke(
+            new RunContext(),
+            JSON.stringify({ query: rawRequestValue }),
+            { toolCall: { callId: `call-${decision}` } } as any,
+          );
+          if (decision === "block") {
+            await expect(invocation).rejects.toThrow("Connector action was not executed: blocked");
+            expect(mcp.calls).toHaveLength(0);
+            expect(completions).toEqual([]);
+          } else {
+            await expect(invocation).resolves.toBeDefined();
+            expect(mcp.calls).toEqual([
+              { tool: "search_documents", args: { query: rawRequestValue } },
+            ]);
+            expect(completions).toEqual([
+              { requestId: `request-${decision}`, outcome: "completed" },
+            ]);
+          }
+          expect(policyCalls.map(({ phase }) => phase)).toEqual(["prepare", "begin"]);
+          expect(
+            policyCalls.every(
+              ({ call }) =>
+                call.connectionId === connectionId &&
+                call.serverId === "docs" &&
+                call.toolName === "search_documents" &&
+                call.approvalId === `call-${decision}`,
+            ),
+          ).toBe(true);
+        } finally {
+          await prepared.close();
+          mcp.close();
+        }
+      }
+    });
+
+    test("connection-backed tools fail closed when no resolved identity reaches policy", async () => {
+      const mcp = startTestMcpServer();
+      const baseConfig = {
+        id: "docs",
+        name: "Personal Documents",
+        url: mcp.url,
+        cacheToolsList: false,
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            ...baseConfig,
+            connectionRef: {
+              providerDomain: "example.test",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+          },
+        ],
+      });
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => ({ managed: true, decision: "block" }),
+        begin: async () => ({
+          allowed: false,
+          managed: true,
+          requestId: "request-missing",
+          reason: "blocked",
+        }),
+        complete: async () => {},
+      };
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        await expect(
+          tool.needsApproval(new RunContext(), { query: "blocked" }, "call-missing"),
+        ).rejects.toThrow("missing its resolved connection identity");
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ query: "blocked" }), {
+            toolCall: { callId: "call-missing" },
+          } as any),
+        ).rejects.toThrow("missing its resolved connection identity");
+        expect(mcp.calls).toHaveLength(0);
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
   });
 
   test("uses normal Azure CLI service principal login hook", () => {
@@ -1417,6 +2060,9 @@ describe("runtime event normalization", () => {
               opengeni_internal_resume: "worker_restart",
               keep_me: "yes",
             },
+            [MODEL_ATTACHMENT_REFS_FIELD]: [
+              { kind: "file", fileId: "00000000-0000-4000-8000-000000000099" },
+            ],
           } as never,
           {
             type: "message",
@@ -1428,6 +2074,7 @@ describe("runtime event normalization", () => {
     );
     const serialized = JSON.stringify(prepared.input);
     expect(serialized).not.toContain("opengeni_internal_resume");
+    expect(serialized).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
     expect(serialized).toContain("keep_me");
   });
 
@@ -1643,7 +2290,7 @@ describe("runtime event normalization", () => {
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
-    "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
+    "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
     "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
@@ -2010,7 +2657,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.bucket).toBe("opengeni-files");
     expect(entry.prefix).toBe(`files/${fileId}/original`);
@@ -2033,7 +2680,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.mountStrategy).toMatchObject({ type: "modal_cloud_bucket" });
   });
@@ -2048,7 +2695,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.container).toBe("opengeni-files");
     expect(entry.prefix).toBe(`files/${fileId}/original`);
@@ -2071,7 +2718,7 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "file", fileId }],
     );
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.endpointUrl).toBe("https://custom.blob.example.test");
   });
@@ -2104,14 +2751,14 @@ describe("runtime event normalization", () => {
     const downloads = [
       {
         fileId,
-        mountPath: `files/${fileId}`,
+        mountPath: `.opengeni/files/${fileId}`,
         filename: "source.txt",
         content: new TextEncoder().encode("hello"),
         sizeBytes: 12,
       },
     ];
     const manifest = buildManifest(settings, [{ kind: "file", fileId }], undefined, downloads);
-    const entry = manifest.entries[`files/${fileId}`] as any;
+    const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     const agent = buildOpenGeniAgent(settings, [{ kind: "file", fileId }], {
       fileResourceDownloads: downloads,
     });
@@ -2120,7 +2767,7 @@ describe("runtime event normalization", () => {
     expect(entry.children["source.txt"].type).toBe("file");
     expect(new TextDecoder().decode(entry.children["source.txt"].content)).toBe("hello");
     expect(sandboxFileDownloadsForAgent(agent)).toEqual([]);
-    expect((agent as any).defaultManifest.entries[`files/${fileId}`].type).toBe("dir");
+    expect((agent as any).defaultManifest.entries[`.opengeni/files/${fileId}`].type).toBe("dir");
   });
 
   test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
@@ -2164,10 +2811,87 @@ describe("runtime event normalization", () => {
     expect(commands[0]).toContain("set -eu");
     expect(commands[0]).not.toContain("pipefail");
     expect(commands[0]).toContain("curl --fail");
+    expect(commands[0]).toContain("mktemp");
+    expect(commands[0]).toContain("Refusing symlinked attachment directory");
+    expect(commands[0]).toContain("Refusing non-file attachment target");
     expect(commands[0]).toContain("chmod a-w");
     expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
     expect(events.join("\n")).not.toContain("sig=secret");
     expect(events.join("\n")).toContain("file-resource-download");
+  });
+
+  test("atomically repairs tampered attachment files and rejects corrupt downloads", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-attachment-"));
+    const workspace = join(root, "workspace");
+    const source = join(root, "source.txt");
+    const target = join(workspace, ".opengeni", "files", "file-1", "input.txt");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(source, "hello");
+    const sha256 = createHash("sha256").update("hello").digest("hex");
+    const events: string[] = [];
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      exec: async ({ cmd }: { cmd: string }) => {
+        const process = Bun.spawn(["/bin/sh", "-c", cmd], {
+          cwd: workspace,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(process.stdout).text(),
+          new Response(process.stderr).text(),
+          process.exited,
+        ]);
+        return { stdout, stderr, output: `${stdout}${stderr}`, exitCode };
+      },
+    };
+    const download = {
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename: "input.txt",
+      url: pathToFileURL(source).href,
+      sizeBytes: 5,
+      sha256,
+    };
+
+    try {
+      expect(
+        (
+          await materializeSandboxFileDownloads(session as any, [download], {
+            onRuntimeEvent: (event) => events.push(JSON.stringify(event)),
+          })
+        ).failures,
+      ).toEqual([]);
+      expect(readFileSync(target, "utf8")).toBe("hello");
+
+      chmodSync(target, 0o644);
+      writeFileSync(target, "wrong");
+      expect((await materializeSandboxFileDownloads(session as any, [download])).failures).toEqual(
+        [],
+      );
+      expect(readFileSync(target, "utf8")).toBe("hello");
+
+      chmodSync(target, 0o644);
+      writeFileSync(target, "wrong");
+      writeFileSync(source, "bad!!");
+      const corrupt = await materializeSandboxFileDownloads(session as any, [download]);
+      expect(corrupt.failures).toHaveLength(1);
+      expect(corrupt.failures[0]?.reason).toContain("failed size or SHA-256 verification");
+      expect(readFileSync(target, "utf8")).toBe("wrong");
+      expect(events.join("\n")).not.toContain(pathToFileURL(source).href);
+
+      rmSync(join(workspace, ".opengeni"), { recursive: true, force: true });
+      const escaped = join(root, "outside");
+      mkdirSync(escaped);
+      symlinkSync(escaped, join(workspace, ".opengeni"), "dir");
+      writeFileSync(source, "hello");
+      const symlinked = await materializeSandboxFileDownloads(session as any, [download]);
+      expect(symlinked.failures).toHaveLength(1);
+      expect(symlinked.failures[0]?.reason).toContain("Refusing symlinked attachment directory");
+      expect(() => statSync(join(escaped, "files", "file-1", "input.txt"))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("reports signed file download failures without throwing", async () => {
@@ -2283,7 +3007,7 @@ describe("runtime event normalization", () => {
     expect(sessions).toHaveLength(2);
   });
 
-  test("keeps repository resources as git repo manifest entries", () => {
+  test("keeps exact repository transport URIs in git repo manifest entries", () => {
     const manifest = buildManifest(testSettings(), [
       {
         kind: "repository",
@@ -2291,10 +3015,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/app",
+      repo: "https://github.com/acme/app.git",
       ref: "main",
     });
   });
@@ -2305,16 +3028,19 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        provider: "github",
       },
       {
         kind: "repository",
         uri: "https://gitlab.com/acme/app.git",
         ref: "main",
+        provider: "gitlab",
       },
       {
         kind: "repository",
         uri: "https://dev.azure.com/acme/project/_git/app",
         ref: "main",
+        provider: "azure_devops",
       },
     ]);
     expect(Object.keys(manifest.entries).sort()).toEqual([
@@ -2332,10 +3058,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "git.example.com:8443",
-      repo: "acme/app",
+      repo: "https://git.example.com:8443/acme/app.git",
     });
   });
 
@@ -2937,8 +3662,7 @@ describe("runtime event normalization", () => {
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/private",
+      repo: "https://github.com/acme/private.git",
       ref: "main",
       subpath: "README.md",
     });
@@ -2975,7 +3699,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -3147,7 +3871,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -3213,7 +3937,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/github.com/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {
@@ -3464,36 +4188,60 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("rejects subject-owned MCP use without a human initiator before resolver or transport", async () => {
+  test("degrades a subject-owned MCP without human authority instead of failing the turn", async () => {
     let resolverCalls = 0;
-    await expect(
-      prepareAgentTools(
-        testSettings({
-          mcpServers: [
-            {
-              id: "personal-slack",
-              name: "Personal Slack",
-              url: "https://mcp.slack.com/mcp",
-              connectionRef: {
-                providerDomain: "slack.com",
-                kind: "oauth2",
-                subjectScope: "subject",
-              },
-              cacheToolsList: false,
+    const transportCalls: Array<{ input: string | URL | Request; init?: RequestInit }> = [];
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "personal-slack",
+            name: "Personal Slack",
+            url: "https://mcp.slack.com/mcp",
+            connectionRef: {
+              providerDomain: "slack.com",
+              kind: "oauth2",
+              subjectScope: "subject",
             },
-          ],
-        }),
-        [{ kind: "mcp", id: "personal-slack" }],
-        {
-          workspaceId: "22222222-2222-4222-8222-222222222222",
-          resolveCredential: async () => {
-            resolverCalls += 1;
-            throw new Error("resolver must not run for a service turn");
+            cacheToolsList: false,
           },
+        ],
+      }),
+      [{ kind: "mcp", id: "personal-slack", optional: true }],
+      {
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        resolveCredential: async (request) => {
+          resolverCalls += 1;
+          expect(request.subjectId).toBeUndefined();
+          return {
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "slack.com",
+          };
         },
-      ),
-    ).rejects.toThrow("requires a human turn initiator");
-    expect(resolverCalls).toBe(0);
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+        mcpFetchImpl: async (input, init) => {
+          transportCalls.push({ input, init });
+          throw new Error("credential-free request must not reach the transport");
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(transportCalls).toEqual([]);
+      expect(resolverCalls).toBeGreaterThan(0);
+      expect(authNeeded).toEqual([
+        expect.objectContaining({
+          serverId: "personal-slack",
+          providerDomain: "slack.com",
+          reason: "missing_connection",
+          toolName: null,
+        }),
+      ]);
+    } finally {
+      await prepared.close();
+    }
   });
 
   test("sends configured credential headers to third-party MCP servers", async () => {
@@ -3582,7 +4330,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("retries brokered MCP requests once after 401 with a forced credential refresh", async () => {
+  test("retries replay-safe brokered MCP requests once after 401 with a forced refresh", async () => {
     const connectionId = "33333333-3333-4333-8333-333333333333";
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer fresh-token" },
@@ -3621,11 +4369,71 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const result = await prepared.mcpServers[0]!.callTool("cap-refresh__search_documents", {
-        query: "refresh",
-      });
-      expect(JSON.stringify(result)).toContain("found document for refresh");
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toContain("cap-refresh__search_documents");
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("never replays brokered tools/call after 401 and reports an uncertain outcome", async () => {
+    const connectionId = "34343434-3434-4434-8434-343434343434";
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer fresh-token" },
+    });
+    const resolved: ResolveConnectionCredentialInput[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-uncertain",
+            name: "Uncertain capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-uncertain" }],
+      {
+        workspaceId: "45454545-4545-4545-8545-454545454545",
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+          resolved.push(input);
+          return {
+            status: "ok",
+            connectionId,
+            headers: {
+              authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
+            },
+          };
+        },
+      },
+    );
+    try {
+      const result = await prepared.mcpServers[0]!.callTool("cap-uncertain__search_documents", {
+        query: "do not duplicate",
+      });
+      expect(result).toMatchObject({ isError: true });
+      const text = JSON.stringify(result);
+      expect(text).toMatch(/outcome uncertain/i);
+      expect(text).toMatch(/did not replay/i);
+      expect(text).toMatch(/do not retry automatically/i);
+      expect(text).toMatch(/verify provider state/i);
+      expect(text).not.toContain("unauthorized");
+      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
+        1,
+      );
+      expect(mcp.calls).toHaveLength(0);
+      expect(
+        resolved.some((input) => input.toolName === "search_documents" && input.forceRefresh),
+      ).toBe(true);
     } finally {
       await prepared.close();
       mcp.close();
@@ -3962,17 +4770,24 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: injects the dynamic ChatGPT bearer + account-id from the codex ALS at connect", async () => {
+  test("codex_apps: injects only the explicit Apps bearer + account-id", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: {
         authorization: "Bearer tok-123",
         "chatgpt-account-id": "acct-9",
       },
     });
-    const prepared = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [
-        { kind: "mcp", id: "codex_apps" },
-      ]),
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    let tokenResolutions = 0;
+    auth.withAuthorization = async (use) => {
+      tokenResolutions += 1;
+      return await authorize(use);
+    };
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      { codexAppsAuth: auth, mcpFetchImpl: codexAppsTestFetch(mcp.url) },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
@@ -3982,10 +4797,30 @@ describe("runtime event normalization", () => {
         query: "gmail",
       });
       expect(JSON.stringify(result)).toContain("found document for gmail");
+      expect(tokenResolutions).toBeGreaterThanOrEqual(2);
     } finally {
       await prepared.close();
       mcp.close();
     }
+  });
+
+  test("codex_apps: rejects a reserved id pointed at a non-canonical endpoint", async () => {
+    await expect(
+      prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "codex_apps",
+              name: "hostile",
+              url: "https://attacker.example/mcp",
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "codex_apps" }],
+        { codexAppsAuth: makeCodexAppsAuth() },
+      ),
+    ).rejects.toThrow("reserved for the canonical endpoint");
   });
 
   test("codex_apps: emits X-OpenAI-Product-Sku only when configured", async () => {
@@ -3995,14 +4830,16 @@ describe("runtime event normalization", () => {
         "X-OpenAI-Product-Sku": "plus",
       },
     });
-    const preparedWith = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(
-        testSettings({
-          codexProductSku: "plus",
-          mcpServers: [CODEX_APPS_ENTRY(withSku.url)],
-        }),
-        [{ kind: "mcp", id: "codex_apps" }],
-      ),
+    const preparedWith = await prepareAgentTools(
+      testSettings({
+        codexProductSku: "plus",
+        mcpServers: [CODEX_APPS_ENTRY()],
+      }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(withSku.url),
+      },
     );
     try {
       expect(preparedWith.mcpServers).toHaveLength(1); // connected => SKU header accepted
@@ -4019,10 +4856,13 @@ describe("runtime event normalization", () => {
         "X-OpenAI-Product-Sku": "plus",
       },
     });
-    const preparedWithout = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(requiresSku.url)] }), [
-        { kind: "mcp", id: "codex_apps" },
-      ]),
+    const preparedWithout = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(requiresSku.url),
+      },
     );
     try {
       expect(preparedWithout.mcpServers).toHaveLength(0); // header absent => connect rejected => dropped
@@ -4032,20 +4872,75 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: no ALS store => no auth => graceful best-effort drop (turn does not throw)", async () => {
+  test("codex_apps: authorization revoked after discovery blocks the remote tool call", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
-    // No codexRequestStorage.run wrapper: the bearer cannot be resolved, the
-    // server fails auth at connect, and because codex_apps is best-effort the
-    // call resolves with codex_apps simply absent (contrast the strict
-    // third-party test above, which throws).
+    let authorized = true;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (!authorized) throw new Error("Codex Apps authorization was revoked");
+      return await authorize(use);
+    };
     const prepared = await prepareAgentTools(
-      testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }),
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
+      { codexAppsAuth: auth, mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      await prepared.mcpServers[0]!.listTools();
+      authorized = false;
+      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
+        query: "must-not-run",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: no explicit Apps auth => graceful best-effort drop", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    // Inference authentication is deliberately not consulted as a fallback.
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      { mcpFetchImpl: codexAppsTestFetch(mcp.url) },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps ignores configured static credentials instead of using a fallback", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer static-must-not-be-used" },
+    });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            ...CODEX_APPS_ENTRY(),
+            headers: { authorization: "Bearer static-must-not-be-used" },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      { mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(mcp.calls).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();
@@ -4056,15 +4951,17 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
-    const prepared = await codexRequestStorage.run(
-      makeCodexContext({ tokenError: new Error("needs_relogin") }),
-      () =>
-        prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [
-          { kind: "mcp", id: "codex_apps" },
-        ]),
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth({ tokenError: new Error("needs_relogin") }),
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+      },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
+      expect(mcp.calls).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();
@@ -4082,24 +4979,26 @@ describe("runtime event normalization", () => {
     });
     try {
       await expect(
-        codexRequestStorage.run(makeCodexContext(), () =>
-          prepareAgentTools(
-            testSettings({
-              mcpServers: [
-                {
-                  id: "cap-secure",
-                  name: "Secure capability MCP",
-                  url: required.url,
-                  cacheToolsList: false,
-                }, // no headers => fails strict
-                CODEX_APPS_ENTRY(apps.url),
-              ],
-            }),
-            [
-              { kind: "mcp", id: "cap-secure" },
-              { kind: "mcp", id: "codex_apps" },
+        prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "cap-secure",
+                name: "Secure capability MCP",
+                url: required.url,
+                cacheToolsList: false,
+              }, // no headers => fails strict
+              CODEX_APPS_ENTRY(),
             ],
-          ),
+          }),
+          [
+            { kind: "mcp", id: "cap-secure" },
+            { kind: "mcp", id: "codex_apps" },
+          ],
+          {
+            codexAppsAuth: makeCodexAppsAuth(),
+            mcpFetchImpl: codexAppsTestFetch(apps.url),
+          },
         ),
       ).rejects.toThrow();
     } finally {
@@ -4277,6 +5176,63 @@ describe("runtime event normalization", () => {
       ).rejects.toThrow();
     } finally {
       broken.close();
+    }
+  });
+
+  test("required first-party setup 404 is recoverable while an external 404 remains terminal", async () => {
+    const unavailable = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("temporary route not found", { status: 404 }),
+    });
+    const url = `http://127.0.0.1:${unavailable.port}/mcp`;
+    const workspaceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    try {
+      let firstPartyFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            opengeniMcpUrl: url,
+            mcpServers: [
+              {
+                id: "opengeni",
+                name: "OpenGeni",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "opengeni" }],
+          { workspaceId },
+        );
+      } catch (error) {
+        firstPartyFailure = error;
+      }
+      expect(firstPartyFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(firstPartyFailure)).toBe(true);
+
+      let externalFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "external-required",
+                name: "External required MCP",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "external-required" }],
+        );
+      } catch (error) {
+        externalFailure = error;
+      }
+      expect(externalFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(externalFailure)).toBe(false);
+    } finally {
+      unavailable.stop(true);
     }
   });
 
@@ -5293,6 +6249,263 @@ describe("provider item id stripping", () => {
     expect(elideSupersededViewImagePairs(prefix)).toBe(prefix);
   });
 
+  test("text-only projection keeps ordinary tool pairs and removes only hosted computer pairs", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "What is shown?" },
+          { type: "input_image", image: "data:image/png;base64,USER" },
+        ],
+      },
+      { type: "reasoning", content: [{ type: "input_text", text: "inspect" }] },
+      {
+        type: "function_call",
+        callId: "view-1",
+        name: "view_image",
+        arguments: '{"path":"/tmp/a.png"}',
+      },
+      {
+        type: "function_call_result",
+        callId: "view-1",
+        output: [{ type: "input_image", image: "data:image/png;base64,TOOL" }],
+      },
+      {
+        type: "function_call",
+        callId: "metadata-1",
+        name: "read_metadata",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "metadata-1",
+        output: [
+          { type: "input_text", text: "width=10" },
+          { type: "input_image", image: "data:image/png;base64,PREVIEW" },
+        ],
+      },
+      { type: "computer_call", callId: "computer-1", actions: [{ type: "screenshot" }] },
+      {
+        type: "computer_call_result",
+        callId: "computer-1",
+        output: { type: "computer_screenshot", image_url: "data:image/png;base64,SCREEN" },
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_image", image: "data:image/png;base64,ONLY" }],
+      },
+    ] as Array<Record<string, unknown>>;
+    const durableJson = JSON.stringify(input);
+
+    const projected = projectModelInputForImageSupport(input, false);
+
+    expect(JSON.stringify(projected)).not.toContain("data:image");
+    expect(projected.some((item) => item.name === "view_image")).toBe(true);
+    expect(projected.some((item) => item.type === "computer_call")).toBe(false);
+    expect(projected.find((item) => item.callId === "view-1" && "output" in item)).toEqual({
+      type: "function_call_result",
+      callId: "view-1",
+      output: [
+        {
+          type: "input_text",
+          text: "[Image content omitted because the selected model does not support image input.]",
+        },
+      ],
+    });
+    expect(projected.some((item) => item.type === "reasoning")).toBe(true);
+    expect(projected.find((item) => item.callId === "metadata-1" && "output" in item)).toEqual({
+      type: "function_call_result",
+      callId: "metadata-1",
+      output: [
+        { type: "input_text", text: "width=10" },
+        {
+          type: "input_text",
+          text: "[Image content omitted because the selected model does not support image input.]",
+        },
+      ],
+    });
+    expect(JSON.stringify(projected)).toContain("Image content omitted");
+    expect(JSON.stringify(input)).toBe(durableJson);
+    expect(projectModelInputForImageSupport(input, true)).toBe(input);
+    expect(JSON.stringify(projectModelInputForImageSupport(input, true))).toBe(durableJson);
+  });
+
+  test("text-only projection does not reapply a tool-output bound", () => {
+    const output = "x".repeat(100_000);
+    const input = [
+      {
+        type: "function_call",
+        callId: "large-result",
+        name: "read_file",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "large-result",
+        output,
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const projected = projectModelInputForImageSupport(input, false);
+
+    expect(projected[1]?.output).toBe(output);
+  });
+
+  test("typed file projection is independent from image support and MIME-specific", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_image", image: "data:image/png;base64,IMAGE" },
+          {
+            type: "input_file",
+            file: "data:application/pdf;base64,PDF",
+            filename: "kept.pdf",
+          },
+          {
+            type: "input_file",
+            file: "data:text/plain;base64,TEXT",
+            filename: "hidden.txt",
+          },
+        ],
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const projected = projectModelInputForCapabilities(input, {
+      supportsImageInput: true,
+      inputFileMediaTypes: ["application/pdf"],
+    });
+    const json = JSON.stringify(projected);
+
+    expect(json).toContain("data:image/png;base64,IMAGE");
+    expect(json).toContain("data:application/pdf;base64,PDF");
+    expect(json).not.toContain("data:text/plain;base64,TEXT");
+    expect(json).toContain("File content omitted");
+    expect(JSON.stringify(input)).toContain("data:text/plain;base64,TEXT");
+  });
+
+  test("preprojected giant prefixes inspect only new tool-result suffixes", async () => {
+    const prefix = Array.from({ length: 100_000 }, (_, index) => ({
+      type: "message",
+      role: "user",
+      content: `history ${index}`,
+    }));
+    const filter = incrementalModelInputProjectionFilter(
+      { supportsImageInput: false, inputFileMediaTypes: [] },
+      true,
+    )!;
+    const run = async (input: Array<Record<string, unknown>>) =>
+      await filter({
+        modelData: { input: input as never },
+        agent: {} as never,
+        context: undefined,
+      });
+
+    const first = await run(prefix);
+    expect(first.input).toBe(prefix);
+
+    const next = [
+      ...prefix,
+      { type: "function_call", callId: "image-tool", name: "mcp_image", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "image-tool",
+        output: [{ type: "input_image", image: "data:image/png;base64,NEW" }],
+      },
+    ];
+    const second = await run(next);
+    const output = second.input as unknown as Array<Record<string, unknown>>;
+
+    expect(output.slice(0, prefix.length)).toEqual(prefix);
+    expect(JSON.stringify(output.slice(prefix.length))).not.toContain("data:image");
+    expect(JSON.stringify(output.slice(prefix.length))).toContain("Image content omitted");
+  });
+
+  test("defensive RunState projection scans its giant prefix only once", async () => {
+    let prefixInspections = 0;
+    const prefix = Array.from({ length: 100_000 }, (_, index) => ({
+      get type() {
+        prefixInspections += 1;
+        return "message";
+      },
+      role: "user",
+      content: `history ${index}`,
+    }));
+    const filter = incrementalModelInputProjectionFilter(
+      { supportsImageInput: false, inputFileMediaTypes: [] },
+      false,
+    )!;
+    const run = async (input: Array<Record<string, unknown>>) =>
+      await filter({
+        modelData: { input: input as never },
+        agent: {} as never,
+        context: undefined,
+      });
+
+    const first = await run(prefix);
+    expect(first.input).toBe(prefix);
+    expect(prefixInspections).toBeGreaterThan(0);
+    const firstPassInspections = prefixInspections;
+
+    const next = [
+      ...prefix,
+      { type: "function_call", callId: "image-tool", name: "mcp_image", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "image-tool",
+        output: [{ type: "input_image", image: "data:image/png;base64,NEW" }],
+      },
+    ];
+    const second = await run(next);
+
+    expect(prefixInspections).toBe(firstPassInspections);
+    expect(JSON.stringify(second.input).slice(-500)).not.toContain("data:image");
+    expect(JSON.stringify(second.input).slice(-500)).toContain("Image content omitted");
+  });
+
+  test("text-only projection runs before context accounting in the real agent loop", async () => {
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+      contextWindowTokens: 20_000,
+      contextAutoCompactThresholdTokens: 10_000,
+      contextReservedOutputTokens: 0,
+    });
+    const model = new ScriptedModel("done");
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      supportsImageInput: false,
+      hostedWebSearch: false,
+    });
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Describe these if supported." },
+          ...["A", "B", "C"].map((value) => ({
+            type: "input_image",
+            image: `data:image/png;base64,${value.repeat(80_000)}`,
+          })),
+        ],
+      },
+    ] as Array<Record<string, unknown>>;
+
+    const result = await runAgentStream(agent, { input: input as any }, settings, {
+      contextCompactionRequested: () => false,
+    });
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(model.calls).toBe(1);
+    expect(JSON.stringify(model.requests[0]?.input)).not.toContain("data:image");
+    expect(JSON.stringify(result.state.history)).toContain("data:image");
+    expect(JSON.stringify(input)).toContain("data:image");
+  });
+
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
     const filter = callModelInputFilterForSettings(
       testSettings({
@@ -5544,7 +6757,7 @@ describe("provider item id stripping", () => {
     }
   });
 
-  test("a delayed provider usage signal cannot bind to a newer model request", async () => {
+  test("a delayed provider usage signal cannot bind or force estimated compaction", async () => {
     let signal: { revision: number; totalTokens: number } | null = null;
     const filter = contextRobustnessFilterForSettings(
       testSettings({
@@ -5585,21 +6798,16 @@ describe("provider item id stripping", () => {
       },
       { type: "message", role: "user", content: "continue again" },
     ] as any;
-    try {
-      await filter({
+    await expect(
+      filter({
         modelData: { input: third, instructions: "system" },
         agent: {} as any,
         context: undefined,
-      });
-      throw new Error("expected the complete estimate to trigger compaction");
-    } catch (error) {
-      expect(error).toBeInstanceOf(CompactionNeededError);
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
-      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
-    }
+      }),
+    ).resolves.toMatchObject({ input: third });
   });
 
-  test("first-call accounting includes instructions and tool schemas", async () => {
+  test("a first call never compacts from estimated instructions and tool schemas", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 10_000,
@@ -5626,10 +6834,12 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
-  test("first-call accounting does not discount a multilingual tool schema", async () => {
+  test("a first call never compacts from an estimated multilingual tool schema", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 12_000,
@@ -5659,7 +6869,9 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
   test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
@@ -5751,7 +6963,7 @@ describe("provider item id stripping", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(CompactionNeededError);
       expect((error as CompactionNeededError).trigger).toBe("operator");
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
+      expect((error as CompactionNeededError).signalSource).toBe("operator");
     }
     expect(polls).toBe(2);
   });

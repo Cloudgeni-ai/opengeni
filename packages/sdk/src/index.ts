@@ -1,10 +1,11 @@
-export { OpenGeniClient } from "./client";
+export { OpenGeniClient } from "./artifact-client";
 export type {
   FetchLike,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
+  TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
 export {
@@ -26,6 +27,56 @@ export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
+export {
+  CodexRealtimeMicrophoneError,
+  acquireCodexRealtimeMicrophone,
+  codexRealtimeMicrophoneHealthy,
+  startCodexRealtimeWebrtc,
+} from "./codex-realtime";
+export type {
+  AcquireCodexRealtimeMicrophoneOptions,
+  CodexRealtimeAudibleOutputState,
+  CodexRealtimeConnectionHealth,
+  CodexRealtimeMicrophoneErrorCode,
+  CodexRealtimeNegotiator,
+  CodexRealtimeWebrtcSession,
+  StartCodexRealtimeWebrtcOptions,
+} from "./codex-realtime";
+export {
+  CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES,
+  contextAppendChunks,
+  createCodexRealtimeV3Bridge,
+  encodeCodexRealtimeV3DelegationContextAppend,
+  encodeCodexRealtimeV3SessionContextAppend,
+  parseCodexRealtimeV3Event,
+} from "./codex-realtime-v3";
+export type {
+  CodexRealtimeV3Bridge,
+  CodexRealtimeV3BridgeOptions,
+  CodexRealtimeV3BridgeSnapshot,
+  CodexRealtimeV3ContextAppendChannel,
+  CodexRealtimeV3DelegationContextAppend,
+  CodexRealtimeV3Event,
+  CodexRealtimeV3ParseFailure,
+  CodexRealtimeV3ParseResult,
+  CodexRealtimeV3SessionContextAppend,
+} from "./codex-realtime-v3";
+export { createCodexRealtimeController } from "./codex-realtime-controller";
+export type {
+  CodexRealtimeController,
+  CodexRealtimeControllerClient,
+  CodexRealtimeDiagnostic,
+  CodexRealtimeDiagnosticKind,
+  CodexRealtimeControllerSnapshot,
+  CodexRealtimeControllerStatus,
+  CodexRealtimeMicrophoneState,
+  CodexRealtimeOwnerStorage,
+  CreateCodexRealtimeControllerOptions,
+  RealtimeControllerTransportStarter,
+} from "./codex-realtime-controller";
+export { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
+export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
+export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";
@@ -55,10 +106,27 @@ export type {
 } from "./stream";
 export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
-export { normalizeWorkspaceInstructionPolicyRoleKey } from "./workspace-instruction-policies";
+export type {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  RollbackWorkspaceArtifactRequest,
+  WorkspaceArtifact,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactEvent,
+  WorkspaceArtifactListOptions,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactVersion,
+} from "./workspace-artifacts";
+export {
+  normalizeWorkspaceInstructionPolicyRoleKey,
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+} from "./workspace-instruction-policies";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
+  CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
   ImportLegacyWorkspaceInstructionPolicyDraftRequest,
   RollbackWorkspaceInstructionPolicyRequest,
   WorkspaceInstructionPolicyActivationEvent,
@@ -72,6 +140,14 @@ export type {
   WorkspaceInstructionPolicyKind,
   WorkspaceInstructionPolicyListOptions,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOnboardingProposal,
+  WorkspaceInstructionPolicyOnboardingProposalConflictResponse,
+  WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse,
+  WorkspaceInstructionPolicyOnboardingProposalListOptions,
+  WorkspaceInstructionPolicyOnboardingProposalListResponse,
+  WorkspaceInstructionPolicyOnboardingProposalSource,
+  WorkspaceInstructionPolicyOnboardingProposalStaleResponse,
+  WorkspaceInstructionPolicyOperationReuseResponse,
   WorkspaceInstructionPolicyProvenanceSource,
   WorkspaceInstructionPolicyRevision,
   WorkspaceInstructionPolicyRevisionIdentity,
@@ -80,7 +156,13 @@ export type {
 } from "./workspace-instruction-policies";
 export type {
   WorkspaceStateDocumentStatusCounts,
+  WorkspaceStateDocumentAuthorityKindCounts,
+  WorkspaceStateAttemptGovernance,
+  WorkspaceStateExportOmission,
+  WorkspaceStateExportResponse,
   WorkspaceStateGapCode,
+  WorkspaceStateGetOptions,
+  WorkspaceStateGovernanceDriftStatus,
   WorkspaceStateMemoryKindCounts,
   WorkspaceStateMemoryStatusCounts,
   WorkspaceStateResponse,
@@ -118,6 +200,7 @@ export {
   DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
   authorizeTranscriptionAdapter,
   createTranscriptionSessionRequest,
+  resolveWorkspaceVoiceInputEnabled,
   resolveWorkspaceTranscriptionPolicy,
 } from "./transcription";
 export type {
@@ -143,6 +226,7 @@ export type {
   WorkspaceTranscriptionTarget,
 } from "./transcription";
 export {
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   KNOWN_PERMISSIONS,
   KNOWN_USAGE_EVENT_TYPES,
   OPENGENI_API_CONTRACT_HEADER,
@@ -154,10 +238,12 @@ export {
 } from "./types";
 export type {
   AccessContext,
+  ActivateCodexRealtimeConnectionRequest,
   AccessGrant,
   AccountGrant,
   AccountRole,
   AddWorkspaceMemberRequest,
+  BeginSessionRealtimeRequest,
   AgentMessageCompletedPayload,
   AgentTextDeltaPayload,
   AgentToolCallCreatedPayload,
@@ -168,6 +254,19 @@ export type {
   BillingMode,
   BillingSummary,
   BillingUsageResponse,
+  InsightsRange,
+  InsightsBillingPath,
+  InsightsModelUsageRow,
+  InsightsSeriesPoint,
+  InsightsDepthBucket,
+  InsightsModelFacet,
+  InsightsSpendDriver,
+  InsightsWarmGroupRow,
+  InsightsLiveWarmLease,
+  InsightsFloorSession,
+  InsightsScheduleRow,
+  WorkspaceInsightsSnapshot,
+  WorkspaceInsightsResponse,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -185,7 +284,16 @@ export type {
   CapabilitySource,
   CapabilityUnavailableReason,
   ClientConfig,
+  ClientVoiceInputConfig,
   ClientModel,
+  CodexRealtimeVoice,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  CodexRealtimeWebrtcVersion,
+  GatewayRealtimeConnectRequest,
+  GatewayRealtimeConnectResponse,
+  GatewayRealtimeInitialItem,
+  EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
   ModelCapabilitiesV1,
@@ -195,8 +303,16 @@ export type {
   ModelCredentialSourceV1,
   ModelPricingScheduleV1,
   ModelPricingV1,
+  RenewSessionRealtimeRequest,
+  SessionRealtimeEndReason,
+  SessionRealtimeMode,
+  SessionRealtimeModel,
+  SessionRealtimeMutationResponse,
+  SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogItem,
+  WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,
   CodexAccountOverview,
   CodexAccountsResponse,
@@ -223,14 +339,23 @@ export type {
   CompleteFileUploadResponse,
   ConnectionKind,
   ConnectionMetadata,
+  ConnectionOwnership,
   ConnectionResponse,
   ConnectionStatus,
+  ConnectorDocumentDestination,
+  ConnectorDocumentDestinationAuthority,
+  ConnectorDocumentDestinationSelection,
+  SocialConnection,
+  SocialConnectionStatus,
+  SocialOAuthStartRequest,
   AddDocumentRequest,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
+  SlackReactionChannel,
+  SlackReactionChannelListResponse,
   CreateConnectionRequest,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
@@ -248,6 +373,7 @@ export type {
   CreateWorkspaceRequest,
   DiscoverMcpCapabilitiesResponse,
   Document,
+  DocumentAuthorityKind,
   DocumentBase,
   DocumentCuration,
   DocumentCurationStatus,
@@ -281,6 +407,19 @@ export type {
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,
   GitHubRepositoriesResponse,
+  GoogleDriveBrowseItem,
+  GoogleDriveBrowseResponse,
+  GoogleDriveConnectionLifecycle,
+  GoogleDriveConnectionLifecycleState,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
+  GoogleDriveLifecycleActionRequest,
+  GoogleDriveOAuthStartRequest,
+  GoogleDriveOAuthStartResponse,
+  GoogleDriveReadPolicy,
+  GoogleDriveSelectedSource,
+  GoogleDriveSyncCadence,
+  GoogleDriveTargetScope,
   GitHubRepository,
   GitHubRepositoryScope,
   GoalSpec,
@@ -302,12 +441,15 @@ export type {
   ListPacksResponse,
   ListWorkspaceMembersResponse,
   McpServerConnectionRef,
+  McpPersonalConnectionDelegation,
+  McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
   PackInstallation,
   PackInstallationStatus,
   Permission,
   ProductAccessMode,
+  LatencyMode,
   ReasoningEffort,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
@@ -326,6 +468,7 @@ export type {
   RegisterCapabilityPackRequest,
   RepositoryResourceRef,
   ResourceRef,
+  SaveGoogleDriveSourceRequest,
   SandboxBackend,
   SandboxCapabilityName,
   SandboxOs,
@@ -415,6 +558,7 @@ export type {
   SessionTurn,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
+  TurnInitiatorContext,
   SessionTurnSource,
   SessionTurnStatus,
   SubmitHumanInputResponseRequest,
@@ -491,6 +635,8 @@ export type {
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  WorkspaceSlackReactionSummonSettings,
+  TranscribeAudioResponse,
   UploadFileInput,
   UsageEvent,
   UsageEventType,
@@ -522,6 +668,7 @@ export type {
   WorkspaceMemorySearchResult,
   WorkspaceMemorySearchResponse,
   WorkspaceSettings,
+  WorkspaceVoiceInputSettings,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
   MetricSample,

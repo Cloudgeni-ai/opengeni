@@ -1,4 +1,4 @@
-// apps/api/src/sandbox/routing.ts — wire the agent-loop-free routing proxy to the
+// apps/api/src/sandbox/channel-a.ts — wire the agent-loop-free routing proxy to the
 // real DB pointer + the live NATS control plane for the API-DIRECT Channel-A path
 // (M7). Symmetric with apps/worker/src/sandbox-routing.ts (the turn path).
 //
@@ -11,7 +11,7 @@
 // The DB-coupled glue (readActiveSandbox / getSandbox / the selfhosted ControlRpc
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
-import type { Settings } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
@@ -42,6 +42,7 @@ import {
   type RoutableSandbox,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
+  type RoutingSandboxOperationObserver,
   type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
 
@@ -56,6 +57,7 @@ export type ChannelARoutingServices = {
   db: Database;
   settings: Settings;
   bus?: EventBus;
+  onSandboxOperation?: RoutingSandboxOperationObserver;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. The
@@ -188,6 +190,7 @@ export function wrapChannelABoxWithRouting(
           routeTargetId: backend.sandboxId,
           routeEpoch: backend.activeEpoch,
           operation: op,
+          captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
         });
         return { admission, providerBinding };
       }
@@ -283,6 +286,7 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           processId: process.id,
           operation: op,
+          captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
         })
     : undefined;
   const afterProcessMutation = homeLease
@@ -430,6 +434,7 @@ export function wrapChannelABoxWithRouting(
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),

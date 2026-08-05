@@ -42,12 +42,20 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
 // a single agent-loop-free entrypoint. They physically live in @opengeni/config
 // (moving them into runtime would create a config→runtime cycle — ledger CR8).
 export { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+export {
+  repairSerializedRunStateExposedPorts,
+  runStateCompatibilityProvider,
+  runStateExposedPortsRecord,
+  type RunStateExposedPortsCompatibilityRepair,
+  type RunStateExposedPortsCompatibilityResult,
+} from "./run-state-compat";
 
 // The provider registry surface — the descriptor table self-test, the per-
 // provider registrations, selection + capability negotiation, and the typed
@@ -121,6 +129,8 @@ export {
 } from "./providers/modal";
 export {
   selectBackend,
+  sdkBackendIdForSandboxBackend,
+  sandboxBackendForSdkBackendId,
   backendSupportsOs,
   desktopCapableBackend,
   negotiateCapabilities,
@@ -395,6 +405,8 @@ export {
   type RoutableBackendSession,
   type ResolvedActiveBackend,
   type RoutingMutationSettlementResult,
+  type RoutingSandboxOperationObservation,
+  type RoutingSandboxOperationObserver,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,
@@ -676,6 +688,14 @@ export async function deserializeSandboxSessionStateEnvelope(
     workspaceReady?: unknown;
     exposedPorts?: unknown;
   };
+  const exposedPorts = runStateExposedPortsRecord(state.exposedPorts);
+  if (state.exposedPorts !== undefined && exposedPorts === undefined) {
+    console.warn("[sandbox] ignored incompatible RunState exposedPorts", {
+      provider: runStateCompatibilityProvider(client.backendId),
+      sessionClass: "root",
+      path: "sessionState.exposedPorts",
+    });
+  }
   return await client.deserializeSessionState({
     ...(state.providerState ?? {}),
     manifest: state.manifest,
@@ -687,7 +707,7 @@ export async function deserializeSandboxSessionStateEnvelope(
       ? { snapshotFingerprintVersion: state.snapshotFingerprintVersion }
       : {}),
     workspaceReady: state.workspaceReady,
-    ...(state.exposedPorts ? { exposedPorts: structuredClone(state.exposedPorts) } : {}),
+    ...(exposedPorts !== undefined ? { exposedPorts } : {}),
   });
 }
 
@@ -1282,11 +1302,13 @@ export async function serializeEstablishedSandboxEnvelope(
     // workspaceReady }`. So the FLAT serialized state must be nested under
     // `providerState` (and manifest/ports lifted), or sandboxId is dropped on the
     // round-trip and resume() throws "requires a persisted sandboxId". We pull
-    // manifest/exposedPorts up but leave them in providerState too (harmless; the
-    // deserialize spreads providerState first, then overlays manifest/ports).
+    // manifest/native endpoint records up but leave them in providerState too
+    // (harmless; the deserialize spreads providerState first, then overlays
+    // manifest/ports). configuredExposedPorts is provider configuration/state,
+    // not the SDK's port-keyed endpoint record, so it must never be lifted.
     const flat = serialized as Record<string, unknown>;
     const manifest = flat.manifest;
-    const exposedPorts = flat.configuredExposedPorts ?? flat.exposedPorts;
+    const exposedPorts = runStateExposedPortsRecord(flat.exposedPorts);
     const sessionState: Record<string, unknown> = {
       providerState: flat,
       ...(manifest !== undefined ? { manifest } : {}),

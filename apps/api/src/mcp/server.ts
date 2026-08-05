@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CreateScheduledTaskRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -23,7 +24,10 @@ import {
   type SessionAuthorizationOperation,
   type SessionAuthorizationSurface,
   type Session,
+  type ScheduledTask,
   UpdateScheduledTaskRequest,
+  normalizeWorkspaceArtifactSlug,
+  WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
 } from "@opengeni/contracts";
 import {
   correctWorkspaceMemory,
@@ -40,7 +44,6 @@ import {
   getPreferenceRegistryFullContent,
   getVariableSet,
   getVariableSetByName,
-  areGitHubRepositoriesAllowedForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
@@ -52,8 +55,9 @@ import {
   listRigs,
   listRigChangeMonitoringSummaries,
   listRigVersionMonitoringSummaries,
-  listSocialConnections,
   listSocialPosts,
+  recordAuditEvent,
+  recordSyncedSocialPosts,
   listVariableSets,
   MEMORY_CORRECT_TOOL_DESCRIPTION,
   MEMORY_SAVE_TOOL_DESCRIPTION,
@@ -70,11 +74,16 @@ import {
   upsertSessionGoalWithEvent,
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
+  createWorkspaceArtifact,
+  getWorkspaceArtifact,
+  getWorkspaceArtifactContentRef,
+  listWorkspaceArtifacts,
+  publishWorkspaceArtifactVersion,
+  rollbackWorkspaceArtifact,
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import {
   createSignedState,
-  createGitHubAppInstallationToken,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
 } from "@opengeni/github";
@@ -88,6 +97,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import * as z4 from "zod/v4";
 import {
   hasPermission,
+  authorizedSocialConnectionsForGrant,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   type ResolvedSessionAuthorization,
@@ -101,6 +111,13 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
+  socialMentionsLive,
+  socialOwnPostsLive,
+  socialPostReply,
+  socialSearchLive,
+  socialThreadLive,
+} from "../integrations/social-api";
+import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
   requireRigChangeForApi,
@@ -112,20 +129,22 @@ import {
   requireVariableSetEncryption,
 } from "@opengeni/core";
 import {
+  captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
+  ScheduledTaskSyncError,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
-  acceptSessionUserMessage,
+  acceptSessionUserMessageWithOutcome,
   controlAgentSessionWorkstream,
   controlHumanSessionWorkstream,
-  createSessionForRequest,
+  createSessionForRequestWithOutcome,
   SessionSpawnDeniedError,
   sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
@@ -153,6 +172,12 @@ import {
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
+import { mcpMutationReceipt, sessionCreateMutationReceipt } from "./receipts";
+import {
+  boundScheduledTaskDetailMcp,
+  boundScheduledTaskMcpPage,
+  scheduledTaskMcpSummary,
+} from "./scheduled-task-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import {
@@ -214,11 +239,19 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   variable_set_set_variable: { allOf: ["variable-sets:manage"] },
   environment_set_variable: { allOf: ["variable-sets:manage"] },
   github_connect_link: { allOf: ["github:use"] },
-  github_token: { sessionRequired: true, allOf: ["github:use"] },
   github_repositories_list: { allOf: ["github:use"] },
   social_connections_list: { allOf: ["connections:read"] },
   social_posts_recent: { allOf: ["connections:read"] },
   social_daily_analysis_context: { allOf: ["connections:read"] },
+  social_search_live: { allOf: ["connections:read"] },
+  social_mentions_live: { allOf: ["connections:read"] },
+  social_thread_fetch: { allOf: ["connections:read"] },
+  // Writes the social_posts store, so it takes the write scope like the REST
+  // equivalent (POST /social/posts is workspace:admin).
+  social_posts_sync: { allOf: ["connections:write"] },
+  // Publishes under the user's identity: connections:write keeps it out of the
+  // default agent permission set, unlike the read-only social tools above.
+  social_post_reply: { allOf: ["connections:write"] },
   scheduled_tasks_list: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
   scheduled_tasks_get: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
   scheduled_tasks_create: { allOf: ["scheduled_tasks:manage"] },
@@ -236,6 +269,12 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_info: { allOf: ["connections:read"] },
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
+  slack_bot_delete_message: { allOf: ["connections:read"] },
+  artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
+  artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
+  artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -326,6 +365,20 @@ export function buildOpenGeniMcpServer(
   });
   const can = (permission: Permission) => hasPermission(grant.permissions, permission);
   const toolspaceMode = options.toolspace != null;
+  let socialConnectionsPromise: ReturnType<typeof authorizedSocialConnectionsForGrant> | undefined;
+  const authorizedSocialConnections = () =>
+    (socialConnectionsPromise ??= authorizedSocialConnectionsForGrant({
+      db: deps.db,
+      grant,
+      limit: 500,
+    }));
+  const requireAuthorizedSocialConnection = async (connectionId: string) => {
+    const authority = (await authorizedSocialConnections()).find(
+      ({ connection }) => connection.id === connectionId,
+    );
+    if (!authority) throw new Error(`Unknown or unavailable social connection: ${connectionId}`);
+    return authority;
+  };
 
   // Session-scoped tools key off the worker-asserted sessionId claim (signed
   // into the delegated token by the worker, never agent-controlled).
@@ -377,6 +430,9 @@ export function buildOpenGeniMcpServer(
   if (!toolspaceMode && sessionId !== null && preferenceAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
   }
+  if (!toolspaceMode && sessionId !== null && preferenceAttemptClaims(grant) !== null) {
+    registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
+  }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
   // provision over the session's Modal box + the workspace's enrolled machines.
@@ -392,26 +448,21 @@ export function buildOpenGeniMcpServer(
     registerSlackBotTools(server, deps, grant, sessionId, json);
   }
 
-  // Orchestration, variableSet, and GitHub status/token tools are permission-gated
+  // Orchestration, variableSet, and GitHub status tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
   // Sandboxed workers reach this server with the first-party delegated
   // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
   // POWERFUL BY DEFAULT — it carries sessions:*, variable sets:*, and github:use,
   // so agents can spawn/read sessions, manage variable set variables, inspect
-  // GitHub connection availability, and refresh scoped tokens for already-bound
-  // repositories out of the box. A user DEMOTES a specific
+  // GitHub connection availability, and use already-bound repository resources
+  // out of the box. GitHub installation credentials are refreshed host-side and
+  // never returned through a model-visible MCP tool. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
-    // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
-    // worker-signed sessionId claim so it mints for THIS session's repos), gated on
-    // the same github:use capability as github_connect_link.
-    if (sessionId !== null) {
-      registerGitHubTokenTool(server, deps, grant, sessionId, json);
-    }
   }
 
   if (!toolspaceMode || can("github:use")) {
@@ -453,11 +504,9 @@ export function buildOpenGeniMcpServer(
       },
       async ({ limit }) =>
         json({
-          connections: await listSocialConnections(
-            deps.db,
-            grant.workspaceId,
-            boundedMcpLimit(limit),
-          ),
+          connections: (await authorizedSocialConnections())
+            .slice(0, boundedMcpLimit(limit))
+            .map(({ connection }) => connection),
         }),
     );
 
@@ -473,6 +522,15 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionIds, since, windowHours, limit }) => {
+        const authorized = await authorizedSocialConnections();
+        const selected = connectionIds?.length
+          ? connectionIds.map((id) => {
+              const match = authorized.find(({ connection }) => connection.id === id);
+              if (!match) throw new Error(`Unknown or unavailable social connection: ${id}`);
+              return match;
+            })
+          : authorized;
+        const personalSubjectId = selected.find(({ subjectId }) => subjectId)?.subjectId ?? null;
         const sinceDate = since
           ? parseMcpDate(since, "since")
           : new Date(Date.now() - (windowHours ?? 24) * 60 * 60 * 1000);
@@ -480,7 +538,8 @@ export function buildOpenGeniMcpServer(
           since: sinceDate.toISOString(),
           posts: await listSocialPosts(deps.db, {
             workspaceId: grant.workspaceId,
-            ...(connectionIds?.length ? { connectionIds } : {}),
+            subjectId: personalSubjectId,
+            connectionIds: selected.map(({ connection }) => connection.id),
             since: sinceDate,
             limit: boundedMcpLimit(limit),
           }),
@@ -502,7 +561,8 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ connectionIds, documentBaseIds, since, windowHours, limit }) => {
-        const allConnections = await listSocialConnections(deps.db, grant.workspaceId, 500);
+        const authorized = await authorizedSocialConnections();
+        const allConnections = authorized.map(({ connection }) => connection);
         const selectedIds =
           connectionIds && connectionIds.length > 0 ? new Set(connectionIds) : null;
         const connections = selectedIds
@@ -522,6 +582,11 @@ export function buildOpenGeniMcpServer(
           connections.length > 0
             ? await listSocialPosts(deps.db, {
                 workspaceId: grant.workspaceId,
+                subjectId:
+                  authorized.find(
+                    ({ connection, subjectId }) =>
+                      subjectId && connections.some((selected) => selected.id === connection.id),
+                  )?.subjectId ?? null,
                 connectionIds: connections.map((connection) => connection.id),
                 since: sinceDate,
                 limit: boundedMcpLimit(limit),
@@ -544,28 +609,209 @@ export function buildOpenGeniMcpServer(
         });
       },
     );
+
+    // Live provider reads (X / Reddit). Tokens are resolved and used entirely
+    // host-side; the agent only ever sees normalized post payloads.
+    server.registerTool(
+      "social_search_live",
+      {
+        description:
+          "Search live conversations on a connected social account (X recent search or Reddit search). Use social_connections_list first to find the connectionId. For Reddit, pass subreddit to scope the search.",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          query: z4.string().min(1).max(512),
+          subreddit: z4.string().min(1).max(100).optional(),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, query, subreddit, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
+        const result = await socialSearchLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          { query, subreddit, limit },
+        );
+        return json({ provider: result.connection.provider, posts: result.posts });
+      },
+    );
+
+    server.registerTool(
+      "social_mentions_live",
+      {
+        description:
+          "Fetch live mentions of the connected account (X mentions timeline, or the Reddit inbox with username mentions and comment replies).",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          sinceId: z4.string().optional(),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, sinceId, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
+        const result = await socialMentionsLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          { sinceId, limit },
+        );
+        return json({ provider: result.connection.provider, posts: result.posts });
+      },
+    );
+
+    server.registerTool(
+      "social_thread_fetch",
+      {
+        description:
+          "Fetch a live conversation thread: for X pass a tweet id (returns the conversation), for Reddit pass a post id or t3_ fullname (returns the post plus top comments).",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          id: z4.string().min(1).max(100),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, id, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
+        const result = await socialThreadLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          { id, limit },
+        );
+        return json({ provider: result.connection.provider, posts: result.posts });
+      },
+    );
+  }
+
+  // Writes are gated on connections:write (never in the default first-party
+  // agent permission set) so scheduled tasks must opt in, and deployments can
+  // additionally wrap posting in a requireApproval policy.
+  if (!toolspaceMode || can("connections:write")) {
+    server.registerTool(
+      "social_posts_sync",
+      {
+        description:
+          "Sync the connected account's own recent posts from the provider into OpenGeni's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, limit }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
+        const result = await socialOwnPostsLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          { limit },
+        );
+        // A post without a provider timestamp is skipped rather than recorded
+        // at sync time: publishedAt drives analysis windows, and the dedup
+        // index would freeze a fabricated date forever.
+        const datedPosts = result.posts.filter((post) => post.createdAt !== null);
+        const synced = await recordSyncedSocialPosts(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          connectionId,
+          subjectId: authority.subjectId,
+          posts: datedPosts.map((post) => ({
+            externalPostId: post.id,
+            url: post.url,
+            authorHandle: post.author,
+            text: post.text,
+            publishedAt: new Date(post.createdAt!),
+            metrics: post.metrics,
+          })),
+        });
+        return json({
+          provider: result.connection.provider,
+          fetched: result.posts.length,
+          inserted: synced.inserted,
+          skipped: synced.skipped,
+          skippedMissingDate: result.posts.length - datedPosts.length,
+        });
+      },
+    );
+
+    server.registerTool(
+      "social_post_reply",
+      {
+        description:
+          "Publish a reply from the connected social account. X: inReplyToId is the tweet id to reply to. Reddit: inReplyToId is a fullname (t3_<post> or t1_<comment>). Draft and get approval before calling this — it posts publicly and immediately.",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          inReplyToId: z4.string().min(1).max(100),
+          text: z4.string().min(1).max(10000),
+        },
+      },
+      async ({ connectionId, inReplyToId, text }) => {
+        const authority = await requireAuthorizedSocialConnection(connectionId);
+        const result = await socialPostReply(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          { inReplyToId, text },
+        );
+        // Outbound publishes leave a durable, secret-free receipt (house
+        // pattern: the Slack bot post audit), so who posted what where stays
+        // answerable after the session is gone.
+        await recordAuditEvent(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: grant.subjectId,
+          action: "social.post_reply",
+          targetType: "social_connection",
+          targetId: connectionId,
+          metadata: {
+            provider: result.connection.provider,
+            inReplyToId,
+            postedId: result.postedId,
+            url: result.url,
+          },
+        });
+        return json({
+          provider: result.connection.provider,
+          postedId: result.postedId,
+          url: result.url,
+        });
+      },
+    );
   }
 
   if (!toolspaceMode || can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {
     server.registerTool(
       "scheduled_tasks_list",
       {
-        description: "List scheduled tasks.",
-        inputSchema: { limit: z4.number().int().positive().optional() },
+        description:
+          "List compact scheduled-task summaries. Prompts, goal text, resource/tool bodies, and metadata values are represented by byte/count facts; page with offset and use scheduled_tasks_get for a bounded explicit detail projection.",
+        inputSchema: {
+          limit: z4.number().int().positive().max(50).optional(),
+          offset: z4.number().int().nonnegative().max(10_000).optional(),
+        },
       },
-      async ({ limit }) =>
-        json({
-          tasks: await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100),
-        }),
+      async ({ limit: requestedLimit, offset: requestedOffset }) => {
+        const limit = requestedLimit ?? 25;
+        const offset = requestedOffset ?? 0;
+        const rows = await listScheduledTasks(deps.db, grant.workspaceId, limit + 1, offset);
+        return json(
+          boundScheduledTaskMcpPage({
+            tasks: rows.slice(0, limit),
+            limit,
+            offset,
+            sourceHasMore: rows.length > limit,
+          }),
+        );
+      },
     );
 
     server.registerTool(
       "scheduled_tasks_get",
       {
-        description: "Get one scheduled task.",
-        inputSchema: { id: z4.string().uuid() },
+        description:
+          "Get one scheduled task. The default is the same compact summary used by scheduled_tasks_list; pass includeEntity=true for a bounded projection with an 8 KiB prompt preview, bounded goal fields, resource/tool identity previews, and metadata keys without values.",
+        inputSchema: { id: z4.string().uuid(), includeEntity: z4.boolean().optional() },
       },
-      async ({ id }) => json(await requireScheduledTask(deps.db, grant.workspaceId, id)),
+      async ({ id, includeEntity }) => {
+        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        return json(
+          includeEntity ? boundScheduledTaskDetailMcp(task) : scheduledTaskMcpSummary(task),
+        );
+      },
     );
 
     server.registerTool(
@@ -605,12 +851,26 @@ export function buildOpenGeniMcpServer(
           payload,
           toolsProvided: scheduledTaskToolsProvided(args),
         });
-        await syncCreatedScheduledTask({
-          db: deps.db,
-          workflowClient: deps.workflowClient,
-          task,
-        });
-        return json(task);
+        try {
+          await syncCreatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_create", task, "partial_failure", true, {
+              partialFailure: { stage: "schedule_sync", retryable: true },
+              warnings: [
+                "The task database record committed, but Temporal schedule synchronization failed.",
+              ],
+            }),
+          );
+        }
+        return json(scheduledTaskReceipt("scheduled_tasks_create", task, "created", true));
       },
     );
 
@@ -637,6 +897,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, ...raw }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         const update = await validatedScheduledTaskUpdate({
@@ -652,7 +913,7 @@ export function buildOpenGeniMcpServer(
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
-          previous: existing,
+          previous,
           task,
         });
         return json(task);
@@ -667,13 +928,14 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "paused",
         });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
-          previous: existing,
+          previous,
           task,
         });
         return json(task);
@@ -688,13 +950,14 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "active",
         });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
-          previous: existing,
+          previous,
           task,
         });
         return json(task);
@@ -733,18 +996,36 @@ export function buildOpenGeniMcpServer(
           triggerWorkflowId,
           initiator: { kind: "subject", subjectId: grant.subjectId },
         });
-        await recordWorkspaceUsage(deps, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          subjectId: grant.subjectId,
-          eventType: "agent_run.created",
-          quantity: 1,
-          unit: "run",
-          sourceResourceType: "scheduled_task",
-          sourceResourceId: task.id,
-          idempotencyKey: agentRunUsageIdempotencyKey,
-        });
-        return json(task);
+        try {
+          await recordWorkspaceUsage(deps, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            subjectId: grant.subjectId,
+            eventType: "agent_run.created",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "scheduled_task",
+            sourceResourceId: task.id,
+            idempotencyKey: agentRunUsageIdempotencyKey,
+          });
+        } catch {
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_trigger", task, "partial_failure", true, {
+              partialFailure: { stage: "usage_recording", retryable: true },
+              warnings: [
+                "The Temporal run trigger completed, but usage recording failed; retry with the same triggerId.",
+              ],
+              idempotencyStatus: triggerId ? "unknown" : "not_requested",
+              facts: { triggerWorkflowId },
+            }),
+          );
+        }
+        return json(
+          scheduledTaskReceipt("scheduled_tasks_trigger", task, "triggered", true, {
+            idempotencyStatus: triggerId ? "unknown" : "not_requested",
+            facts: { triggerWorkflowId },
+          }),
+        );
       },
     );
 
@@ -759,8 +1040,28 @@ export function buildOpenGeniMcpServer(
         await deps.workflowClient.deleteScheduledTaskSchedule({
           temporalScheduleId: task.temporalScheduleId,
         });
-        await deleteScheduledTask(deps.db, grant.workspaceId, id);
-        return json({ ok: true });
+        try {
+          await deleteScheduledTask(deps.db, grant.workspaceId, id);
+        } catch {
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_delete", task, "partial_failure", true, {
+              partialFailure: { stage: "database_delete", retryable: true },
+              warnings: [
+                "The Temporal schedule was deleted, but the task database record remains.",
+              ],
+            }),
+          );
+        }
+        return json(
+          mcpMutationReceipt({
+            operation: "scheduled_tasks_delete",
+            committed: true,
+            outcome: "deleted",
+            changed: true,
+            resource: { type: "scheduled_task", id: task.id, state: "deleted" },
+            idempotency: { status: "not_supported" },
+          }),
+        );
       },
     );
 
@@ -1001,6 +1302,24 @@ function registerSlackBotTools(
       );
     },
   );
+
+  server.registerTool(
+    "slack_bot_delete_message",
+    {
+      description:
+        "Delete a message authored by the workspace-shared OpenGeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        operationId: z4.string().uuid(),
+        channelId: z4.string().min(1).max(64),
+        timestamp: z4.string().min(1).max(64),
+      },
+    },
+    async ({ connectionId, operationId, channelId, timestamp }) =>
+      json(
+        await (await clientFor(connectionId)).deleteMessage({ operationId, channelId, timestamp }),
+      ),
+  );
 }
 
 function registerToolspaceProxyTools(server: McpServer, surface: ToolspaceMcpSurface | null): void {
@@ -1201,10 +1520,27 @@ function registerGoalTools(
           event: { type: "goal.completed", evidence },
         },
       );
+      const changed = events.length > 0;
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
-      return json(goal);
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_complete",
+          committed: true,
+          outcome: changed ? "updated" : "unchanged",
+          changed,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
     },
   );
 
@@ -1238,10 +1574,27 @@ function registerGoalTools(
           },
         },
       );
+      const changed = events.length > 0;
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
-      return json(goal);
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_pause",
+          committed: true,
+          outcome: changed ? "updated" : "unchanged",
+          changed,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
     },
   );
 }
@@ -1261,6 +1614,198 @@ async function authorizeFirstPartySession(
     operation,
     surface: "first_party_mcp",
   });
+}
+
+function registerWorkspaceArtifactTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  const attempt = () => {
+    const claims = preferenceAttemptClaims(grant);
+    if (!claims) throw new Error("Exact signed artifact attempt authority is required.");
+    return claims;
+  };
+  const authorize = async () => {
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+  const prepare = (html: string) => {
+    if (!deps.objectStorage) throw new Error("Object storage is not configured");
+    const bytes = new TextEncoder().encode(html);
+    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
+      throw new Error(
+        `Artifact HTML must be 1-${WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES} UTF-8 bytes`,
+      );
+    }
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const contentKey = `workspaces/${grant.workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
+    return {
+      contentKey,
+      contentSha256,
+      sizeBytes: bytes.byteLength,
+      persistContent: async () => {
+        await deps.objectStorage!.putObject({
+          key: contentKey,
+          contentType: "text/html; charset=utf-8",
+          body: bytes,
+          sha256: contentSha256,
+        });
+      },
+    };
+  };
+  const provenance = (
+    idempotencyKey: string,
+    sourceToolName: "artifacts_create" | "artifacts_publish" | "artifacts_rollback",
+  ) => {
+    const claims = attempt();
+    return {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      operationKey: `attempt:${createHash("sha256")
+        .update(
+          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
+        )
+        .digest("hex")}`,
+      actorSubjectId: grant.subjectId,
+      sourceSessionId: claims.sessionId,
+      sourceTurnId: claims.turnId,
+      sourceAttemptId: claims.attemptId,
+      sourceExecutionGeneration: claims.executionGeneration,
+      sourceToolName,
+    };
+  };
+
+  server.registerTool(
+    "artifacts_list",
+    {
+      description:
+        "List the generic published artifacts in this workspace and their current versions.",
+      inputSchema: {},
+    },
+    async () => {
+      await authorize();
+      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
+    },
+  );
+
+  server.registerTool(
+    "artifacts_get_source",
+    {
+      description:
+        "Read an artifact's metadata and exact HTML source. Omit versionId for the current version.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        versionId: z4.string().uuid().optional(),
+      },
+    },
+    async ({ artifactId, versionId }) => {
+      await authorize();
+      if (!deps.objectStorage) throw new Error("Object storage is not configured");
+      const [detail, ref] = await Promise.all([
+        getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
+        getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
+      ]);
+      const object = await deps.objectStorage.getObjectBytes(ref.contentKey);
+      if (!object) throw new Error("Artifact content is unavailable");
+      const actualHash = createHash("sha256").update(object.bytes).digest("hex");
+      if (actualHash !== ref.version.contentSha256)
+        throw new Error("Artifact content failed integrity verification");
+      return json({ detail, version: ref.version, html: new TextDecoder().decode(object.bytes) });
+    },
+  );
+
+  server.registerTool(
+    "artifacts_create",
+    {
+      description:
+        "Create and publish a generic static workspace artifact from a complete, self-contained HTML document with inline CSS. JavaScript and active or navigation-capable markup do not render in the MVP.",
+      inputSchema: {
+        title: z4.string().min(1).max(120),
+        description: z4.string().max(2000).nullable().optional(),
+        slug: z4
+          .string()
+          .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
+          .max(96)
+          .optional(),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ title, description, slug, html, idempotencyKey }) => {
+      await authorize();
+      const artifactId = crypto.randomUUID();
+      const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
+      const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
+      return json(
+        await createWorkspaceArtifact(deps.db, {
+          artifactId,
+          slug: resolvedSlug,
+          title,
+          description: description ?? null,
+          ...prepare(html),
+          ...provenance(idempotencyKey, "artifacts_create"),
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_publish",
+    {
+      description:
+        "Publish a new immutable static HTML/CSS version. JavaScript and active or navigation-capable markup do not render in the MVP. First read the current source and pass its version id for optimistic concurrency.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        title: z4.string().min(1).max(120).optional(),
+        description: z4.string().max(2000).nullable().optional(),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, title, description, html, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await publishWorkspaceArtifactVersion(deps.db, {
+          artifactId,
+          expectedCurrentVersionId,
+          ...(title !== undefined ? { title } : {}),
+          ...(description !== undefined ? { description } : {}),
+          ...prepare(html),
+          ...provenance(idempotencyKey, "artifacts_publish"),
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_rollback",
+    {
+      description:
+        "Promote an existing immutable artifact version back to current without rewriting history.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        versionId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await rollbackWorkspaceArtifact(deps.db, {
+          artifactId,
+          versionId,
+          expectedCurrentVersionId,
+          reason,
+          ...provenance(idempotencyKey, "artifacts_rollback"),
+        }),
+      );
+    },
+  );
 }
 
 function preferenceAttemptClaims(grant: AccessGrant): {
@@ -1328,6 +1873,38 @@ function registerPreferenceRegistryTools(
 }
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
+
+function scheduledTaskReceipt(
+  operation: string,
+  task: ScheduledTask,
+  outcome: "created" | "updated" | "unchanged" | "triggered" | "partial_failure",
+  changed: boolean,
+  options: {
+    partialFailure?: { stage: string; retryable: boolean };
+    warnings?: string[];
+    idempotencyStatus?: "not_supported" | "not_requested" | "applied" | "replayed" | "unknown";
+    facts?: Record<string, string | number | boolean | null>;
+  } = {},
+) {
+  return mcpMutationReceipt({
+    operation,
+    committed: true,
+    outcome,
+    changed,
+    resource: {
+      type: "scheduled_task",
+      id: task.id,
+      version: task.updatedAt,
+      state: task.status,
+    },
+    timestamp: task.updatedAt,
+    idempotency: { status: options.idempotencyStatus ?? "not_supported" },
+    ...(options.partialFailure ? { partialFailure: options.partialFailure } : {}),
+    ...(options.warnings ? { warnings: options.warnings } : {}),
+    ...(options.facts ? { facts: options.facts } : {}),
+    nextAction: { tool: "scheduled_tasks_get", arguments: { id: task.id } },
+  });
+}
 
 function memoryPreview(text: string): string {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -1404,7 +1981,52 @@ function registerMemoryTools(
           },
         },
       ]);
-      return json(result);
+      const changed = !result.deduped || result.updated || result.superseded !== null;
+      const outcome =
+        result.updated || result.superseded !== null
+          ? "updated"
+          : result.deduped
+            ? "unchanged"
+            : "created";
+      return json(
+        mcpMutationReceipt({
+          operation: "memory_save",
+          committed: true,
+          outcome,
+          changed,
+          resource: {
+            type: "knowledge_memory",
+            id: result.memory.id,
+            state: result.memory.status,
+          },
+          relatedResources: result.superseded
+            ? [
+                {
+                  type: "knowledge_memory",
+                  id: result.superseded.id,
+                  state: result.superseded.status,
+                },
+              ]
+            : undefined,
+          timestamp: result.memory.updatedAt,
+          idempotency: { status: "not_supported" },
+          warnings: [
+            ...(result.redactionCount > 0
+              ? [`Redacted ${result.redactionCount} sensitive value(s) before committing memory.`]
+              : []),
+            ...(!result.embedded
+              ? ["Memory committed without a vector embedding; keyword search remains available."]
+              : []),
+          ],
+          facts: {
+            deduped: result.deduped,
+            dedupeReason: result.dedupeReason,
+            updatedInPlace: result.updated,
+            redactionCount: result.redactionCount,
+            embedded: result.embedded,
+          },
+        }),
+      );
     },
   );
 
@@ -1449,7 +2071,31 @@ function registerMemoryTools(
           },
         },
       ]);
-      return json(result);
+      return json(
+        mcpMutationReceipt({
+          operation: "memory_correct",
+          committed: true,
+          outcome: "updated",
+          changed: true,
+          resource: {
+            type: "knowledge_memory",
+            id: result.memory.id,
+            state: result.memory.status,
+          },
+          relatedResources: result.replacement
+            ? [
+                {
+                  type: "knowledge_memory",
+                  id: result.replacement.id,
+                  state: result.replacement.status,
+                },
+              ]
+            : undefined,
+          timestamp: (result.replacement ?? result.memory).updatedAt,
+          idempotency: { status: "not_supported" },
+          facts: { correctionAction: result.action },
+        }),
+      );
     },
   );
 }
@@ -1496,7 +2142,7 @@ function registerFleetTools(
     "sandboxes_list",
     {
       description:
-        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `liveness` is conservative: online requires observed provider existence and verified workspace readiness. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch are also reported separately. Use an entry `id` as an attach/swap/run_on target.",
+        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `operationAvailability` is authoritative for ordinary shell/files use: `wakeable` means the next ordinary operation will wake or restore the idle managed home sandbox, even when `liveness=offline`, `leaseLiveness=cold|draining`, or `attachable=false`. `attachable` describes an already-live swap target, not ordinary operation availability. `recovering` requires a bounded retry/typed recovery result; `unavailable` is not usable. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch remain separate truth dimensions. Use an entry `id` as an attach/swap/run_on target.",
       inputSchema: {},
     },
     async () => json(await listFleet(services, await fleetContext())),
@@ -1669,12 +2315,57 @@ function registerRigTools(
           sessionId ? { proposedBy: `session:${sessionId}` } : {},
         );
         const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
-        await deps.workflowClient.startRigVerification({
-          workspaceId: grant.workspaceId,
-          changeId: change.id,
-          workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
-        });
-        return json({ change: verifying, verificationStarted: true });
+        const attempt = verificationAttempt(verifying);
+        try {
+          await deps.workflowClient.startRigVerification({
+            workspaceId: grant.workspaceId,
+            changeId: change.id,
+            workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
+          });
+        } catch {
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_propose_change",
+              committed: true,
+              outcome: "partial_failure",
+              changed: true,
+              resource: {
+                type: "rig_change",
+                id: verifying.id,
+                version: verifying.updatedAt,
+                state: verifying.status,
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              timestamp: verifying.updatedAt,
+              idempotency: { status: "not_supported" },
+              partialFailure: { stage: "verification_workflow_start", retryable: true },
+              warnings: [
+                "The rig change and verifying transition committed, but verification workflow start failed.",
+              ],
+              facts: { verificationAttempt: attempt },
+              nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+            }),
+          );
+        }
+        return json(
+          mcpMutationReceipt({
+            operation: "rig_propose_change",
+            committed: true,
+            outcome: "created",
+            changed: true,
+            resource: {
+              type: "rig_change",
+              id: verifying.id,
+              version: verifying.updatedAt,
+              state: verifying.status,
+            },
+            relatedResources: [{ type: "rig", id: rig.id }],
+            timestamp: verifying.updatedAt,
+            idempotency: { status: "not_supported" },
+            facts: { verificationStarted: true, verificationAttempt: attempt },
+            nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+          }),
+        );
       },
     );
 
@@ -1697,12 +2388,57 @@ function registerRigTools(
             grant.workspaceId,
             change.id,
           );
-          await deps.workflowClient.startRigVerification({
-            workspaceId: grant.workspaceId,
-            changeId: change.id,
-            workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
-          });
-          return json({ ok: true, changeId: change.id });
+          const attempt = verificationAttempt(verifying);
+          try {
+            await deps.workflowClient.startRigVerification({
+              workspaceId: grant.workspaceId,
+              changeId: change.id,
+              workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
+            });
+          } catch {
+            return json(
+              mcpMutationReceipt({
+                operation: "rig_verify",
+                committed: true,
+                outcome: "partial_failure",
+                changed: true,
+                resource: {
+                  type: "rig_change",
+                  id: verifying.id,
+                  version: verifying.updatedAt,
+                  state: verifying.status,
+                },
+                relatedResources: [{ type: "rig", id: rig.id }],
+                timestamp: verifying.updatedAt,
+                idempotency: { status: "not_supported" },
+                partialFailure: { stage: "verification_workflow_start", retryable: true },
+                warnings: [
+                  "The verifying transition committed, but verification workflow start failed.",
+                ],
+                facts: { verificationAttempt: attempt },
+                nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+              }),
+            );
+          }
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_verify",
+              committed: true,
+              outcome: "accepted",
+              changed: true,
+              resource: {
+                type: "rig_change",
+                id: verifying.id,
+                version: verifying.updatedAt,
+                state: verifying.status,
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              timestamp: verifying.updatedAt,
+              idempotency: { status: "not_supported" },
+              facts: { verificationStarted: true, verificationAttempt: attempt },
+              nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+            }),
+          );
         }
         if (!rig.activeVersion) {
           throw new Error("rig has no active version");
@@ -1712,7 +2448,23 @@ function registerRigTools(
           versionId: rig.activeVersion.id,
           workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
         });
-        return json({ ok: true, versionId: rig.activeVersion.id });
+        return json(
+          mcpMutationReceipt({
+            operation: "rig_verify",
+            committed: true,
+            outcome: "accepted",
+            changed: true,
+            resource: {
+              type: "rig_version",
+              id: rig.activeVersion.id,
+              version: rig.activeVersion.version,
+              state: "verification_started",
+            },
+            relatedResources: [{ type: "rig", id: rig.id }],
+            idempotency: { status: "not_supported" },
+            nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+          }),
+        );
       },
     );
   }
@@ -1731,8 +2483,32 @@ function registerRigTools(
       async ({ rigId, changeId }) => {
         const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
         const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+        const promoted = await promoteVerifiedDefinitionEditChangeForApi(
+          { db: deps.db },
+          grant,
+          rig,
+          change,
+        );
         return json(
-          await promoteVerifiedDefinitionEditChangeForApi({ db: deps.db }, grant, rig, change),
+          mcpMutationReceipt({
+            operation: "rig_promote",
+            committed: true,
+            outcome: "updated",
+            changed: true,
+            resource: {
+              type: "rig_version",
+              id: promoted.version.id,
+              version: promoted.version.version,
+              state: "active",
+            },
+            relatedResources: [
+              { type: "rig_change", id: promoted.change.id, state: promoted.change.status },
+              { type: "rig", id: rig.id },
+            ],
+            timestamp: promoted.version.createdAt,
+            idempotency: { status: "not_supported" },
+            nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+          }),
         );
       },
     );
@@ -2002,6 +2778,7 @@ function registerWorkspaceOrchestrationTools(
           rigId: z4.string().uuid().optional(),
           model: z4.string().min(1).optional(),
           reasoningEffort: z4.string().optional(),
+          latencyMode: z4.enum(["standard", "priority", "fast"]).optional(),
           sandboxBackend: z4.string().optional(),
           // Create-time machine targeting: an enrolled sandbox id (from
           // sandboxes_list) to run the spawned session on. Seeds the active-sandbox
@@ -2075,8 +2852,13 @@ function registerWorkspaceOrchestrationTools(
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
-          return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
+          const result = await createSessionForRequestWithOutcome(
+            deps,
+            grant,
+            grant.workspaceId,
+            args,
+          );
+          return json(sessionCreateMutationReceipt(result, Boolean(args.idempotencyKey)));
         } catch (error) {
           if (error instanceof SessionSpawnDeniedError) {
             return {
@@ -2116,17 +2898,30 @@ function registerWorkspaceOrchestrationTools(
             exactAgentCommandContext(grant, callerSessionId),
             { targetSessionId, text, idempotencyKey },
           );
-          return json({
-            delivered: true,
-            updateId: result.updateId,
-            delivery: "coalesced_internal_update",
-            effectiveState: result.effectiveState,
-            wakeRequested: result.wakeRevision !== null,
-            resumeRequired: result.effectiveState === "paused",
-            replay: result.replay,
-          });
+          return json(
+            mcpMutationReceipt({
+              operation: "session_send_message",
+              committed: true,
+              outcome: result.replay ? "replayed" : "accepted",
+              changed: !result.replay,
+              resource: {
+                type: "session_system_update",
+                id: result.updateId,
+                state: result.effectiveState,
+              },
+              relatedResources: [{ type: "session", id: targetSessionId }],
+              timestamp: result.receipt.createdAt.toISOString(),
+              idempotency: { status: result.replay ? "replayed" : "applied" },
+              facts: {
+                delivery: "coalesced_internal_update",
+                wakeRequested: result.wakeRevision !== null,
+                resumeRequired: result.effectiveState === "paused",
+              },
+              nextAction: { tool: "session_get", arguments: { sessionId: targetSessionId } },
+            }),
+          );
         }
-        const { accepted, turn } = await acceptSessionUserMessage(
+        const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
           deps,
           grant,
           grant.workspaceId,
@@ -2141,7 +2936,27 @@ function registerWorkspaceOrchestrationTools(
             ),
           },
         );
-        return json({ event: accepted, turnId: turn.id });
+        return json(
+          mcpMutationReceipt({
+            operation: "session_send_message",
+            committed: true,
+            outcome: replay ? "replayed" : "accepted",
+            changed: !replay,
+            resource: {
+              type: "session_turn",
+              id: turn.id,
+              version: turn.version,
+              state: turn.status,
+            },
+            relatedResources: [
+              { type: "session", id: targetSessionId },
+              { type: "session_event", id: accepted.id, state: accepted.type },
+            ],
+            timestamp: accepted.occurredAt,
+            idempotency: { status: replay ? "replayed" : "applied" },
+            nextAction: { tool: "session_get", arguments: { sessionId: targetSessionId } },
+          }),
+        );
       },
     );
 
@@ -2268,13 +3083,28 @@ function registerWorkspaceOrchestrationTools(
             exactAgentCommandContext(grant, callerSessionId, "first_party_mcp"),
             { targetSessionId: sessionId, instruction, idempotencyKey },
           );
-          return json({
-            updateId: result.updateId,
-            interruptionCount: result.interruptionCount,
-            stoppingPreviousAttempt: result.interruptionCount > 0,
-            effectiveState: result.effectiveState,
-            replay: result.replay,
-          });
+          return json(
+            mcpMutationReceipt({
+              operation: "session_steer",
+              committed: true,
+              outcome: result.replay ? "replayed" : "updated",
+              changed: !result.replay,
+              resource: {
+                type: "session_system_update",
+                id: result.updateId,
+                state: result.effectiveState,
+              },
+              relatedResources: [{ type: "session", id: sessionId }],
+              timestamp: result.receipt.createdAt.toISOString(),
+              idempotency: { status: result.replay ? "replayed" : "applied" },
+              facts: {
+                interruptionCount: result.interruptionCount,
+                stoppingPreviousAttempt: result.interruptionCount > 0,
+              },
+              updateId: result.updateId,
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         },
       );
     }
@@ -2327,93 +3157,114 @@ function registerVariableSetTools(
       },
     );
   };
-  const setVariableHandler = async ({
-    variableSetId,
-    variableSetName,
-    environmentId,
-    environmentName,
-    name,
-    value,
-  }: {
-    variableSetId?: string | undefined;
-    variableSetName?: string | undefined;
-    environmentId?: string | undefined;
-    environmentName?: string | undefined;
-    name: string;
-    value: string;
-  }) => {
-    const key = requireVariableSetEncryption(deps.settings);
-    const parsedName = VariableSetVariableName.safeParse(name);
-    if (!parsedName.success) {
-      throw new Error("variable set/environment variable names must match ^[A-Z][A-Z0-9_]*$");
-    }
-    assertAllowedVariableSetVariableName(parsedName.data);
-    const targetId = variableSetId ?? environmentId;
-    const targetName = variableSetName ?? environmentName;
-    if ((targetId === undefined) === (targetName === undefined)) {
-      throw new Error(
-        "provide exactly one of variableSetId or variableSetName; deprecated aliases must provide exactly one of environmentId or environmentName",
-      );
-    }
-    const trimmedVariableSetName = targetName?.trim();
-    if (targetName !== undefined && !trimmedVariableSetName) {
-      throw new Error("variable set name is required");
-    }
-    let created = false;
-    let variableSet =
-      targetId !== undefined
-        ? await getVariableSet(deps.db, grant.workspaceId, targetId)
-        : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
-    if (!variableSet && targetId !== undefined) {
-      throw new Error("variable set/environment not found");
-    }
-    if (!variableSet) {
-      if ((await countVariableSets(deps.db, grant.workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
+  const setVariableHandler =
+    (operation: "variable_set_set_variable" | "environment_set_variable") =>
+    async ({
+      variableSetId,
+      variableSetName,
+      environmentId,
+      environmentName,
+      name,
+      value,
+    }: {
+      variableSetId?: string | undefined;
+      variableSetName?: string | undefined;
+      environmentId?: string | undefined;
+      environmentName?: string | undefined;
+      name: string;
+      value: string;
+    }) => {
+      const key = requireVariableSetEncryption(deps.settings);
+      const parsedName = VariableSetVariableName.safeParse(name);
+      if (!parsedName.success) {
+        throw new Error("variable set/environment variable names must match ^[A-Z][A-Z0-9_]*$");
+      }
+      assertAllowedVariableSetVariableName(parsedName.data);
+      const targetId = variableSetId ?? environmentId;
+      const targetName = variableSetName ?? environmentName;
+      if ((targetId === undefined) === (targetName === undefined)) {
         throw new Error(
-          `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
+          "provide exactly one of variableSetId or variableSetName; deprecated aliases must provide exactly one of environmentId or environmentName",
         );
       }
-      variableSet = await createVariableSet(deps.db, {
+      const trimmedVariableSetName = targetName?.trim();
+      if (targetName !== undefined && !trimmedVariableSetName) {
+        throw new Error("variable set name is required");
+      }
+      let created = false;
+      let variableSet =
+        targetId !== undefined
+          ? await getVariableSet(deps.db, grant.workspaceId, targetId)
+          : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
+      if (!variableSet && targetId !== undefined) {
+        throw new Error("variable set/environment not found");
+      }
+      if (!variableSet) {
+        if (
+          (await countVariableSets(deps.db, grant.workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
+        ) {
+          throw new Error(
+            `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
+          );
+        }
+        variableSet = await createVariableSet(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          name: trimmedVariableSetName!,
+        });
+        created = true;
+        await recordVariableSetAuditEvent(deps.db, {
+          grant,
+          action: "variable_set.created",
+          variableSetId: variableSet.id,
+        });
+      }
+      const exists = variableSet.variables.some((variable) => variable.name === parsedName.data);
+      if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
+        throw new Error(
+          `a variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`,
+        );
+      }
+      const metadata = await setVariableSetVariable(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
-        name: trimmedVariableSetName!,
+        variableSetId: variableSet.id,
+        name: parsedName.data,
+        valueEncrypted: encryptVariableSetValue(key, value),
       });
-      created = true;
       await recordVariableSetAuditEvent(deps.db, {
         grant,
-        action: "variable_set.created",
+        action: "variable_set.variable.set",
         variableSetId: variableSet.id,
+        variableName: parsedName.data,
       });
-    }
-    const exists = variableSet.variables.some((variable) => variable.name === parsedName.data);
-    if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
-      throw new Error(`a variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`);
-    }
-    const metadata = await setVariableSetVariable(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      variableSetId: variableSet.id,
-      name: parsedName.data,
-      valueEncrypted: encryptVariableSetValue(key, value),
-    });
-    await recordVariableSetAuditEvent(deps.db, {
-      grant,
-      action: "variable_set.variable.set",
-      variableSetId: variableSet.id,
-      variableName: parsedName.data,
-    });
-    const responseVariableSet = {
-      id: variableSet.id,
-      name: variableSet.name,
-      created,
+      return json(
+        mcpMutationReceipt({
+          operation,
+          committed: true,
+          outcome: exists ? "updated" : "created",
+          changed: true,
+          resource: {
+            type: "variable_set",
+            id: variableSet.id,
+            version: metadata.version,
+            state: "variable_written",
+          },
+          timestamp: metadata.updatedAt,
+          idempotency: { status: "not_supported" },
+          facts: {
+            variableCreated: !exists,
+            variableSetCreated: created,
+            deprecatedAlias: operation === "environment_set_variable",
+          },
+          nextAction: { tool: "variable_set_list", arguments: {} },
+        }),
+      );
     };
-    return json({
-      variableSet: responseVariableSet,
-      environment: responseVariableSet,
-      variable: metadata,
-    });
-  };
-  const registerSetTool = (name: string, description: string): void => {
+  const registerSetTool = (
+    name: "variable_set_set_variable" | "environment_set_variable",
+    description: string,
+  ): void => {
     server.registerTool(
       name,
       {
@@ -2427,7 +3278,7 @@ function registerVariableSetTools(
           value: z4.string().min(1).max(32768),
         },
       },
-      setVariableHandler,
+      setVariableHandler(name),
     );
   };
   if (can("variable-sets:use")) {
@@ -2519,73 +3370,6 @@ function registerGitHubConnectTool(
   );
 }
 
-// TOKEN-BROKER (B1): mint a FRESH short-lived GitHub App installation token for the
-// session's repository resources. The agent calls this to refresh git auth before
-// the current token expires. The MCP server CANNOT write the box, so the tool RETURNS
-// the token as JSON; the agent writes it to the token file (via exec) to refresh
-// GIT_ASKPASS. Same github:use capability gate as github_connect_link.
-function registerGitHubTokenTool(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  sessionId: string,
-  json: JsonResult,
-): void {
-  server.registerTool(
-    "github_token",
-    {
-      description:
-        "Mint a fresh short-lived GitHub token for this session's repositories. Write it to $OPENGENI_GIT_TOKEN_FILE (default $HOME/.opengeni/git-token) to refresh git auth before the current token expires.",
-      inputSchema: {},
-    },
-    async () => {
-      const session = await requireSession(deps.db, grant.workspaceId, sessionId);
-      // Resolve the run-scoped installation + repository ids from THIS session's
-      // repository resources (same shape sandboxEnvironmentForRun mints against). Only
-      // private GitHub-App repos carry the installation/repository ids.
-      const selected = (session.resources ?? []).flatMap((resource) => {
-        if (resource.kind !== "repository") {
-          return [];
-        }
-        const installationId = resource.githubInstallationId;
-        const repositoryId = resource.githubRepositoryId;
-        return typeof installationId === "number" &&
-          installationId > 0 &&
-          typeof repositoryId === "number" &&
-          repositoryId > 0
-          ? [{ installationId, repositoryId }]
-          : [];
-      });
-      if (selected.length === 0) {
-        throw new Error("this session has no GitHub App repository resources to mint a token for");
-      }
-      const installationId = selected[0]!.installationId;
-      if (selected.some((item) => item.installationId !== installationId)) {
-        throw new Error("GitHub App repository resources must belong to one installation");
-      }
-      const repositoryIds = selected.map((item) => item.repositoryId);
-      if (
-        !(await areGitHubRepositoriesAllowedForWorkspace(
-          deps.db,
-          grant.workspaceId,
-          installationId,
-          repositoryIds,
-        ))
-      ) {
-        throw new Error("this workspace no longer authorizes the session's GitHub repositories");
-      }
-      const token = await createGitHubAppInstallationToken(deps.settings, {
-        installationId,
-        repositoryIds,
-      });
-      return json({
-        token,
-        tokenFile: "$OPENGENI_GIT_TOKEN_FILE (default $HOME/.opengeni/git-token)",
-      });
-    },
-  );
-}
-
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's
 // first-party delegated token never carries variable-sets:use, so sandboxed
 // agents calling these MCP tools cannot attach a variable set.
@@ -2610,7 +3394,8 @@ function repositoryWithScheduledTaskResource(
       kind: "repository",
       uri,
       ref: repository.defaultBranch,
-      mountPath: defaultRepositoryMountPath(uri),
+      provider: "github",
+      mountPath: defaultRepositoryMountPath(uri, "github"),
       ...(repository.private
         ? {
             githubInstallationId: repository.installationId,

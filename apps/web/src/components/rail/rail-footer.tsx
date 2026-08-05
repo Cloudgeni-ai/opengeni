@@ -3,6 +3,7 @@
 // a collapse chevron, both with tooltips.
 import { Link } from "@tanstack/react-router";
 import {
+  ChartColumnIcon,
   ChevronsLeftIcon,
   ChevronsRightIcon,
   LockIcon,
@@ -25,6 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
+import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
 function userInitial(label: string): string {
   return (label.trim()[0] ?? "U").toUpperCase();
@@ -34,6 +36,7 @@ export function RailFooter() {
   const rail = useRail();
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
+  const showAnalyticsPreferences = analyticsPreferencesAvailable(context.clientConfig.analytics);
   const displayName =
     context.authSession?.user.name ??
     context.authSession?.user.email ??
@@ -91,6 +94,12 @@ export function RailFooter() {
                 Organization settings
               </Link>
             </DropdownMenuItem>
+            {showAnalyticsPreferences ? (
+              <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
+                <ChartColumnIcon className="size-4" />
+                Analytics preferences
+              </DropdownMenuItem>
+            ) : null}
             {managed ? (
               <DropdownMenuItem
                 variant="destructive"

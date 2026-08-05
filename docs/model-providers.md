@@ -115,6 +115,49 @@ derives both from the provider kind:
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
 
+## Curated AI Gateway models
+
+`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
+models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
+rail; the client never receives the Gateway hostname, upstream model slug, or
+endpoint provider.
+
+| Product | Approved provider order | Supplier input / cache read / output | Conservative retail fallback (+25%) |
+| --- | --- | --- | --- |
+| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.175 / $0.035 / $0.35 per 1M (highest approved route) |
+| Kimi K3 | Baseten → Fireworks | $3 / $0.30 / $15 per 1M on both routes | $3.75 / $0.375 / $18.75 per 1M |
+
+Prices are a reviewed 2026-08-03 snapshot from public Gateway endpoint metadata.
+Managed turns normally debit the exact Gateway-reported inference cost for the
+provider that actually served the response, plus 25%. The static token rates
+above are only a conservative fallback if that response metadata is absent.
+Adding or changing a model requires reviewing the provider order, Responses
+tool/vision transport, cache reporting, pricing, definition, and tests together.
+Kimi's Gateway Responses adapter rejects grouped parallel call/result history.
+At the post-serialization fence, OpenGeni pairs only complete call/result batches
+by `call_id`. This preserves all fields and parallel execution; it does not
+change the model or provider route. Grouped, name-annotated, and Chat Completions
+continuations were probed on 2026-08-03; only the paired Responses shape kept
+full tool continuity plus Gateway route/cost metadata.
+
+Every Gateway request replaces caller routing options with the reviewed provider
+list in both `only` and `order`, sends no model fallback list, and disables OpenAI
+SDK retries. Gateway may advance only through that ordered allowlist. Unknown
+Gateway model slugs fail before network I/O. Keep Gateway account-level rewrite
+rules disabled for the managed key because those rules operate outside the
+request body.
+
+Both models request Gateway automatic caching. Kimi remains catalogued as
+image-capable. OpenGeni verifies finalized attachment bytes and checksums, then
+sends images inline as data URLs through the standard Responses input surface;
+it never gives an endpoint provider an object-store URL.
+
+A workspace admin can instead connect **Vercel AI Gateway** in workspace Settings.
+The key is stored in the encrypted workspace connection table, resolved only in
+the worker, and uses the same curated models and exact routes. These turns have
+`upstreamPayer: workspace` and `metering: external`, so OpenGeni never debits
+credits. The picker hides this rail until the connection is active.
+
 ### Secret-safe definition versions
 
 `definitionVersion` is a deterministic SHA-256 digest of executable model and
@@ -126,6 +169,16 @@ It does not include aliases, display labels, health, entitlement state, concrete
 credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted
 turn. Changing executable provider identity does.
+
+Credential identity is also not a conversation-history compatibility boundary.
+Changing the selected Codex subscription does not rewrite canonical history or
+a saved approval `RunState`. Responses providers receive canonical structured
+items directly. Chat Completions receives one request-local transcript view for
+canonical record types that its SDK converter cannot represent; that view is
+never persisted. Historical `tool_search` calls/outputs remain inert completed
+facts. A session frozen to `remote_v2` compaction admits only Codex models;
+portable sessions may use any supported route whose request adapter can express
+their canonical history.
 
 ## Canonicalization and compatibility
 
@@ -167,6 +220,11 @@ The catalog describes:
 - input and output modalities;
 - SSE, Responses WebSocket, and realtime-audio transports; and
 - standard, priority, and fast latency modes.
+
+GPT-5.6 Sol, Terra, and Luna (including their Codex subscription variants)
+advertise runnable **Fast** mode. Fast requests set the provider service tier,
+use a 2× billing multiplier, and fail the turn if the provider response omits
+or downgrades that tier; OpenGeni never silently falls back to Standard.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
@@ -357,6 +415,30 @@ Pricing is keyed by product model ID. A tiered schedule selects the greatest
 classification comes from the accepted policy: `external` usage must not spend
 OpenGeni model credits; `opengeni_credits` usage follows configured pricing and
 margin rules.
+
+### Price audit (llm-prices canary)
+
+OpenGeni debit authority is the hand-maintained
+`defaultModelPricing` map in `packages/config/src/index.ts` (plus registry /
+`OPENGENI_MODEL_PRICING_JSON` overrides). Do not generate that map from an
+external feed.
+
+When you add a billed model or want to verify list rates are still current:
+
+```bash
+bun run check:model-pricing
+```
+
+That fetches [llm-prices.com](https://www.llm-prices.com/current-v1.json) and
+compares Standard short- and long-context rates for the allow-listed GPT-5.6
+product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
+and update `defaultModelPricing` — not as automatic truth to import.
+
+Not covered by the llm-prices canary: Fast/priority multipliers, Fireworks GLM
+defaults, the provider-pinned Gateway snapshots, and the `marginBps` markup.
+Gateway catalogue tests pin the exact Baseten/Wafer rates and caching claims;
+offline llm-prices coverage uses
+`scripts/fixtures/llm-prices-current-v1.sample.json`.
 
 ## Evidence-bounded Grok 4.5 support
 

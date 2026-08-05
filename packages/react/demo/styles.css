@@ -1,9 +1,9 @@
 @import "tailwindcss";
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
-@import "../styles/index.css";
+@import "@opengeni/react/styles.css";
 
-@source "../src";
+@source "../../../node_modules/@opengeni/react/src";
 
 html,
 body,

@@ -209,6 +209,78 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("coalesces simultaneous identical session projection reads", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input) => {
+        requests += 1;
+        await gate;
+        return jsonResponse(
+          String(input).endsWith("/lineage")
+            ? { ancestors: [], children: [] }
+            : { id: SESSION_ID, workspaceId: WORKSPACE_ID },
+        );
+      },
+    });
+    const sessionReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+    ];
+    const lineageReads = [
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+    ];
+    const queueReads = [
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+    ];
+    const goalReads = [
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(4);
+    release();
+    await Promise.all([...sessionReads, ...lineageReads, ...queueReads, ...goalReads]);
+    expect(requests).toBe(4);
+  });
+
+  test("queues one fresh session read behind an existing projection read", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await gate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+    const initial = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const freshReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    release();
+    expect(((await initial) as Session & { request: number }).request).toBe(1);
+    const reconciled = await Promise.all(freshReads);
+    expect(requests).toBe(2);
+    expect(reconciled.map((session) => (session as Session & { request: number }).request)).toEqual(
+      [2, 2],
+    );
+  });
+
   test("updates an existing session MCP approval policy through the dedicated route", async () => {
     const response = {
       server: {
@@ -451,11 +523,15 @@ describe("OpenGeniClient", () => {
     });
   });
 
-  test("pause uses atomic control while approval posts a typed event", async () => {
+  test("pause and terminal cancel use atomic control while approval posts a typed event", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ event: makeEvent(5, "user.pause") }, 202),
     );
     await client.pauseSession(WORKSPACE_ID, SESSION_ID, { reason: "pause" });
+    await client.cancelSession(WORKSPACE_ID, SESSION_ID, {
+      reason: "host deleted",
+      clientEventId: "cancel-1",
+    });
     await client.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, {
       approvalId: "ap-1",
       decision: "approve",
@@ -466,6 +542,11 @@ describe("OpenGeniClient", () => {
     });
     expect(JSON.parse(requests[0]!.body!).clientEventId).toEqual(expect.any(String));
     expect(JSON.parse(requests[1]!.body!)).toEqual({
+      action: "cancel",
+      reason: "host deleted",
+      clientEventId: "cancel-1",
+    });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
     });
@@ -680,6 +761,35 @@ describe("OpenGeniClient", () => {
       outcomeUnknown: false,
       body,
       message: "OpenGeni is temporarily unavailable — retry. Reference: api-safe-503.",
+    });
+  });
+
+  test("preserves an actionable canonical 503 message instead of masking it as retryable", async () => {
+    const body = JSON.stringify({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message:
+          "X connection is not configured. An operator must add X OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON.",
+        retryable: false,
+        requestId: "social-oauth-config-missing",
+        details: { oauthReason: "operator_oauth_app_missing", provider: "x" },
+      },
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 503, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: false,
+      correlationId: "social-oauth-config-missing",
+      outcomeUnknown: false,
+      details: { oauthReason: "operator_oauth_app_missing", provider: "x" },
+      message:
+        "X connection is not configured. An operator must add X OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON. Reference: social-oauth-config-missing.",
     });
   });
 

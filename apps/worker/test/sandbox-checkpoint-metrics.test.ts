@@ -5,6 +5,8 @@ import {
   recordSandboxCheckpointArtifactGauges,
   recordSandboxCheckpointArtifactOutcome,
   recordSandboxDeadlineRotationsRequested,
+  recordSandboxInventoryProjectionFailure,
+  recordSandboxInventoryProjectionSuccess,
   recordSandboxRotationBacklogGauges,
 } from "../src/observability-metrics";
 
@@ -76,5 +78,23 @@ describe("sandbox checkpoint and deadline metrics", () => {
       /opengeni_sandbox_checkpoint_artifact_operations_total\{outcome="deleted"/,
     );
     expect(metrics).toMatch(/opengeni_sandbox_deadline_rotations_requested_total\{[^}]*\} 2\b/);
+  });
+
+  test("publishes bounded per-domain projection freshness and failures", async () => {
+    const observability = workerObservability();
+    recordSandboxInventoryProjectionSuccess(observability, "leases", 1_700_000_000);
+    recordSandboxInventoryProjectionSuccess(observability, "checkpoint_artifacts", 1_700_000_001);
+    recordSandboxInventoryProjectionFailure(observability, "leases");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_inventory_refresh_timestamp_seconds\{[^}]*domain="leases"[^}]*\} 1700000000\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_inventory_refresh_timestamp_seconds\{[^}]*domain="checkpoint_artifacts"[^}]*\} 1700000001\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_inventory_refresh_failures_total\{[^}]*domain="leases"[^}]*\} 1\b/,
+    );
   });
 });

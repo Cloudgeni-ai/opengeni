@@ -115,6 +115,43 @@ function toMachinePath(p: string | undefined, workingDir: string): string {
   return base ? `${base}/${p}` : p;
 }
 
+/**
+ * Builds the exact argv for an explicitly selected shell.
+ *
+ * The self-hosted wire already supports direct argv (`ExecRequest.shell=false`),
+ * which is the compatibility-safe way to honor the SDK shell tool's `shell` and
+ * `login` arguments: every enrolled agent version understands this shape. Sending
+ * `{ command: [cmd], shell: true }` instead delegates shell selection to the
+ * machine's ambient `$SHELL`/`ComSpec` and silently discards the caller's choice.
+ *
+ * `login` maps to profile/login semantics where the shell family exposes them.
+ * Windows `cmd.exe` has no login-shell mode. PowerShell profile loading is the
+ * closest equivalent, so non-login calls use `-NoProfile` while login calls do
+ * not. Other shells use the common POSIX `-l -c` / `-c` contract.
+ */
+function explicitShellArgv(shell: string, command: string, login: boolean): string[] {
+  const leaf = shell.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? "";
+  if (leaf === "cmd" || leaf === "cmd.exe") {
+    return [shell, "/D", "/S", "/C", command];
+  }
+  if (
+    leaf === "powershell" ||
+    leaf === "powershell.exe" ||
+    leaf === "pwsh" ||
+    leaf === "pwsh.exe"
+  ) {
+    return [
+      shell,
+      "-NoLogo",
+      ...(!login ? ["-NoProfile"] : []),
+      "-NonInteractive",
+      "-Command",
+      command,
+    ];
+  }
+  return [shell, ...(login ? ["-l"] : []), "-c", command];
+}
+
 // ── The agent-turn provided-session contract (@openai/agents-core) ──────────
 // When the routing proxy resolves a selfhosted ACTIVE backend, the @openai/agents
 // agent loop binds its filesystem/shell/skills capabilities to THIS session and
@@ -589,11 +626,15 @@ export class SelfhostedSession {
     // wire carried timeoutMs=0 (unbounded) while the caller stopped waiting after
     // ~30s, leaving accepted work invisible and able to starve control liveness.
     const executionTimeoutMs = this.effectiveExecDeadlineMs;
+    const requestedShell = args.shell?.trim();
     const execReq: ExecRequest = {
-      // The agent does NOT shell-interpret unless `shell` — Channel-A passes a
-      // single shell command string, so run it through the platform shell.
-      command: [args.cmd],
-      shell: true,
+      // An explicit shell is encoded as direct argv so every agent version honors
+      // it. With no explicit shell, preserve the existing machine-owned default
+      // shell behavior byte-for-byte.
+      command: requestedShell
+        ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
+        : [args.cmd],
+      shell: !requestedShell,
       // Rewrite a virtual-root cwd ("/workspace[/…]") onto the machine's frame —
       // an absolute "/workspace" would ENOENT on a real machine (see
       // SELFHOSTED_VIRTUAL_ROOT). Empty → the session workingDir (itself "" by
@@ -734,8 +775,8 @@ export class SelfhostedSession {
    *  after a newline when there is partial output (a timed-out result is already not
    *  cleanly parseable — silence is worse than an explanatory suffix). The structured
    *  `exec()` result is left untouched for the Channel-A parsers. */
-  async execCommand(args: { cmd: string; workdir?: string; runAs?: string }): Promise<string> {
-    const result = await this.exec({ cmd: args.cmd, workdir: args.workdir, runAs: args.runAs });
+  async execCommand(args: SelfhostedExecArgs): Promise<string> {
+    const result = await this.exec(args);
     if (result.timedOut) {
       const hint = execDeadlineHint(Math.round(this.effectiveExecDeadlineMs / 1000));
       return result.output ? `${result.output}\n${hint}` : hint;
@@ -807,8 +848,9 @@ export class SelfhostedSession {
    *  filesystem and is prepared by the agent itself, so there is nothing to stage.
    *  Present (not absent) so the SDK's provided-session manifest apply path — which
    *  requires `applyManifest()` OR `materializeEntry()` when the agent declares
-   *  entries — is satisfied without error. The selfhosted manifest declares no
-   *  entries, so in practice this is never invoked with a real entry. */
+   *  entries — is satisfied without error. A session swapped from a managed
+   *  sandbox can still present managed-only manifest entries here; they remain
+   *  intentionally unstaged on the user-owned machine. */
   async materializeEntry(_args: { path: string; entry: unknown; runAs?: string }): Promise<void> {
     return;
   }

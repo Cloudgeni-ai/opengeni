@@ -7,6 +7,7 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { usePageLiveActivity } from "./internal";
 
 // "on-demand" is the boxless-benign resting state: the lease is cold and NOTHING
 // asked to warm a box (no viewer/consent action, no files-tab warm). Under lazy
@@ -157,6 +158,8 @@ export function useSessionCapabilities(
 ): UseSessionCapabilitiesResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const pageLive = usePageLiveActivity();
+  const lifecycleEnabled = enabled && pageLive;
   const attachDesktop = options.attachDesktop ?? false;
   const attachTerminal = options.attachTerminal ?? false;
   const attachFiles = options.attachFiles ?? false;
@@ -201,21 +204,21 @@ export function useSessionCapabilities(
       epochRef.current = 0;
       viewerIdRef.current = null;
     }
-    if (!enabled || !sessionId) {
+    if (!lifecycleEnabled || !sessionId) {
       setState("idle");
       setCapabilities(null);
       return;
     }
     let cancelled = false;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
-    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
     let localViewerId: string | null = null;
     const requestAbort = new AbortController();
     const startedAt = Date.now();
 
     const clearTimers = () => {
       if (pollTimer !== null) clearTimeout(pollTimer);
-      if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
+      if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
       pollTimer = null;
       heartbeatTimer = null;
     };
@@ -231,27 +234,35 @@ export function useSessionCapabilities(
       if (!localViewerId || heartbeatTimer !== null) return;
       const intervalMs =
         caps.viewerHeartbeatIntervalMs > 0 ? caps.viewerHeartbeatIntervalMs : 30_000;
-      heartbeatTimer = setInterval(() => {
+      const schedule = () => {
         if (cancelled || !localViewerId) return;
-        void client
-          .heartbeatViewer(workspaceId, sessionId, localViewerId, { leaseEpoch: epochRef.current })
-          .then((res) => {
-            // alive:false ⇒ the holder was reaped or the epoch moved under us;
-            // re-negotiate to re-acquire against the new owner.
-            if (!res.alive && !cancelled) {
-              renegotiate();
-            }
-          })
-          .catch((cause) => {
-            if (cancelled) return;
-            if (
-              cause instanceof OpenGeniApiError &&
-              (cause.status === 409 || cause.status === 410)
-            ) {
-              renegotiate();
-            }
-          });
-      }, intervalMs);
+        heartbeatTimer = setTimeout(() => {
+          heartbeatTimer = null;
+          if (cancelled || !localViewerId) return;
+          void client
+            .heartbeatViewer(workspaceId, sessionId, localViewerId, {
+              leaseEpoch: epochRef.current,
+            })
+            .then((res) => {
+              // alive:false ⇒ the holder was reaped or the epoch moved under us;
+              // re-negotiate to re-acquire against the new owner.
+              if (!res.alive && !cancelled) {
+                renegotiate();
+              }
+            })
+            .catch((cause) => {
+              if (cancelled) return;
+              if (
+                cause instanceof OpenGeniApiError &&
+                (cause.status === 409 || cause.status === 410)
+              ) {
+                renegotiate();
+              }
+            })
+            .finally(schedule);
+        }, intervalMs);
+      };
+      schedule();
     };
 
     const pollUntilWarm = () => {
@@ -455,7 +466,7 @@ export function useSessionCapabilities(
     client,
     workspaceId,
     sessionId,
-    enabled,
+    lifecycleEnabled,
     attachDesktop,
     attachTerminal,
     attachFiles,

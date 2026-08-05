@@ -59,6 +59,7 @@ import { appendAndPublishEvents } from "@opengeni/events";
 import {
   signDelegatedAccessToken,
   type AccessContext,
+  type McpMutationReceiptType,
   type Permission,
   type SessionEvent,
   type SessionStatus,
@@ -901,16 +902,17 @@ describe("API component integration", () => {
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
 
-    const setGoal = await callMcpTool<{
-      id: string;
-      status: string;
-      version: number;
-    }>(mcp, "goal_set", {
+    const setGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_set", {
       text: "keep CI green",
       successCriteria: "main pipeline passes",
     });
-    expect(setGoal.status).toBe("active");
-    expect(setGoal.version).toBe(1);
+    expect(setGoal).toMatchObject({
+      receiptVersion: "mcp-mutation-receipt.v1",
+      outcome: "created",
+      changed: true,
+      resource: { state: "active", version: 1 },
+    });
+    expect(JSON.stringify(setGoal)).not.toContain("main pipeline passes");
 
     const updated = await callMcpTool<{
       version: number;
@@ -926,24 +928,26 @@ describe("API component integration", () => {
     expect(updated.operationId).toBeTruthy();
     expect(updated.replay).toBe(false);
 
-    const pausedGoal = await callMcpTool<{
-      status: string;
-      pausedReason: string;
-    }>(mcp, "goal_pause", { rationale: "waiting on upstream fix" });
-    expect(pausedGoal.status).toBe("paused");
-    expect(pausedGoal.pausedReason).toBe("agent");
+    const pausedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_pause", {
+      rationale: "waiting on upstream fix",
+    });
+    expect(pausedGoal.resource.state).toBe("paused");
+    expect(JSON.stringify(pausedGoal)).not.toContain("waiting on upstream fix");
 
-    const replacedGoal = await callMcpTool<{ status: string }>(mcp, "goal_set", {
+    const replacedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_set", {
       text: "upstream fixed; finish the job",
     });
-    expect(replacedGoal.status).toBe("active");
+    expect(replacedGoal).toMatchObject({
+      outcome: "updated",
+      resource: { state: "active" },
+      facts: { replaced: true },
+    });
 
-    const completedGoal = await callMcpTool<{
-      status: string;
-      evidence: string;
-    }>(mcp, "goal_complete", { evidence: "CI green for 3 consecutive runs" });
-    expect(completedGoal.status).toBe("completed");
-    expect(completedGoal.evidence).toBe("CI green for 3 consecutive runs");
+    const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
+      evidence: "CI green for 3 consecutive runs",
+    });
+    expect(completedGoal.resource.state).toBe("completed");
+    expect(JSON.stringify(completedGoal)).not.toContain("CI green for 3 consecutive runs");
     await expect(callMcpTool(mcp, "goal_pause", { rationale: "too late" })).rejects.toThrow(
       "completed",
     );
@@ -3533,7 +3537,7 @@ describe("API component integration", () => {
     });
     const workspaceId = await defaultWorkspaceId(app);
     const suffix = crypto.randomUUID().slice(0, 8);
-    const imagePackManifest = (id: string, image: string) => ({
+    const imagePackManifest = (id: string, image: string, modalImageId?: string) => ({
       id,
       name: `Pack ${id}`,
       description: "Pack with a pack-scoped sandbox image.",
@@ -3541,6 +3545,7 @@ describe("API component integration", () => {
       category: "infrastructure",
       version: "0.1.0",
       sandboxImage: image,
+      ...(modalImageId ? { sandboxProviderImages: { modal: { imageId: modalImageId } } } : {}),
       skills: [
         {
           name: "infra-ops",
@@ -3555,16 +3560,24 @@ describe("API component integration", () => {
           ],
         },
       ],
+      metadata: {
+        sandboxImage: "example.invalid/spoofed:latest",
+        sandboxProviderImages: { modal: { imageId: "im-abcdefghijklmnopqrstuv" } },
+        skills: ["spoofed-skill"],
+      },
     });
     const packA = `img-a-${suffix}`;
     const packB = `img-b-${suffix}`;
-    for (const [packId, image] of [
-      [packA, "example.com/sandbox-a@sha256:aaaa"],
-      [packB, "example.com/sandbox-b@sha256:bbbb"],
+    const packAImage =
+      "example.com/sandbox-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const packAModalImageId = "im-1234567890123456789012";
+    for (const [packId, image, modalImageId] of [
+      [packA, packAImage, packAModalImageId],
+      [packB, "example.com/sandbox-b@sha256:bbbb", undefined],
     ] as const) {
       const registered = await app.request(workspacePath(workspaceId, "/packs"), {
         method: "POST",
-        body: JSON.stringify(imagePackManifest(packId, image)),
+        body: JSON.stringify(imagePackManifest(packId, image, modalImageId)),
         headers: { "content-type": "application/json" },
       });
       expect(registered.status).toBe(201);
@@ -3584,8 +3597,12 @@ describe("API component integration", () => {
       items: Array<{ id: string; metadata: Record<string, unknown> }>;
     };
     const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
-    expect(packAItem?.metadata.sandboxImage).toBe("example.com/sandbox-a@sha256:aaaa");
+    expect(packAItem?.metadata.sandboxImage).toBe(packAImage);
+    expect(packAItem?.metadata.sandboxProviderImages).toEqual({
+      modal: { imageId: packAModalImageId },
+    });
     expect(packAItem?.metadata.skills).toEqual(["infra-ops"]);
+    expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
 
     // A second image-declaring pack cannot be enabled, on either enable path.
@@ -3722,22 +3739,128 @@ describe("API component integration", () => {
     ).toBe(false);
 
     workflow.syncError = null;
-    const task = await callMcpTool<{ id: string }>(mcp, "scheduled_tasks_create", {
+    const taskReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
       name: `mcp-rollback-${crypto.randomUUID()}`,
       schedule: { type: "interval", everySeconds: 3600 },
       agentConfig: { prompt: "inspect" },
     });
+    const taskId = taskReceipt.resource.id;
+    expect(taskReceipt).toMatchObject({
+      operation: "scheduled_tasks_create",
+      outcome: "created",
+      changed: true,
+      resource: { type: "scheduled_task", id: taskId, state: "active" },
+    });
 
     workflow.syncError = new Error("temporal unavailable");
-    await expect(callMcpTool(mcp, "scheduled_tasks_pause", { id: task.id })).rejects.toThrow(
+    await expect(callMcpTool(mcp, "scheduled_tasks_pause", { id: taskId })).rejects.toThrow(
       "temporal unavailable",
     );
-    expect((await getScheduledTask(dbClient.db, grant.workspaceId, task.id))?.status).toBe(
-      "active",
-    );
+    expect((await getScheduledTask(dbClient.db, grant.workspaceId, taskId))?.status).toBe("active");
     await expect(
       callMcpTool(mcp, "scheduled_tasks_resume", { id: crypto.randomUUID() }),
     ).rejects.toThrow("Scheduled task not found");
+  });
+
+  test("returns compact receipts across the MCP scheduled task lifecycle", async () => {
+    const workflowClient = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const mcp = buildOpenGeniMcpServer(
+      {
+        settings: testSettings({ databaseUrl: services.databaseUrl }),
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient,
+        objectStorage: null,
+        githubStateSecret: "test-state-secret",
+        documentIndexer: { indexDocument: async () => undefined },
+        getDocumentServices: () => {
+          throw new Error("document services are not used by scheduled task lifecycle tests");
+        },
+        resumeBoxById: fakeResumeBoxById,
+      },
+      grant,
+    );
+    const prompt = `scheduled receipt prompt ${crypto.randomUUID()}`;
+    const originalName = `scheduled-receipt-${crypto.randomUUID()}`;
+    const created = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
+      name: originalName,
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: { prompt },
+    });
+    expect(created).toMatchObject({
+      outcome: "created",
+      changed: true,
+      resource: { type: "scheduled_task", state: "active" },
+    });
+    expect(JSON.stringify(created)).not.toContain(prompt);
+    expect(JSON.stringify(created)).not.toContain(originalName);
+
+    const summary = await callMcpTool<{
+      id: string;
+      configuration: { promptBytes: number };
+    }>(mcp, "scheduled_tasks_get", { id: created.resource.id });
+    expect(summary).toMatchObject({
+      id: created.resource.id,
+      configuration: { promptBytes: Buffer.byteLength(prompt, "utf8") },
+    });
+    expect(JSON.stringify(summary)).not.toContain(prompt);
+
+    const detail = await callMcpTool<{
+      entity: { agentConfig: { prompt: string } };
+      detailProjection: { bounded: boolean };
+    }>(mcp, "scheduled_tasks_get", { id: created.resource.id, includeEntity: true });
+    expect(detail.entity.agentConfig.prompt).toBe(prompt);
+    expect(detail.detailProjection.bounded).toBe(true);
+
+    const updatedName = `scheduled-updated-${crypto.randomUUID()}`;
+    const updated = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_update", {
+      id: created.resource.id,
+      name: updatedName,
+    });
+    expect(updated).toMatchObject({ outcome: "updated", changed: true });
+    expect(JSON.stringify(updated)).not.toContain(updatedName);
+    const unchanged = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_update", {
+      id: created.resource.id,
+      name: updatedName,
+    });
+    expect(unchanged).toMatchObject({ outcome: "unchanged", changed: false });
+
+    const paused = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_pause", {
+      id: created.resource.id,
+    });
+    expect(paused).toMatchObject({ outcome: "updated", resource: { state: "paused" } });
+    const alreadyPaused = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_pause", {
+      id: created.resource.id,
+    });
+    expect(alreadyPaused).toMatchObject({ outcome: "unchanged", changed: false });
+
+    const resumed = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_resume", {
+      id: created.resource.id,
+    });
+    expect(resumed).toMatchObject({ outcome: "updated", resource: { state: "active" } });
+
+    const triggerId = `scheduled-receipt-trigger-${crypto.randomUUID()}`;
+    const triggered = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_trigger", {
+      id: created.resource.id,
+      triggerId,
+    });
+    expect(triggered).toMatchObject({
+      outcome: "triggered",
+      changed: true,
+      idempotency: { status: "unknown" },
+    });
+    expect(workflowClient.triggers).toHaveLength(1);
+
+    const deleted = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_delete", {
+      id: created.resource.id,
+    });
+    expect(deleted).toMatchObject({
+      outcome: "deleted",
+      changed: true,
+      resource: { id: created.resource.id, state: "deleted" },
+    });
+    expect(await getScheduledTask(dbClient.db, grant.workspaceId, created.resource.id)).toBeNull();
   });
 
   test("MCP scheduled task tools enforce the same billing limits as REST routes", async () => {
@@ -3759,7 +3882,7 @@ describe("API component integration", () => {
       },
       grant,
     );
-    const task = await callMcpTool<{ id: string }>(allowedMcp, "scheduled_tasks_create", {
+    const task = await callMcpTool<McpMutationReceiptType>(allowedMcp, "scheduled_tasks_create", {
       name: `mcp-limit-trigger-${crypto.randomUUID()}`,
       schedule: { type: "interval", everySeconds: 3600 },
       agentConfig: { prompt: "inspect" },
@@ -3805,8 +3928,8 @@ describe("API component integration", () => {
       quantity: 1,
       unit: "run",
       sourceResourceType: "test",
-      sourceResourceId: task.id,
-      idempotencyKey: `test:mcp-agent-run-cap:${task.id}`,
+      sourceResourceId: task.resource.id,
+      idempotencyKey: `test:mcp-agent-run-cap:${task.resource.id}`,
     });
 
     const blockedTriggerMcp = buildOpenGeniMcpServer(
@@ -3833,7 +3956,7 @@ describe("API component integration", () => {
     );
     await expect(
       callMcpTool(blockedTriggerMcp, "scheduled_tasks_trigger", {
-        id: task.id,
+        id: task.resource.id,
       }),
     ).rejects.toThrow("monthly agent run limit reached");
     expect(workflow.triggers).toHaveLength(0);
@@ -4916,7 +5039,7 @@ describe("API component integration", () => {
       ...initialWorkspaceGrant!,
       workspaceId: secondWorkspace.id,
     };
-    const tokenMcp = buildOpenGeniMcpServer(
+    const staleTokenMcp = buildOpenGeniMcpServer(
       {
         settings,
         db: dbClient.db,
@@ -4927,7 +5050,7 @@ describe("API component integration", () => {
         githubAppApi,
         documentIndexer: { indexDocument: async () => undefined },
         getDocumentServices: () => {
-          throw new Error("document services are not used by GitHub token tests");
+          throw new Error("document services are not used by the GitHub token retirement test");
         },
         resumeBoxById: fakeResumeBoxById,
       },
@@ -4936,25 +5059,9 @@ describe("API component integration", () => {
         metadata: { sessionId: connected.id, firstPartyMcpTools: ["github_token"] },
       },
     );
-    const originalFetch = globalThis.fetch;
-    let tokenRequestBody: unknown = null;
-    globalThis.fetch = (async (input, init) => {
-      expect(String(input)).toBe(
-        `https://api.github.com/app/installations/${installationId}/access_tokens`,
-      );
-      tokenRequestBody = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ token: "ghs_scoped_test" }), {
-        status: 201,
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
-    try {
-      const token = await callMcpTool<{ token: string }>(tokenMcp, "github_token", {});
-      expect(token.token).toBe("ghs_scoped_test");
-      expect(tokenRequestBody).toEqual({ repository_ids: [adminRepository.id] });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    await expect(callMcpTool(staleTokenMcp, "github_token", {})).rejects.toThrow(
+      "MCP tool not registered: github_token",
+    );
   });
 
   test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
@@ -5073,7 +5180,9 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const workspaceId = await defaultWorkspaceId(app);
+    const access = await defaultAccessContext(app);
+    const workspaceId = access.defaultWorkspaceId!;
+    const accountId = access.defaultAccountId!;
     const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
       method: "POST",
       body: JSON.stringify({
@@ -5217,6 +5326,7 @@ describe("API component integration", () => {
       const fallbackResults = await searchDocuments(
         dbClient.db,
         {
+          accountId,
           workspaceId,
           query: "network policy",
           baseIds: [base.id],
@@ -5727,7 +5837,9 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const workspaceId = await defaultWorkspaceId(app);
+    const access = await defaultAccessContext(app);
+    const workspaceId = access.defaultWorkspaceId!;
+    const accountId = access.defaultAccountId!;
 
     // Private, agent-blocked text drop: no base, no metadata — the server
     // creates the Default base, and heuristic curation names + summarizes it.
@@ -5785,6 +5897,7 @@ describe("API component integration", () => {
 
     // The agent retrieval surface never sees it: private AND agent-blocked.
     const agentBlocked = await searchDocuments(dbClient.db, {
+      accountId,
       workspaceId,
       query: "contract renews",
       mode: "keyword",
@@ -5809,6 +5922,7 @@ describe("API component integration", () => {
     expect(publicDrop.visibility).toBe("workspace");
     expect(publicDrop.agentAccess).toBe(true);
     const agentVisible = await searchDocuments(dbClient.db, {
+      accountId,
       workspaceId,
       query: "onboarding checklist",
       mode: "keyword",
@@ -5941,6 +6055,71 @@ describe("API component integration", () => {
     };
     const path = (suffix: string) => workspacePath(ownerGrant.workspaceId, suffix);
 
+    const deniedOrganizationDrop = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "Workspace authority cannot publish this account-wide.",
+        authorityKind: "organization",
+      }),
+    });
+    expect(deniedOrganizationDrop.status).toBe(403);
+    expect(await deniedOrganizationDrop.text()).toContain("missing permission: account:admin");
+
+    const accountAdminToken = await signDelegatedAccessToken(delegationSecret, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      subjectId: ownerGrant.subjectId,
+      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+    const organizationDrop = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accountAdminToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        text: "Account administrators can publish this organization runbook.",
+        authorityKind: "organization",
+      }),
+    });
+    expect(organizationDrop.status).toBe(201);
+    const organizationDocument = (await organizationDrop.json()) as {
+      id: string;
+      baseId: string;
+      fileId: string;
+      authorityKind: string;
+      authorityWorkspaceId: string | null;
+      authoritySubjectId: string | null;
+    };
+    expect(organizationDocument).toMatchObject({
+      authorityKind: "organization",
+      authorityWorkspaceId: null,
+      authoritySubjectId: null,
+    });
+
+    const deniedOrganizationReadd = await app.request(
+      path(`/document-bases/${organizationDocument.baseId}/documents`),
+      {
+        method: "POST",
+        headers: { ...otherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({
+          fileId: organizationDocument.fileId,
+          title: "Workspace authority must not rewrite organization metadata",
+        }),
+      },
+    );
+    expect(deniedOrganizationReadd.status).toBe(403);
+    expect(await deniedOrganizationReadd.text()).toContain("missing permission: account:admin");
+    const deniedOrganizationDelete = await app.request(
+      path(`/document-bases/${organizationDocument.baseId}/documents/${organizationDocument.id}`),
+      { method: "DELETE", headers: otherHeaders },
+    );
+    expect(deniedOrganizationDelete.status).toBe(403);
+    expect(await deniedOrganizationDelete.text()).toContain("missing permission: account:admin");
+
     const dropResponse = await app.request(path("/knowledge/drops"), {
       method: "POST",
       headers: { ...ownerHeaders, "content-type": "application/json" },
@@ -5966,14 +6145,16 @@ describe("API component integration", () => {
       headers: ownerHeaders,
     });
     expect(ownerList.status).toBe(200);
-    expect((await ownerList.json()) as Array<{ id: string }>).toEqual([
-      expect.objectContaining({ id: drop.id }),
-    ]);
+    expect(
+      ((await ownerList.json()) as Array<{ id: string }>).map((document) => document.id).sort(),
+    ).toEqual([organizationDocument.id, drop.id].sort());
     const otherList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
       headers: otherHeaders,
     });
     expect(otherList.status).toBe(200);
-    expect(await otherList.json()).toEqual([]);
+    expect((await otherList.json()) as Array<{ id: string }>).toEqual([
+      expect.objectContaining({ id: organizationDocument.id }),
+    ]);
 
     const ownerSearch = await app.request(path("/knowledge/search"), {
       method: "POST",
@@ -5994,6 +6175,7 @@ describe("API component integration", () => {
     expect(await otherSearch.json()).toEqual({ results: [] });
 
     const ownerAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
       workspaceId: ownerGrant.workspaceId,
       query: "contract details",
       mode: "keyword",
@@ -6001,6 +6183,7 @@ describe("API component integration", () => {
     });
     expect(ownerAgentResults.map((result) => result.documentId)).toContain(drop.id);
     const otherAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
       workspaceId: ownerGrant.workspaceId,
       query: "contract details",
       mode: "keyword",
@@ -6008,6 +6191,7 @@ describe("API component integration", () => {
     });
     expect(otherAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
     const anonymousAgentResults = await searchDocuments(dbClient.db, {
+      accountId: ownerGrant.accountId,
       workspaceId: ownerGrant.workspaceId,
       query: "contract details",
       mode: "keyword",
@@ -6017,13 +6201,13 @@ describe("API component integration", () => {
     const chunkId = ownerAgentResults.find((result) => result.documentId === drop.id)?.chunkId;
     expect(chunkId).toBeTruthy();
     await expect(
-      getDocumentChunk(dbClient.db, ownerGrant.workspaceId, chunkId!, {
+      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
         agentOnly: true,
         viewerSubjectId: ownerGrant.subjectId,
       }),
     ).resolves.toMatchObject({ documentId: drop.id });
     await expect(
-      getDocumentChunk(dbClient.db, ownerGrant.workspaceId, chunkId!, {
+      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
         agentOnly: true,
         viewerSubjectId: otherSubject,
       }),
@@ -6478,10 +6662,26 @@ describe("API component integration", () => {
             createdBySessionId: forgedSession.id,
           }),
         ),
-      ) as { text: string; createdBySessionId: string | null };
-      expect(proposedMemory.text).toBe("Private endpoint MCP memory should be reviewed.");
-      expect(proposedMemory.createdBySessionId).toBe(serverSession.id);
-      expect(proposedMemory.createdBySessionId).not.toBe(forgedSession.id);
+      ) as McpMutationReceiptType;
+      expect(proposedMemory).toMatchObject({
+        operation: "memory_propose",
+        outcome: "created",
+        changed: true,
+        resource: { type: "knowledge_memory", state: "proposed" },
+      });
+      expect(JSON.stringify(proposedMemory)).not.toContain(
+        "Private endpoint MCP memory should be reviewed.",
+      );
+      expect(
+        await getKnowledgeMemory(dbClient.db, workspaceId, proposedMemory.resource.id),
+      ).toMatchObject({
+        text: "Private endpoint MCP memory should be reviewed.",
+        createdBySessionId: serverSession.id,
+      });
+      expect(
+        (await getKnowledgeMemory(dbClient.db, workspaceId, proposedMemory.resource.id))
+          ?.createdBySessionId,
+      ).not.toBe(forgedSession.id);
 
       const downloadResult = await filesServer.callTool("files__files_get_download_url", {
         fileId: upload.fileId,
@@ -6630,26 +6830,20 @@ describe("API component integration", () => {
             confidence: 0.91,
           }),
         ),
-      ) as {
-        memory: {
-          id: string;
-          status: string;
-          kind: string;
-          createdBySessionId: string | null;
-          metadata: Record<string, unknown>;
-        };
-        deduped: boolean;
-      };
-      expect(saved.deduped).toBe(false);
-      expect(saved.memory).toMatchObject({
+      ) as McpMutationReceiptType;
+      expect(saved).toMatchObject({
+        outcome: "created",
+        changed: true,
+        resource: { type: "knowledge_memory", state: "active" },
+        facts: { deduped: false },
+      });
+      expect(JSON.stringify(saved)).not.toContain(
+        "Staging deploys from main only, via opengeni-ops.",
+      );
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.resource.id)).toMatchObject({
+        id: saved.resource.id,
         status: "active",
         kind: "procedural",
-        createdBySessionId: session.id,
-        metadata: { origin: "agent" },
-      });
-      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.memory.id)).toMatchObject({
-        id: saved.memory.id,
-        status: "active",
         createdBySessionId: session.id,
         metadata: { origin: "agent" },
       });
@@ -6659,7 +6853,7 @@ describe("API component integration", () => {
       );
       expect(saveEvents).toHaveLength(1);
       expect(saveEvents[0]?.payload).toMatchObject({
-        memoryId: saved.memory.id,
+        memoryId: saved.resource.id,
         kind: "procedural",
         preview: "Staging deploys from main only, via opengeni-ops.",
       });
@@ -6681,61 +6875,63 @@ describe("API component integration", () => {
           matchType: string;
         }>;
       };
-      expect(search.results[0]?.memory.id).toBe(saved.memory.id);
+      expect(search.results[0]?.memory.id).toBe(saved.resource.id);
       expect(search.results[0]!.score).toBeGreaterThan(0);
       expect(search.results[0]!.memory.usageCount).toBe(1);
 
       const superseded = JSON.parse(
         mcpText(
           await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
-            id: saved.memory.id.slice(0, 8),
+            id: saved.resource.id.slice(0, 8),
             reason: "Deployment branch changed",
             replacement_text: "Staging deploys from release only, via opengeni-ops.",
           }),
         ),
-      ) as {
-        action: string;
-        memory: { id: string; status: string };
-        replacement: { id: string; status: string } | null;
-      };
-      expect(superseded.action).toBe("superseded");
-      expect(superseded.memory.id).toBe(saved.memory.id);
-      expect(superseded.replacement?.status).toBe("active");
-      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.memory.id)).toMatchObject({
+      ) as McpMutationReceiptType;
+      expect(superseded).toMatchObject({
+        outcome: "updated",
+        resource: { id: saved.resource.id, state: "superseded" },
+        facts: { correctionAction: "superseded" },
+      });
+      const replacementId = superseded.relatedResources?.[0]?.id;
+      expect(typeof replacementId).toBe("string");
+      expect(superseded.relatedResources?.[0]?.state).toBe("active");
+      expect(JSON.stringify(superseded)).not.toContain(
+        "Staging deploys from release only, via opengeni-ops.",
+      );
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.resource.id)).toMatchObject({
         status: "superseded",
-        supersededById: superseded.replacement!.id,
+        supersededById: replacementId,
       });
 
       const archived = JSON.parse(
         mcpText(
           await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
-            id: superseded.replacement!.id,
+            id: replacementId!,
             reason: "Staging deploy process moved into a runbook.",
           }),
         ),
-      ) as {
-        action: string;
-        memory: { id: string; status: string };
-        replacement: null;
-      };
-      expect(archived.action).toBe("archived");
-      expect(archived.memory.status).toBe("archived");
-      expect(
-        await getKnowledgeMemory(dbClient.db, workspaceId, superseded.replacement!.id),
-      ).toMatchObject({ status: "archived" });
+      ) as McpMutationReceiptType;
+      expect(archived).toMatchObject({
+        resource: { id: replacementId, state: "archived" },
+        facts: { correctionAction: "archived" },
+      });
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, replacementId!)).toMatchObject({
+        status: "archived",
+      });
 
       const correctionEvents = (
         await listSessionEvents(dbClient.db, workspaceId, session.id)
       ).filter((event) => event.type === "memory.corrected");
       expect(correctionEvents).toHaveLength(2);
       expect(correctionEvents[0]?.payload).toMatchObject({
-        memoryId: saved.memory.id,
+        memoryId: saved.resource.id,
         action: "superseded",
         reason: "Deployment branch changed",
-        replacementMemoryId: superseded.replacement!.id,
+        replacementMemoryId: replacementId,
       });
       expect(correctionEvents[1]?.payload).toMatchObject({
-        memoryId: superseded.replacement!.id,
+        memoryId: replacementId,
         action: "archived",
         reason: "Staging deploy process moved into a runbook.",
       });
@@ -7255,32 +7451,38 @@ describe("API component integration", () => {
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
 
-    const created = await callMcpTool<{
-      id: string;
-      environmentId: string | null;
-    }>(adminMcp, "scheduled_tasks_create", {
-      name: `mcp-attach-${crypto.randomUUID()}`,
-      schedule: { type: "interval", everySeconds: 3600 },
-      agentConfig: { prompt: "inspect" },
-      environmentId: environment.id,
-    });
-    expect(created.environmentId).toBe(environment.id);
+    const createdReceipt = await callMcpTool<McpMutationReceiptType>(
+      adminMcp,
+      "scheduled_tasks_create",
+      {
+        name: `mcp-attach-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect" },
+        environmentId: environment.id,
+      },
+    );
+    const created = await getScheduledTask(
+      dbClient.db,
+      grant.workspaceId,
+      createdReceipt.resource.id,
+    );
+    expect(created?.variableSetId).toBe(environment.id);
 
     await expect(
       callMcpTool(sandboxMcp, "scheduled_tasks_update", {
-        id: created.id,
+        id: createdReceipt.resource.id,
         environmentId: environment.id,
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
     await expect(
       callMcpTool(sandboxMcp, "scheduled_tasks_update", {
-        id: created.id,
+        id: createdReceipt.resource.id,
         environmentId: null,
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
     await expect(
       callMcpTool(sandboxMcp, "scheduled_tasks_update", {
-        id: created.id,
+        id: createdReceipt.resource.id,
         agentConfig: { prompt: "exfiltrate the injected secrets" },
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
@@ -7304,16 +7506,26 @@ describe("API component integration", () => {
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
 
+    const createdReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", {
+      initialMessage: "take the staging deploy zero-to-one",
+      model: "scripted-model",
+      goal: { text: "staging deployed", successCriteria: "healthz green" },
+    });
+    expect(createdReceipt).toMatchObject({
+      operation: "session_create",
+      outcome: "created",
+      changed: true,
+      resource: { type: "session", state: "queued" },
+      idempotency: { status: "not_requested" },
+    });
+    expect(JSON.stringify(createdReceipt)).not.toContain("take the staging deploy zero-to-one");
     const created = await callMcpTool<{
       id: string;
       status: string;
       model: string;
       temporalWorkflowId: string;
-    }>(mcp, "session_create", {
-      initialMessage: "take the staging deploy zero-to-one",
-      model: "scripted-model",
-      goal: { text: "staging deployed", successCriteria: "healthz green" },
-    });
+      environmentId: string | null;
+    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id });
     expect(created.status).toBe("queued");
     expect(created.model).toBe("scripted-model");
     expect(created.temporalWorkflowId).toBe(`session-${created.id}`);
@@ -7431,19 +7643,23 @@ describe("API component integration", () => {
       boundedForensic.events.every((event) => event.id !== "00000000-0000-0000-0000-000000000000"),
     ).toBeTrue();
 
-    const sent = await callMcpTool<{
-      event: { type: string; payload: { text: string } };
-      turnId: string;
-    }>(mcp, "session_send_message", {
+    const sent = await callMcpTool<McpMutationReceiptType>(mcp, "session_send_message", {
       sessionId: created.id,
       text: "also enable the health alerts",
       idempotencyKey: crypto.randomUUID(),
     });
-    expect(sent.event.type).toBe("user.message");
-    expect(sent.event.payload.text).toBe("also enable the health alerts");
+    expect(sent).toMatchObject({
+      operation: "session_send_message",
+      outcome: "accepted",
+      resource: { type: "session_turn", state: "queued" },
+      idempotency: { status: "applied" },
+    });
+    expect(JSON.stringify(sent)).not.toContain("also enable the health alerts");
     expect(wf.wakeups).toHaveLength(2);
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
-    expect(turns.some((turn) => turn.id === sent.turnId && turn.status === "queued")).toBe(true);
+    expect(turns.some((turn) => turn.id === sent.resource.id && turn.status === "queued")).toBe(
+      true,
+    );
 
     const callerAttemptId = crypto.randomUUID();
     const callerClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
@@ -7473,19 +7689,21 @@ describe("API component integration", () => {
     )
       .map((turn) => turn.id)
       .sort();
-    const internal = await callMcpTool<{
-      delivered: boolean;
-      updateId: string;
-      delivery: string;
-    }>(workerMcpWithIdentity, "session_send_message", {
-      sessionId: created.id,
-      text: "child result one of several",
-      idempotencyKey: crypto.randomUUID(),
-    });
+    const internal = await callMcpTool<McpMutationReceiptType>(
+      workerMcpWithIdentity,
+      "session_send_message",
+      {
+        sessionId: created.id,
+        text: "child result one of several",
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
     expect(internal).toMatchObject({
-      delivered: true,
-      delivery: "coalesced_internal_update",
+      outcome: "accepted",
+      resource: { type: "session_system_update", state: "active" },
+      facts: { delivery: "coalesced_internal_update" },
     });
+    expect(JSON.stringify(internal)).not.toContain("child result one of several");
     expect(
       (await listSessionTurns(dbClient.db, grant.workspaceId, created.id))
         .map((turn) => turn.id)
@@ -7495,7 +7713,7 @@ describe("API component integration", () => {
       await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, created.id),
     ).toEqual([
       expect.objectContaining({
-        id: internal.updateId,
+        id: internal.resource.id,
         kind: "agent_message",
         sourceId: created.id,
         summary: "child result one of several",
@@ -7506,7 +7724,7 @@ describe("API component integration", () => {
     // descendant attempt receives an immediate revisioned control wake; Resume
     // creates no human prompt, and Agent Steer is one typed internal update
     // rather than a fake prompt-queue row.
-    const controlledChild = await callMcpTool<{ id: string }>(
+    const controlledChild = await callMcpTool<McpMutationReceiptType>(
       workerMcpWithIdentity,
       "session_create",
       {
@@ -7516,8 +7734,8 @@ describe("API component integration", () => {
     );
     const childAttemptId = crypto.randomUUID();
     const childClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
-      sessionId: controlledChild.id,
-      workflowId: `session-${controlledChild.id}`,
+      sessionId: controlledChild.resource.id,
+      workflowId: `session-${controlledChild.resource.id}`,
       workflowRunId: crypto.randomUUID(),
       attemptId: childAttemptId,
       dispatchId: `dispatch-${crypto.randomUUID()}`,
@@ -7527,53 +7745,67 @@ describe("API component integration", () => {
       throw new Error(`controlled child was not claimed: ${childClaim.reason}`);
     }
     const dispatchCountBeforeAgentPause = wf.wakeDispatches;
-    const agentPause = await callMcpTool<{
-      effectiveControl: { state: string };
-      interruptionCount: number;
-    }>(workerMcpWithIdentity, "session_pause", {
-      sessionId: controlledChild.id,
-      idempotencyKey: crypto.randomUUID(),
-      reason: "manager inspection",
-    });
+    const agentPause = await callMcpTool<McpMutationReceiptType>(
+      workerMcpWithIdentity,
+      "session_pause",
+      {
+        sessionId: controlledChild.resource.id,
+        idempotencyKey: crypto.randomUUID(),
+        reason: "manager inspection",
+      },
+    );
     expect(agentPause).toMatchObject({
-      effectiveControl: { state: "paused" },
-      interruptionCount: 1,
+      outcome: "updated",
+      resource: { type: "session", state: "paused" },
+      facts: { interruptionCount: 1 },
     });
+    expect(JSON.stringify(agentPause)).not.toContain("manager inspection");
     expect(wf.wakeDispatches).toBe(dispatchCountBeforeAgentPause + 1);
     const turnsBeforeAgentResume = await listSessionTurns(
       dbClient.db,
       grant.workspaceId,
-      controlledChild.id,
+      controlledChild.resource.id,
     );
-    const agentResume = await callMcpTool<{
-      effectiveControl: { state: string };
-    }>(workerMcpWithIdentity, "session_resume", {
-      sessionId: controlledChild.id,
-      idempotencyKey: crypto.randomUUID(),
-    });
-    expect(agentResume.effectiveControl.state).toBe("active");
+    const agentResume = await callMcpTool<McpMutationReceiptType>(
+      workerMcpWithIdentity,
+      "session_resume",
+      {
+        sessionId: controlledChild.resource.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(agentResume.resource.state).toBe("active");
     expect(
-      (await listSessionTurns(dbClient.db, grant.workspaceId, controlledChild.id)).map(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, controlledChild.resource.id)).map(
         (turn) => turn.id,
       ),
     ).toEqual(turnsBeforeAgentResume.map((turn) => turn.id));
-    const agentSteer = await callMcpTool<{
-      updateId: string;
-      interruptionCount: number;
-    }>(workerMcpWithIdentity, "session_steer", {
-      sessionId: controlledChild.id,
-      instruction: "Inspect the new control-plane evidence first",
-      idempotencyKey: crypto.randomUUID(),
-    });
+    const agentSteer = await callMcpTool<McpMutationReceiptType>(
+      workerMcpWithIdentity,
+      "session_steer",
+      {
+        sessionId: controlledChild.resource.id,
+        instruction: "Inspect the new control-plane evidence first",
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
     expect(agentSteer).toMatchObject({
-      updateId: expect.any(String),
-      interruptionCount: 1,
+      outcome: "updated",
+      resource: { type: "session_system_update" },
+      facts: { interruptionCount: 1, stoppingPreviousAttempt: true },
     });
+    expect(JSON.stringify(agentSteer)).not.toContain(
+      "Inspect the new control-plane evidence first",
+    );
     expect(
-      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, controlledChild.id),
+      await listOutstandingSessionSystemUpdates(
+        dbClient.db,
+        grant.workspaceId,
+        controlledChild.resource.id,
+      ),
     ).toContainEqual(
       expect.objectContaining({
-        id: agentSteer.updateId,
+        id: agentSteer.resource.id,
         kind: "agent_steer_instruction",
         summary: "Inspect the new control-plane evidence first",
       }),
@@ -7608,6 +7840,61 @@ describe("API component integration", () => {
     ]) {
       await expect(callMcpTool(workerMcp, tool, {})).rejects.toThrow("MCP tool not registered");
     }
+  });
+
+  test("MCP session_create returns a compact, truthful idempotent replay receipt", async () => {
+    const workflowClient = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const mcp = buildOpenGeniMcpServer(
+      {
+        settings: testSettings({ databaseUrl: services.databaseUrl }),
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient,
+        objectStorage: null,
+        githubStateSecret: "test-state-secret",
+        documentIndexer: { indexDocument: async () => undefined },
+        getDocumentServices: () => {
+          throw new Error("document services are not used by session replay tests");
+        },
+        resumeBoxById: fakeResumeBoxById,
+      },
+      grant,
+    );
+    const initialMessage = `idempotent secret ${crypto.randomUUID()}`;
+    const idempotencyKey = `compact-receipt-session-create-${crypto.randomUUID()}`;
+    const args = {
+      initialMessage,
+      model: "scripted-model",
+      sandboxBackend: "none",
+      idempotencyKey,
+    };
+
+    const first = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", args);
+    const replay = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", args);
+
+    expect(first).toMatchObject({
+      operation: "session_create",
+      outcome: "created",
+      changed: true,
+      idempotency: { status: "applied" },
+      resource: { type: "session", state: "queued" },
+    });
+    expect(replay).toMatchObject({
+      operation: "session_create",
+      outcome: "replayed",
+      changed: false,
+      idempotency: { status: "replayed" },
+      resource: { type: "session", id: first.resource.id, state: "queued" },
+    });
+    expect(JSON.stringify(first)).not.toContain(initialMessage);
+    expect(JSON.stringify(replay)).not.toContain(initialMessage);
+    expect(await withWorkspaceCount(dbClient.db, grant.workspaceId, idempotencyKey)).toBe(1);
+    expect(await requireSession(dbClient.db, grant.workspaceId, first.resource.id)).toMatchObject({
+      id: first.resource.id,
+      initialMessage,
+      createIdempotencyKey: idempotencyKey,
+    });
   });
 
   test("per-session first-party MCP permissions are capped by the creator and gate the manager tools", async () => {
@@ -7747,16 +8034,17 @@ describe("API component integration", () => {
         firstPartyMcpPermissions: ["environments:manage"],
       }),
     ).rejects.toThrow("cannot grant first-party MCP permission beyond the creating grant");
-    const spawned = await callMcpTool<{
-      id: string;
-      firstPartyMcpPermissions: string[] | null;
-      sandboxBackend: string;
-    }>(managerMcp, "session_create", {
+    const spawnedReceipt = await callMcpTool<McpMutationReceiptType>(managerMcp, "session_create", {
       initialMessage: "spawn a delegated worker",
       model: "scripted-model",
       sandboxBackend: "none",
       firstPartyMcpPermissions: ["sessions:read"],
     });
+    const spawned = await requireSession(
+      dbClient.db,
+      grant.workspaceId,
+      spawnedReceipt.resource.id,
+    );
     expect(spawned.firstPartyMcpPermissions).toEqual(["sessions:read"]);
     expect(spawned.sandboxBackend).toBe("none");
 
@@ -8813,15 +9101,17 @@ describe("API component integration", () => {
     ).rejects.toThrow("missing permission: variable-sets:use (deprecated alias: environments:use)");
 
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
-    const attached = await callMcpTool<{
-      id: string;
-      environmentId: string | null;
-    }>(mcp, "session_create", {
+    const attachedReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", {
       initialMessage: "deploy with cloud credentials",
       model: "scripted-model",
       environmentId: environment.id,
     });
-    expect(attached.environmentId).toBe(environment.id);
+    const attached = await requireSession(
+      dbClient.db,
+      grant.workspaceId,
+      attachedReceipt.resource.id,
+    );
+    expect(attached.variableSetId).toBe(environment.id);
     await expect(
       callMcpTool(mcp, "session_create", {
         initialMessage: "unknown environment",
@@ -8882,11 +9172,12 @@ describe("API component integration", () => {
 
     // Control: a backend:"none" create WITHOUT a target succeeds — no machine
     // is pinned, so nothing exercises the create-time targeting path.
-    const plain = await callMcpTool<{ id: string; sandboxBackend: string }>(mcp, "session_create", {
+    const plainReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", {
       initialMessage: "no target",
       model: "scripted-model",
       sandboxBackend: "none",
     });
+    const plain = await requireSession(dbClient.db, grant.workspaceId, plainReceipt.resource.id);
     expect(plain.sandboxBackend).toBe("none");
 
     // The fix: targetSandboxId is now declared on the session_create inputSchema,
@@ -8928,39 +9219,43 @@ describe("API component integration", () => {
     const environmentName = `geni-cloud-${crypto.randomUUID()}`;
     const secretValue = `super-secret-${crypto.randomUUID()}`;
 
-    const first = await callMcpTool<{
-      environment: { id: string; name: string; created: boolean };
-      variable: { name: string; version: number };
-    }>(mcp, "environment_set_variable", {
+    const first = await callMcpTool<McpMutationReceiptType>(mcp, "environment_set_variable", {
       environmentName,
       name: "AZURE_CLIENT_SECRET",
       value: secretValue,
     });
-    expect(first.environment.created).toBe(true);
-    expect(first.environment.name).toBe(environmentName);
-    expect(first.variable).toMatchObject({
-      name: "AZURE_CLIENT_SECRET",
-      version: 1,
+    expect(first).toMatchObject({
+      operation: "environment_set_variable",
+      outcome: "created",
+      resource: { type: "variable_set", version: 1, state: "variable_written" },
+      facts: {
+        variableCreated: true,
+        variableSetCreated: true,
+        deprecatedAlias: true,
+      },
     });
+    expect(JSON.stringify(first)).not.toContain(secretValue);
+    expect(JSON.stringify(first)).not.toContain("AZURE_CLIENT_SECRET");
+    expect(JSON.stringify(first)).not.toContain(environmentName);
 
     const rotatedValue = `rotated-${crypto.randomUUID()}`;
-    const rotated = await callMcpTool<{
-      environment: { id: string; created: boolean };
-      variable: { version: number };
-    }>(mcp, "environment_set_variable", {
-      environmentId: first.environment.id,
+    const rotated = await callMcpTool<McpMutationReceiptType>(mcp, "environment_set_variable", {
+      environmentId: first.resource.id,
       name: "AZURE_CLIENT_SECRET",
       value: rotatedValue,
     });
-    expect(rotated.environment.created).toBe(false);
-    expect(rotated.variable.version).toBe(2);
+    expect(rotated).toMatchObject({
+      outcome: "updated",
+      resource: { id: first.resource.id, version: 2 },
+      facts: { variableCreated: false, variableSetCreated: false, deprecatedAlias: true },
+    });
 
     // The stored value round-trips through the operator key, proving the MCP
     // write path encrypts exactly like the REST route.
     const stored = await getWorkspaceEnvironmentValuesForRun(
       dbClient.db,
       grant.workspaceId,
-      first.environment.id,
+      first.resource.id,
     );
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
     expect(decryptEnvironmentValue(key, stored!.values["AZURE_CLIENT_SECRET"]!)).toBe(rotatedValue);
@@ -8973,7 +9268,7 @@ describe("API component integration", () => {
       }>;
     }>(mcp, "environment_list", {});
     const listedEnvironment = listedEnvironments.environments.find(
-      (candidate) => candidate.id === first.environment.id,
+      (candidate) => candidate.id === first.resource.id,
     );
     expect(listedEnvironment?.variables).toEqual([
       expect.objectContaining({ name: "AZURE_CLIENT_SECRET", version: 2 }),
@@ -8998,7 +9293,7 @@ describe("API component integration", () => {
     ).rejects.toThrow("environment variable names must match");
     await expect(
       callMcpTool(mcp, "environment_set_variable", {
-        environmentId: first.environment.id,
+        environmentId: first.resource.id,
         environmentName,
         name: "AMBIGUOUS",
         value: "nope",
@@ -9022,9 +9317,9 @@ describe("API component integration", () => {
     const useOnlyList = await callMcpTool<{
       environments: Array<{ id: string }>;
     }>(useOnlyMcp, "environment_list", {});
-    expect(
-      useOnlyList.environments.some((candidate) => candidate.id === first.environment.id),
-    ).toBe(true);
+    expect(useOnlyList.environments.some((candidate) => candidate.id === first.resource.id)).toBe(
+      true,
+    );
     await expect(
       callMcpTool(useOnlyMcp, "environment_set_variable", {
         environmentName,
@@ -9450,6 +9745,11 @@ async function signDelegatedBearer(
     executionGeneration?: number;
   },
 ): Promise<string> {
+  const hasExactAgentAuthority =
+    input.sessionId !== undefined &&
+    input.turnId !== undefined &&
+    input.attemptId !== undefined &&
+    input.executionGeneration !== undefined;
   return `Bearer ${await signDelegatedAccessToken(secret, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -9460,7 +9760,7 @@ async function signDelegatedBearer(
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.attemptId ? { attemptId: input.attemptId } : {}),
     ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
-    principalKind: "agent_attempt",
+    principalKind: hasExactAgentAuthority ? "agent_attempt" : "human_session",
     exp: Math.floor(Date.now() / 1000) + 300,
   })}`;
 }

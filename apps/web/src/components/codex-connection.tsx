@@ -10,17 +10,17 @@ import type {
   CodexOverviewResponse,
   CodexResetCredit,
   CodexResetRedemptionRecovery,
-  CodexRotationSettings,
   CodexUsage,
   CodexUsageMap,
   CodexUsageWindow,
 } from "@opengeni/sdk";
 import {
+  ChevronDownIcon,
   ExternalLinkIcon,
   Loader2Icon,
+  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  SparklesIcon,
   TicketCheckIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -28,7 +28,9 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { ChatGptMark } from "@/components/chatgpt-mark";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
@@ -39,6 +41,7 @@ import {
   redeemCodexResetCredit,
   type CodexResetRedemptionPreparation,
 } from "@/api";
+import { cn } from "@/lib/utils";
 
 function relativeTimestamp(value: string | number | null | undefined, now: number): string {
   if (value == null) return "";
@@ -295,52 +298,100 @@ export function UsageBar({
   );
 }
 
-/**
- * A row's two usage bars (5h + weekly) with all four component states. Prefers the
- * LIVE refresh payload (which carries an explicit status) over the cached windows.
- */
-function AccountUsage({
+/** Compact inline meter for the collapsed subscription row. */
+function CompactUsageMeter({ label, window }: { label: string; window: CodexUsageWindow | null }) {
+  if (!window) return null;
+  const pct = Math.min(100, Math.max(0, Math.round(window.percent)));
+  const danger = pct >= 90;
+  return (
+    <div
+      className="flex items-center gap-1.5 text-2xs text-fg-muted"
+      title={`${label} usage ${pct}%`}
+    >
+      <span className="shrink-0">{label}</span>
+      <div
+        className="h-1 w-14 overflow-hidden rounded-full bg-surface-2"
+        role="progressbar"
+        aria-label={`${label} usage`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+      >
+        <div
+          className={`h-full rounded-full ${danger ? "bg-status-waiting" : "bg-brand"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="w-7 shrink-0 tabular-nums text-fg-subtle">{pct}%</span>
+    </div>
+  );
+}
+
+function accountUsageWindows(
+  account: CodexAccount,
+  live: CodexUsage | undefined,
+): { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null; status?: string } {
+  return {
+    status: live?.status,
+    fiveHour: live?.usage?.fiveHour ?? account.fiveHour ?? null,
+    weekly: live?.usage?.weekly ?? account.weekly ?? null,
+  };
+}
+
+/** Short 5h + weekly meters for the collapsed row. */
+function CompactAccountUsage({
   account,
   live,
-  overview,
-  now,
   refreshing,
   onRetry,
 }: {
   account: CodexAccount;
   live: CodexUsage | undefined;
-  overview: CodexAccountOverview | undefined;
-  now: number;
   refreshing: boolean;
   onRetry: () => void;
 }) {
-  const status = live?.status;
-  const fiveHour = live?.usage?.fiveHour ?? account.fiveHour ?? null;
-  const weekly = live?.usage?.weekly ?? account.weekly ?? null;
-
-  // loading — a live refresh is in flight and we have nothing cached yet.
+  const { fiveHour, weekly, status } = accountUsageWindows(account, live);
   if (refreshing && !fiveHour && !weekly) {
-    return <div className="h-3 w-2/3 animate-pulse rounded bg-surface-2" />;
+    return <div className="h-3 w-28 animate-pulse rounded bg-surface-2" />;
   }
-  // error — a refresh/needs_relogin or transient 401. Subtle inline, not a hard block.
   if (status === "error" && !fiveHour && !weekly) {
     return (
-      <div className="text-xs text-fg-subtle">
-        usage unavailable ·{" "}
-        <button type="button" className="underline hover:text-fg" onClick={onRetry}>
-          retry
-        </button>
-      </div>
+      <button
+        type="button"
+        className="text-2xs text-fg-subtle underline hover:text-fg"
+        onClick={onRetry}
+      >
+        retry usage
+      </button>
     );
   }
-  // no-data — no windows and the call succeeded: render nothing (the plan badge stands in).
-  if (!fiveHour && !weekly) {
-    return null;
-  }
+  if (!fiveHour && !weekly) return null;
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1" aria-live="polite">
+      <CompactUsageMeter label="5h" window={fiveHour} />
+      <CompactUsageMeter label="Wk" window={weekly} />
+    </div>
+  );
+}
+
+/** Expanded-only usage meta (timestamps / limit-reached); bars stay on the row. */
+function AccountUsageMeta({
+  account,
+  live,
+  overview,
+  now,
+}: {
+  account: CodexAccount;
+  live: CodexUsage | undefined;
+  overview: CodexAccountOverview | undefined;
+  now: number;
+}) {
+  const { fiveHour, weekly, status } = accountUsageWindows(account, live);
+  if (!overview && !fiveHour && !weekly) return null;
   const limitReached =
     status === "limit_reached" || (fiveHour?.percent ?? 0) >= 100 || (weekly?.percent ?? 0) >= 100;
   return (
-    <div className="grid gap-2" aria-live="polite">
+    <div className="grid gap-1.5" aria-live="polite">
       {overview ? (
         <div className="text-2xs text-fg-subtle">
           {overview.usage.source === "provider" ? "Provider reported" : "Cached by OpenGeni"}
@@ -350,8 +401,16 @@ function AccountUsage({
           {overview.usage.stale ? " · stale" : ""}
         </div>
       ) : null}
-      <UsageBar label="5-hour" window={fiveHour} now={now} />
-      <UsageBar label="Weekly" window={weekly} now={now} />
+      {fiveHour ? (
+        <div className="text-2xs text-fg-subtle">
+          5-hour · {resetTimestamp(fiveHour, now) || "reset unknown"}
+        </div>
+      ) : null}
+      {weekly ? (
+        <div className="text-2xs text-fg-subtle">
+          Weekly · {resetTimestamp(weekly, now) || "reset unknown"}
+        </div>
+      ) : null}
       {limitReached ? (
         <div className="flex items-center gap-1.5 text-xs text-status-waiting">
           <TriangleAlertIcon className="size-3.5" /> Usage limit reached
@@ -543,6 +602,28 @@ function accountDisplay(account: CodexAccount): string {
   return account.label ?? account.email ?? account.plan ?? "Codex account";
 }
 
+const RESET_URGENT_MS = 2 * 24 * 60 * 60 * 1000;
+const RESET_SOON_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Soonest reset-credit expiry among listed credits (unix-seconds → ms remaining). */
+function soonestResetExpiryMs(credits: CodexResetCredit[], now: number): number | null {
+  let soonest: number | null = null;
+  for (const credit of credits) {
+    if (credit.expiresAt == null) continue;
+    if (credit.status !== "available" && !credit.actionable) continue;
+    const remaining = credit.expiresAt * 1000 - now;
+    if (soonest == null || remaining < soonest) soonest = remaining;
+  }
+  return soonest;
+}
+
+function resetBadgeTone(remainingMs: number | null): "urgent" | "soon" | "ok" {
+  if (remainingMs == null) return "ok";
+  if (remainingMs < RESET_URGENT_MS) return "urgent";
+  if (remainingMs < RESET_SOON_MS) return "soon";
+  return "ok";
+}
+
 export function CodexSubscriptionsCard({
   workspaceId,
   canManage,
@@ -581,6 +662,9 @@ export function CodexSubscriptionsCard({
   // A monotonic clock the rows tick off for the reset countdown — one timer for
   // the whole card, never a backend re-hit.
   const [now, setNow] = useState(() => Date.now());
+  // One expanded subscription at a time; healthy rows stay collapsed by default.
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const autoExpandedReloginRef = useRef(false);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
@@ -689,7 +773,10 @@ export function CodexSubscriptionsCard({
       window.open(start.verificationUri, "_blank", "noopener,noreferrer");
       const interval = Math.max(2, start.intervalSeconds) * 1000;
       const poll = async (): Promise<void> => {
-        if (cancelled.current) return;
+        // Device authorization is server-side work. Keep polling after this
+        // settings card unmounts so navigating back to the workspace cannot
+        // strand an already-approved OpenAI grant. Only UI updates are gated
+        // by the component lifetime.
         // The recursive poll runs detached via setTimeout, so a rejection here
         // (a 500/502/400 from the poll route) would otherwise be swallowed,
         // leaving the card stuck on "Waiting for authorization…" forever with no
@@ -699,23 +786,29 @@ export function CodexSubscriptionsCard({
         try {
           result = await client.codexConnectPoll(workspaceId, start.state);
         } catch (error) {
-          setPending(null);
-          toast.error(
-            error instanceof Error
-              ? error.message
-              : "Failed to verify Codex authorization. Try again.",
-          );
+          if (!cancelled.current) {
+            setPending(null);
+            toast.error(
+              error instanceof Error
+                ? error.message
+                : "Failed to verify Codex authorization. Try again.",
+            );
+          }
           return;
         }
         if (result.status === "connected") {
-          setPending(null);
-          toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
-          await refreshAccounts();
+          if (!cancelled.current) {
+            setPending(null);
+            toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
+            await refreshAccounts();
+          }
           return;
         }
         if (result.status === "expired") {
-          setPending(null);
-          toast.error("The code expired before it was authorized. Try again.");
+          if (!cancelled.current) {
+            setPending(null);
+            toast.error("The code expired before it was authorized. Try again.");
+          }
           return;
         }
         setTimeout(() => void poll(), interval);
@@ -747,12 +840,9 @@ export function CodexSubscriptionsCard({
     [client, workspaceId, refreshAccounts],
   );
 
-  // P3: enable/disable auto-rotation or change the strategy, then re-read settings.
+  // Enable or disable auto-rotation, then re-read effective settings.
   const setRotation = useCallback(
-    async (patch: {
-      rotationEnabled?: boolean;
-      rotationStrategy?: CodexRotationSettings["rotationStrategy"];
-    }) => {
+    async (patch: { rotationEnabled: boolean }) => {
       setBusy(true);
       try {
         await client.setCodexRotationSettings(workspaceId, patch);
@@ -791,6 +881,29 @@ export function CodexSubscriptionsCard({
       }
     },
     [client, workspaceId, refreshAccounts],
+  );
+
+  const setAppsCredential = useCallback(
+    async (account: CodexAccount, enabled: boolean) => {
+      if (!data?.apps) return;
+      setBusy(true);
+      try {
+        if (enabled) {
+          await client.designateCodexAppsAccount(workspaceId, account.id, data.apps.version);
+          toast.success("Codex Apps credential enabled");
+        } else {
+          await client.clearCodexAppsAccount(workspaceId, data.apps.version);
+          toast.success("Codex Apps credential disabled");
+        }
+        await refreshAccounts();
+      } catch (error) {
+        await refreshAccounts();
+        toast.error(error instanceof Error ? error.message : "Failed to update Codex Apps");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, data, workspaceId, refreshAccounts],
   );
 
   const beginRedemption = useCallback(
@@ -934,58 +1047,64 @@ export function CodexSubscriptionsCard({
   const activeAccountId = data?.activeAccountId ?? null;
   const rotationEnabled = data?.settings?.rotationEnabled ?? false;
 
+  useEffect(() => {
+    autoExpandedReloginRef.current = false;
+    setExpandedId(null);
+  }, [workspaceId]);
+
+  // Burying reconnect behind a click is worse than one auto-open; healthy rows stay closed.
+  useEffect(() => {
+    if (autoExpandedReloginRef.current || expandedId != null || !data) return;
+    const needsRelogin = data.accounts.find(
+      (account) => account.status !== "active" && account.lastError != null,
+    );
+    if (!needsRelogin) return;
+    autoExpandedReloginRef.current = true;
+    setExpandedId(needsRelogin.id);
+  }, [data, expandedId]);
+
   return (
-    <section
-      aria-labelledby="codex-subscriptions-heading"
-      className="grid gap-3 rounded-lg border border-border bg-surface p-4"
-    >
-      <div className="flex items-start justify-between gap-3">
+    <section aria-labelledby="codex-subscriptions-heading" className="grid gap-2">
+      <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h2
             id="codex-subscriptions-heading"
             className="flex items-center gap-1.5 text-sm font-medium"
           >
-            <SparklesIcon className="size-3.5 text-brand" />
+            <ChatGptMark className="size-3.5 text-brand" />
             Codex subscriptions
           </h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            Connect one or more ChatGPT plans to run agents on your subscription. Turns using a{" "}
-            <span className="font-medium">Codex</span> model spend your ChatGPT usage —{" "}
-            <span className="font-medium">no API credits</span>.
+          <p className="mt-0.5 text-2xs text-fg-subtle">
+            ChatGPT plans for Codex models — subscription usage, not API credits.
           </p>
         </div>
         {canManage && accounts.length > 0 && !pending ? (
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="ghost"
             disabled={busy}
             onClick={() => void connect()}
           >
-            <PlusIcon className="size-3.5" /> Connect another subscription
+            <PlusIcon className="size-3.5" /> Connect
           </Button>
         ) : null}
       </div>
 
       {accounts.length > 1 && canManage ? (
-        <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
-          <label className="flex cursor-pointer items-center justify-between gap-3">
-            <span className="text-xs">
-              <span className="font-medium">Auto-rotate subscriptions</span>
-              <span className="ml-1 text-fg-subtle">
-                — each session sticks to one plan for maximum prompt-cache reuse, spread across all
-                of them; a capped plan hands its sessions to the others, never mid-turn.
-              </span>
-            </span>
-            <input
-              type="checkbox"
-              className="size-4 accent-brand"
-              checked={rotationEnabled}
-              disabled={busy}
-              onChange={(e) => void setRotation({ rotationEnabled: e.target.checked })}
-            />
-          </label>
-        </div>
+        <label
+          className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2"
+          title="Each session sticks to one plan for prompt-cache reuse; a capped plan hands sessions to others, never mid-turn."
+        >
+          <span className="text-xs font-medium">Auto-rotate subscriptions</span>
+          <input
+            type="checkbox"
+            className="size-4 accent-brand"
+            checked={rotationEnabled}
+            disabled={busy}
+            onChange={(e) => void setRotation({ rotationEnabled: e.target.checked })}
+          />
+        </label>
       ) : null}
 
       {loading ? (
@@ -995,7 +1114,8 @@ export function CodexSubscriptionsCard({
       ) : pending ? (
         <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
           <div className="text-xs text-fg-muted">
-            Enter this code at the OpenAI page (opened in a new tab), then leave this open:
+            Enter this code at the OpenAI page (opened in a new tab). Authorization continues if you
+            navigate away.
           </div>
           <div className="flex items-center gap-2">
             <code className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest">
@@ -1021,197 +1141,303 @@ export function CodexSubscriptionsCard({
               {busy ? (
                 <Loader2Icon className="size-3.5 animate-spin" />
               ) : (
-                <SparklesIcon className="size-3.5" />
+                <ChatGptMark className="size-3.5" />
               )}{" "}
               Connect Codex
             </Button>
           ) : null}
         </div>
       ) : (
-        <div className="grid gap-2">
+        <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
           {accounts.map((account) => {
             const isActive = account.id === activeAccountId;
             const needsRelogin = account.status !== "active" && account.lastError != null;
+            const resetOverview = overviewMap[account.id]?.resetCredits;
+            const resetCount = resetOverview?.availableCount;
+            const resetRemainingMs = soonestResetExpiryMs(resetOverview?.credits ?? [], now);
+            const resetTone = resetBadgeTone(resetRemainingMs);
+            const expanded = expandedId === account.id;
+            const coolingSecs = account.exhaustedUntil
+              ? Math.max(0, Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000))
+              : 0;
             return (
               <article
                 key={account.id}
-                className="grid gap-2 rounded-md border border-border bg-bg p-3"
                 aria-label={`${accountDisplay(account)} Codex subscription`}
               >
-                <div className="flex flex-wrap items-center gap-3">
-                  <label
-                    className="flex min-h-11 min-w-11 cursor-pointer items-center justify-center"
-                    title="Used when a session isn't pinned to a specific subscription"
+                <Collapsible
+                  open={expanded}
+                  onOpenChange={(open) => setExpandedId(open ? account.id : null)}
+                >
+                  <div
+                    className="flex min-w-0 cursor-pointer flex-wrap items-center gap-2 px-2.5 py-2 transition-colors hover:bg-surface-2/50"
+                    onClick={() => setExpandedId(expanded ? null : account.id)}
                   >
-                    <input
-                      type="radio"
-                      name="codex-active"
-                      className="size-3.5 accent-brand"
-                      checked={isActive}
-                      disabled={!canManage || busy}
-                      aria-label={`Use ${accountDisplay(account)} as active subscription`}
-                      onChange={() => {
-                        if (!isActive) void activate(account.id);
-                      }}
-                    />
-                  </label>
-                  <div className="min-w-0 flex-1">
-                    {editing?.id === account.id ? (
-                      <Input
-                        autoFocus
-                        value={editing.value}
-                        onChange={(e) => setEditing({ id: account.id, value: e.target.value })}
-                        onBlur={() => void commitRename(account.id, editing.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void commitRename(account.id, editing.value);
-                          if (e.key === "Escape") setEditing(null);
+                    <label
+                      className="flex min-h-9 min-w-9 cursor-pointer items-center justify-center"
+                      title="Used when a session isn't pinned to a specific subscription"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <input
+                        type="radio"
+                        name="codex-active"
+                        className="size-3.5 accent-brand"
+                        checked={isActive}
+                        disabled={!canManage || busy}
+                        aria-label={`Use ${accountDisplay(account)} as active subscription`}
+                        onChange={() => {
+                          if (!isActive) void activate(account.id);
                         }}
-                        className="h-7 text-sm"
                       />
+                    </label>
+                    <div
+                      className="flex min-w-0 flex-1 basis-36 items-center gap-1"
+                      onClick={(event) => {
+                        // Keep rename/edit from toggling; plain text still expands via row.
+                        if (editing?.id === account.id) event.stopPropagation();
+                      }}
+                    >
+                      {editing?.id === account.id ? (
+                        <Input
+                          autoFocus
+                          value={editing.value}
+                          onChange={(e) => setEditing({ id: account.id, value: e.target.value })}
+                          onBlur={() => void commitRename(account.id, editing.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void commitRename(account.id, editing.value);
+                            if (e.key === "Escape") setEditing(null);
+                          }}
+                          className="h-7 text-sm"
+                        />
+                      ) : (
+                        <>
+                          <span className="min-w-0 truncate text-sm font-medium">
+                            {accountDisplay(account)}
+                            {account.email && account.label ? (
+                              <span className="font-normal text-fg-subtle"> · {account.email}</span>
+                            ) : null}
+                          </span>
+                          {canManage ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              className="size-7 shrink-0"
+                              aria-label={`Rename ${accountDisplay(account)}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setEditing({
+                                  id: account.id,
+                                  value: account.label ?? "",
+                                });
+                              }}
+                            >
+                              <PencilIcon className="size-3.5" />
+                            </Button>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                    {account.plan ? (
+                      <MetaChip dot="idle" rounded="full">
+                        {account.plan}
+                      </MetaChip>
+                    ) : null}
+                    {account.appsDesignated ? (
+                      <MetaChip dot="running" rounded="full">
+                        Apps
+                      </MetaChip>
+                    ) : null}
+                    {!needsRelogin ? (
+                      <div onClick={(event) => event.stopPropagation()}>
+                        <CompactAccountUsage
+                          account={account}
+                          live={usageMap[account.id]}
+                          refreshing={refreshingUsage || refreshingRow === account.id}
+                          onRetry={() => void refreshAccountUsage(account.id)}
+                        />
+                      </div>
                     ) : (
-                      <button
-                        type="button"
-                        className="truncate text-left text-sm font-medium hover:underline disabled:cursor-default disabled:no-underline"
-                        disabled={!canManage}
-                        onClick={() =>
-                          setEditing({
-                            id: account.id,
-                            value: account.label ?? "",
-                          })
-                        }
-                        title={canManage ? "Click to rename" : undefined}
-                      >
-                        {accountDisplay(account)}
-                      </button>
+                      <span className="flex items-center gap-1 text-2xs text-status-waiting">
+                        <TriangleAlertIcon className="size-3" /> Reconnect
+                      </span>
                     )}
-                    <div className="mt-0.5 truncate text-xs text-fg-subtle">
-                      {account.email ? `${account.email} · ` : ""}
+                    {typeof resetCount === "number" && resetCount > 0 ? (
+                      <span
+                        className={cn(
+                          "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-2xs",
+                          resetTone === "urgent" &&
+                            "border-status-failed/40 bg-status-failed/10 text-status-failed",
+                          resetTone === "soon" &&
+                            "border-status-waiting/40 bg-status-waiting/10 text-status-waiting",
+                          resetTone === "ok" && "border-border/70 bg-surface/60 text-fg-muted",
+                        )}
+                        title={
+                          resetRemainingMs == null
+                            ? `${resetCount} usage limit reset${resetCount === 1 ? "" : "s"} available`
+                            : `${resetCount} usage limit reset${resetCount === 1 ? "" : "s"} · soonest expires ${
+                                resetRemainingMs <= 0
+                                  ? "now"
+                                  : relativeTimestamp((now + resetRemainingMs) / 1000, now)
+                              }`
+                        }
+                      >
+                        <TicketCheckIcon
+                          className={cn(
+                            "size-3",
+                            resetTone === "urgent" && "text-status-failed",
+                            resetTone === "soon" && "text-status-waiting",
+                            resetTone === "ok" && "text-brand",
+                          )}
+                        />
+                        {resetCount}
+                      </span>
+                    ) : null}
+                    <CollapsibleTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="shrink-0"
+                        aria-label={
+                          expanded
+                            ? `Hide details for ${accountDisplay(account)}`
+                            : `Show details for ${accountDisplay(account)}`
+                        }
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <ChevronDownIcon
+                          className={cn(
+                            "size-4 text-fg-subtle transition-transform",
+                            expanded ? "rotate-180" : "",
+                          )}
+                        />
+                      </Button>
+                    </CollapsibleTrigger>
+                  </div>
+                  <CollapsibleContent className="grid gap-2 border-t border-border/60 px-2.5 py-2.5">
+                    <div className="truncate text-2xs text-fg-subtle">
                       {account.status === "active"
                         ? "Token valid"
                         : account.status.replaceAll("_", " ")}
                       {account.expiresAt
                         ? ` · expires ${new Date(account.expiresAt).toLocaleString()}`
                         : ""}
+                      {coolingSecs > 0
+                        ? ` · cooling down ${resetLabel(coolingSecs)}`
+                        : isActive
+                          ? rotationEnabled
+                            ? " · active default when idle"
+                            : " · active"
+                          : ""}
                     </div>
-                  </div>
-                  {account.plan ? (
-                    <MetaChip dot="idle" rounded="full">
-                      {account.plan} plan
-                    </MetaChip>
-                  ) : null}
-                  {(() => {
-                    const coolingSecs = account.exhaustedUntil
-                      ? Math.max(
-                          0,
-                          Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000),
-                        )
-                      : 0;
-                    if (coolingSecs > 0) {
-                      return (
-                        <MetaChip
-                          dot="waiting"
-                          rounded="full"
-                          title="Rotated off after hitting its cap; skipped until reset"
-                        >
-                          Cooling down · {resetLabel(coolingSecs)}
-                        </MetaChip>
-                      );
-                    }
-                    if (isActive) {
-                      return (
-                        <span className="shrink-0 text-2xs uppercase tracking-wide text-fg-subtle">
-                          {rotationEnabled ? "Active · default when idle" : "Active"}
+                    <label
+                      className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5"
+                      title="Pausing affects only new automatic selection. A current live lease continues; quota, cooldown, and relogin state still gate eligibility."
+                    >
+                      <span className="text-xs font-medium">Use for new automatic turns</span>
+                      <span className="flex items-center gap-2 text-xs text-fg-muted">
+                        <input
+                          type="checkbox"
+                          className="size-4 accent-brand"
+                          checked={account.allocatorEnabled}
+                          disabled={!canManage || busy}
+                          aria-label={`Use ${accountDisplay(account)} for new automatic turns`}
+                          onChange={(event) => void setAllocator(account, event.target.checked)}
+                        />
+                        <span aria-hidden="true">
+                          {account.allocatorEnabled ? "Enabled" : "Paused"}
                         </span>
-                      );
-                    }
-                    return null;
-                  })()}
-                </div>
-                <div className="flex min-w-0 flex-wrap items-start justify-between gap-2 rounded-md border border-border/70 bg-surface/50 p-2.5">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium">Use for new automatic turns</div>
-                    <p className="mt-0.5 break-words text-2xs text-fg-subtle">
-                      Pausing affects only new automatic selection. Current leased or frozen turns
-                      continue; quota, cooldown, and relogin state still gate eligibility.
-                    </p>
-                  </div>
-                  <label className="flex min-h-11 shrink-0 cursor-pointer items-center gap-2 text-xs">
-                    <span className="sr-only">
-                      {account.allocatorEnabled ? "Pause" : "Enable"} {accountDisplay(account)} for
-                      new automatic turns
-                    </span>
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-brand"
-                      checked={account.allocatorEnabled}
-                      disabled={!canManage || busy}
-                      aria-label={`Use ${accountDisplay(account)} for new automatic turns`}
-                      onChange={(event) => void setAllocator(account, event.target.checked)}
+                      </span>
+                    </label>
+                    {data?.apps?.available ? (
+                      <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5 py-1.5">
+                        <div className="min-w-0">
+                          <div className="text-xs font-medium">Use for Codex Apps</div>
+                          <div className="text-2xs text-fg-subtle">
+                            Independent of inference, usage limits, rotation, and active selection.
+                          </div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          className="size-4 shrink-0 accent-brand"
+                          checked={account.appsDesignated}
+                          disabled={
+                            busy ||
+                            (account.appsDesignated
+                              ? !data.apps.canDisable
+                              : !account.canEnableApps)
+                          }
+                          aria-label={`Use ${accountDisplay(account)} for Codex Apps`}
+                          onChange={(event) =>
+                            void setAppsCredential(account, event.target.checked)
+                          }
+                        />
+                      </label>
+                    ) : null}
+                    {needsRelogin ? (
+                      <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
+                        <TriangleAlertIcon className="size-3.5" />{" "}
+                        {account.lastError ?? "Reconnect needed."}
+                      </div>
+                    ) : (
+                      <AccountUsageMeta
+                        account={account}
+                        live={usageMap[account.id]}
+                        overview={overviewMap[account.id]}
+                        now={now}
+                      />
+                    )}
+                    <ResetCreditInventory
+                      overview={overviewMap[account.id]}
+                      now={now}
+                      busy={busy || preparingReset != null}
+                      recoveryAttempts={redemptionAttemptViews(
+                        workspaceId,
+                        account.id,
+                        overviewMap[account.id],
+                      )}
+                      onRedeem={(credit, recovery) =>
+                        void beginRedemption(account.id, credit, recovery)
+                      }
                     />
-                    <span aria-hidden="true" className="text-fg-muted">
-                      {account.allocatorEnabled ? "Enabled" : "Paused"}
-                    </span>
-                  </label>
-                </div>
-                {needsRelogin ? (
-                  <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
-                    <TriangleAlertIcon className="size-3.5" />{" "}
-                    {account.lastError ?? "Reconnect needed."}
-                  </div>
-                ) : (
-                  <AccountUsage
-                    account={account}
-                    live={usageMap[account.id]}
-                    overview={overviewMap[account.id]}
-                    now={now}
-                    refreshing={refreshingUsage || refreshingRow === account.id}
-                    onRetry={() => void refreshAccountUsage(account.id)}
-                  />
-                )}
-                <ResetCreditInventory
-                  overview={overviewMap[account.id]}
-                  now={now}
-                  busy={busy || preparingReset != null}
-                  recoveryAttempts={redemptionAttemptViews(
-                    workspaceId,
-                    account.id,
-                    overviewMap[account.id],
-                  )}
-                  onRedeem={(credit, recovery) =>
-                    void beginRedemption(account.id, credit, recovery)
-                  }
-                />
-                {canManage ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy || refreshingRow === account.id}
-                      onClick={() => void refreshAccountUsage(account.id)}
-                    >
-                      {refreshingRow === account.id ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCwIcon className="size-3.5" />
-                      )}{" "}
-                      Refresh
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void disconnect(account.id)}
-                    >
-                      <Trash2Icon className="size-3.5" /> Disconnect
-                    </Button>
-                  </div>
-                ) : null}
+                    {canManage ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy || refreshingRow === account.id}
+                          onClick={() => void refreshAccountUsage(account.id)}
+                        >
+                          {refreshingRow === account.id ? (
+                            <Loader2Icon className="size-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCwIcon className="size-3.5" />
+                          )}{" "}
+                          Refresh
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => void disconnect(account.id)}
+                        >
+                          <Trash2Icon className="size-3.5" /> Disconnect
+                        </Button>
+                      </div>
+                    ) : null}
+                  </CollapsibleContent>
+                </Collapsible>
               </article>
             );
           })}
-          <p className="text-2xs text-fg-subtle">
+        </div>
+      )}
+      {accounts.length > 0 && !pending && !loading ? (
+        <div className="grid gap-1 text-2xs text-fg-subtle">
+          <p>
             {rotationEnabled ? (
               <>
                 Sessions are spread across all {accounts.length} subscriptions, each sticking to its
@@ -1224,8 +1450,14 @@ export function CodexSubscriptionsCard({
               </>
             )}
           </p>
+          {data?.apps?.available ? (
+            <p>
+              Codex Apps uses only the separately marked Apps subscription. With none marked, Apps
+              tools are unavailable.
+            </p>
+          ) : null}
         </div>
-      )}
+      ) : null}
       <ConfirmDialog
         open={redemption != null}
         onOpenChange={(open) => {

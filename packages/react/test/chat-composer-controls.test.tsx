@@ -73,6 +73,28 @@ async function press(textarea: HTMLTextAreaElement, init: KeyboardEventInit): Pr
 }
 
 describe("ChatComposer delivery and lifecycle controls", () => {
+  test("keeps the mobile footer on one nowrap row when controls and actions share the bar", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={composer(spy)}
+        controlsStart={<span data-testid="chat-model">model</span>}
+        actionsStart={<span data-testid="voice">voice</span>}
+        transcriptionSuppressed
+      />,
+    );
+    const footer = [...mounted.container.querySelectorAll("div")].find((node) =>
+      node.className.includes("max-sm:flex-nowrap"),
+    );
+    expect(footer).toBeTruthy();
+    expect(footer?.className).toContain("sm:flex-wrap");
+    const actions = [...mounted.container.querySelectorAll("span")].find((node) =>
+      node.className.includes("max-sm:shrink-0"),
+    );
+    expect(actions).toBeTruthy();
+    expect(actions?.className).toContain("max-sm:flex-nowrap");
+  });
+
   test("Enter queues while Cmd/Ctrl+Enter steers", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     mounted = await renderComponent(<ChatComposer composer={composer(spy)} />);
@@ -200,8 +222,9 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     const send = mounted.container.querySelector<HTMLButtonElement>(
       'button[aria-label="Send message"]',
     );
-    expect(send?.title).toContain("Queue message");
-    expect(send?.title).toContain("Cmd/Ctrl+Enter");
+    // Tips are Radix tooltips (not native `title`); tip copy is on data-og-tip.
+    expect(send?.getAttribute("data-og-tip")).toContain("Queue message");
+    expect(send?.getAttribute("data-og-tip")).toContain("Cmd/Ctrl+Enter");
     await act(async () => send?.click());
     expect(spy.sends).toEqual(["send"]);
   });

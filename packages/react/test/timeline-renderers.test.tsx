@@ -1,9 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
-import { defaultToolRegistry, ActivityRail } from "../src/timeline";
-import type { AuthNeededItem, MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
+import { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } from "../src/timeline";
+import type {
+  AuthNeededItem,
+  MemoryItem,
+  ToolCallItem,
+  SandboxItem,
+  ToolRegistry,
+  TimelineItem,
+} from "../src/timeline";
 import { MessageTimeline } from "../src";
 import { TimelineRow } from "../src/components/message-timeline";
 
@@ -37,6 +44,27 @@ function timelineEvent(
     turnId,
   };
 }
+
+describe("context compaction rendering", () => {
+  test("labels before and after values as estimated history tokens", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            estimatedTokensBefore: 59_471,
+            estimatedTokensAfter: 2_858,
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain(
+      "Conversation history compacted · ~59,471 → ~2,858 estimated history tokens",
+    );
+    await r.unmount();
+  });
+});
 
 describe("provider MCP unavailable rendering", () => {
   test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
@@ -72,7 +100,7 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
-  test("renders a delivered coalesced batch with source and typed members", async () => {
+  test("renders a collapsed landmark pill; details hold typed members", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
       <MessageTimeline
@@ -101,12 +129,52 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("2 updates joined this turn");
+    expect(r.container.textContent).toContain("2 updates · Agent update, Agent finished");
+    expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(r.container.textContent).not.toContain("Input batch");
     expect(r.container.textContent).not.toContain('"sourceId"');
+    const details = r.container.querySelector(
+      "details[data-og-machine-input-batch]",
+    ) as HTMLDetailsElement | null;
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    // Detail rows stay in the DOM for expand-on-demand audit.
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
     expect(r.container.textContent).toContain("Agent finished");
+    await r.unmount();
+  });
+
+  test("identical agent-finished members collapse to one plural pill", async () => {
+    resetTimelineEvents();
+    const members = Array.from({ length: 15 }, (_, index) => ({
+      id: `update-${index}`,
+      kind: "child_terminal_result" as const,
+      classification: "success" as const,
+      sourceId: `aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa${index.toString(16)}`,
+      summary: `A worker session you spawned has finished its work and gone idle. Worker session id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa${index.toString(16)}`,
+    }));
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-agents",
+            count: members.length,
+            members,
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("15 agents finished");
+    expect(r.container.textContent).not.toContain("updates joined this turn");
+    expect(
+      (
+        r.container.querySelector(
+          "details[data-og-machine-input-batch]",
+        ) as HTMLDetailsElement | null
+      )?.open,
+    ).toBe(false);
     await r.unmount();
   });
 });
@@ -208,6 +276,72 @@ function fleetDecisionEventPayload(): Record<string, unknown> {
     credentialId: "credential-secret",
   };
 }
+
+describe("timeline renderer isolation", () => {
+  test("keeps neighboring groups visible and recovers when an undefined renderer is replaced", async () => {
+    const items: TimelineItem[] = [
+      {
+        kind: "user-message",
+        id: "before-broken-renderer",
+        text: "Message before the broken renderer",
+        resources: [],
+        tools: [],
+        occurredAt: new Date(0).toISOString(),
+      },
+      toolItem({
+        id: "broken-renderer",
+        callId: "broken-renderer",
+        name: "consumer_tool_with_missing_renderer",
+        occurredAt: new Date(1).toISOString(),
+      }),
+      {
+        kind: "user-message",
+        id: "after-broken-renderer",
+        text: "Message after the broken renderer",
+        resources: [],
+        tools: [],
+        occurredAt: new Date(2).toISOString(),
+      },
+    ];
+    const brokenRegistry: ToolRegistry = {
+      fallback: defaultToolRegistry.fallback,
+      // Reproduce React error #130: an integration returned an undefined
+      // component type for one historical tool row.
+      resolve: () => undefined as never,
+    };
+    const error = spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const r = await renderComponent(
+        <MessageTimeline items={items} toolRegistry={brokenRegistry} />,
+      );
+      await flush();
+
+      const text = r.container.textContent ?? "";
+      expect(text).toContain("Message before the broken renderer");
+      expect(text).toContain("Timeline item unavailable");
+      expect(text).toContain("Message after the broken renderer");
+      expect(
+        r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
+      ).toHaveLength(1);
+
+      await r.rerender(<MessageTimeline items={items} toolRegistry={defaultToolRegistry} />);
+      await flush();
+
+      const recoveredText = r.container.textContent ?? "";
+      expect(recoveredText).toContain("Message before the broken renderer");
+      expect(recoveredText).toContain("Consumer tool with missing renderer");
+      expect(recoveredText).toContain("Message after the broken renderer");
+      expect(
+        r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
+      ).toHaveLength(0);
+
+      await r.unmount();
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
 
 describe("FleetDecisionRow", () => {
   test("renders an accessible bounded production-vs-shadow explanation without secret metadata", async () => {
@@ -350,6 +484,38 @@ describe("TimelineRow — connection recovery", () => {
 });
 
 describe("MessageTimeline — settled turn folding", () => {
+  test("auto-opens a settled turn that contains a connection recovery warning", async () => {
+    resetTimelineEvents();
+    const turnId = "turn-auth-warning";
+    const events = [
+      timelineEvent(
+        "tool.auth_needed",
+        {
+          serverId: "mcp-linear",
+          providerDomain: "linear.app",
+          reason: "missing_connection",
+        },
+        turnId,
+      ),
+      timelineEvent("agent.reasoning.delta", { text: "Continuing without Linear." }, turnId),
+      timelineEvent(
+        "agent.message.completed",
+        { text: "The unrelated work completed; Linear was unavailable." },
+        turnId,
+      ),
+      timelineEvent("turn.completed", {}, turnId),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const disclosure = r.container.querySelector("button[aria-expanded]") as HTMLElement | null;
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+    expect(r.container.textContent).toContain("Connect Linear");
+    expect(r.container.textContent).toContain("It isn't connected yet.");
+
+    await r.unmount();
+  });
+
   test("settled turn renders one top-level chip, final answer, and folded narration", async () => {
     resetTimelineEvents();
     const events = [
@@ -388,12 +554,20 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     expect(r.container.textContent).toContain("Narration: one fixture needs a quick patch.");
-    expect(turnSummaryTriggers(r.container).length).toBeGreaterThan(1);
+    // Outer turn chip + one nested chip per activity cluster split by narration.
+    const afterExpand = turnSummaryTriggers(r.container);
+    expect(afterExpand).toHaveLength(3);
+    // Nested chips start closed — expand one to reach the command body.
+    await act(async () => {
+      afterExpand[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("bun test");
 
     await r.unmount();
   });
 
-  test("live turn activity renders the rail directly without a TurnSummary trigger", async () => {
+  test("live turn activity keeps an open TurnSummary shell (no remount on settle)", async () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Run the checks" }),
@@ -407,7 +581,11 @@ describe("MessageTimeline — settled turn folding", () => {
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
     await flush();
 
-    expect(turnSummaryTrigger(r.container)).toBeNull();
+    // Same shell while live so mid-turn fold only collapses — it does not
+    // remount a bare rail into a brand-new steps wrapper (that was the yank).
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute("data-state")).toBe("open");
     expect(r.container.textContent).toContain("Checking the suite.");
 
     await r.unmount();
@@ -556,12 +734,16 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     const triggers = turnSummaryTriggers(r.container);
-    // Exactly ONE chip: the completed first cluster. It is NEUTRAL — no verdict
-    // glyph (chevron is the only svg; the slot holds the pulse dot span).
-    expect(triggers).toHaveLength(1);
-    expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(1);
-    expect(triggers[0]?.querySelector(".animate-og-pulse")).not.toBeNull();
-    // The live tail cluster renders bare: its command is visible without expanding.
+    // Settled cluster chip + live-open shell for the running tail (same shell
+    // type so settle never remounts bare rail → wrapper).
+    expect(triggers).toHaveLength(2);
+    const settled = triggers.find((node) => node.getAttribute("data-state") === "closed");
+    const live = triggers.find((node) => node.getAttribute("data-state") === "open");
+    expect(settled).toBeTruthy();
+    expect(live).toBeTruthy();
+    expect(settled?.querySelectorAll("svg")).toHaveLength(1);
+    expect(settled?.querySelector(".animate-og-pulse")).not.toBeNull();
+    // The live tail stays expanded: its command is visible without expanding.
     expect(r.container.textContent).toContain("step two");
     // The folded cluster's contents are NOT in the DOM until expanded.
     expect(r.container.textContent).not.toContain("step one");
@@ -585,7 +767,10 @@ describe("MessageTimeline — settled turn folding", () => {
 
     // The waiting notice follows the cluster, but a notice is not agent
     // PROGRESS — the paused work stays expanded next to the approval ask.
-    expect(turnSummaryTriggers(r.container)).toHaveLength(0);
+    // Live shell chip is present and open (not collapsed).
+    const triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("open");
     expect(r.container.textContent).toContain("terraform apply");
     expect(r.container.textContent).toContain("Approval needed");
 
@@ -622,9 +807,10 @@ describe("MessageTimeline — settled turn folding", () => {
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
     await flush();
 
-    // The settled first cluster folds; the RUNNING second cluster stays bare.
+    // Settled first cluster folded; running cluster keeps an open live shell.
     const triggers = turnSummaryTriggers(r.container);
-    expect(triggers).toHaveLength(1);
+    expect(triggers).toHaveLength(2);
+    expect(triggers.some((node) => node.getAttribute("data-state") === "open")).toBe(true);
     expect(r.container.textContent).toContain("step two running");
     expect(r.container.textContent).not.toContain("queued follow-up");
 
@@ -656,8 +842,9 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     const triggers = turnSummaryTriggers(r.container);
-    // One settled OUTER chip. Successful summaries are intentionally quiet, so
-    // only the disclosure chevron remains; the final answer sits outside it.
+    // Bulk/history paint: no settle beat — one settled OUTER chip. Successful
+    // summaries are intentionally quiet, so only the disclosure chevron remains;
+    // the final answer sits outside it.
     expect(triggers).toHaveLength(1);
     expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(1);
     expect(r.container.textContent).toContain("All finished.");
@@ -665,7 +852,161 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
-  test("nested chips inside a failed turn stay quiet — the outer chip owns the failure", async () => {
+  test("live activity→turn wrap remounts a settle-open chip (no insta-collapse)", async () => {
+    resetTimelineEvents();
+    const midTurn = [
+      timelineEvent("user.message", { text: "Do a long job" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "step one" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("agent.message.completed", { text: "Mid-turn checkpoint" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "step two" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
+      timelineEvent("agent.message.completed", { text: "All finished." }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={midTurn} status="running" />);
+    await flush();
+    // Two live/settling cluster chips before turn.completed.
+    expect(turnSummaryTriggers(r.container).length).toBeGreaterThanOrEqual(1);
+
+    await r.rerender(
+      <MessageTimeline events={[...midTurn, timelineEvent("turn.completed", {})]} status="idle" />,
+    );
+    await flush();
+
+    const triggers = turnSummaryTriggers(r.container);
+    const outer = triggers[0];
+    expect(outer).not.toBeNull();
+    // Fresh turn key + settleFold: open during the beat, not snapped shut.
+    expect(outer?.getAttribute("data-state")).toBe("open");
+    expect(outer?.className ?? "").toContain("animate-og-settle-chip");
+    // Settle beat keeps nested structure (force-open) — never flat-map to bare
+    // rails (that flash made clusters look unordered then re-nest on expand).
+    expect(triggers).toHaveLength(3);
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "open")).toBe(true);
+    expect(r.container.textContent).toContain("Mid-turn checkpoint");
+    expect(r.container.textContent).toContain("step one");
+
+    // The outer fold closes after its beat but remains in settle choreography
+    // through the slow collapse. Assert that durable state on the trigger, not
+    // Radix Presence's transient nested DOM: Bun's native shard runner may
+    // release happy-dom's CSS-only exit subtree immediately.
+    await flush(1150);
+    expect(outer?.getAttribute("data-state")).toBe("closed");
+    expect(outer?.className ?? "").toContain("animate-og-settle-chip");
+
+    // Settle chrome clears after the slow collapse; nested remount closed.
+    await flush(900);
+    expect(outer?.getAttribute("data-state")).toBe("closed");
+    const afterChrome = turnSummaryTriggers(r.container);
+    // Presence may keep closed content mounted briefly — nested must be closed.
+    expect(afterChrome[0]).toBe(outer);
+    expect(afterChrome.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+
+    await act(async () => {
+      outer?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    const expanded = turnSummaryTriggers(r.container);
+    // Outer + two nested cluster chips once the reader opens the settled turn.
+    expect(expanded).toHaveLength(3);
+    expect(expanded.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+    expect(r.container.textContent).toContain("Mid-turn checkpoint");
+    expect(r.container.textContent).not.toContain("step one");
+
+    await r.unmount();
+  });
+
+  test("a cluster that finished its settle fold stays closed as siblings append and the turn wraps", async () => {
+    resetTimelineEvents();
+    // Grand finale choreography, streamed live: tool marathon → narration
+    // (cluster one settle-folds) → more tools → finale text (cluster two
+    // settle-folds) → turn.completed (wrap). Nothing that already settled
+    // closed may reopen at any point.
+    const phase1 = [
+      timelineEvent("user.message", { text: "Grand finale" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "step one" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={phase1} status="running" />);
+    await flush();
+    let triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("open");
+
+    // Narration arrives → cluster one runs its full settle choreography.
+    const phase2 = [
+      ...phase1,
+      timelineEvent("agent.message.completed", { text: "Mid-turn checkpoint" }),
+    ];
+    await r.rerender(<MessageTimeline events={phase2} status="running" />);
+    await flush(2200);
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("closed");
+
+    // More tools append below: the settled cluster must stay closed.
+    const phase3 = [
+      ...phase2,
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "step two" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
+    ];
+    await r.rerender(<MessageTimeline events={phase3} status="running" />);
+    await flush();
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(2);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("closed");
+    expect(triggers[1]?.getAttribute("data-state")).toBe("open");
+
+    // Finale text folds cluster two the same way.
+    const phase4 = [...phase3, timelineEvent("agent.message.completed", { text: "All finished." })];
+    await r.rerender(<MessageTimeline events={phase4} status="running" />);
+    await flush(2200);
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers.every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+
+    // Snappy close: the turn wraps. The NEW outer chip takes its one settle
+    // beat, but the clusters that already settled closed must not reopen —
+    // force-opening them here was the "already-collapsed cluster auto-expands
+    // at the end" bug.
+    await r.rerender(
+      <MessageTimeline events={[...phase4, timelineEvent("turn.completed", {})]} status="idle" />,
+    );
+    await flush();
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(3);
+    const outer = triggers[0];
+    expect(outer?.getAttribute("data-state")).toBe("open");
+    expect(outer?.className ?? "").toContain("animate-og-settle-chip");
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+    // Narration (visible pre-wrap) rides the beat; folded step rows do not.
+    expect(r.container.textContent).toContain("Mid-turn checkpoint");
+    expect(r.container.textContent).not.toContain("step one");
+
+    // Through the collapse and after chrome clears: everything stays closed.
+    await flush(2200);
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("closed");
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+
+    await r.unmount();
+  }, 15_000);
+
+  test("a failed turn keeps nested cluster chips quiet under the outer failure", async () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Deploy preview" }),
@@ -688,16 +1029,15 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     const triggers = turnSummaryTriggers(r.container);
-    // The open outer chip is the one loud failure surface; nested cluster chips
-    // are closed and never repeat the failure text.
-    const withFailure = triggers.filter((t) => (t.textContent ?? "").includes("provider down"));
-    expect(withFailure).toHaveLength(1);
-    expect(withFailure[0]?.getAttribute("data-state")).toBe("open");
-    const nested = triggers.filter((t) => t !== withFailure[0]);
-    expect(nested.length).toBeGreaterThan(0);
-    for (const chip of nested) {
-      expect(chip.getAttribute("data-state")).toBe("closed");
-    }
+    // Outer owns the loud failure (auto-open). Nested cluster chips stay bare /
+    // closed — no repeated failure text, two calm sub-expands for the two clusters.
+    expect(triggers).toHaveLength(3);
+    expect(triggers[0]?.textContent ?? "").toContain("provider down");
+    expect(triggers[0]?.getAttribute("data-state")).toBe("open");
+    expect(triggers.slice(1).every((t) => !(t.textContent ?? "").includes("provider down"))).toBe(
+      true,
+    );
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
 
     await r.unmount();
   });
@@ -855,6 +1195,33 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
     await r.unmount();
   });
 
+  test("renders modern queries[] when deprecated singular query is absent", async () => {
+    const item = toolItem({
+      name: "web_search_call",
+      raw: {
+        type: "hosted_tool_call",
+        status: "in_progress",
+        providerData: {
+          action: {
+            type: "search",
+            queries: ["hexagonal diamond lonsdaleite 2026 Nature paper"],
+          },
+        },
+      },
+      status: "running",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Searching the web");
+    expect(text).toContain("hexagonal diamond lonsdaleite 2026 Nature paper");
+    expect(text).not.toContain("query unavailable");
+
+    await r.unmount();
+  });
+
   test("renders without throwing when results contains a null entry", async () => {
     // Simulate a host-enriched output where one entry is null (untrusted data).
     const item = toolItem({
@@ -913,6 +1280,122 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
     const text = r.container.textContent ?? "";
     // No valid results → fallback note.
     expect(text.toLowerCase()).toContain("no list available");
+
+    await r.unmount();
+  });
+});
+
+describe("ToolSearchRenderer", () => {
+  test("running shows capability query without flashing Done", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: { query: "send an email to someone", limit: 8 },
+      raw: {
+        type: "tool_search_call",
+        call_id: "ts1",
+        execution: "client",
+        arguments: { query: "send an email to someone", limit: 8 },
+      },
+      status: "running",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    expect(Renderer.name).toBe("ToolSearchRenderer");
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Looking up tools");
+    expect(text).toContain("send an email to someone");
+    expect(text).not.toContain("Done");
+
+    await r.unmount();
+  });
+
+  test("settled disclosed-tools text lists leaves with source prefix", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: { query: "email" },
+      raw: { type: "tool_search_call", call_id: "ts2", execution: "client" },
+      output: {
+        type: "text",
+        text: "Disclosed tools: codex_apps__gmail_send_email, slack__post_message",
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Looked up tools");
+    expect(r.container.textContent).toContain("2 tools");
+
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("gmail_send_email");
+    expect(text).toContain("post_message");
+    expect(text).toContain("codex_apps");
+    expect(text).toContain("slack");
+    expect(text).toContain("capability query: email");
+    // Parsed list owns the face — no raw "Disclosed tools:" dump.
+    expect(text).not.toContain("Disclosed tools:");
+
+    await r.unmount();
+  });
+
+  test("no matches settles quietly", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: JSON.stringify({ query: "teleport to mars" }),
+      output: { type: "text", text: "No matching tools found." },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("No matches");
+
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect((r.container.textContent ?? "").toLowerCase()).toContain("no deferred tools matched");
+
+    await r.unmount();
+  });
+
+  test("structured tools array on output is accepted", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: { query: "calendar" },
+      output: {
+        tools: [
+          { type: "function", name: "codex_apps__google_calendar_create_event" },
+          null,
+          { type: "function", name: "codex_apps__google_calendar_list_events" },
+        ],
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("2 tools");
+
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("google_calendar_create_event");
+    expect(r.container.textContent).toContain("google_calendar_list_events");
 
     await r.unmount();
   });
@@ -1045,6 +1528,40 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     const text = r.container.textContent ?? "";
     expect(text).toContain("Edited");
     expect(text).not.toContain("Applying");
+
+    await r.unmount();
+  });
+
+  test("Codex function-tool { patch } shape uses the specialized renderer", async () => {
+    const freeform = [
+      "*** Begin Patch",
+      "*** Update File: src/hello.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    const item = toolItem({
+      name: "apply_patch",
+      raw: {
+        type: "function_call",
+        name: "apply_patch",
+        arguments: JSON.stringify({ patch: freeform }),
+      },
+      arguments: JSON.stringify({ patch: freeform }),
+      status: "complete",
+      output: "Patch applied.",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Edited");
+    expect(text).toContain("hello.ts");
+    // Must not fall through to GenericRenderer chrome.
+    expect(text).not.toMatch(/Apply patch/i);
+    expect(r.container.textContent).not.toContain("Arguments");
 
     await r.unmount();
   });
@@ -1456,6 +1973,74 @@ describe("turn fold — memory facet", () => {
       timelineEvent("turn.completed", {}),
     ]);
     expect(trigger?.textContent).toContain("1 memory updated");
+    await r.unmount();
+  });
+});
+
+describe("ask / run_on / exec collapsed previews", () => {
+  test("request_human_input shows Ask + first question, not Done", async () => {
+    const item = toolItem({
+      name: "request_human_input",
+      arguments: {
+        questions: [{ id: "q1", prompt: "Which region should we deploy to?", kind: "text" }],
+        allowSkip: false,
+      },
+      output: JSON.stringify({ requestId: "req-1", outcome: "answered" }),
+      status: "complete",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Ask");
+    expect(text).toContain("Which region should we deploy to?");
+    expect(text).not.toContain("Done");
+    expect(text).not.toContain("Request human input");
+    await r.unmount();
+  });
+
+  test("run_on shows machine name from tool output + exec gist", async () => {
+    const item = toolItem({
+      name: "run_on",
+      arguments: {
+        target: "sandbox-abc",
+        op: { kind: "exec", cmd: "uname -a" },
+      },
+      output: JSON.stringify({
+        target: "sandbox-abc",
+        targetName: "studio-mac",
+        kind: "exec",
+        ok: true,
+        stdout: "Darwin\n",
+        exitCode: 0,
+      }),
+      status: "complete",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Run on studio-mac");
+    expect(text).toContain("$ uname -a");
+    expect(text).not.toContain("Done");
+    await r.unmount();
+  });
+
+  test("exec_command prefixes preview with computeLabel", async () => {
+    const item = toolItem({
+      name: "exec_command",
+      arguments: { cmd: "pwd" },
+      output: "Chunk ID none\nProcess exited with code 0\nOutput:\n/workspace\n",
+      status: "complete",
+    });
+    const r = await renderComponent(
+      <TimelineComputeLabelProvider value="studio-mac">
+        <ActivityRail items={[item]} />
+      </TimelineComputeLabelProvider>,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("$ pwd");
+    expect(text).toContain("on studio-mac");
+    expect(text).toContain("/workspace");
     await r.unmount();
   });
 });

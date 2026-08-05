@@ -26,6 +26,7 @@ import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type {
   GoalSpec,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   SandboxBackend,
@@ -37,7 +38,8 @@ import { buildTools } from "./session-tools";
 // ── Compute target — the promoted top-level "Where should this run?" choice ──
 
 /** A platform-owned ephemeral sandbox. `backend === ""` is the deployment
- *  default; a specific managed backend is an Advanced override. */
+ *  default. The composer no longer exposes a managed-backend override; keep the
+ *  field so drafts/API mapping stay stable if we re-enable it later. */
 export type ManagedSandboxTarget = {
   kind: "sandbox";
   backend: SandboxBackend | "";
@@ -121,10 +123,14 @@ export type SessionDraftSubmission = {
 export type BuildCreateSessionRequestInput = {
   currentResources: ResourceRef[];
   submission: TurnSubmission;
+  /** Session-scoped system guidance that is not rendered in the chat timeline. */
+  instructions?: string;
+  startMode?: "realtime";
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   defaultModel: string;
   defaultReasoningEffort: ReasoningEffort;
+  defaultLatencyMode: LatencyMode;
   clientEventId: string;
   idempotencyKey: string;
   targetSandboxId?: string | null;
@@ -176,11 +182,15 @@ export function buildCreateSessionRequest(
       ? undefined
       : [...input.selectedTools];
   return {
-    initialMessage: input.submission.text,
+    ...(input.startMode === "realtime"
+      ? { startMode: "realtime" as const }
+      : { initialMessage: input.submission.text }),
+    instructions: input.instructions || undefined,
     resources,
     ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,
     reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
+    latencyMode: input.submission.latencyMode ?? input.defaultLatencyMode,
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
     ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
@@ -196,7 +206,9 @@ export function buildCreateSessionRequest(
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
-      ? { expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision }
+      ? {
+          expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
+        }
       : {}),
   };
 }
@@ -338,7 +350,9 @@ export function sessionDraftFromNewSessionDraftOptions(
         }
       : {
           kind: "sandbox",
-          backend: options.sandboxBackend ?? "",
+          // Ignore persisted managed-backend overrides — the create UI no longer
+          // offers that control; always use the deployment default.
+          backend: "",
         },
     variableSetId: options.variableSetId ?? "",
     rigId: options.rigId ?? "",
@@ -441,9 +455,9 @@ function formatLifetime(ms: number): string {
   return Number.isInteger(hours) ? `${hours}h` : `${Math.round(hours)}h`;
 }
 
-/** The managed backend options for the Advanced override, descriptor-driven and
- *  led by the deployment default. Excludes `selfhosted` (the Connected Machine
- *  kind). */
+/** Managed backend choices (deployment default first). Excludes `selfhosted`
+ *  (Connected Machine kind). Kept for tests / a possible future override UI —
+ *  the create composer no longer surfaces this control. */
 export function managedBackendOptions(): ManagedBackendOption[] {
   const managed = (
     Object.entries(CAPABILITY_DESCRIPTORS) as Array<[SandboxBackend, CapabilityDescriptor]>

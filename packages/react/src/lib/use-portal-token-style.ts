@@ -34,7 +34,7 @@ export function usePortalTokenStyle(sourceRef: RefObject<HTMLElement | null>): P
       const observer = new MutationObserver(sync);
       observer.observe(ancestor, {
         attributes: true,
-        attributeFilter: ["class", "data-og-theme", "style"],
+        attributeFilter: ["class", "data-og-density", "data-og-theme", "style"],
       });
       observers.push(observer);
       ancestor = ancestor.parentElement;

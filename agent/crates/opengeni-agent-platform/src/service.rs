@@ -63,6 +63,10 @@ pub struct ServiceSpec {
     pub args: Vec<String>,
     /// The install scope (Linux only; ignored elsewhere).
     pub scope: ServiceScope,
+    /// Command lookup path inherited from the interactive installer. Service
+    /// managers commonly provide a much narrower default (notably on NixOS),
+    /// which would make otherwise valid connected-machine commands disappear.
+    pub environment_path: Option<String>,
 }
 
 impl ServiceSpec {
@@ -74,6 +78,7 @@ impl ServiceSpec {
             binary_path: binary_path.into(),
             args: vec!["run".to_string()],
             scope: ServiceScope::User,
+            environment_path: std::env::var("PATH").ok().filter(|value| !value.is_empty()),
         }
     }
 
@@ -115,6 +120,11 @@ pub mod ids {
 #[must_use]
 pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
     let exec = exec_line(&spec.binary_path, &spec.args);
+    let path = spec
+        .environment_path
+        .as_deref()
+        .map(|value| format!("Environment=\"PATH={}\"\n", systemd_escape(value)))
+        .unwrap_or_default();
     let wanted_by = match spec.scope {
         ServiceScope::User => "default.target",
         ServiceScope::System => "multi-user.target",
@@ -131,6 +141,7 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
+         {path}\
          ExecStart={exec}\n\
          Restart=always\n\
          RestartSec=5\n\
@@ -164,6 +175,16 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("\n");
+    let environment = spec
+        .environment_path
+        .as_deref()
+        .map(|value| {
+            format!(
+                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{}</string>\n  </dict>\n",
+                xml_escape(value)
+            )
+        })
+        .unwrap_or_default();
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -175,6 +196,7 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
          \x20 <array>\n\
          {program_args}\n\
          \x20 </array>\n\
+         {environment}\
          \x20 <key>RunAtLoad</key>\n\
          \x20 <true/>\n\
          \x20 <key>KeepAlive</key>\n\
@@ -243,6 +265,10 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn systemd_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// A not-yet-supported service backend error (a target with no service manager).
 #[must_use]
 pub fn unsupported_backend() -> PlatformError {
@@ -280,6 +306,7 @@ mod tests {
             binary_path: PathBuf::from("/home/u/.local/bin/opengeni-agent"),
             args: vec!["run".to_string()],
             scope: ServiceScope::User,
+            environment_path: Some("/home/u/.local/bin:/usr/bin:/bin".to_string()),
         }
     }
 
@@ -287,12 +314,21 @@ mod tests {
     fn systemd_unit_has_the_required_directives() {
         let unit = render_systemd_unit(&spec());
         assert!(unit.contains("ExecStart=/home/u/.local/bin/opengeni-agent run"));
+        assert!(unit.contains("Environment=\"PATH=/home/u/.local/bin:/usr/bin:/bin\""));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(
             unit.contains("KillSignal=SIGTERM"),
             "clean stop must SIGTERM for going-offline"
         );
+    }
+
+    #[test]
+    fn launchd_plist_preserves_the_installer_command_path() {
+        let plist = render_launchd_plist(&spec());
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("<key>PATH</key>"));
+        assert!(plist.contains("/home/u/.local/bin:/usr/bin:/bin"));
     }
 
     #[test]

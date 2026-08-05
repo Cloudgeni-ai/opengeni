@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/observability",
-  "version": "0.3.0",
+  "version": "0.5.1",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -31,6 +31,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@opengeni/contracts": "workspace:*",
     "prom-client": "^15.1.3"
   },
   "devDependencies": {

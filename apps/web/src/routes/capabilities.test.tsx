@@ -1,10 +1,17 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { AccessContext } from "@/types";
-import { canInstallOpenGeniSlackBot, SlackBotInstallControls } from "./capabilities";
+import {
+  canInstallOpenGeniSlackBot,
+  canManageSlackReactionSummon,
+  canWriteWorkspaceConnections,
+  SlackBotInstallControls,
+  WorkspaceSlackBotRequestedScopes,
+} from "./capabilities";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -66,6 +73,21 @@ function accessContext(
 }
 
 describe("OpenGeni Slack bot install controls", () => {
+  test("renders every requested workspace-bot scope including read-only reactions", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<WorkspaceSlackBotRequestedScopes />));
+      expect(container.textContent).toBe(OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", "));
+      expect(container.textContent).toContain("reactions:read");
+      expect(container.textContent).not.toContain("reactions:write");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("uses the authoritative workspace permission grant", () => {
     expect(canInstallOpenGeniSlackBot(accessContext(["connections:read"]), "workspace-a")).toBe(
       false,
@@ -74,6 +96,15 @@ describe("OpenGeni Slack bot install controls", () => {
       true,
     );
     expect(canInstallOpenGeniSlackBot(accessContext(["workspace:admin"]), "workspace-a")).toBe(
+      true,
+    );
+    expect(canWriteWorkspaceConnections(accessContext(["connections:write"]), "workspace-a")).toBe(
+      true,
+    );
+    expect(canManageSlackReactionSummon(accessContext(["connections:write"]), "workspace-a")).toBe(
+      false,
+    );
+    expect(canManageSlackReactionSummon(accessContext(["workspace:admin"]), "workspace-a")).toBe(
       true,
     );
   });

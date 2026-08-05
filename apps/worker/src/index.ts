@@ -22,6 +22,7 @@ import {
 } from "@opengeni/observability";
 import {
   Connection,
+  isGrpcServiceError,
   ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   Client as TemporalClient,
@@ -127,6 +128,13 @@ export function temporalActivityLeaseSettled(
   );
 }
 
+/** The exact Temporal workflow run is absent, so it cannot retain an activity. */
+export function temporalWorkflowExecutionNotFound(error: unknown): boolean {
+  // gRPC status code 5 is NOT_FOUND. The typed guard prevents unrelated
+  // provider/HTTP errors carrying a numeric code from proving quiescence.
+  return isGrpcServiceError(error) && error.code === 5;
+}
+
 type WorkerWorkflowDefinition =
   | { workflowBundle: WorkflowBundleOption }
   | { workflowsPath: string };
@@ -165,9 +173,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
     throw new Error("workflowBundle is valid only for the control worker role");
   }
   // Pre-resolve a PRIVATE-registry sandbox image before any turn creates a box.
-  // No-op unless OPENGENI_MODAL_IMAGE_REGISTRY_SECRET + OPENGENI_MODAL_IMAGE_REF are
-  // both set (so non-modal / public-image deployments are byte-unchanged and never
-  // load the modal SDK here). Memoized in the provider, so this runs once per process.
+  // A provider-native OPENGENI_MODAL_IMAGE_ID intentionally bypasses this
+  // registry path and is resolved by ModalImageSelector.fromId at create time.
+  // Otherwise this is a no-op unless the registry secret + logical ref are both
+  // set. Memoized in the provider, so it runs once per process.
   if (options.role === "turn") {
     await retryStartupDependency(
       "Modal private-registry image",
@@ -311,10 +320,16 @@ export async function createWorkerWorkflowSignaler(
       // receipt and its exact wake revision atomically.
     },
     inspectSessionAttemptActivity: async ({ workflowId, workflowRunId, activityId }) => {
-      const description = await connection.workflowService.describeWorkflowExecution({
-        namespace: settings.temporalNamespace,
-        execution: { workflowId, runId: workflowRunId },
-      });
+      let description;
+      try {
+        description = await connection.workflowService.describeWorkflowExecution({
+          namespace: settings.temporalNamespace,
+          execution: { workflowId, runId: workflowRunId },
+        });
+      } catch (error) {
+        if (temporalWorkflowExecutionNotFound(error)) return "settled";
+        throw error;
+      }
       const pending = description.pendingActivities?.find(
         (activity) => activity.activityId === activityId,
       );
@@ -351,8 +366,8 @@ export async function createWorkerWorkflowSignaler(
 /**
  * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
  * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
- * sandbox ownership off the activity performs only bounded DB outbox repair;
- * it never reads/terminates sandbox leases.
+ * sandbox ownership off the activity performs bounded DB outbox repair and
+ * read-only observability projections; it never mutates or terminates sandbox leases.
  *
  * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant

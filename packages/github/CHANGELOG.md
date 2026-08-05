@@ -1,5 +1,256 @@
 # @opengeni/github
 
+## 0.4.32
+
+### Patch Changes
+
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
+## 0.4.31
+
+### Patch Changes
+
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
+## 0.4.30
+
+### Patch Changes
+
+- Updated dependencies [8135dbb]
+  - @opengeni/config@0.10.14
+
+## 0.4.29
+
+### Patch Changes
+
+- Updated dependencies [c0f8e40]
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+
+## 0.4.28
+
+### Patch Changes
+
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/config@0.10.12
+
+## 0.4.27
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/config@0.10.11
+
+## 0.4.26
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+
+## 0.4.25
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/config@0.10.9
+
+## 0.4.24
+
+### Patch Changes
+
+- Updated dependencies [abe0de6]
+  - @opengeni/config@0.10.8
+  - @opengeni/contracts@0.36.1
+
+## 0.4.23
+
+### Patch Changes
+
+- Updated dependencies [00f7d3b]
+  - @opengeni/contracts@0.36.0
+  - @opengeni/config@0.10.7
+
+## 0.4.22
+
+### Patch Changes
+
+- Updated dependencies [b121e7c]
+  - @opengeni/contracts@0.35.0
+  - @opengeni/config@0.10.6
+
+## 0.4.21
+
+### Patch Changes
+
+- Updated dependencies [b83af7a]
+  - @opengeni/contracts@0.34.0
+  - @opengeni/config@0.10.5
+
+## 0.4.20
+
+### Patch Changes
+
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [74bd3a5]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/config@0.10.4
+
+## 0.4.19
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/config@0.10.3
+
+## 0.4.18
+
+### Patch Changes
+
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/config@0.10.2
+
+## 0.4.17
+
+### Patch Changes
+
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+
+## 0.4.16
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+
+## 0.4.15
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+  - @opengeni/config@0.9.3
+
+## 0.4.14
+
+### Patch Changes
+
+- Updated dependencies [dd71248]
+  - @opengeni/contracts@0.29.0
+  - @opengeni/config@0.9.2
+
+## 0.4.13
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/config@0.9.1
+
+## 0.4.12
+
+### Patch Changes
+
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/config@0.9.0
+
+## 0.4.11
+
+### Patch Changes
+
+- Updated dependencies [8243ffe]
+  - @opengeni/config@0.8.1
+
+## 0.4.10
+
+### Patch Changes
+
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/config@0.8.0
+  - @opengeni/contracts@0.27.0
+
+## 0.4.9
+
+### Patch Changes
+
+- Updated dependencies [c52acc0]
+  - @opengeni/config@0.7.22
+  - @opengeni/contracts@0.26.1
+
+## 0.4.8
+
+### Patch Changes
+
+- Updated dependencies [f413e6c]
+  - @opengeni/contracts@0.26.0
+  - @opengeni/config@0.7.21
+
+## 0.4.7
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/config@0.7.20
+
+## 0.4.6
+
+### Patch Changes
+
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+
+## 0.4.5
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+
+## 0.4.4
+
+### Patch Changes
+
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/config@0.7.17
+
 ## 0.4.3
 
 ### Patch Changes

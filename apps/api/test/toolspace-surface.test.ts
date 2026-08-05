@@ -218,6 +218,45 @@ function grantFor(input: {
   } as AccessGrant;
 }
 
+function connectionBrokerTestInput(
+  deps: ApiRouteDeps,
+): Parameters<typeof connectionBrokerFetch>[1] {
+  return {
+    deps,
+    grant: {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      subjectId: "sandbox:test",
+      permissions: ["toolspace:call"],
+      metadata: {
+        sessionId: "session-1",
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        executionGeneration: 1,
+      },
+    } as AccessGrant,
+    config: {
+      id: "test-server",
+      url: "https://example.com/mcp",
+      cacheToolsList: false,
+      connectionRef: {
+        provider: "test-provider",
+        providerDomain: "example.com",
+        connectionId: "connection-1",
+      },
+    } as McpServerConfig,
+    sessionId: "session-1",
+    rootSessionId: "session-1",
+    turn: {
+      id: "turn-1",
+      activeAttemptId: "attempt-1",
+      executionGeneration: 1,
+      initiator: { kind: "subject", subjectId: "host:test" },
+      initiatorContext: {},
+    } as SessionTurn,
+  };
+}
+
 function toolNames(surface: ToolspaceMcpSurface): string[] {
   return surface.tools.map((tool) => tool.name).sort();
 }
@@ -227,6 +266,7 @@ describe("toolspaceCanProxyServerId (recursion guard predicate)", () => {
     expect(toolspaceCanProxyServerId("opengeni")).toBe(false);
     expect(toolspaceCanProxyServerId("files")).toBe(false);
     expect(toolspaceCanProxyServerId("docs")).toBe(false);
+    expect(toolspaceCanProxyServerId("codex_apps")).toBe(false);
     expect(toolspaceCanProxyServerId("thirdparty")).toBe(true);
     expect(toolspaceCanProxyServerId("github-mcp")).toBe(true);
   });
@@ -355,11 +395,19 @@ describe("connectionBrokerFetch response lifecycle", () => {
       } as SessionTurn,
     });
 
-    const result = await broker("https://example.com/mcp", { method: "GET" });
+    const replaySafeRequest = (id: number, method: string): RequestInit => ({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id, method }),
+    });
+    const result = await broker("https://example.com/mcp", replaySafeRequest(1, "initialize"));
     expect(result.status).toBe(200);
-    const expired = await broker("https://example.com/mcp", { method: "GET" });
+    const expired = await broker("https://example.com/mcp", replaySafeRequest(2, "tools/list"));
     expect(expired.status).toBe(401);
-    const insufficient = await broker("https://example.com/mcp", { method: "GET" });
+    const insufficient = await broker(
+      "https://example.com/mcp",
+      replaySafeRequest(3, "tools/list"),
+    );
     expect(insufficient.status).toBe(401);
     expect(fetchCount).toBe(5);
     expect(credentialRequests.length).toBeGreaterThan(1);
@@ -368,45 +416,433 @@ describe("connectionBrokerFetch response lifecycle", () => {
     );
     expect(canceled).toEqual(["initial-401", "initial-401-again", "retry-401", "initial-403"]);
   });
+
+  test("refreshes future credentials but never replays tools/call after 401", async () => {
+    const canceled: string[] = [];
+    let fetchCount = 0;
+    const baseFetch = async () => {
+      fetchCount += 1;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("provider-secret-body"));
+          },
+          cancel() {
+            canceled.push("initial-401");
+          },
+        }),
+        { status: 401 },
+      );
+    };
+    const credentialRequests: McpCredentialsRequest[] = [];
+    const deps = {
+      connectionCredentials: {
+        mcpCredentials: async (request: McpCredentialsRequest) => {
+          credentialRequests.push(request);
+          return {
+            status: "ok" as const,
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { "x-test-credential": "refreshed" },
+            connectionId: "connection-1",
+            provider: "test-provider",
+            providerDomain: "example.com",
+          };
+        },
+      },
+    } as unknown as ApiRouteDeps;
+    const broker = connectionBrokerFetch(baseFetch, {
+      deps,
+      grant: {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        subjectId: "sandbox:test",
+        permissions: ["toolspace:call"],
+        metadata: {
+          sessionId: "session-1",
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+          executionGeneration: 1,
+        },
+      } as AccessGrant,
+      config: {
+        id: "test-server",
+        url: "https://example.com/mcp",
+        cacheToolsList: false,
+        connectionRef: {
+          provider: "test-provider",
+          providerDomain: "example.com",
+          connectionId: "connection-1",
+        },
+      } as McpServerConfig,
+      sessionId: "session-1",
+      rootSessionId: "session-1",
+      turn: {
+        id: "turn-1",
+        activeAttemptId: "attempt-1",
+        executionGeneration: 1,
+        initiator: { kind: "subject", subjectId: "host:test" },
+        initiatorContext: {},
+      } as SessionTurn,
+    });
+
+    const response = await broker("https://example.com/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 17,
+        method: "tools/call",
+        params: { name: "create_issue", arguments: { title: "once" } },
+      }),
+    });
+
+    expect(fetchCount).toBe(1);
+    expect(canceled).toEqual(["initial-401"]);
+    expect(
+      credentialRequests.some(
+        (request) => request.toolName === "create_issue" && request.forceRefresh,
+      ),
+    ).toBe(true);
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      error?: { code?: number; message?: string };
+    };
+    expect(payload.error?.code).toBe(40_102);
+    expect(payload.error?.message).toMatch(/outcome uncertain/i);
+    expect(payload.error?.message).toMatch(/did not replay/i);
+    expect(payload.error?.message).toMatch(/do not retry automatically/i);
+    expect(payload.error?.message).toMatch(/verify provider state/i);
+    expect(JSON.stringify(payload)).not.toContain("provider-secret-body");
+  });
+
+  test("never replays malformed, unknown, non-list, or mixed-batch requests after 401", async () => {
+    const cases: Array<{
+      name: string;
+      body: string;
+      expectedIds?: Array<string | number | null>;
+    }> = [
+      { name: "malformed", body: "{" },
+      {
+        name: "unknown extension",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 11, method: "provider/create" }),
+      },
+      {
+        name: "non-list standard method",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 12, method: "resources/read" }),
+      },
+      {
+        name: "mixed batch",
+        body: JSON.stringify([
+          { jsonrpc: "2.0", id: 13, method: "tools/list" },
+          {
+            jsonrpc: "2.0",
+            id: 14,
+            method: "tools/call",
+            params: { name: "create_issue", arguments: { title: "once" } },
+          },
+        ]),
+        expectedIds: [13, 14],
+      },
+    ];
+
+    for (const scenario of cases) {
+      const canceled: string[] = [];
+      let fetchCount = 0;
+      const baseFetch = async () => {
+        fetchCount += 1;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`provider-secret-body:${scenario.name}`));
+            },
+            cancel() {
+              canceled.push(scenario.name);
+            },
+          }),
+          { status: 401 },
+        );
+      };
+      const credentialRequests: McpCredentialsRequest[] = [];
+      const deps = {
+        connectionCredentials: {
+          mcpCredentials: async (request: McpCredentialsRequest) => {
+            credentialRequests.push(request);
+            return {
+              status: "ok" as const,
+              accountId: request.accountId,
+              workspaceId: request.workspaceId,
+              sessionId: request.sessionId,
+              headers: { "x-test-credential": request.forceRefresh ? "fresh" : "stale" },
+              connectionId: "connection-1",
+              provider: "test-provider",
+              providerDomain: "example.com",
+            };
+          },
+        },
+      } as unknown as ApiRouteDeps;
+      const broker = connectionBrokerFetch(baseFetch, connectionBrokerTestInput(deps));
+      const response = await broker("https://example.com/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: scenario.body,
+      });
+
+      expect(fetchCount, scenario.name).toBe(1);
+      expect(canceled, scenario.name).toEqual([scenario.name]);
+      expect(
+        credentialRequests.some((request) => request.forceRefresh),
+        scenario.name,
+      ).toBe(true);
+      expect(response.status, scenario.name).toBe(200);
+      const payload = (await response.json()) as
+        | { id?: string | number | null; error?: { code?: number; message?: string } }
+        | Array<{ id?: string | number | null; error?: { code?: number; message?: string } }>;
+      const errors = Array.isArray(payload) ? payload : [payload];
+      expect(
+        errors.every((entry) => entry.error?.code === 40_102),
+        scenario.name,
+      ).toBe(true);
+      expect(errors.every((entry) => /outcome uncertain/i.test(entry.error?.message ?? ""))).toBe(
+        true,
+      );
+      expect(JSON.stringify(payload), scenario.name).not.toContain("provider-secret-body");
+      if (scenario.expectedIds) {
+        expect(
+          errors.map((entry) => entry.id),
+          scenario.name,
+        ).toEqual(scenario.expectedIds);
+      }
+    }
+  });
+
+  test("returns uncertain outcome without replay when forced credential refresh throws", async () => {
+    const canceled: string[] = [];
+    let fetchCount = 0;
+    const baseFetch = async () => {
+      fetchCount += 1;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("provider-secret-refresh-body"));
+          },
+          cancel() {
+            canceled.push("initial-401");
+          },
+        }),
+        { status: 401 },
+      );
+    };
+    const credentialRequests: McpCredentialsRequest[] = [];
+    const deps = {
+      connectionCredentials: {
+        mcpCredentials: async (request: McpCredentialsRequest) => {
+          credentialRequests.push(request);
+          if (request.forceRefresh) {
+            throw new Error("provider-refresh-secret");
+          }
+          return {
+            status: "ok" as const,
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { "x-test-credential": "stale" },
+            connectionId: "connection-1",
+            provider: "test-provider",
+            providerDomain: "example.com",
+          };
+        },
+      },
+    } as unknown as ApiRouteDeps;
+    const broker = connectionBrokerFetch(baseFetch, connectionBrokerTestInput(deps));
+    const response = await broker("https://example.com/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 18,
+        method: "tools/call",
+        params: { name: "create_issue", arguments: { title: "once" } },
+      }),
+    });
+
+    expect(fetchCount).toBe(1);
+    expect(canceled).toEqual(["initial-401"]);
+    expect(credentialRequests.filter((request) => request.forceRefresh)).toHaveLength(1);
+    const payload = (await response.json()) as {
+      error?: { code?: number; message?: string };
+    };
+    expect(payload.error?.code).toBe(40_102);
+    expect(payload.error?.message).toMatch(/outcome uncertain/i);
+    expect(payload.error?.message).toMatch(/did not replay/i);
+    expect(payload.error?.message).toMatch(/do not retry automatically/i);
+    expect(payload.error?.message).toMatch(/verify provider state/i);
+    expect(JSON.stringify(payload)).not.toContain("provider-refresh-secret");
+    expect(JSON.stringify(payload)).not.toContain("provider-secret-refresh-body");
+  });
+
+  test("pins direct and delegated Toolspace calls to frozen personal authority", async () => {
+    if (!available) return;
+    const accountId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const ownerSubjectId = "host:user:personal-owner";
+    await admin`
+      insert into managed_accounts (id, name) values (${accountId}, 'toolspace personal account')`;
+    await admin`
+      insert into workspaces (id, account_id, name)
+      values (${workspaceId}, ${accountId}, 'toolspace personal workspace')`;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspaceId}, ${accountId})`;
+    await admin`
+      insert into workspace_memberships (workspace_id, account_id, subject_id, role)
+      values (${workspaceId}, ${accountId}, ${ownerSubjectId}, 'owner')`;
+
+    const frozenConnectionId = crypto.randomUUID();
+    const replacementConnectionId = crypto.randomUUID();
+    const credentialRequests: McpCredentialsRequest[] = [];
+    let fetchCalls = 0;
+    const deps = {
+      db,
+      settings: testSettings(),
+      bus: new MemoryEventBus(),
+      connectionCredentials: {
+        mcpCredentials: async (request: McpCredentialsRequest) => {
+          credentialRequests.push(request);
+          if (request.connectionRef.connectionId === frozenConnectionId) {
+            return {
+              status: "auth_needed" as const,
+              accountId: request.accountId,
+              workspaceId: request.workspaceId,
+              sessionId: request.sessionId,
+              reason: "missing_connection" as const,
+              providerDomain: "linear.app",
+              connectionId: frozenConnectionId,
+            };
+          }
+          return {
+            status: "ok" as const,
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { "x-test-credential": "replacement" },
+            providerDomain: "linear.app",
+            connectionId: replacementConnectionId,
+          };
+        },
+      },
+    } as unknown as ApiRouteDeps;
+    const config = {
+      id: "linear",
+      url: "https://linear.app/mcp",
+      cacheToolsList: false,
+      connectionRef: {
+        providerDomain: "linear.app",
+        subjectScope: "subject",
+      },
+    } as McpServerConfig;
+    const personalConnectionDelegations = [
+      {
+        serverId: "linear",
+        connectionId: frozenConnectionId,
+        ownerSubjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+      },
+    ];
+    const grant = {
+      accountId,
+      workspaceId,
+      subjectId: "sandbox:toolspace",
+      permissions: ["toolspace:call"],
+    } as AccessGrant;
+    const turn = {
+      id: crypto.randomUUID(),
+      activeAttemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      initiator: { kind: "subject", subjectId: ownerSubjectId },
+      initiatorContext: {},
+    } as SessionTurn;
+    const baseFetch = async () => {
+      fetchCalls += 1;
+      return new Response("replacement credential must not be used");
+    };
+
+    for (const initiator of [
+      turn.initiator,
+      { kind: "service" as const, subjectId: "goal-continuation" },
+    ]) {
+      const broker = connectionBrokerFetch(baseFetch, {
+        deps,
+        grant,
+        config,
+        sessionId: crypto.randomUUID(),
+        rootSessionId: crypto.randomUUID(),
+        turn: { ...turn, initiator } as SessionTurn,
+        personalConnectionDelegations,
+      });
+      const response = await broker("https://linear.app/mcp", { method: "GET" });
+      expect(response.status).toBe(401);
+    }
+
+    expect(fetchCalls).toBe(0);
+    expect(credentialRequests).toHaveLength(2);
+    for (const request of credentialRequests) {
+      expect(request.callerSubjectId).toBe(ownerSubjectId);
+      expect(request.connectionRef).toMatchObject({
+        providerDomain: "linear.app",
+        connectionId: frozenConnectionId,
+        kind: "oauth2",
+        subjectScope: "subject",
+      });
+    }
+    expect(
+      credentialRequests.some(
+        (request) => request.connectionRef.connectionId === replacementConnectionId,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("prepareToolspaceMcpSurface", () => {
-  test("service turns cannot reach subject-owned resolvers or upstream transport", () => {
+  test("service turns degrade subject-owned MCPs without reaching credentials or transport", async () => {
     let fetchCalls = 0;
     const baseFetch = async () => {
       fetchCalls += 1;
       return new Response("unexpected");
     };
-    expect(() =>
-      connectionBrokerFetch(baseFetch, {
-        deps: { settings: testSettings() } as ApiRouteDeps,
-        grant: {
-          accountId: "account-1",
-          workspaceId: "workspace-1",
-          subjectId: "sandbox:scheduled",
-          permissions: ["toolspace:call"],
-        } as AccessGrant,
-        config: {
-          id: "personal-slack",
-          url: "https://mcp.slack.com/mcp",
-          cacheToolsList: false,
-          connectionRef: {
-            providerDomain: "slack.com",
-            kind: "oauth2",
-            subjectScope: "subject",
-          },
-        } as McpServerConfig,
-        sessionId: "session-1",
-        rootSessionId: "session-1",
-        turn: {
-          id: "turn-1",
-          activeAttemptId: "attempt-1",
-          executionGeneration: 1,
-          initiator: { kind: "service", subjectId: "scheduler" },
-          initiatorContext: {},
-        } as SessionTurn,
-      }),
-    ).toThrow("requires a human turn initiator");
+    const broker = connectionBrokerFetch(baseFetch, {
+      deps: { settings: testSettings() } as ApiRouteDeps,
+      grant: {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        subjectId: "sandbox:scheduled",
+        permissions: ["toolspace:call"],
+      } as AccessGrant,
+      config: {
+        id: "personal-slack",
+        url: "https://mcp.slack.com/mcp",
+        cacheToolsList: false,
+        connectionRef: {
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      } as McpServerConfig,
+      sessionId: "session-1",
+      rootSessionId: "session-1",
+      turn: {
+        id: "turn-1",
+        activeAttemptId: "attempt-1",
+        executionGeneration: 1,
+        initiator: { kind: "service", subjectId: "scheduler" },
+        initiatorContext: {},
+      } as SessionTurn,
+    });
+    const response = await broker("https://mcp.slack.com/mcp", { method: "GET" });
+    expect(response.status).toBe(401);
+    expect(await response.text()).toContain("Authentication required");
     expect(fetchCalls).toBe(0);
   });
 
@@ -572,6 +1008,85 @@ describe("prepareToolspaceMcpSurface", () => {
     expect(requests.some((request) => request.toolName === "search_documents")).toBe(true);
     await surface!.close();
     server.close();
+  }, 60_000);
+
+  test("surfaces a brokered 401 tool call as outcome-uncertain without replay", async () => {
+    if (!available) return;
+    const server = startTestMcpServer({ unauthorizedForMethods: ["tools/call"] });
+    const connectionId = crypto.randomUUID();
+    const requests: McpCredentialsRequest[] = [];
+    const seeded = await seedSession({
+      selects: ["host-actions"],
+      withActiveTurn: true,
+      child: true,
+      sessionMcpServers: [
+        {
+          id: "host-actions",
+          url: server.url,
+          cacheToolsList: false,
+          connectionRef: {
+            connectionId,
+            provider: "test-provider",
+            providerDomain: new URL(server.url).hostname,
+            kind: "oauth2",
+          },
+        },
+      ],
+    });
+    const deps = {
+      settings: testSettings({
+        toolspaceEnabled: true,
+        toolspaceMaxCallsPerTurn: 200,
+        environmentsEncryptionKey: undefined,
+        mcpServers: [],
+      }),
+      db,
+      bus: new MemoryEventBus(),
+      observability,
+      connectionCredentials: {
+        mcpCredentials: async (request: McpCredentialsRequest) => {
+          requests.push(request);
+          return {
+            status: "ok" as const,
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { "x-test-credential": "present" },
+            connectionId,
+            provider: "test-provider",
+            providerDomain: request.connectionRef.providerDomain,
+          };
+        },
+      },
+    } as unknown as ApiRouteDeps;
+    const surface = await prepareToolspaceMcpSurface({
+      deps,
+      grant: grantFor(seeded),
+    });
+    try {
+      const tool = surface!.tools.find(
+        (candidate) => candidate.name === "host-actions__search_documents",
+      );
+      expect(tool).toBeDefined();
+      const result = await tool!.call({ query: "create once" });
+      expect(result).toMatchObject({ isError: true });
+      const text = JSON.stringify(result);
+      expect(text).toMatch(/outcome uncertain/i);
+      expect(text).toMatch(/did not replay/i);
+      expect(text).toMatch(/do not retry automatically/i);
+      expect(text).toMatch(/verify provider state/i);
+      expect(text).not.toContain("unauthorized");
+      expect(
+        server.requests.filter((request) => request.jsonRpcMethod === "tools/call"),
+      ).toHaveLength(1);
+      expect(server.calls).toHaveLength(0);
+      expect(
+        requests.some((request) => request.toolName === "search_documents" && request.forceRefresh),
+      ).toBe(true);
+    } finally {
+      await surface?.close();
+      server.close();
+    }
   }, 60_000);
 
   test("lists third-party tools but excludes first-party proxies from the surface", async () => {

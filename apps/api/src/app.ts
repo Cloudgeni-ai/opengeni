@@ -12,25 +12,31 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
+  VOICE_INPUT_ACCEPTED_MIME_TYPES,
+  TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   type AccessGrant,
   type ErrorCode,
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
+  getDocument,
   indexDocumentNow,
   type DocumentServices,
 } from "@opengeni/documents";
-import { dbSql, getWorkspace } from "@opengeni/db";
+import { dbSql, getWorkspace, rlsContextForWorkspace } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "./http/api-error";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
+  CodexCompactionV2ProviderLockedError,
   hasPermission,
   requireAccessGrant,
   requirePermission,
@@ -66,8 +72,14 @@ import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
+import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
+import { registerInsightsRoutes } from "./routes/insights";
+import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { projectClientModel } from "./model-catalog";
+import { createTranscriptionService } from "./transcription/service";
+import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
+import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 
 export type {
   ApiRouteDeps,
@@ -91,9 +103,28 @@ export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+
+/** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
+export function apiRequestBodyLimitBytes(settings: {
+  voiceInputMaxSizeBytes: number;
+  voiceInputResumableMaxChunkSizeBytes?: number;
+}): number {
+  return Math.max(
+    API_MAX_REQUEST_BODY_BYTES,
+    settings.voiceInputMaxSizeBytes + 64 * 1024,
+    (settings.voiceInputResumableMaxChunkSizeBytes ?? 0) + 64 * 1024,
+  );
+}
 const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
+  return createAppComposition(deps).app;
+}
+
+export function createAppComposition(deps: AppDependencies): {
+  app: Hono;
+  routeDeps: ApiRouteDeps;
+} {
   const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
@@ -107,17 +138,38 @@ export function createApp(deps: AppDependencies): Hono {
       accountId,
       workspaceId,
       documentId,
+      authorityKind,
+      authorityWorkspaceId,
+      authoritySubjectId,
     }: {
       accountId: string;
       workspaceId: string;
       documentId: string;
+      authorityKind: import("@opengeni/contracts").DocumentAuthorityKind;
+      authorityWorkspaceId: string | null;
+      authoritySubjectId: string | null;
     }) => {
       if (!objectStorage) {
         throw new HTTPException(503, {
           message: "object storage is not configured",
         });
       }
-      return await indexDocumentNow(
+      const context = await rlsContextForWorkspace(deps.db, workspaceId);
+      if (context.accountId !== accountId) {
+        throw new Error("document account/workspace authority mismatch");
+      }
+      const claimedDocument = await getDocument(deps.db, workspaceId, documentId, {
+        viewerSubjectId: authoritySubjectId,
+      });
+      if (
+        !claimedDocument ||
+        claimedDocument.authorityKind !== authorityKind ||
+        claimedDocument.authorityWorkspaceId !== authorityWorkspaceId ||
+        claimedDocument.authoritySubjectId !== authoritySubjectId
+      ) {
+        throw new Error("document authority changed before indexing");
+      }
+      const document = await indexDocumentNow(
         deps.db,
         objectStorage,
         workspaceId,
@@ -133,7 +185,16 @@ export function createApp(deps: AppDependencies): Hono {
             });
           },
         },
+        { viewerSubjectId: authoritySubjectId },
       );
+      if (
+        document.authorityKind !== authorityKind ||
+        document.authorityWorkspaceId !== authorityWorkspaceId ||
+        document.authoritySubjectId !== authoritySubjectId
+      ) {
+        throw new Error("document authority changed before indexing");
+      }
+      return document;
     },
   };
   // The API process's own agent-loop-free sandbox client — the API-direct
@@ -144,6 +205,20 @@ export function createApp(deps: AppDependencies): Hono {
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
   const observability =
     deps.observability ?? createObservability(deps.settings, { component: "api" });
+  const transcription =
+    deps.transcription === undefined
+      ? createTranscriptionService({
+          settings: deps.settings,
+          db: deps.db,
+          ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
+        })
+      : deps.transcription;
+  const transcriptionSegmenter =
+    deps.transcriptionSegmenter === undefined
+      ? createFfmpegTranscriptionSegmenter({
+          ffmpegPath: deps.settings.voiceInputFfmpegPath,
+        })
+      : deps.transcriptionSegmenter;
   const routeDeps: ApiRouteDeps = {
     ...deps,
     observability,
@@ -153,6 +228,8 @@ export function createApp(deps: AppDependencies): Hono {
     objectStorage,
     documentIndexer,
     getDocumentServices,
+    transcription,
+    transcriptionSegmenter,
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
@@ -167,37 +244,61 @@ export function createApp(deps: AppDependencies): Hono {
     await next();
   });
 
-  app.use(
-    "*",
-    cors({
-      credentials: true,
-      allowHeaders: [
-        "Accept",
-        "Authorization",
-        "Content-Type",
-        "X-OpenGeni-Access-Key",
-        "X-OpenGeni-Api-Contract",
-        "X-OpenGeni-Correlation-Id",
-        "X-OpenGeni-Subject",
-      ],
-      exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
-      origin: (origin) => {
-        if (!origin) {
-          return null;
-        }
-        return allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null;
-      },
-    }),
-  );
+  const corsHeaders = {
+    allowHeaders: [
+      "Accept",
+      "Authorization",
+      "Content-Type",
+      "X-OpenGeni-Access-Key",
+      "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Correlation-Id",
+      "X-OpenGeni-Subject",
+    ],
+    exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
+  };
+  const publicApiCors = cors({
+    ...corsHeaders,
+    credentials: false,
+    origin: "*",
+  });
+  const credentialedCors = cors({
+    ...corsHeaders,
+    credentials: true,
+    origin: (origin) =>
+      allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
+  });
+
+  app.use("*", (c, next) => {
+    const origin = c.req.header("origin");
+    const middleware =
+      origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
+        ? credentialedCors
+        : publicApiCors;
+    return middleware(c, next);
+  });
 
   app.use(
     "*",
     bodyLimit({
-      maxSize: API_MAX_REQUEST_BODY_BYTES,
+      maxSize: apiRequestBodyLimitBytes(deps.settings),
       onError: (c) =>
         c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
     }),
   );
+
+  // Large catalog, capture, and session-list responses are on the browser's
+  // critical path. Compress JSON at the API boundary while leaving SSE and
+  // other streaming transports byte-for-byte unchanged.
+  const compressJson = compress({
+    encoding: "gzip",
+    contentTypeFilter: /^application\/json(?:;|$)/i,
+  });
+  app.use("/v1/*", async (c, next) => {
+    await compressJson(c, next);
+    if (/^application\/json(?:;|$)/i.test(c.res.headers.get("content-type") ?? "")) {
+      c.res.headers.set("vary", appendVary(c.res.headers.get("vary"), "Accept-Encoding"));
+    }
+  });
 
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
@@ -323,7 +424,7 @@ export function createApp(deps: AppDependencies): Hono {
     }),
   );
 
-  app.get("/v1/config/client", (c) => {
+  app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
     const catalogSettings = deps.settings.codexSubscriptionEnabled
       ? withCodexCatalogProvider(deps.settings)
@@ -338,7 +439,7 @@ export function createApp(deps: AppDependencies): Hono {
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
         // selection order (default model first); project each to the client-safe
-        // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
+        // provider-blind ClientModel shape (execution topology remains server-side).
         models: configuredModels(catalogSettings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
@@ -350,8 +451,33 @@ export function createApp(deps: AppDependencies): Hono {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
+        voiceInput: {
+          available: (await transcription?.available()) ?? false,
+          maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
+          maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
+          acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
+          ...(deps.settings.voiceInputResumableEnabled &&
+          objectStorage &&
+          transcription &&
+          transcriptionSegmenter &&
+          (await transcription.available()) &&
+          (await transcriptionSegmenter.available())
+            ? {
+                resumable: {
+                  maxDurationSeconds: deps.settings.voiceInputResumableMaxDurationSeconds,
+                  maxSizeBytes: deps.settings.voiceInputResumableMaxSizeBytes,
+                  maxChunkSizeBytes: deps.settings.voiceInputResumableMaxChunkSizeBytes,
+                  providerSegmentSeconds: Math.min(
+                    TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+                    deps.settings.voiceInputMaxDurationSeconds,
+                  ),
+                },
+              }
+            : {}),
+        },
         productAccessMode: deps.settings.productAccessMode,
         auth: clientAuthConfig(deps.settings),
+        analytics: clientAnalyticsConfig(deps.settings),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
@@ -367,7 +493,9 @@ export function createApp(deps: AppDependencies): Hono {
       boundedRequest = await boundedMcpRequest(c.req.raw);
     } catch (error) {
       if (error instanceof McpPayloadTooLargeError) {
-        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+        throw new HTTPException(413, {
+          message: "MCP request body exceeds the safety limit",
+        });
       }
       throw error;
     }
@@ -389,7 +517,9 @@ export function createApp(deps: AppDependencies): Hono {
           throw new HTTPException(404, { message: "session not found" });
         }
         if (error instanceof SessionAuthorizationUnavailableError) {
-          throw new HTTPException(503, { message: "session authorization is unavailable" });
+          throw new HTTPException(503, {
+            message: "session authorization is unavailable",
+          });
         }
         throw error;
       }
@@ -397,10 +527,15 @@ export function createApp(deps: AppDependencies): Hono {
     let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
     if (toolspaceGrant) {
       try {
-        toolspace = await prepareToolspaceMcpSurface({ deps: routeDeps, grant });
+        toolspace = await prepareToolspaceMcpSurface({
+          deps: routeDeps,
+          grant,
+        });
       } catch (error) {
         if (error instanceof McpPayloadTooLargeError) {
-          throw new HTTPException(413, { message: "MCP tool list exceeds the safety limit" });
+          throw new HTTPException(413, {
+            message: "MCP tool list exceeds the safety limit",
+          });
         }
         throw error;
       }
@@ -430,8 +565,10 @@ export function createApp(deps: AppDependencies): Hono {
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
+  registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
+  registerWorkspaceArtifactRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
@@ -445,6 +582,8 @@ export function createApp(deps: AppDependencies): Hono {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerTranscriptionRoutes(app, routeDeps);
+  registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
@@ -464,8 +603,12 @@ export function createApp(deps: AppDependencies): Hono {
   });
 
   app.onError((error, c) => {
-    const status = httpStatusForError(error);
-    const code = errorCodeForStatus(status);
+    const compactionLock = codexCompactionV2ProviderLockedError(error);
+    const apiError = error instanceof ApiHttpError ? error : null;
+    const status = compactionLock ? 422 : httpStatusForError(error);
+    const code: ErrorCode = compactionLock
+      ? compactionLock.code
+      : (apiError?.code ?? errorCodeForStatus(status));
     const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
@@ -475,15 +618,31 @@ export function createApp(deps: AppDependencies): Hono {
       error: {
         status,
         code,
-        message: publicErrorMessage(error, status),
-        retryable: retryableHttpStatus(status),
+        message: compactionLock
+          ? (boundedPublicMessage(compactionLock.message) ?? "Request failed.")
+          : apiError
+            ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
+            : publicErrorMessage(error, status),
+        retryable: apiError?.retryable ?? retryableHttpStatus(status),
         requestId,
+        ...(apiError?.details ? { details: apiError.details } : {}),
       },
     });
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return app;
+  return { app, routeDeps };
+}
+
+export function appendVary(current: string | null, value: string): string {
+  const values = (current ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (!values.some((entry) => entry.toLowerCase() === value.toLowerCase())) {
+    values.push(value);
+  }
+  return values.join(", ");
 }
 
 async function requireMcpAccessGrant(
@@ -529,6 +688,31 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
   return { mode: "none" as const };
 }
 
+function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
+  if (!settings.analyticsEnabled) {
+    return { consentRequired: true, providers: {} };
+  }
+  return {
+    consentRequired: settings.analyticsConsentRequired,
+    providers: {
+      ...(settings.analyticsReoClientId
+        ? { reo: { clientId: settings.analyticsReoClientId } }
+        : {}),
+      ...(settings.analyticsPosthogProjectKey && settings.analyticsPosthogHost
+        ? {
+            posthog: {
+              projectKey: settings.analyticsPosthogProjectKey,
+              host: settings.analyticsPosthogHost,
+            },
+          }
+        : {}),
+      ...(settings.analyticsGa4MeasurementId
+        ? { ga4: { measurementId: settings.analyticsGa4MeasurementId } }
+        : {}),
+    },
+  };
+}
+
 function structuredServicesHint(backend: string): {
   fileSystem: boolean;
   git: boolean;
@@ -542,7 +726,23 @@ export function allowedCorsOrigin(pattern: string, origin: string): boolean {
   return new RegExp(`^(?:${pattern})$`).test(origin);
 }
 
+function codexCompactionV2ProviderLockedError(
+  error: unknown,
+): CodexCompactionV2ProviderLockedError | null {
+  if (error instanceof CodexCompactionV2ProviderLockedError) return error;
+  if (
+    error instanceof HTTPException &&
+    error.cause instanceof CodexCompactionV2ProviderLockedError
+  ) {
+    return error.cause;
+  }
+  return null;
+}
+
 export function httpStatusForError(error: unknown): number {
+  if (codexCompactionV2ProviderLockedError(error)) {
+    return 422;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }
@@ -648,7 +848,9 @@ async function runReadinessChecks<const Checks extends Readonly<Record<string, R
       }
     }),
   );
-  const result = Object.fromEntries(entries) as { [Name in keyof Checks]: ReadinessCheckResult };
+  const result = Object.fromEntries(entries) as {
+    [Name in keyof Checks]: ReadinessCheckResult;
+  };
   return {
     ok: Object.values(result).every((check) => check.ok),
     checks: result,
@@ -703,6 +905,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/insights$/,
+    label: "/v1/workspaces/:workspaceId/insights",
+  },
   {
     pattern: /^\/v1\/billing\/entitlements$/,
     label: "/v1/billing/entitlements",
@@ -1006,6 +1212,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/integrations/slack/callback",
   },
   {
+    pattern: /^\/v1\/social\/oauth\/callback$/,
+    label: "/v1/social/oauth/callback",
+  },
+  {
     pattern: /^\/v1\/enrollments\/device\/start$/,
     label: "/v1/enrollments/device/start",
   },
@@ -1072,6 +1282,9 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname.startsWith("/v1/auth/") ||
     pathname.startsWith("/v1/webhooks/") ||
     pathname.startsWith("/v1/integrations/oauth/") ||
+    pathname === "/v1/integrations/slack/events" ||
+    pathname === "/v1/integrations/slack/commands" ||
+    pathname === "/v1/integrations/slack/interactions" ||
     pathname.startsWith("/v1/github/") ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||

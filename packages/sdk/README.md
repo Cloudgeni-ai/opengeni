@@ -8,6 +8,11 @@ helpers for proxying the stream through your own API.
 Zero runtime dependencies. Needs only WHATWG `fetch` and streams, so it runs in
 Node 18+, Bun, Deno, browsers, and edge runtimes.
 
+Browser clients may call the public API from any origin with an API key or
+other bearer credential. Browser cookies are accepted cross-origin only from
+operator-configured trusted origins; arbitrary embedding origins never receive
+credentialed CORS responses.
+
 ## Quick start
 
 ```ts
@@ -31,6 +36,86 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
   }
 }
 ```
+
+## Realtime browser controller (`@opengeni/sdk/realtime`)
+
+The public realtime subpath owns the provider-neutral browser controller and
+the existing Codex Live, WebRTC/V3, and AI Gateway transports. It selects the
+transport from the catalog model without changing the backend API, durable
+ledger, delegation, context, or recovery semantics:
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk";
+import type { SessionRealtimeClientLike } from "@opengeni/sdk/realtime";
+
+const client = new OpenGeniClient({ baseUrl: "/opengeni-api" });
+const realtimeClient: SessionRealtimeClientLike = client;
+const catalog = await realtimeClient.getWorkspaceRealtimeModelCatalog(workspaceId);
+const model = catalog.models.find((candidate) => candidate.available)?.id;
+if (!model) throw new Error("No realtime model is available");
+
+// Lazy import keeps the base SDK entry safe for server and non-realtime hosts.
+const { createSessionRealtimeController } = await import("@opengeni/sdk/realtime");
+const controller = createSessionRealtimeController({
+  client: realtimeClient,
+  workspaceId,
+  sessionId,
+  model,
+  remoteAudio,
+});
+
+const unsubscribe = controller.subscribe((snapshot) => {
+  console.log(snapshot.status, snapshot.microphone, snapshot.diagnostic);
+});
+await controller.start();
+
+// Later:
+await controller.stop();
+unsubscribe();
+controller.close();
+```
+
+`SessionRealtimeClientLike` is the exact proxy-friendly backend surface:
+catalog, begin, Codex/Gateway negotiation, activation, heartbeat, ledger sync,
+and end. Existing `OpenGeniClient` methods remain the implementation. Current
+Codex-named controller and transport exports remain available as compatibility
+aliases, but new integrations should use the provider-neutral names.
+
+Do not put API credentials in browser bundles. Browser hosts should either use
+the deployment's normal browser authentication or expose these same methods
+through a tenant-scoped, same-origin proxy. The SDK does not move persistence,
+prompt construction, context processing, delegation, or provider credentials
+out of `apps/api`, `apps/worker`, or `packages/db`.
+
+## Workspace artifacts
+
+Workspace artifacts are generic, immutable HTML publications. The SDK does not
+assign product types such as app, page, dashboard, or gallery. List pages are
+bounded and expose both `truncated` and an opaque `nextCursor` so callers never
+mistake a partial page for the complete workspace catalog.
+
+The initial web renderer supports semantic HTML, inline CSS, CSS-only
+interactions, and inline SVG. It removes JavaScript, event handlers, forms,
+embeds, external URLs, and other active or navigation-capable markup before
+rendering. Executable artifacts require a later, stronger isolation boundary.
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await client.listWorkspaceArtifacts(workspaceId, {
+    limit: 50,
+    ...(cursor ? { cursor } : {}),
+  });
+  for (const artifact of page.artifacts) console.log(artifact.title);
+  cursor = page.nextCursor ?? undefined;
+} while (cursor);
+```
+
+Creation and publication require a caller-supplied idempotency key. Reuse the
+same key only to retry the same logical mutation. Agent-authored versions also
+return the exact source session, turn, attempt, and execution generation that
+published them. Version and event history are bounded; inspect
+`versionsTruncated` and `eventsTruncated` on the detail response.
 
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately
@@ -204,6 +289,11 @@ const paused = await client.getQueue(workspaceId, sessionId);
 await client.resumeSession(workspaceId, sessionId, {
   expectedControlEtag: paused.effectiveControl.controlEtag,
 });
+// Cancel is irreversible: it drains and fences this session subtree.
+await client.cancelSession(workspaceId, sessionId, {
+  reason: "host record deleted",
+  clientEventId: crypto.randomUUID(),
+});
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
@@ -258,6 +348,11 @@ await client.resumeGoal(workspaceId, sessionId); // resets counters, re-arms con
 `uploadFile` wraps the three-step flow (begin → signed PUT → complete) in one
 call; the lower-level steps are exported for resumable/custom flows.
 
+Browser hosts need no storage credentials or per-application registration.
+OpenGeni authorizes the workspace request and returns a short-lived,
+object-scoped signed URL; operators must configure the private object store to
+allow CORS from `*` so any product embedding the SDK can use that URL.
+
 ```ts
 const file = await client.uploadFile(workspaceId, {
   filename: "incident-notes.md",
@@ -308,14 +403,14 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `getWorkspace`, `updateWorkspace` |
-| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
 | Variable sets | `listVariable sets`, `createVariable set`, `getVariable set`, `updateVariable set`, `deleteVariable set`, `setVariable setVariable`, `deleteVariable setVariable` (values are write-only) |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
-| Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments` |
+| Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
 | Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
 | GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |

@@ -13,7 +13,8 @@ The default root import (`@opengeni/react`) is the clean sandbox-agnostic
 surface — the chat/timeline hooks and components plus the sandbox workspace
 suite. Advanced chat-composer composition lives under
 `@opengeni/react/composer`; Connected-Machine UI lives under
-`@opengeni/react/machines`. (The root barrel still re-exports the machines
+`@opengeni/react/machines`; realtime voice controls live under the lazily
+loadable `@opengeni/react/realtime` subpath. (The root barrel still re-exports the machines
 island for back-compat, deprecated per #144.)
 
 Design-system-first: every visual decision routes through CSS-variable tokens
@@ -64,6 +65,48 @@ entry CSS:
 (`@source` lets Tailwind compile the utilities used inside the components.
 Consuming only the tokens without Tailwind? Import
 `@opengeni/react/tokens.css` and use the `--og-*` variables directly.)
+
+### Product-compatible theming and density
+
+The default typography and control geometry are the same values used by
+`apps/web`. Put theme overrides on one ancestor; SDK popovers and dropdowns
+copy the effective `--og-*` values from their trigger across the portal
+boundary, so a menu mounted under `<body>` still matches the embedded panel.
+SDK type utilities are also scoped against ordinary host resets such as
+`.app button { font: inherit }`; customize their public tokens instead of
+adding selector-specific overrides.
+
+For a narrow product sidebar, opt into the supported compact preset:
+
+```tsx
+<aside data-og-theme="light" data-og-density="compact">
+  <MessageTimeline {...timelineProps} />
+  <ChatComposer {...composerProps} />
+</aside>
+```
+
+The preset is only a starting point. Override individual runtime tokens on the
+same ancestor without rebuilding Tailwind:
+
+```css
+.my-agent {
+  --og-font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --og-font-size-menu: 12px;
+  --og-line-height-menu: 18px;
+  --og-font-size-composer-wide: 13px;
+  --og-line-height-composer-wide: 20px;
+  --og-model-picker-menu-width: 15rem;
+  --og-color-accent: oklch(0.58 0.19 288);
+}
+```
+
+The type ramp is `--og-font-size-{xs,sm,base,md}` with matching
+`--og-line-height-*` tokens. Interactive chrome uses the semantic `control`,
+`menu`, `composer`, and `composer-wide` pairs. Model picker height, width,
+padding, and row-density tokens are grouped under `--og-model-picker-*` in
+`styles/tokens.css`. `ModelPolicyPicker` also exposes `contentClassName` and
+`contentStyle` for exceptional surface-level customization; tokens are the
+recommended path.
 
 ## Quick start
 
@@ -117,6 +160,89 @@ export function App() {
   );
 }
 ```
+
+## Realtime composer controls (`@opengeni/react/realtime`)
+
+The realtime subpath is the exact OpenGeni composer experience: model catalog
+and selection, split-button motion, start/stop/retry states, microphone and
+audio mute controls, diagnostics, recovery, and the same copy, ARIA, classes,
+and styling used by the web console. It is deliberately separate from the root
+entry so SSR and non-realtime consumers do not eagerly load browser media or
+transport code.
+
+For an existing session, place one public component in the composer's action
+slot. It resolves `client` and `workspaceId` from `OpenGeniProvider` and reuses
+the host's existing session/event projection rather than opening a duplicate
+stream:
+
+```tsx
+import { ChatComposer } from "@opengeni/react";
+import { SessionRealtimeControl } from "@opengeni/react/realtime";
+
+<ChatComposer
+  composer={composer}
+  effectiveControl={effectiveControl}
+  actionsStart={
+    <SessionRealtimeControl
+      sessionId={sessionId}
+      sessionStatus={sessionStatus}
+      effectiveControl={effectiveControl}
+      events={events}
+      eventsReady={!initialLoading}
+      codexConnected={codexConnected}
+    />
+  }
+/>;
+```
+
+For a new-session composer, create the session with `startMode: "realtime"`,
+navigate to it, and pass the selected model to the same existing-session
+control's `realtimeAutostartModel` prop:
+
+```tsx
+import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
+
+<NewSessionRealtimeControl
+  codexConnected={codexConnected}
+  onStart={async (model) => {
+    const session = await client.createSession(workspaceId, {
+      requestedSessionId: crypto.randomUUID(),
+      startMode: "realtime",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    navigateToSession(session.id, { realtimeAutostartModel: model });
+    return true;
+  }}
+/>;
+```
+
+Proxy-backed hosts can pass explicit `client` and `workspaceId` overrides. The
+exported `EmbeddedRealtimeSessionClientLike` requires only catalog, begin,
+Codex/Gateway negotiation, activation, heartbeat, ledger sync, and end. For
+custom layouts, use `useSessionRealtime`, `useRealtimeModelSelection`,
+`RealtimeVoiceControl`, and `RealtimeModelPickerMenu`; the batteries-included
+wrappers remain the recommended path.
+
+The reference consumer is `demo/realtime.html`. Run `bun run demo` from
+`packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
+deterministic selection/start/mute/stop/reconnect/error testing. Use
+`?mode=live&workspaceId=…&sessionId=…` against the web server's same-origin
+`/demo-api` proxy for a real local OpenGeni environment. Configure
+`OPENGENI_DEMO_API_URL` and, only on the server, optional demo API/access
+credentials; the browser receives neither credential. Prefer the deployment's
+normal browser authentication. If the proxy needs a server credential, create a
+dedicated tenant-scoped, least-privilege key for the reference demo and never
+reuse a deployment-wide runtime secret. Helm deployments can mount a Secret
+containing only `api-key` and/or `access-key` with
+`web.demoApiCredentialsSecret`; those values are mounted read-only rather than
+exposed as container environment variables. Local non-Kubernetes servers may
+instead use `OPENGENI_DEMO_API_KEY` and/or `OPENGENI_DEMO_ACCESS_KEY`.
+
+Microphone capture works on `localhost` or a secure HTTPS origin. A remote HTTP
+deployment cannot request microphone access. The live page exercises catalog
+loading, realtime-first creation, Codex Live, Gateway models, mute, recovery,
+delegation/context timeline updates, structured questions, and stop/restart
+through published package APIs only.
 
 ## Composer customization (`@opengeni/react/composer`)
 
@@ -286,10 +412,17 @@ intentional changes should regenerate those snapshots and review the diff.
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
   `renderMessageText` to plug a markdown renderer.
+- `UserMessageBody` — the shared lossless rendered-height disclosure for
+  already-sent user text. Use it inside a custom `renderMessageText` user branch
+  so attachments and voice identity remain outside the clipped Markdown region.
 - `SessionStatus` / `StatusDot` — status badges; live states breathe.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
   host-exposed models by provider.
+- `ModelPolicyPicker` — the full model policy control used by the OpenGeni web
+  app: provider/billing rails, model availability, reasoning effort, and
+  runnable latency modes such as Fast. It accepts either `ClientModel[]` or
+  catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
 - `CommandPalette` — the slash-command palette UI over `useSlashCommands`.
 
@@ -414,4 +547,6 @@ what the surfaces you mount need:
 `bun run demo` (from this package) serves a harness that drives the real hooks
 and components against a scripted mock client — a manager ops-channel narrative
 with streaming, tool calls, and a worker spawn, plus fleet and scheduled-task
-views and a dark/light toggle. `bun run demo:build` is part of the repo gate.
+views and a dark/light toggle. `realtime.html` is the public-package reference
+consumer described above, with deterministic mock and same-origin live modes.
+`bun run demo:build` is part of the repo gate.

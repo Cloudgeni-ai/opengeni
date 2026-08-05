@@ -25,7 +25,7 @@ import type {
   SessionCapabilities,
   WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
-import type { MachinesResponse, MachineView } from "../src/machines";
+import type { MachinesResponse, MachineView } from "@opengeni/react/machines";
 import { MockOpenGeniClient } from "./mock";
 
 export const DOCK_SESSION_ID = "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f";

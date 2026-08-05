@@ -2,13 +2,16 @@
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
-import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { SessionEvent } from "@opengeni/sdk";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
 import {
   createContext,
+  lazy,
+  Suspense,
   type Dispatch,
   type SetStateAction,
   useCallback,
@@ -37,7 +40,9 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { sameSessionForContext } from "@/lib/session-context";
+import { runSingleFlight } from "@/lib/single-flight";
 import {
   buildCreateSessionRequest,
   prepareCreateSessionAttempt,
@@ -67,19 +72,38 @@ import { upsertWorkspace } from "@/lib/workspaces";
 import type {
   AccessContext,
   AuthSession,
+  CapabilityCatalogItem,
+  CapabilityCatalogResponse,
   ClientConfig,
   CreateWorkspaceRequest,
   GitHubAppInfo,
   GitHubRepository,
+  LatencyMode,
   ResourceRef,
   Session,
+  ToolRef,
   TurnSubmission,
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
 
+const AnalyticsManager = lazy(() =>
+  import("@/components/analytics-consent").then((module) => ({
+    default: module.AnalyticsManager,
+  })),
+);
+
+function captureProductAnalyticsEvent(
+  name: AnalyticsEventName,
+  properties: AnalyticsProperties = {},
+): void {
+  void import("@/lib/analytics").then(({ captureAnalyticsEvent }) => {
+    captureAnalyticsEvent(name, properties);
+  });
+}
+
 export type AppContextValue = {
-  client: OpenGeniClient;
+  client: OpenGeniCoreClient;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;
@@ -91,20 +115,32 @@ export type AppContextValue = {
   /**
    * The model chosen for a specific open session. Composer state (draft, mode)
    * is session-scoped, and so is the model: each session remembers its own pick
-   * in-memory, falling back to the deployment default ({@link model}) until the
-   * operator overrides it. The new-session surface uses the bare {@link model}
-   * (no session id yet); the session route threads its id through these.
+   * in-memory. Until seeded, uses `fallback` when provided (typically durable
+   * `session.model`), else the frozen deployment default — never the mutable
+   * new-session {@link model} pick (that would cross-bleed).
+   * Seed with {@link ensureModelForSession} from `session.model` / draft.
    */
-  modelForSession: (sessionId: string) => string;
+  modelForSession: (sessionId: string, fallback?: string) => string;
   setModelForSession: (sessionId: string, value: string) => void;
+  /** Write only when this session has no override yet (safe metadata/draft seed). */
+  ensureModelForSession: (sessionId: string, value: string) => void;
+  /** Deployment/new-session default effort. Open sessions use {@link effortForSession}. */
   reasoningEffort: IntelligenceEffort;
   setReasoningEffort: Dispatch<SetStateAction<IntelligenceEffort>>;
+  effortForSession: (sessionId: string) => IntelligenceEffort;
+  setEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
+  /** Write only when this session has no override yet (safe metadata/draft seed). */
+  ensureEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
+  latencyMode: LatencyMode;
+  setLatencyMode: Dispatch<SetStateAction<LatencyMode>>;
   inspectorOpen: boolean;
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
   session: Session | null;
   setSession: Dispatch<SetStateAction<Session | null>>;
   connectionState: SessionEventsConnectionState;
   setConnectionState: Dispatch<SetStateAction<SessionEventsConnectionState>>;
+  /** The routed session's one shared event feed. Header consumers must never self-stream. */
+  sessionEventFeedStore: SessionEventFeedStore;
   manualRepos: RepoDraft[];
   setManualRepos: Dispatch<SetStateAction<RepoDraft[]>>;
   manualReposOpen: boolean;
@@ -133,6 +169,8 @@ export type AppContextValue = {
   workspaceDefaultToolIds: string[];
   /** True once the workspace capability catalog has completed its authoritative load. */
   workspaceMcpCatalogReady: boolean;
+  /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
+  workspaceCapabilityCatalog: CapabilityCatalogItem[];
   currentResources: ResourceRef[];
   addManualRepository: () => void;
   forgetAccessKey: () => void;
@@ -175,15 +213,45 @@ export type AppContextValue = {
     workspaceId: string,
     submission: TurnSubmission,
     options?: {
+      instructions?: string;
+      /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
+      sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
+      /** Create a session shell without starting an underlying agent turn. */
+      startMode?: "realtime";
     },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
   resetWorkspaceIntegrations: () => void;
 };
+
+type SessionEventFeed = { sessionId: string; events: SessionEvent[] } | null;
+
+type SessionEventFeedStore = {
+  getSnapshot: () => SessionEventFeed;
+  subscribe: (listener: () => void) => () => void;
+  set: (feed: SessionEventFeed) => void;
+};
+
+function createSessionEventFeedStore(): SessionEventFeedStore {
+  let snapshot: SessionEventFeed = null;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set: (feed) => {
+      if (snapshot === feed) return;
+      snapshot = feed;
+      for (const listener of listeners) listener();
+    },
+  };
+}
 
 const AppContext = createContext<AppContextValue | null>(null);
 
@@ -230,16 +298,16 @@ export function RootRouteComponent() {
   // inherits the deployment default `model`; selecting in its picker writes here
   // so each open session keeps its own choice independently.
   const [modelBySession, setModelBySession] = useState<Record<string, string>>({});
+  const [reasoningEffortBySession, setReasoningEffortBySession] = useState<
+    Record<string, IntelligenceEffort>
+  >({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
-  // The dock is open by default on desktop, but on narrow viewports (<1024px)
-  // the dock renders as a full-screen overlay — so it must start CLOSED there or
-  // a phone opening a session would land with the overlay covering the
-  // transcript. Only the initial default is viewport-aware; the user's later
-  // toggles are never overridden.
-  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() =>
-    typeof window === "undefined" ? true : !window.matchMedia("(max-width: 1023px)").matches,
-  );
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
+  // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
+  // No localStorage — only an in-memory default (toggle still works for the session).
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
+  const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
@@ -251,6 +319,9 @@ export function RootRouteComponent() {
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
+  const [workspaceCapabilityCatalog, setWorkspaceCapabilityCatalog] = useState<
+    CapabilityCatalogItem[]
+  >([]);
   const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
@@ -260,6 +331,7 @@ export function RootRouteComponent() {
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
+  const mcpCatalogRequests = useRef(new Map<string, Promise<CapabilityCatalogResponse>>());
   // Stable CREATE idempotency key for the in-flight session create. Generated
   // lazily and reused across retries (and across a double-click that re-enters
   // startSession before busy flips), so duplicate creates collapse to one
@@ -289,7 +361,13 @@ export function RootRouteComponent() {
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const isPublicAuthRoute = pathname === "/reset-password";
+  const hasSearchParameters = useRouterState({
+    select: (state) => Object.keys(state.location.search).length > 0,
+  });
+  // Public surfaces render ahead of auth/config gates. `/reset-password` is
+  // always public; the SessionChrome DEV harness is public and needs no session.
+  const isPublicAuthRoute =
+    pathname === "/reset-password" || (import.meta.env.DEV && pathname === "/dev/composer-chrome");
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
@@ -324,6 +402,7 @@ export function RootRouteComponent() {
         // the "low" placeholder (which the server treated as an override beating
         // the deployer's configured default — a silent billing footgun).
         setReasoningEffort(initialReasoningEffort(config));
+        setLatencyMode("standard");
       })
       .catch((error) => {
         if (cancelled) {
@@ -387,7 +466,9 @@ export function RootRouteComponent() {
         if (cancelled) {
           return;
         }
-        toast.error("Failed to load workspace access", { description: String(error) });
+        toast.error("Failed to load workspace access", {
+          description: String(error),
+        });
         setAccessContext(null);
         setWorkspaces([]);
         setAccessError(error instanceof Error ? error.message : String(error));
@@ -438,6 +519,11 @@ export function RootRouteComponent() {
       return null;
     }
     setWorkspaces((current) => upsertWorkspace(current, created));
+    captureProductAnalyticsEvent("workspace_created", {
+      $insert_id: `workspace_created:${created.id}`,
+      account_id: created.accountId,
+      workspace_id: created.id,
+    });
     // Refresh grants so the new workspace's owner permissions apply at once;
     // the workspace itself is already usable if this refresh fails — surface a
     // soft warning so a stale permission set doesn't fail silently.
@@ -525,7 +611,9 @@ export function RootRouteComponent() {
     rigId: string | null,
   ): Promise<Workspace | null> {
     try {
-      const updated = await client.setWorkspaceDefaultRig(workspaceId, { rigId });
+      const updated = await client.setWorkspaceDefaultRig(workspaceId, {
+        rigId,
+      });
       setWorkspaces((current) => upsertWorkspace(current, updated));
       return updated;
     } catch (error) {
@@ -546,10 +634,16 @@ export function RootRouteComponent() {
     title: string,
   ): Promise<Session | null> {
     try {
-      const updated = await client.updateSession(workspaceId, sessionId, { title });
+      const updated = await client.updateSession(workspaceId, sessionId, {
+        title,
+      });
       setSession((current) =>
         current && current.id === updated.id
-          ? { ...current, title: updated.title, titleSource: updated.titleSource }
+          ? {
+              ...current,
+              title: updated.title,
+              titleSource: updated.titleSource,
+            }
           : current,
       );
       return updated;
@@ -600,7 +694,9 @@ export function RootRouteComponent() {
       // Re-read on every failure, not only OCC conflicts. A transport failure
       // may have happened after the server committed; blindly restoring
       // `before` would temporarily lie and could overwrite a newer device.
-      const authoritative = await client.getSession(workspaceId, sessionId).catch(() => null);
+      const authoritative = await client
+        .getSession(workspaceId, sessionId, { fresh: true })
+        .catch(() => null);
       if (authoritative) {
         setSession((current) => reconcileFailedSessionPin(current, optimistic, authoritative));
         notifySessionPinChanged(workspaceId, sessionId);
@@ -694,7 +790,9 @@ export function RootRouteComponent() {
         // that the last-known installation or repository identities vanished.
         // Keep the last successful snapshot and readiness fence so draft
         // hydration cannot project it to [] and autosave destructive loss.
-        toast.error("GitHub status unavailable", { description: String(error) });
+        toast.error("GitHub status unavailable", {
+          description: String(error),
+        });
       } finally {
         if (githubRefreshId.current === refreshId) {
           setRepoBusy(false);
@@ -708,35 +806,48 @@ export function RootRouteComponent() {
     async (workspaceId: string, signal?: AbortSignal) => {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
-      const catalog = await client.listCapabilities(workspaceId);
+      const requestKey = `${accessKeyVersion}:${workspaceId}`;
+      const catalog = await runSingleFlight(
+        mcpCatalogRequests.current,
+        requestKey,
+        async () => await client.listCapabilities(workspaceId),
+      );
       if (signal?.aborted || mcpRefreshId.current !== refreshId) {
         return;
       }
       setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+      setWorkspaceCapabilityCatalog(catalog.items);
       setWorkspaceMcpCatalogReady(true);
     },
-    [client],
+    [accessKeyVersion, client],
   );
 
   async function startSession(
     workspaceId: string,
     submission: TurnSubmission,
     options?: {
+      instructions?: string;
+      /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
+      sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
+      startMode?: "realtime";
     },
   ): Promise<Session | null> {
     setBusy(true);
     try {
-      if (!workspaceMcpCatalogReady) {
+      const sessionTools = options?.sessionTools;
+      if (!workspaceMcpCatalogReady && !sessionTools) {
         toast.error("Tools are still loading", {
           description: "Wait for the workspace tool catalog to finish loading, then try again.",
         });
         return null;
       }
-      const selectedTools = buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
+      const selectedTools = sessionTools
+        ? [...sessionTools]
+        : buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
         pending: pendingCreateAttempt.current,
@@ -746,10 +857,12 @@ export function RootRouteComponent() {
         request: buildCreateSessionRequest({
           currentResources,
           submission,
+          instructions: options?.instructions,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           defaultModel: model,
           defaultReasoningEffort: reasoningEffort,
+          defaultLatencyMode: latencyMode,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
           workspaceDefaultMcpServerIds: ["files", ...toolMcpServers.map((server) => server.id)],
@@ -757,6 +870,7 @@ export function RootRouteComponent() {
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
           expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
+          startMode: options?.startMode,
         }),
       });
       pendingCreateAttempt.current = attempt.pending;
@@ -767,6 +881,14 @@ export function RootRouteComponent() {
       }
       setSession(created);
       setConnectionState("idle");
+      captureProductAnalyticsEvent("session_started", {
+        $insert_id: `session_started:${created.id}`,
+        account_id: created.accountId,
+        workspace_id: created.workspaceId,
+        session_id: created.id,
+        ...(attempt.request.model ? { model: attempt.request.model } : {}),
+        start_mode: options?.startMode ?? "standard",
+      });
       return created;
     } catch (error) {
       // Keep the attempt on failure. An exact retry dedups against a create that
@@ -889,8 +1011,16 @@ export function RootRouteComponent() {
   ) {
     if (mode === "signup") {
       await signUpEmail(input);
+      captureProductAnalyticsEvent("signup_submitted", {
+        method: "email",
+        verification_required: true,
+      });
     } else {
-      await signInEmail({ email: input.email, password: input.password, rememberMe: true });
+      await signInEmail({
+        email: input.email,
+        password: input.password,
+        rememberMe: true,
+      });
     }
     const nextSession = await fetchAuthSession();
     setAuthSession(nextSession);
@@ -914,24 +1044,56 @@ export function RootRouteComponent() {
   const resetSessionView = useCallback(() => {
     setSession(null);
     setConnectionState("idle");
-  }, [setSession]);
+    sessionEventFeedStore.set(null);
+  }, [sessionEventFeedStore, setSession]);
 
-  // Session-scoped model: read the session's override or fall back to the
-  // deployment default; writing records it without disturbing other sessions
-  // (or the new-session surface, which reads the bare `model`).
+  // Session-scoped model/effort: never fall back to the mutable new-session
+  // picks — those change while other sessions are open and would bleed across.
+  const deploymentDefaultModel = clientConfig?.defaultModel ?? model;
   const modelForSession = useCallback(
-    (sessionId: string): string => modelBySession[sessionId] ?? model,
-    [model, modelBySession],
+    (sessionId: string, fallback?: string): string =>
+      modelBySession[sessionId] ?? fallback ?? deploymentDefaultModel,
+    [deploymentDefaultModel, modelBySession],
   );
   const setModelForSession = useCallback((sessionId: string, value: string): void => {
-    setModelBySession((current) => ({ ...current, [sessionId]: value }));
+    setModelBySession((current) =>
+      current[sessionId] === value ? current : { ...current, [sessionId]: value },
+    );
   }, []);
+  const ensureModelForSession = useCallback((sessionId: string, value: string): void => {
+    setModelBySession((current) =>
+      Object.prototype.hasOwnProperty.call(current, sessionId)
+        ? current
+        : { ...current, [sessionId]: value },
+    );
+  }, []);
+  const effortForSession = useCallback(
+    (sessionId: string): IntelligenceEffort =>
+      reasoningEffortBySession[sessionId] ?? clientConfig?.defaultReasoningEffort ?? "low",
+    [clientConfig?.defaultReasoningEffort, reasoningEffortBySession],
+  );
+  const setEffortForSession = useCallback((sessionId: string, value: IntelligenceEffort): void => {
+    setReasoningEffortBySession((current) =>
+      current[sessionId] === value ? current : { ...current, [sessionId]: value },
+    );
+  }, []);
+  const ensureEffortForSession = useCallback(
+    (sessionId: string, value: IntelligenceEffort): void => {
+      setReasoningEffortBySession((current) =>
+        Object.prototype.hasOwnProperty.call(current, sessionId)
+          ? current
+          : { ...current, [sessionId]: value },
+      );
+    },
+    [],
+  );
 
   const resetWorkspaceIntegrations = useCallback(() => {
     setGithubStatus(null);
     setGithubRepos([]);
     setGithubCatalogReady(false);
     setWorkspaceMcpServers([]);
+    setWorkspaceCapabilityCatalog([]);
     setWorkspaceMcpCatalogReady(false);
   }, []);
 
@@ -969,14 +1131,21 @@ export function RootRouteComponent() {
           setModel,
           modelForSession,
           setModelForSession,
+          ensureModelForSession,
           reasoningEffort,
           setReasoningEffort,
+          effortForSession,
+          setEffortForSession,
+          ensureEffortForSession,
+          latencyMode,
+          setLatencyMode,
           inspectorOpen,
           setInspectorOpen,
           session,
           setSession,
           connectionState,
           setConnectionState,
+          sessionEventFeedStore,
           manualRepos,
           setManualRepos,
           manualReposOpen,
@@ -1002,6 +1171,7 @@ export function RootRouteComponent() {
           toolMcpServers,
           workspaceDefaultToolIds: toolMcpServers.map((server) => server.id),
           workspaceMcpCatalogReady,
+          workspaceCapabilityCatalog,
           currentResources,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
@@ -1061,7 +1231,12 @@ export function RootRouteComponent() {
     manualReposOpen,
     model,
     modelForSession,
+    ensureModelForSession,
+    latencyMode,
     reasoningEffort,
+    effortForSession,
+    setEffortForSession,
+    ensureEffortForSession,
     refreshGitHub,
     refreshWorkspace,
     refreshWorkspaceMcpServers,
@@ -1074,16 +1249,33 @@ export function RootRouteComponent() {
     selectedRepoIds,
     selectedRepoRefs,
     session,
+    sessionEventFeedStore,
     setModelForSession,
     setSession,
     toolMcpServers,
     workspaceMcpCatalogReady,
+    workspaceCapabilityCatalog,
     workspaces,
   ]);
 
   return (
-    <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
+    // Fixed app canvas: never let the document scroll. Page surfaces own
+    // overflow via ContentPage / session panes. `min-h-screen` used to let
+    // main grow past the viewport when a child mis-owned scroll.
+    <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
+      {clientConfig ? (
+        <Suspense fallback={null}>
+          <AnalyticsManager
+            analyticsAccountId={accessContext?.defaultAccountId ?? null}
+            analyticsUserId={authSession?.user.id ?? null}
+            config={clientConfig.analytics}
+            hasSearchParameters={hasSearchParameters}
+            isPublicAuthRoute={isPublicAuthRoute}
+            pathname={pathname}
+          />
+        </Suspense>
+      ) : null}
       {isPublicAuthRoute ? (
         // Self-contained public page (e.g. /reset-password): rendered before the
         // config/auth gates and outside AppContext, so it works for a signed-out

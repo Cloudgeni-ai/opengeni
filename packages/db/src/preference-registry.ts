@@ -21,8 +21,8 @@ import {
   type PreferenceRegistryTrust,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
-import type { Database } from "./index";
-import { setSubjectRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./index";
+import type { Database } from "./database";
+import { setSubjectRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
 
@@ -558,6 +558,109 @@ export async function listPreferenceRegistry(
   });
 }
 
+export type PreferenceRegistryGovernanceIdentity = Pick<
+  PreferenceRegistryDescriptor,
+  "id" | "revisionId" | "contentHash" | "activeVersion" | "scope"
+>;
+
+export type CurrentPreferenceRegistryGovernanceMetadata = {
+  descriptors: PreferenceRegistryGovernanceIdentity[];
+  truncated: boolean;
+};
+
+/**
+ * Read the current active descriptor identities for one exact authenticated
+ * subject. Full preference values and even descriptor display text stay inside
+ * this DB boundary; Workspace State receives only stable revision metadata.
+ */
+export async function getCurrentPreferenceRegistryGovernanceMetadata(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<CurrentPreferenceRegistryGovernanceMetadata> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        preference: schema.preferenceRegistryPreferences,
+        revision: schema.preferenceRegistryRevisions,
+      })
+      .from(schema.preferenceRegistryPreferences)
+      .innerJoin(
+        schema.preferenceRegistryRevisions,
+        and(
+          eq(
+            schema.preferenceRegistryRevisions.id,
+            schema.preferenceRegistryPreferences.activeRevisionId,
+          ),
+          eq(
+            schema.preferenceRegistryRevisions.accountId,
+            schema.preferenceRegistryPreferences.accountId,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.preferenceRegistryPreferences.status, "active"),
+          or(
+            isNull(schema.preferenceRegistryRevisions.expiresAt),
+            gt(schema.preferenceRegistryRevisions.expiresAt, sql`transaction_timestamp()`),
+          ),
+        ),
+      )
+      .orderBy(
+        sql`case ${schema.preferenceRegistryPreferences.scope}
+          when 'organization' then 0
+          when 'workspace' then 1
+          when 'user' then 2
+          else 3
+        end`,
+        desc(schema.preferenceRegistryRevisions.precedenceRank),
+        asc(schema.preferenceRegistryPreferences.stableKey),
+        asc(schema.preferenceRegistryPreferences.id),
+      )
+      .limit(PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT + 1);
+
+    const bounded = boundPreferenceRegistryDescriptors(
+      rows.map(({ preference, revision }) =>
+        PreferenceRegistryDescriptor.parse({
+          id: preference.id,
+          stableKey: preference.stableKey,
+          title: revision.title,
+          description: revision.description,
+          scope: preference.scope,
+          activeVersion: preference.activationVersion,
+          revisionId: revision.id,
+          contentHash: revision.contentHash,
+          precedence: {
+            tier: preference.scope,
+            rank: revision.precedenceRank,
+            conflictStrategy: revision.conflictStrategy,
+            conflictsWith: revision.conflictsWith,
+          },
+          provenance: {
+            source: revision.provenanceSource,
+            sourceIdHash: revision.provenanceSourceId
+              ? contentHash(revision.provenanceSourceId)
+              : null,
+            trust: revision.trust,
+          },
+          expiresAt: revision.expiresAt ? iso(revision.expiresAt) : null,
+          retrievalHandle: `preference://${preference.id}/revisions/${revision.id}?sha256=${revision.contentHash}`,
+        }),
+      ),
+    );
+    return {
+      descriptors: bounded.descriptors.map((descriptor) => ({
+        id: descriptor.id,
+        revisionId: descriptor.revisionId,
+        contentHash: descriptor.contentHash,
+        activeVersion: descriptor.activeVersion,
+        scope: descriptor.scope,
+      })),
+      truncated: bounded.truncated,
+    };
+  });
+}
+
 export async function listPreferenceRegistryForAttempt(
   db: Database,
   input: PreferenceRegistryAttemptClaims & PreferenceRegistryListInput,
@@ -998,7 +1101,10 @@ async function withPreferenceRegistryAttemptAuthority<T>(
       ), locked_turn AS MATERIALIZED (
         SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
           turn.active_attempt_id, turn.execution_generation,
-          turn.initiator_kind, turn.initiator_subject_id
+          coalesce(
+            turn.initiating_human_subject_id,
+            case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
+          ) as initiating_human_subject_id
         FROM session_turns turn
         JOIN locked_session session
           ON session.id = turn.session_id
@@ -1008,8 +1114,10 @@ async function withPreferenceRegistryAttemptAuthority<T>(
           AND turn.active_attempt_id = ${input.attemptId}::uuid
           AND turn.execution_generation = ${input.executionGeneration}
           AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
-          AND turn.initiator_kind = 'subject'
-          AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
+          AND length(btrim(coalesce(
+            turn.initiating_human_subject_id,
+            case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
+          ))) BETWEEN 1 AND 1024
         FOR SHARE OF turn
       ), locked_attempt AS MATERIALIZED (
         SELECT attempt.id, attempt.account_id, attempt.workspace_id,
@@ -1032,7 +1140,7 @@ async function withPreferenceRegistryAttemptAuthority<T>(
           )
         FOR SHARE OF attempt
       )
-      SELECT turn.initiator_subject_id
+      SELECT turn.initiating_human_subject_id
       FROM locked_workspace workspace
       JOIN locked_session session ON true
       JOIN locked_turn turn ON true
@@ -1041,8 +1149,8 @@ async function withPreferenceRegistryAttemptAuthority<T>(
         AND workspace.id = attempt.workspace_id
         AND session.id = attempt.session_id
         AND turn.id = attempt.turn_id
-    `)) as unknown as Array<{ initiator_subject_id: string }>;
-    const initiatingHumanSubjectId = rows[0]?.initiator_subject_id;
+    `)) as unknown as Array<{ initiating_human_subject_id: string }>;
+    const initiatingHumanSubjectId = rows[0]?.initiating_human_subject_id;
     if (!initiatingHumanSubjectId) {
       throw new PreferenceRegistryInitiatorError(
         "Preference retrieval requires the exact current attempt, generation, and immutable human initiator",

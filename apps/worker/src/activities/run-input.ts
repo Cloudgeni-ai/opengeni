@@ -1,7 +1,14 @@
-import type { FileAsset, ResourceRef } from "@opengeni/contracts";
+import {
+  MODEL_ATTACHMENT_REFS_FIELD,
+  FileResourceRef,
+  resourceMountPath,
+  type FileAsset,
+  type ResourceRef,
+} from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItems,
+  getFiles,
   getLatestRunState,
   getHumanInputResumeForEvent,
   getSandboxSessionEnvelope,
@@ -11,88 +18,33 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
-  stripReasoningEncryptedContent,
-  stripReasoningIdentityFromSerializedRunState,
-  neutralizeToolSearchItemsInSerializedRunState,
+  projectHistoryForProvider,
+  projectRejectedProviderArtifactsFromSerializedRunState,
+  projectRejectedReasoningArtifact,
+  hasOpaqueProviderArtifact,
+  type HistoryProviderApi,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 
-/**
- * The codex account THIS turn runs on, threaded into every history read path so a
- * cross-account turn never replays another account's encrypted reasoning. The
- * single rule across all paths: DROP any reasoning item whose producing codex
- * account differs from `currentCodexCredentialId`.
- *
- * `currentCodexCredentialId` is the resolved codex credential id on a codex turn,
- * or NULL on a non-codex turn (the "account" of the built-in Azure/OpenAI path).
- * NULL is a real value in the comparison, not a "skip" sentinel: a non-codex turn
- * (current = null) still drops codex-produced reasoning (producer != null) so a
- * foreign encrypted blob never reaches the Azure/built-in Responses call. A
- * session with no codex history (every producer == null == current) is a no-op.
- */
-export type TurnCodexAccount = { currentCodexCredentialId: string | null };
-
-/** A non-codex turn's account (current = null): no codex credential resolved. */
-const NON_CODEX_TURN: TurnCodexAccount = { currentCodexCredentialId: null };
-
-/**
- * Apply the cross-account reasoning strip to a set of stored history rows. Pure +
- * non-mutating. The single rule: a row whose producing codex account EQUALS the
- * turn's current account replays verbatim (by reference); a row produced by a
- * DIFFERENT account is treated by item type —
- *
- *  - `reasoning`  → DROPPED WHOLE (id + blob filtered out of the history). The
- *    foreign `rs_…` id is validated by the Responses backend, which rejects a
- *    reasoning item that has a foreign id and no encrypted_content (store:false),
- *    so blanking only the blob is not enough — the whole item must go.
- *  - `compaction` → kept, with only its account-bound `encrypted_content` blob
- *    stripped (its summary is real conversation content that must survive).
- *  - everything else (messages, tool calls, tool outputs) → kept verbatim by
- *    reference; message and tool content are never account-bound, never touched.
- *
- * Mismatch covers a foreign codex account, the non-codex/Azure producer (null on
- * a codex turn), and legacy untagged rows (null): all are stripped, which is
- * defensive and harmless (at most one turn of lost chain-of-thought continuity,
- * never any content). No-op (rows by reference) when every producer equals the
- * current account — a single-account workspace, an unchanged-account turn, or a
- * non-codex turn over a history with no codex-produced reasoning.
- */
-export function applyCodexHistoryStrip(
+/** Project only artifacts explicitly rejected by the provider out of its next view. */
+export function projectRejectedProviderArtifacts(
   rows: ReadonlyArray<{
     item: Record<string, unknown>;
-    producerCodexCredentialId: string | null;
     providerArtifactInvalidatedAt?: Date | null;
   }>,
-  current: TurnCodexAccount,
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   for (const row of rows) {
-    if (
-      row.producerCodexCredentialId === current.currentCodexCredentialId &&
-      !row.providerArtifactInvalidatedAt
-    ) {
+    if (!row.providerArtifactInvalidatedAt) {
       out.push(row.item);
       continue;
     }
     const type = typeof row.item.type === "string" ? row.item.type : undefined;
     if (type === "reasoning") {
-      // Foreign reasoning: drop the WHOLE item (id + blob) — see rule above.
-      continue;
-    }
-    if (type === "tool_search_call" || type === "tool_search_output") {
-      // Foreign tool_search items (progressive connector disclosure): drop WHOLE,
-      // like reasoning. The `tsc_…` id is minted by the producing account's
-      // backend, and the output's disclosure set reflects THAT account's
-      // connectors — replaying either into a different account risks a 400 /
-      // wrong-connector disclosure. Dropping both sides keeps the pair invariant
-      // (the history sanitizer would drop a stranded half anyway); the model
-      // simply re-searches on the new account, re-disclosing from the NEW
-      // account's own connector pool. Never any content loss — search items
-      // carry tool metadata, not conversation content.
+      out.push(projectRejectedReasoningArtifact(row.item));
       continue;
     }
     if (type === "compaction") {
-      out.push(stripReasoningEncryptedContent(row.item));
       continue;
     }
     out.push(row.item);
@@ -100,60 +52,26 @@ export function applyCodexHistoryStrip(
   return out;
 }
 
-/**
- * Resolve the serialized RunState used only for an approval resume, applying
- * the same cross-account rule as the canonical history-items path. The blob
- * carries no per-item producer tag, so we
- * compare the codex account that FROZE the state to the resuming turn's account:
- * when they differ, neutralize every reasoning item's account-bound identity
- * (encrypted_content + provider id) in the blob; when they match (including
- * null == null for non-codex / single-account) the blob replays byte-for-byte
- * (same string reference). This closes the gap where a frozen A-minted RunState
- * was replayed verbatim into a turn that switched to account B (or to a non-codex
- * turn), 400ing the resume.
- */
-export function resumeRunStateForCodexAccount(
-  state: {
-    serializedRunState: string;
-    frozenCodexCredentialId: string | null;
-    providerArtifactInvalidatedAt?: Date | null;
-  },
-  current: TurnCodexAccount,
-): string {
-  if (
-    state.frozenCodexCredentialId === current.currentCodexCredentialId &&
-    !state.providerArtifactInvalidatedAt
-  ) {
+/** Build the attempt-local RunState view after an explicit provider rejection. */
+export function resumeRunState(state: {
+  serializedRunState: string;
+  providerArtifactInvalidatedAt?: Date | null;
+}): string {
+  if (!state.providerArtifactInvalidatedAt) {
     return state.serializedRunState;
   }
-  // Cross-account: neutralize reasoning identity in place AND flip frozen
-  // tool_search pairs to execution:"server" in place (count-preserving — HOLE E
-  // forbids removing blob items). The server flip makes the SDK skip its
-  // client-executor rehydration (which would THROW when the resuming account's
-  // connector pool differs from the freezing account's); the flipped shape is
-  // live-verified wire-safe. The model can still re-search on this account.
-  return neutralizeToolSearchItemsInSerializedRunState(
-    stripReasoningIdentityFromSerializedRunState(state.serializedRunState),
-  );
+  return projectRejectedProviderArtifactsFromSerializedRunState(state.serializedRunState);
 }
 
-/**
- * A prepared turn input plus the watermark-seed discriminator the reconcile pass
- * needs (HOLE E). `modelHistoryFromItems` is TRUE iff `state.history` was seeded
- * from the cross-account-STRIPPED active history items (the items read path) — so
- * the turn-end reconcile must seed `persistedHistoryCount` from the SAME strip
- * (HOLE D). It is FALSE only when `state.history` was seeded from the approval
- * RunState: there
- * foreign reasoning is NEUTRALIZED-IN-PLACE by {@link resumeRunStateForCodexAccount}
- * (the item is KEPT, only its id/encrypted_content go), so the blob's history
- * length still COUNTS those items. Seeding the watermark with the strip on that
- * path under-counts by K and the reconcile re-appends K already-persisted items at
- * fresh positions — that is HOLE E. The watermark must therefore NOT strip on the
- * blob path (count the raw sanitized active length, matching the blob).
- */
+/** Prepared input and its exact durable-history prefix length for reconciliation. */
 export type PreparedTurnInput = {
   input: Awaited<ReturnType<OpenGeniRuntime["prepareInput"]>>;
-  modelHistoryFromItems: boolean;
+  persistedHistoryCount: number;
+  providerArtifactCandidates: {
+    knownHistoryItemIds: string[];
+    historyItemIds: string[];
+    runStateId?: string;
+  };
 };
 
 export type TurnInputOptions = {
@@ -161,11 +79,10 @@ export type TurnInputOptions = {
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
-  readFileBytesForModel?: (file: FileAsset) => Promise<Uint8Array>;
-  materializeModelHistory?: (
-    history: Array<Record<string, unknown>>,
-  ) => Promise<Array<Record<string, unknown>>>;
+  providerApi: HistoryProviderApi;
+  materializeModelHistory?: ModelHistoryAttachmentProjector;
   materializeSerializedRunState?: (serialized: string) => Promise<string>;
+  projectModelHistory?: ModelHistoryAttachmentProjector;
 };
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -176,6 +93,15 @@ export type ModelAttachmentContent = {
   filename: string;
   contentType: string;
   dataUrl: string;
+};
+
+export type ModelHistoryAttachmentProjector = (
+  items: Array<Record<string, unknown>>,
+) => Promise<Array<Record<string, unknown>>>;
+
+export type ModelAttachmentInputPolicy = {
+  supportsImageInput: boolean;
+  inputFileMediaTypes: readonly string[];
 };
 
 const MODEL_IMAGE_CONTENT_TYPES = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
@@ -223,7 +149,11 @@ export async function modelAttachmentContentForFiles(
   files: FileAsset[],
   readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
 ): Promise<ModelAttachmentContent[]> {
-  const attachments: ModelAttachmentContent[] = [];
+  const selected: Array<{
+    file: FileAsset;
+    descriptor: Pick<ModelAttachmentContent, "kind" | "contentType">;
+    checksum: string;
+  }> = [];
   let remainingBytes = MAX_INLINE_MODEL_ATTACHMENT_BYTES;
   for (const file of files) {
     const descriptor = modelAttachmentDescriptor(file.contentType);
@@ -236,82 +166,204 @@ export async function modelAttachmentContentForFiles(
     ) {
       continue;
     }
-    try {
-      const bytes = await readFileBytes(file);
-      if (bytes.byteLength !== file.sizeBytes || bytes.byteLength > remainingBytes) {
-        console.error("model attachment bytes did not match finalized metadata", {
-          fileId: file.id,
-          expectedSizeBytes: file.sizeBytes,
-          actualSizeBytes: bytes.byteLength,
-        });
-        continue;
-      }
-      if (createHash("sha256").update(bytes).digest("hex") !== checksum) {
-        console.error("model attachment checksum did not match finalized metadata", {
-          fileId: file.id,
-        });
-        continue;
-      }
-      attachments.push({
-        kind: descriptor.kind,
-        fileId: file.id,
-        filename: file.safeFilename,
-        contentType: descriptor.contentType,
-        dataUrl: `data:${descriptor.contentType};base64,${Buffer.from(bytes).toString("base64")}`,
-      });
-      remainingBytes -= bytes.byteLength;
-    } catch (error) {
-      // The sandbox-path projection remains available for every file. A direct
-      // provider-content read is an additive fast path and must not turn a
-      // transient storage read into loss of the accepted prompt.
-      console.error("model attachment content read failed; retaining sandbox path fallback", {
-        fileId: file.id,
-        errorType: safeErrorType(error),
-      });
-    }
+    selected.push({ file, descriptor, checksum });
+    remainingBytes -= file.sizeBytes;
   }
-  return attachments;
+
+  const attachments = new Array<ModelAttachmentContent | undefined>(selected.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < selected.length) {
+      const index = cursor++;
+      const { file, descriptor, checksum } = selected[index]!;
+      try {
+        const bytes = await readFileBytes(file);
+        if (bytes.byteLength !== file.sizeBytes) {
+          console.error("model attachment bytes did not match finalized metadata", {
+            fileId: file.id,
+            expectedSizeBytes: file.sizeBytes,
+            actualSizeBytes: bytes.byteLength,
+          });
+          continue;
+        }
+        if (createHash("sha256").update(bytes).digest("hex") !== checksum) {
+          console.error("model attachment checksum did not match finalized metadata", {
+            fileId: file.id,
+          });
+          continue;
+        }
+        attachments[index] = {
+          kind: descriptor.kind,
+          fileId: file.id,
+          filename: file.safeFilename,
+          contentType: descriptor.contentType,
+          dataUrl: `data:${descriptor.contentType};base64,${Buffer.from(bytes).toString("base64")}`,
+        };
+      } catch (error) {
+        // The sandbox-path projection remains available for every file. A direct
+        // provider-content read is an additive fast path and must not turn a
+        // transient storage read into loss of the accepted prompt.
+        console.error("model attachment content read failed; retaining sandbox path fallback", {
+          fileId: file.id,
+          errorType: safeErrorType(error),
+        });
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(8, selected.length) }, async () => await worker()),
+  );
+  return attachments.filter(
+    (attachment): attachment is ModelAttachmentContent => attachment !== undefined,
+  );
+}
+
+function modelAcceptsFileMediaType(
+  policy: ModelAttachmentInputPolicy,
+  contentType: string,
+): boolean {
+  const normalized = contentType.toLowerCase().split(";", 1)[0]?.trim() ?? "";
+  return policy.inputFileMediaTypes.some(
+    (accepted) =>
+      accepted === normalized ||
+      (accepted.endsWith("/*") && normalized.startsWith(accepted.slice(0, -1))),
+  );
+}
+
+function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[] {
+  const raw = item[MODEL_ATTACHMENT_REFS_FIELD];
+  if (!Array.isArray(raw)) return [];
+  const refs: FileResourceRef[] = [];
+  for (const candidate of raw) {
+    const parsed = FileResourceRef.safeParse(candidate);
+    if (parsed.success) refs.push(parsed.data);
+  }
+  return refs;
+}
+
+function attachmentUnavailableText(ref: FileResourceRef, file: FileAsset | undefined): string {
+  const filename = file?.safeFilename ?? ref.fileId;
+  const mediaType = file?.contentType ?? "unknown type";
+  const path = file ? sandboxFilePath(ref, file) : `/workspace/${resourceMountPath(ref)}`;
+  return (
+    `[Attachment not included directly because the selected model does not accept this input ` +
+    `or it exceeded the safe inline limit: ${filename} (${mediaType}). ` +
+    `It remains available to tools in the sandbox at ${path}.]`
+  );
 }
 
 /**
- * Enrich the current turn's durable user boundary for this model attempt only.
- * The item count stays unchanged, so the turn reconciler still treats the
- * enriched row as the already-persisted prefix and never writes inline bytes to
- * session_history_items. Recovery rebuilds the same projection from the trigger.
+ * Build one turn-scoped durable-attachment projector. Metadata is batch-loaded
+ * and file bytes are memoized, so compaction/retry can reuse the same work and
+ * the SDK's repeated tool loop never touches storage or rescans old history.
  */
-export function withCurrentUserAttachmentContent(
-  historyItems: Array<Record<string, unknown>>,
-  attachments: ModelAttachmentContent[],
-): Array<Record<string, unknown>> {
-  if (attachments.length === 0) return historyItems;
-  let currentUserIndex = -1;
-  for (let index = historyItems.length - 1; index >= 0; index -= 1) {
-    const item = historyItems[index];
-    if (item?.type === "message" && item.role === "user") {
-      currentUserIndex = index;
-      break;
+export function createModelHistoryAttachmentProjector(
+  db: Database,
+  workspaceId: string,
+  policy: ModelAttachmentInputPolicy,
+  readFileBytes?: (file: FileAsset) => Promise<Uint8Array>,
+): ModelHistoryAttachmentProjector {
+  const fileById = new Map<string, FileAsset>();
+  const missingFileIds = new Set<string>();
+  const contentById = new Map<string, ModelAttachmentContent>();
+  const attemptedContentIds = new Set<string>();
+
+  return async (items) => {
+    const refsByIndex = new Map<number, FileResourceRef[]>();
+    const orderedFileIds: string[] = [];
+    const seenFileIds = new Set<string>();
+    for (let index = 0; index < items.length; index += 1) {
+      const refs = attachmentRefsFromItem(items[index]!);
+      if (refs.length === 0) continue;
+      refsByIndex.set(index, refs);
+      for (const ref of refs) {
+        if (seenFileIds.has(ref.fileId)) continue;
+        seenFileIds.add(ref.fileId);
+        orderedFileIds.push(ref.fileId);
+      }
     }
-  }
-  if (currentUserIndex < 0) return historyItems;
-  const currentUser = historyItems[currentUserIndex]!;
-  const existingContent = Array.isArray(currentUser.content)
-    ? [...currentUser.content]
-    : [{ type: "input_text", text: String(currentUser.content ?? "") }];
-  const attachmentContent = attachments.map((attachment) =>
-    attachment.kind === "image"
-      ? { type: "input_image", image: attachment.dataUrl }
-      : {
-          type: "input_file",
-          file: attachment.dataUrl,
-          filename: attachment.filename,
-        },
-  );
-  const projected = [...historyItems];
-  projected[currentUserIndex] = {
-    ...currentUser,
-    content: [...existingContent, ...attachmentContent],
+    if (refsByIndex.size === 0) return items;
+
+    const unknownIds = orderedFileIds.filter((id) => !fileById.has(id) && !missingFileIds.has(id));
+    if (unknownIds.length > 0) {
+      const files = await getFiles(db, workspaceId, unknownIds);
+      for (const file of files) fileById.set(file.id, file);
+      for (const id of unknownIds) {
+        if (!fileById.has(id)) missingFileIds.add(id);
+      }
+    }
+
+    if (readFileBytes) {
+      // Prefer the newest attachments if the aggregate request safety limit is
+      // reached; an old image becomes a marker instead of hiding the new prompt.
+      const readable = [...orderedFileIds]
+        .reverse()
+        .map((id) => fileById.get(id))
+        .filter((file): file is FileAsset => {
+          if (!file || attemptedContentIds.has(file.id)) return false;
+          const descriptor = modelAttachmentDescriptor(file.contentType);
+          return Boolean(
+            descriptor &&
+            ((descriptor.kind === "image" && policy.supportsImageInput) ||
+              (descriptor.kind === "file" && modelAcceptsFileMediaType(policy, file.contentType))),
+          );
+        });
+      for (const file of readable) attemptedContentIds.add(file.id);
+      const content = await modelAttachmentContentForFiles(readable, readFileBytes);
+      for (const attachment of content) contentById.set(attachment.fileId, attachment);
+    }
+
+    const projected = [...items];
+    for (const [index, refs] of refsByIndex) {
+      const original = items[index]!;
+      const existingContent = Array.isArray(original.content)
+        ? [...original.content]
+        : [{ type: "input_text", text: String(original.content ?? "") }];
+      const attachmentParts = refs.map((ref) => {
+        const attachment = contentById.get(ref.fileId);
+        if (!attachment) {
+          return {
+            type: "input_text",
+            text: attachmentUnavailableText(ref, fileById.get(ref.fileId)),
+          };
+        }
+        return attachment.kind === "image"
+          ? { type: "input_image", image: attachment.dataUrl }
+          : {
+              type: "input_file",
+              file: attachment.dataUrl,
+              filename: attachment.filename,
+            };
+      });
+      const clone: Record<string, unknown> = {
+        ...original,
+        content: [...existingContent, ...attachmentParts],
+      };
+      delete clone[MODEL_ATTACHMENT_REFS_FIELD];
+      projected[index] = clone;
+    }
+    return projected;
   };
-  return projected;
+}
+
+/** Add current trigger refs only when older/local history predates durable stamping. */
+export function withCurrentUserAttachmentRefs(
+  historyItems: Array<Record<string, unknown>>,
+  refs: FileResourceRef[],
+): Array<Record<string, unknown>> {
+  if (refs.length === 0) return historyItems;
+  for (let index = historyItems.length - 1; index >= 0; index -= 1) {
+    const item = historyItems[index]!;
+    if (item.type !== "message" || item.role !== "user") continue;
+    const existing = attachmentRefsFromItem(item);
+    const existingIds = new Set(existing.map((ref) => ref.fileId));
+    const additions = refs.filter((ref) => !existingIds.has(ref.fileId));
+    if (additions.length === 0) return historyItems;
+    const projected = [...historyItems];
+    projected[index] = { ...item, [MODEL_ATTACHMENT_REFS_FIELD]: [...existing, ...additions] };
+    return projected;
+  }
+  return historyItems;
 }
 
 export async function turnInput(
@@ -319,7 +371,6 @@ export async function turnInput(
   runtime: OpenGeniRuntime,
   agent: any,
   trigger: Awaited<ReturnType<typeof getSessionEvent>>,
-  current: TurnCodexAccount = NON_CODEX_TURN,
   options: TurnInputOptions,
 ): Promise<PreparedTurnInput> {
   if (!trigger) {
@@ -361,12 +412,6 @@ export async function turnInput(
       resources,
     );
     const attachmentContext = userMessageAttachmentsContext(fileAttachments);
-    const modelAttachments = options.readFileBytesForModel
-      ? await modelAttachmentContentForFiles(
-          fileAttachments.map((attachment) => attachment.file),
-          options.readFileBytesForModel,
-        )
-      : [];
     return await messageInput(
       db,
       runtime,
@@ -374,9 +419,10 @@ export async function turnInput(
       trigger,
       undefined,
       joinInternalContext(internalContext, attachmentContext),
-      current,
-      modelAttachments,
+      fileAttachments.map((attachment) => attachment.resource),
+      options.providerApi,
       options.materializeModelHistory,
+      options.projectModelHistory,
     );
   }
   if (trigger.type === "system.update.delivered") {
@@ -390,9 +436,10 @@ export async function turnInput(
       trigger,
       undefined,
       internalContext,
-      current,
       [],
+      options.providerApi,
       options.materializeModelHistory,
+      options.projectModelHistory,
     );
   }
   if (trigger.type === "user.approvalDecision") {
@@ -407,25 +454,24 @@ export async function turnInput(
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
-    const serializedRunState = resumeRunStateForCodexAccount(state, current);
+    const serializedRunState = resumeRunState(state);
+    const prepared = await runtime.prepareInput(agent, {
+      kind: "approval",
+      serializedRunState: options.materializeSerializedRunState
+        ? await options.materializeSerializedRunState(serializedRunState)
+        : serializedRunState,
+      approvalId: String(payload.approvalId ?? ""),
+      decision: payload.decision === "approve" ? "approve" : "reject",
+      ...(typeof payload.message === "string" ? { message: payload.message } : {}),
+    });
     return {
-      input: await runtime.prepareInput(agent, {
-        kind: "approval",
-        // Cross-account run-state strip (HOLE C): if the account resuming this
-        // frozen approval differs from the one that froze it, neutralize the
-        // blob's account-bound reasoning before replay (else byte-for-byte).
-        serializedRunState: options.materializeSerializedRunState
-          ? await options.materializeSerializedRunState(serializedRunState)
-          : serializedRunState,
-        approvalId: String(payload.approvalId ?? ""),
-        decision: payload.decision === "approve" ? "approve" : "reject",
-        ...(typeof payload.message === "string" ? { message: payload.message } : {}),
-      }),
-      // Model seeded from the run-state BLOB (neutralize-in-place), NOT stripped
-      // items: the reconcile watermark must NOT apply the cross-account strip
-      // (HOLE E) — else a cross-account approval resume re-appends K
-      // already-persisted items at fresh positions.
-      modelHistoryFromItems: false,
+      input: prepared,
+      persistedHistoryCount: prepared.persistedHistoryCount,
+      providerArtifactCandidates: {
+        knownHistoryItemIds: [],
+        historyItemIds: [],
+        runStateId: state.id,
+      },
     };
   }
   if (trigger.type === "user.humanInputResponse") {
@@ -439,16 +485,22 @@ export async function turnInput(
     if (!resume) {
       throw new Error("Human-input response does not resolve to a durable request");
     }
-    const serializedRunState = resumeRunStateForCodexAccount(state, current);
+    const serializedRunState = resumeRunState(state);
+    const prepared = await runtime.prepareInput(agent, {
+      kind: "human_input",
+      serializedRunState: options.materializeSerializedRunState
+        ? await options.materializeSerializedRunState(serializedRunState)
+        : serializedRunState,
+      toolCallId: resume.toolCallId,
+    });
     return {
-      input: await runtime.prepareInput(agent, {
-        kind: "human_input",
-        serializedRunState: options.materializeSerializedRunState
-          ? await options.materializeSerializedRunState(serializedRunState)
-          : serializedRunState,
-        toolCallId: resume.toolCallId,
-      }),
-      modelHistoryFromItems: false,
+      input: prepared,
+      persistedHistoryCount: prepared.persistedHistoryCount,
+      providerArtifactCandidates: {
+        knownHistoryItemIds: [],
+        historyItemIds: [],
+        runStateId: state.id,
+      },
     };
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
@@ -467,28 +519,47 @@ async function messageInput(
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>,
   text: string | undefined,
   internalContext: string | undefined,
-  current: TurnCodexAccount = NON_CODEX_TURN,
-  modelAttachments: ModelAttachmentContent[] = [],
-  materializeModelHistory?: (
-    history: Array<Record<string, unknown>>,
-  ) => Promise<Array<Record<string, unknown>>>,
+  currentAttachmentRefs: FileResourceRef[] = [],
+  providerApi: HistoryProviderApi = "responses",
+  materializeModelHistory?: ModelHistoryAttachmentProjector,
+  projectModelHistory?: ModelHistoryAttachmentProjector,
 ): Promise<PreparedTurnInput> {
   const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
-  const strippedHistory = applyCodexHistoryStrip(stored, current);
-  const modelHistory = materializeModelHistory
-    ? await materializeModelHistory(strippedHistory)
-    : strippedHistory;
-  const historyItems = withCurrentUserAttachmentContent(modelHistory, modelAttachments);
+  const canonicalView = projectRejectedProviderArtifacts(stored);
+  const providerView = projectHistoryForProvider(canonicalView, providerApi);
+  const referencedHistory = withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs);
+  const materializedHistory = materializeModelHistory
+    ? await materializeModelHistory(referencedHistory)
+    : referencedHistory;
+  const historyItems = projectModelHistory
+    ? await projectModelHistory(materializedHistory)
+    : materializedHistory;
+  const prepared = await runtime.prepareInput(agent, {
+    kind: "message",
+    ...(text ? { text } : {}),
+    ...(internalContext ? { internalContext } : {}),
+    historyItems: historyItems as any,
+    sandboxEnvelope: envelope,
+    ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+  });
+  const preparedItems = Array.isArray(prepared.input)
+    ? new Set(prepared.input)
+    : new Set<unknown>();
   return {
-    input: await runtime.prepareInput(agent, {
-      kind: "message",
-      ...(text ? { text } : {}),
-      ...(internalContext ? { internalContext } : {}),
-      historyItems: historyItems as any,
-      sandboxEnvelope: envelope,
-    }),
-    modelHistoryFromItems: true,
+    input: prepared,
+    persistedHistoryCount: prepared.persistedHistoryCount,
+    providerArtifactCandidates: {
+      knownHistoryItemIds: stored.map((row) => row.id),
+      historyItemIds: stored
+        .filter(
+          (row) =>
+            row.providerArtifactInvalidatedAt === null &&
+            hasOpaqueProviderArtifact(row.item) &&
+            preparedItems.has(row.item),
+        )
+        .map((row) => row.id),
+    },
   };
 }
 
@@ -539,5 +610,5 @@ function sandboxFilePath(
   resource: Extract<ResourceRef, { kind: "file" }>,
   file: FileAsset,
 ): string {
-  return `/workspace/${resource.mountPath ?? `files/${file.id}`}/${file.safeFilename}`;
+  return `/workspace/${resourceMountPath(resource)}/${file.safeFilename}`;
 }

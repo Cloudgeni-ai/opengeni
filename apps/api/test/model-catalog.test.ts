@@ -6,6 +6,60 @@ import { testSettings } from "@opengeni/testing";
 import { buildWorkspaceModelCatalog } from "../src/model-catalog";
 
 describe("workspace model catalog availability", () => {
+  test("projects OpenGeni topology safely and gates the workspace Gateway rail", () => {
+    const settings = testSettings({
+      codexSubscriptionEnabled: false,
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_managed",
+    });
+    const disconnected = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      workspaceGatewayConnectionActive: false,
+    });
+    const managed = disconnected.models.find((model) => model.id === "deepseek-v4-flash-0731")!;
+    expect(managed).toMatchObject({
+      provider: "opengeni",
+      providerLabel: "OpenGeni",
+      source: "opengeni",
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    });
+    expect(managed.deployment).toBeUndefined();
+    expect(managed.credentialSource).toBeUndefined();
+    const publicManagedModel = JSON.stringify(managed);
+    for (const internalName of [
+      "baseten",
+      "novita",
+      "deepinfra",
+      "fireworks",
+      "ai-gateway.vercel.sh",
+    ]) {
+      expect(publicManagedModel).not.toContain(internalName);
+    }
+
+    const workspaceModel = disconnected.models.find(
+      (model) => model.id === "workspace-gateway/deepseek-v4-flash-0731",
+    )!;
+    expect(workspaceModel).toMatchObject({
+      provider: "workspace-gateway",
+      providerLabel: "Your Gateway",
+      source: "workspace_gateway",
+      credentialReadiness: { status: "not_ready" },
+    });
+
+    const connected = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      workspaceGatewayConnectionActive: true,
+    });
+    expect(
+      connected.models.find((model) => model.id === "workspace-gateway/deepseek-v4-flash-0731")
+        ?.credentialReadiness.status,
+    ).toBe("ready");
+  });
+
   test("unknown health is selectable only after credential and policy gates pass", () => {
     const settings = testSettings({ codexSubscriptionEnabled: false });
     const allowed = buildWorkspaceModelCatalog({
@@ -202,8 +256,9 @@ describe("workspace model catalog availability", () => {
     });
     const codexDisconnected = disconnected.models.find((model) => model.id.startsWith("codex/"))!;
     expect(codexDisconnected).toMatchObject({
-      provider: "codex-subscription",
-      credentialSource: { kind: "connected_subscription", provider: "codex" },
+      provider: "codex",
+      providerLabel: "Codex",
+      source: "codex",
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
       credentialReadiness: {
         status: "not_ready",
@@ -216,6 +271,7 @@ describe("workspace model catalog availability", () => {
         reason: "needs_reauth",
       },
     });
+    expect(codexDisconnected.credentialSource).toBeUndefined();
 
     const connected = buildWorkspaceModelCatalog({
       settings,
@@ -252,7 +308,9 @@ describe("workspace model catalog availability", () => {
       now,
     }).models.find((candidate) => candidate.id === settings.openaiModel)!;
     expect(unresolved).toMatchObject({
-      credentialSource: { kind: "deployment", mechanism: "azure_ad_bearer" },
+      provider: "opengeni",
+      providerLabel: "OpenGeni",
+      source: "opengeni",
       credentialReadiness: {
         status: "not_ready",
         reason: "prerequisites_missing",
@@ -266,6 +324,7 @@ describe("workspace model catalog availability", () => {
         checkedAt: null,
       },
     });
+    expect(unresolved.credentialSource).toBeUndefined();
     expect(JSON.stringify(unresolved)).not.toContain("static-ad-token-never-project");
 
     const ready = buildWorkspaceModelCatalog({

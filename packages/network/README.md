@@ -26,12 +26,13 @@ calling `pinnedFetch`; the policy resolution and pinned Agent are the final
 network boundary. Callers must not preflight with one fetch and then call a
 second global fetch.
 
-The package uses Undici's fetch implementation from its explicit
-`undici/index.js` entrypoint for production callers. Bun's bare `undici`
-specifier resolves to a compatibility shim whose `Agent` does not expose the
-dispatcher methods needed by `fetch`, and Bun's native `fetch` does not provide a
-portable guarantee that an Undici `dispatcher` is honored. Bun callers should use
-the exported transport (or the explicit Undici entrypoint) rather than
-substituting Bun's native fetch after the guard. This package does not follow
-redirects; each caller must make a manual redirect decision and call the transport
-again so every hop is independently resolved and pinned.
+The pinned transport uses Undici's `request()` implementation from its explicit
+`undici/index.js` entrypoint and adapts the result to a web `Response`. This
+avoids Bun/Undici `fetch()` body-stream interoperability stalls while preserving
+the vetted per-request `Agent`. The separately exported `undiciFetch` remains a
+fetch-compatible adapter for callers that do not use `pinnedFetch`. Bun's bare
+`undici` specifier resolves to a compatibility shim whose `Agent` does not expose
+the required dispatcher methods, and Bun's native `fetch` does not provide a
+portable guarantee that an Undici `dispatcher` is honored. This package does not
+follow redirects; each caller must make a manual redirect decision and call the
+transport again so every hop is independently resolved and pinned.

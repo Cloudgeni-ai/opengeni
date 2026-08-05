@@ -1,13 +1,15 @@
+import { DocumentSearchResponse } from "@opengeni/contracts";
 import {
   getDocumentChunk,
   listDocumentBases,
-  searchDocuments,
+  searchEffectiveDocuments,
   type DocumentAccessFilter,
   type DocumentServices,
 } from "@opengeni/documents";
 import { createKnowledgeMemory, listKnowledgeMemories, type Database } from "@opengeni/db";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
+import { mcpMutationReceipt } from "./receipts";
 
 const SearchInputSchema = {
   query: z.string().min(1),
@@ -47,9 +49,9 @@ export function buildDocumentsMcpServer(
   documentServices: DocumentServices,
   options: {
     createdBySessionId?: string | undefined;
-    /** The human subject whose agent is making this retrieval request. */
-    viewerSubjectId?: string | undefined;
-  } = {},
+    /** Immutable human subject whose agent is making this retrieval request. */
+    initiatingSubjectId: string;
+  },
 ): McpServer {
   const server = new McpServer({
     name: "opengeni-documents",
@@ -60,7 +62,7 @@ export function buildDocumentsMcpServer(
   // documents are available only to the creating subject's agent.
   const agentAccess: DocumentAccessFilter = {
     agentOnly: true,
-    ...(options.viewerSubjectId ? { viewerSubjectId: options.viewerSubjectId } : {}),
+    viewerSubjectId: options.initiatingSubjectId,
   };
 
   server.registerTool(
@@ -80,17 +82,35 @@ export function buildDocumentsMcpServer(
       description: "Search indexed documents with hybrid, vector, or keyword retrieval.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input, agentAccess),
+    async (input) =>
+      searchContent(
+        db,
+        accountId,
+        workspaceId,
+        documentServices,
+        input,
+        options.initiatingSubjectId,
+        false,
+      ),
   );
 
   server.registerTool(
     "knowledge_search",
     {
       description:
-        "Search company knowledge sources with optional base, source-kind, ACL, and retrieval-mode filters.",
+        "Search the effective authorized organization, current-workspace, and immutable initiating-user personal document scope. Authorization is applied before ranking and every result retains source and authority provenance.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input, agentAccess),
+    async (input) =>
+      searchContent(
+        db,
+        accountId,
+        workspaceId,
+        documentServices,
+        input,
+        options.initiatingSubjectId,
+        true,
+      ),
   );
 
   server.registerTool(
@@ -102,7 +122,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId, agentAccess);
+      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -121,7 +141,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId, agentAccess);
+      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -173,31 +193,47 @@ export function buildDocumentsMcpServer(
         metadata: z.record(z.string(), z.unknown()).optional(),
       },
     },
-    async ({ text, kind, scope, sourceRefs, confidence, metadata }) => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            await createKnowledgeMemory(db, {
-              accountId,
-              workspaceId,
-              status: "proposed",
-              kind: kind ?? "semantic",
-              scope: scope ?? "workspace",
-              text,
-              sourceRefs:
-                sourceRefs?.map((sourceRef) => ({
-                  ...sourceRef,
-                  metadata: sourceRef.metadata ?? {},
-                })) ?? [],
-              confidence: confidence ?? 0.5,
-              metadata: metadata ?? {},
-              createdBySessionId: options.createdBySessionId,
-            }),
-          ),
-        },
-      ],
-    }),
+    async ({ text, kind, scope, sourceRefs, confidence, metadata }) => {
+      const memory = await createKnowledgeMemory(db, {
+        accountId,
+        workspaceId,
+        status: "proposed",
+        kind: kind ?? "semantic",
+        scope: scope ?? "workspace",
+        text,
+        sourceRefs:
+          sourceRefs?.map((sourceRef) => ({
+            ...sourceRef,
+            metadata: sourceRef.metadata ?? {},
+          })) ?? [],
+        confidence: confidence ?? 0.5,
+        metadata: metadata ?? {},
+        createdBySessionId: options.createdBySessionId,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              mcpMutationReceipt({
+                operation: "memory_propose",
+                committed: true,
+                outcome: "created",
+                changed: true,
+                resource: {
+                  type: "knowledge_memory",
+                  id: memory.id,
+                  state: memory.status,
+                },
+                timestamp: memory.updatedAt,
+                idempotency: { status: "not_supported" },
+                nextAction: { tool: "memory_search", arguments: {} },
+              }),
+            ),
+          },
+        ],
+      };
+    },
   );
 
   return server;
@@ -205,6 +241,7 @@ export function buildDocumentsMcpServer(
 
 async function searchContent(
   db: Database,
+  accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
   input: {
@@ -226,28 +263,30 @@ async function searchContent(
       | undefined;
     aclTags?: string[] | undefined;
   },
-  access: DocumentAccessFilter,
+  initiatingSubjectId: string,
+  wrapResponse: boolean,
 ) {
+  const results = await searchEffectiveDocuments(
+    db,
+    {
+      accountId,
+      workspaceId,
+      query: input.query,
+      ...(input.baseIds ? { baseIds: input.baseIds } : {}),
+      ...(input.limit ? { limit: input.limit } : {}),
+      ...(input.mode ? { mode: input.mode } : {}),
+      ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
+      ...(input.aclTags ? { aclTags: input.aclTags } : {}),
+      initiatingSubjectId,
+      surface: "agent",
+    },
+    documentServices,
+  );
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(
-          await searchDocuments(
-            db,
-            {
-              workspaceId,
-              query: input.query,
-              ...(input.baseIds ? { baseIds: input.baseIds } : {}),
-              ...(input.limit ? { limit: input.limit } : {}),
-              ...(input.mode ? { mode: input.mode } : {}),
-              ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
-              ...(input.aclTags ? { aclTags: input.aclTags } : {}),
-              access,
-            },
-            documentServices,
-          ),
-        ),
+        text: JSON.stringify(wrapResponse ? DocumentSearchResponse.parse({ results }) : results),
       },
     ],
   };

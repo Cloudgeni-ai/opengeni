@@ -1,5 +1,23 @@
 # @opengeni/codex
 
+## 0.2.11
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+
+## 0.2.10
+
+### Patch Changes
+
+- 4f15920: Add an authorized, server-mediated connected-Codex GPT-Live V3 WebRTC SDP path with credential-safe negotiation and browser lifecycle helpers.
+
+## 0.2.9
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+
 ## 0.2.8
 
 ### Patch Changes

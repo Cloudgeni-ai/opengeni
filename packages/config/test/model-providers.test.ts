@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  calculateGatewayReportedCostMicros,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -12,10 +13,20 @@ import {
   getSettings,
   parseModelProvidersJson,
   policyProviderIdForModel,
+  productLabelForModelId,
+  productShortLabelForModelId,
   resolveModelProvider,
   resolveProviderApiKey,
   resolveTurnExecutionPolicyV1,
+  responseSatisfiesLatencyMode,
   selectModelPricing,
+  serviceTierForLatencyMode,
+  withCodexCatalogProvider,
+  withWorkspaceGatewayCatalogProvider,
+  withWorkspaceGatewayCredential,
+  OPENGENI_GATEWAY_MODELS,
+  OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
 } from "../src";
 
 // A reusable Fireworks/GLM-5.2 registry JSON mirroring the doc's host example.
@@ -53,6 +64,149 @@ const codexRegistry = JSON.stringify([
     models: [{ id: "codex/gpt-5.6-sol", label: "gpt-5.6-sol", reasoningEffort: true }],
   },
 ]);
+
+describe("curated AI Gateway catalogue", () => {
+  test("adds the two managed models with exact routes, capabilities, and prices", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    const providers = configuredProviders(settings);
+    const gateway = providers.find((provider) => provider.id === OPENGENI_GATEWAY_PROVIDER_ID)!;
+    expect(gateway.kind).toBe("vercel-gateway-managed");
+    expect(gateway.api).toBe("responses");
+
+    const models = configuredModels(settings);
+    const deepseek = models.find(
+      (model) => model.id === OPENGENI_GATEWAY_MODELS.deepseek.productId,
+    )!;
+    const kimi = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.kimi.productId)!;
+    expect(deepseek.upstreamModelId).toBe(OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId);
+    expect(deepseek.label).toBe("DeepSeek V4 Flash 0731");
+    expect(deepseek.shortLabel).toBe("V4 Flash");
+    expect(kimi.shortLabel).toBe("Kimi K3");
+    expect(deepseek.requestPolicy).toEqual({
+      gateway: { only: ["baseten", "novita", "deepinfra"], caching: "auto" },
+    });
+    expect(deepseek.capabilities.promptCaching).toEqual({
+      upstream: "supported",
+      runnable: true,
+      mode: "implicit",
+    });
+    expect(deepseek.capabilities.inputModalities).toEqual(["text"]);
+    expect(deepseek.capabilities.inputFileMediaTypes).toEqual([]);
+    expect(kimi.upstreamModelId).toBe("moonshotai/kimi-k3");
+    expect(kimi.label).toBe("Kimi K3");
+    expect(kimi.aliases).toEqual([]);
+    expect(kimi.requestPolicy).toEqual({
+      gateway: { only: ["baseten", "fireworks"], caching: "auto" },
+    });
+    expect(kimi.capabilities.promptCaching).toEqual({
+      upstream: "supported",
+      runnable: true,
+      mode: "implicit",
+    });
+    expect(kimi.capabilities.inputModalities).toEqual(["text", "image"]);
+    expect(kimi.capabilities.inputFileMediaTypes).toEqual(["application/pdf"]);
+    expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
+
+    expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
+      inputMicrosPerMillionTokens: 140_000,
+      cachedInputMicrosPerMillionTokens: 28_000,
+      outputMicrosPerMillionTokens: 280_000,
+      marginBps: 2_500,
+    });
+    expect(configuredModelPricing(settings)[kimi.id]).toEqual({
+      inputMicrosPerMillionTokens: 3_000_000,
+      cachedInputMicrosPerMillionTokens: 300_000,
+      outputMicrosPerMillionTokens: 15_000_000,
+      marginBps: 2_500,
+    });
+  });
+
+  test("workspace overlay is externally billed and receives a key only at runtime", () => {
+    const base = { ...getSettings(), modelProvidersJson: "[]", vercelAiGatewayApiKey: undefined };
+    const catalog = withWorkspaceGatewayCatalogProvider(base);
+    const provider = configuredProviders(catalog).find(
+      (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
+    )!;
+    expect(provider.kind).toBe("vercel-gateway-workspace");
+    expect(provider.apiKey).toBeUndefined();
+    expect(provider.credentialSource).toEqual({
+      kind: "workspace_connection",
+      mechanism: "api_key",
+    });
+    expect(provider.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
+
+    const runtime = withWorkspaceGatewayCredential(catalog, "vck_workspace");
+    expect(
+      configuredProviders(runtime).find(
+        (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
+      )?.apiKey,
+    ).toBe("vck_workspace");
+  });
+
+  test("managed debit fallback uses the highest approved DeepSeek route", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.deepseek.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(385_000);
+  });
+
+  test("managed debit fallback applies normal Kimi cache-read pricing", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.kimi.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(375_000);
+  });
+
+  test("managed debit converts exact Gateway cost before applying margin", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "0.00000325",
+        { inputTokens: 9 },
+      ),
+    ).toBe(5);
+    expect(
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "1.23456789",
+      ),
+    ).toBe(1_543_210);
+    expect(() =>
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "NaN",
+      ),
+    ).toThrow("Invalid AI Gateway inference cost");
+  });
+});
 
 const grok45Capabilities = {
   reasoning: {
@@ -452,7 +606,53 @@ describe("configuredProviders", () => {
   });
 });
 
+describe("productLabelForModelId", () => {
+  test("formats GPT family slugs the same for OpenAI and Codex ids", () => {
+    expect(productLabelForModelId("gpt-5.6-luna")).toBe("GPT-5.6 Luna");
+    expect(productLabelForModelId("codex/gpt-5.6-luna")).toBe("GPT-5.6 Luna");
+    expect(productLabelForModelId("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(productLabelForModelId("codex/gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(productLabelForModelId("gpt-5.6-terra")).toBe("GPT-5.6 Terra");
+    expect(productLabelForModelId("gpt-5.4-mini")).toBe("GPT-5.4 Mini");
+  });
+});
+
+describe("productShortLabelForModelId", () => {
+  test("curates compact GPT-5.6 product labels and leaves others unset", () => {
+    expect(productShortLabelForModelId("gpt-5.6-sol")).toBe("5.6 Sol");
+    expect(productShortLabelForModelId("codex/gpt-5.6-sol")).toBe("5.6 Sol");
+    expect(productShortLabelForModelId("gpt-5.6-luna")).toBe("5.6 Luna");
+    expect(productShortLabelForModelId("gpt-5.6-terra")).toBe("5.6 Terra");
+    expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
+  });
+});
+
 describe("configuredModels", () => {
+  test("Codex catalog overlay uses the same product labels as OpenAI", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-sol",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
+        OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
+      },
+      () => withCodexCatalogProvider(getSettings()),
+    );
+    const models = configuredModels(settings);
+    expect(models.find((model) => model.id === "gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+    expect(models.find((model) => model.id === "codex/gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+    expect(models.find((model) => model.id === "gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
+    expect(models.find((model) => model.id === "codex/gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
+    expect(models.find((model) => model.id === "gpt-5.6-luna")?.shortLabel).toBe("5.6 Luna");
+    expect(models.find((model) => model.id === "gpt-5.6-terra")?.shortLabel).toBe("5.6 Terra");
+    expect(
+      models.find((model) => model.id === "gpt-5.6-luna")?.capabilities.inputModalities,
+    ).toEqual(["text", "image"]);
+    expect(
+      models.find((model) => model.id === "codex/gpt-5.6-luna")?.capabilities.inputModalities,
+    ).toEqual(["text", "image"]);
+  });
+
   test("with no registry returns exactly the built-in allow-list, default model first", () => {
     const settings = withEnv(
       {
@@ -466,7 +666,7 @@ describe("configuredModels", () => {
     expect(models.map((model) => model.id)).toEqual(["gpt-5.6-sol", "gpt-5.4", "gpt-5.4-mini"]);
     expect(models[0]).toMatchObject({
       id: "gpt-5.6-sol",
-      label: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
       providerId: "openai",
       providerLabel: "OpenAI",
       api: "responses",
@@ -474,6 +674,7 @@ describe("configuredModels", () => {
       reasoningEffort: true,
       hostedWebSearch: settings.webSearchEnabled,
     });
+    expect(models.map((model) => model.label)).toEqual(["GPT-5.6 Sol", "GPT-5.4", "GPT-5.4 Mini"]);
   });
 
   test("unions built-in models first, then registry models in declaration order", () => {
@@ -768,7 +969,7 @@ describe("normalized model definitions", () => {
   test("pins the V1 digest and excludes labels, aliases, API keys, and secret metadata values", () => {
     const baseline = definitionFor();
     expect(baseline.definitionVersion).toBe(
-      "sha256:40e81d830e81001fb8bc29050c22ba6170b78c0a54554ca3594bc59801912015",
+      "sha256:008d081089653410afffe7b5b92ee709047e8596695dce65f6027eb3ef130882",
     );
     expect(
       definitionFor({
@@ -965,7 +1166,7 @@ describe("turn execution policy V1", () => {
       modelId: "codex/gpt-5.6-sol",
       requestedModelId: null,
       modelSource: "session",
-      reasoningEffort: "xhigh",
+      reasoningEffort: "max",
       reasoningSource: "session",
     });
     expect(policy).toMatchObject({
@@ -975,6 +1176,7 @@ describe("turn execution policy V1", () => {
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
     });
+    expect(policy.reasoningEffort).toBe("max");
   });
 });
 describe("Grok 4.5 explicit xAI registry contract", () => {
@@ -1147,11 +1349,59 @@ describe("resolveModelProvider", () => {
 describe("configuredModelPricing", () => {
   test("includes the built-in GLM-5.2 default pricing entry", () => {
     expect(defaultModelPricing["accounts/fireworks/models/glm-5p2"]).toEqual({
-      inputMicrosPerMillionTokens: 1_400_000,
-      cachedInputMicrosPerMillionTokens: 260_000,
-      outputMicrosPerMillionTokens: 4_400_000,
+      default: {
+        inputMicrosPerMillionTokens: 1_400_000,
+        cachedInputMicrosPerMillionTokens: 140_000,
+        outputMicrosPerMillionTokens: 4_400_000,
+        marginBps: 2_500,
+      },
+    });
+  });
+
+  test("keeps current GPT-5.6 OpenAI list rates and long-context tiers", () => {
+    expect(defaultModelPricing["gpt-5.6-terra"]?.default).toEqual({
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 200_000,
+      outputMicrosPerMillionTokens: 12_000_000,
       marginBps: 2_500,
     });
+    expect(defaultModelPricing["gpt-5.6-luna"]?.default).toEqual({
+      inputMicrosPerMillionTokens: 200_000,
+      cachedInputMicrosPerMillionTokens: 20_000,
+      outputMicrosPerMillionTokens: 1_200_000,
+      marginBps: 2_500,
+    });
+    expect(defaultModelPricing["gpt-5.4"]).toBeUndefined();
+    expect(defaultModelPricing["gpt-5"]).toBeUndefined();
+
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    // 100k input @ $0.20/M = 20_000 micros, then +25% margin → 25_000
+    expect(calculateModelUsageCostMicros(settings, "gpt-5.6-luna", { inputTokens: 100_000 })).toBe(
+      25_000,
+    );
+    // >272K uses long-context luna ($0.40/M input): ceil(272001*400000/1e6)=108801, +25% → 136002
+    expect(calculateModelUsageCostMicros(settings, "gpt-5.6-luna", { inputTokens: 272_001 })).toBe(
+      136_002,
+    );
+    expect(
+      calculateModelUsageCostMicros(
+        settings,
+        "gpt-5.6-luna",
+        { inputTokens: 100_000 },
+        { latencyMode: "fast" },
+      ),
+    ).toBe(50_000);
+  });
+
+  test("maps and verifies provider Fast service tiers", () => {
+    expect(serviceTierForLatencyMode("openai", "fast")).toBe("fast");
+    expect(serviceTierForLatencyMode("azure", "fast")).toBe("priority");
+    expect(serviceTierForLatencyMode("codex-subscription", "fast")).toBe("priority");
+    expect(serviceTierForLatencyMode("openai", "standard")).toBeUndefined();
+    expect(responseSatisfiesLatencyMode("fast", "fast")).toBe(true);
+    expect(responseSatisfiesLatencyMode("fast", "priority")).toBe(true);
+    expect(responseSatisfiesLatencyMode("fast", "default")).toBe(false);
+    expect(responseSatisfiesLatencyMode("fast", undefined)).toBe(false);
   });
 
   test("merge precedence: registry model pricing overrides defaults, explicit JSON overrides registry", () => {
@@ -1203,8 +1453,8 @@ describe("configuredModelPricing", () => {
       inputMicrosPerMillionTokens: 111_000,
       outputMicrosPerMillionTokens: 222_000,
     });
-    // an untouched default stays intact.
-    expect(pricing["gpt-5.6-sol"]).toEqual(defaultModelPricing["gpt-5.6-sol"]!);
+    // an untouched default stays intact (flat projection = schedule.default).
+    expect(pricing["gpt-5.6-sol"]).toEqual(defaultModelPricing["gpt-5.6-sol"]!.default);
   });
 });
 

@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import type {
   ConnectionCredentialsPort,
+  DocumentAuthorityKind,
   EntitlementsPort,
   ScheduledTaskTriggerType,
   TurnInitiator,
@@ -202,6 +203,27 @@ export type RecoverDispatchResult =
   // ceiling), so the failed attempt was worker death number redispatches + 1.
   | { action: "exceeded"; turnId: string; redispatches: number };
 
+export const ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE = "EscapedMcpTimeoutRecoveryFailure";
+export const ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE =
+  "MCP request timeout recovery checkpoint failed before model request";
+
+export type EscapedMcpTimeoutRecoveryDetail = {
+  turnId: string;
+  triggerEventId: string;
+  executionGeneration: number;
+};
+
+export type RecoverEscapedMcpTimeoutInput = EscapedMcpTimeoutRecoveryDetail & {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+};
+
+export type RecoverEscapedMcpTimeoutResult = {
+  action: "recovering" | "stale" | "ineligible";
+};
+
 export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
@@ -273,11 +295,26 @@ export type DispatchScheduledTaskRunResult =
       workflowWakeRevision: number | null;
     };
 
-export type IndexDocumentInput = {
+type DocumentIndexIdentity = {
   accountId: string;
   workspaceId: string;
   documentId: string;
 };
+
+type CurrentDocumentIndexAuthority = {
+  authorityKind: DocumentAuthorityKind;
+  authorityWorkspaceId: string | null;
+  authoritySubjectId: string | null;
+};
+
+type HistoricalDocumentIndexAuthority = {
+  authorityKind?: never;
+  authorityWorkspaceId?: never;
+  authoritySubjectId?: never;
+};
+
+export type IndexDocumentInput = DocumentIndexIdentity &
+  (CurrentDocumentIndexAuthority | HistoricalDocumentIndexAuthority);
 
 type ClaimedRunAgentTurnResult = {
   // "recovering": this attempt ended after durably preserving the same current

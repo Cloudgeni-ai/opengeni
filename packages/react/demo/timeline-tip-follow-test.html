@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Timeline tip-follow regression</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: #f4f6f8;
+        color: #18212f;
+        font: 14px sans-serif;
+      }
+      .tip-follow-app {
+        display: flex;
+        height: 680px;
+        min-height: 0;
+        flex-direction: column;
+        overflow: hidden;
+        margin: 0 auto;
+        max-width: 900px;
+      }
+      .tip-follow-timeline {
+        min-height: 0;
+        flex: 1;
+      }
+      .tip-follow-shell {
+        display: flex;
+        height: 100%;
+        min-height: 0;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .tip-follow-shell > div {
+        min-height: 0;
+        flex: 1;
+        overflow-y: auto;
+      }
+      .tip-follow-chrome {
+        flex-shrink: 0;
+        margin: 0 0 8px;
+        border: 1px solid #c8d0da;
+        border-radius: 12px;
+        background: #101826;
+        color: #e8edf4;
+        padding: 8px 12px;
+      }
+      .tip-follow-composer {
+        flex-shrink: 0;
+        border: 1px solid #c8d0da;
+        border-radius: 12px;
+        background: #ffffff;
+        padding: 12px;
+      }
+      [data-timeline-row] {
+        border: 1px solid #d7dde5;
+        border-radius: 12px;
+        padding: 8px;
+      }
+      button {
+        font: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/timeline-tip-follow-test-harness.tsx"></script>
+  </body>
+</html>

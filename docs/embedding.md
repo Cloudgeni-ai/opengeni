@@ -23,9 +23,14 @@ Resume is optional.
 ```ts
 createSessionForRequest(deps, grant, workspaceId, rawPayload);
 acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
+controlHumanSessionWorkstream(deps, context, {
+  action: "cancel",
+  clientEventId: crypto.randomUUID(),
+  reason: "host record deleted",
+});
 ```
 
-Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
+The create/message helpers live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`; terminal control lives in `packages/core/src/application/session-commands.ts` and uses an explicit authenticated command context. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
 
 **Runtime dependency isolation.** `@opengeni/runtime` bundles its OpenAI Agents
 implementation together with the Zod 4 instance that defines those runtime
@@ -249,6 +254,14 @@ but are workspace-relative, separator-normalized, traversal-free, portable to
 case-insensitive filesystems, and collision-checked before sandbox execution.
 The normalized path is returned on the session resource and is the same value
 used by the manifest, clone hook, agent filesystem, and workbench.
+Repository URI normalization preserves the provider-defined HTTPS clone path;
+OpenGeni never manufactures or removes a trailing `.git` suffix. Credential
+routing and resource identity use an exhaustive provider capability policy:
+GitHub and GitLab explicitly declare `.git` and suffix-free paths equivalent,
+while Azure DevOps and provider-neutral remotes use exact paths. Adding a Git
+provider therefore requires choosing its path semantics rather than silently
+inheriting GitHub behavior. Mount-path and display-name derivation are separate
+from the clone transport URI.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
@@ -465,12 +478,14 @@ creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
 `CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
-`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the complete catalog,
-while explicit `[]` remains empty. A child omission snapshots its parent's exact
-effective selection. Tool selection never grants a permission, and permissions
-never implicitly select a tool. This separation lets a host keep a broad
-delegated authorization envelope while exposing only the tools appropriate to
-one embedded session.
+`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
+connector-wide `social_*` and `slack_bot_*` tools, while explicit `[]` remains
+empty. Connector tools require an explicit selection and their independent
+connection permission. A child omission snapshots its parent's exact effective
+selection. Tool selection never grants a permission, and permissions never
+implicitly select a tool. This separation lets a host keep a broad delegated
+authorization envelope while exposing only the tools appropriate to one
+embedded session.
 
 Resources are unaffected by that selection. File/document/repository
 attachments still materialize when `firstPartyMcpTools` is empty or contains

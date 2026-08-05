@@ -1,5 +1,677 @@
 # @opengeni/core
 
+## 0.21.3
+
+### Patch Changes
+
+- 41f7ae3: Treat the SDK's exact UnixLocal missing-workspace proof as provider loss so stale local leases can recover or drain cleanly, and expose ordinary sandbox-operation availability separately from live attach/swap readiness.
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [110d255]
+- Updated dependencies [41f7ae3]
+- Updated dependencies [5d1d0c2]
+- Updated dependencies [ce823ce]
+  - @opengeni/db@0.28.2
+  - @opengeni/runtime@0.18.18
+  - @opengeni/events@0.3.81
+  - @opengeni/contracts@0.39.1
+  - @opengeni/documents@0.5.11
+  - @opengeni/config@0.11.1
+  - @opengeni/observability@0.5.1
+  - @opengeni/storage@0.2.69
+
+## 0.21.2
+
+### Patch Changes
+
+- Updated dependencies [33166b0]
+  - @opengeni/observability@0.5.0
+
+## 0.21.1
+
+### Patch Changes
+
+- Updated dependencies [55f6ad0]
+- Updated dependencies [18eea76]
+  - @opengeni/db@0.28.1
+  - @opengeni/runtime@0.18.17
+  - @opengeni/documents@0.5.10
+  - @opengeni/events@0.3.80
+
+## 0.21.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- Updated dependencies [49c7f9c]
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+- Updated dependencies [5b6d36e]
+  - @opengeni/db@0.28.0
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+  - @opengeni/runtime@0.18.16
+  - @opengeni/documents@0.5.9
+  - @opengeni/events@0.3.79
+  - @opengeni/storage@0.2.68
+  - @opengeni/observability@0.4.17
+
+## 0.20.17
+
+### Patch Changes
+
+- Updated dependencies [cbf165a]
+  - @opengeni/db@0.27.12
+  - @opengeni/documents@0.5.8
+  - @opengeni/events@0.3.78
+
+## 0.20.16
+
+### Patch Changes
+
+- Updated dependencies [8135dbb]
+- Updated dependencies [17643a5]
+  - @opengeni/config@0.10.14
+  - @opengeni/db@0.27.11
+  - @opengeni/documents@0.5.7
+  - @opengeni/runtime@0.18.15
+  - @opengeni/storage@0.2.67
+  - @opengeni/events@0.3.77
+
+## 0.20.15
+
+### Patch Changes
+
+- Updated dependencies [c6c9acb]
+  - @opengeni/runtime@0.18.14
+
+## 0.20.14
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- Updated dependencies [69bc207]
+- Updated dependencies [144fd9e]
+- Updated dependencies [c0f8e40]
+  - @opengeni/codex@0.2.11
+  - @opengeni/db@0.27.10
+  - @opengeni/runtime@0.18.13
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+  - @opengeni/documents@0.5.6
+  - @opengeni/events@0.3.76
+  - @opengeni/observability@0.4.16
+  - @opengeni/storage@0.2.66
+
+## 0.20.13
+
+### Patch Changes
+
+- Updated dependencies [8105c25]
+  - @opengeni/runtime@0.18.12
+
+## 0.20.12
+
+### Patch Changes
+
+- 4502474: Add workspace-default and explicitly personal ownership for first-party social connections, preserve causal personal authority for agent work, and retain actionable structured gateway errors.
+- ee79969: Repair release-head recovery when GitHub emits duplicate legacy check projections.
+- Updated dependencies [4502474]
+- Updated dependencies [1ea5e62]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/db@0.27.9
+  - @opengeni/runtime@0.18.11
+  - @opengeni/config@0.10.12
+  - @opengeni/documents@0.5.5
+  - @opengeni/events@0.3.75
+  - @opengeni/observability@0.4.15
+  - @opengeni/storage@0.2.65
+
+## 0.20.11
+
+### Patch Changes
+
+- dfa3aef: Preserve Steer priority through provider recovery and repair interrupted attempts durably.
+- Updated dependencies [dfa3aef]
+  - @opengeni/db@0.27.8
+  - @opengeni/documents@0.5.4
+  - @opengeni/events@0.3.74
+
+## 0.20.10
+
+### Patch Changes
+
+- c29fd4c: Bound MCP OAuth callbacks through token exchange and persistence, return safe stage-specific failures to the capabilities UI, and replace incompatible dynamic client registrations with a compare-and-swap update.
+- Updated dependencies [c29fd4c]
+  - @opengeni/db@0.27.7
+  - @opengeni/documents@0.5.3
+  - @opengeni/events@0.3.73
+
+## 0.20.9
+
+### Patch Changes
+
+- 664c1d8: Bound MCP OAuth setup with an absolute server deadline, abort stalled response streams, and preserve safe stage-specific API error details in SDK clients.
+  - @opengeni/db@0.27.6
+  - @opengeni/runtime@0.18.10
+  - @opengeni/documents@0.5.2
+  - @opengeni/events@0.3.72
+
+## 0.20.8
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+  - @opengeni/config@0.10.11
+  - @opengeni/documents@0.5.1
+  - @opengeni/events@0.3.71
+  - @opengeni/observability@0.4.14
+  - @opengeni/runtime@0.18.9
+  - @opengeni/storage@0.2.64
+
+## 0.20.7
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+  - @opengeni/documents@0.5.0
+  - @opengeni/events@0.3.70
+  - @opengeni/runtime@0.18.8
+  - @opengeni/storage@0.2.63
+  - @opengeni/observability@0.4.13
+
+## 0.20.6
+
+### Patch Changes
+
+- 4976e1c: Fix DNS-pinned OAuth response streaming under Bun and expose X as a built-in workspace social capability.
+- Updated dependencies [d5df927]
+  - @opengeni/documents@0.4.1
+  - @opengeni/db@0.27.3
+  - @opengeni/runtime@0.18.7
+  - @opengeni/events@0.3.69
+
+## 0.20.5
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/documents@0.4.0
+  - @opengeni/config@0.10.9
+  - @opengeni/db@0.27.2
+  - @opengeni/events@0.3.68
+  - @opengeni/observability@0.4.12
+  - @opengeni/runtime@0.18.6
+  - @opengeni/storage@0.2.62
+
+## 0.20.4
+
+### Patch Changes
+
+- Updated dependencies [abe0de6]
+  - @opengeni/config@0.10.8
+  - @opengeni/contracts@0.36.1
+  - @opengeni/db@0.27.1
+  - @opengeni/documents@0.3.4
+  - @opengeni/runtime@0.18.5
+  - @opengeni/storage@0.2.61
+  - @opengeni/events@0.3.67
+  - @opengeni/observability@0.4.11
+
+## 0.20.3
+
+### Patch Changes
+
+- Updated dependencies [00f7d3b]
+  - @opengeni/contracts@0.36.0
+  - @opengeni/db@0.27.0
+  - @opengeni/config@0.10.7
+  - @opengeni/documents@0.3.3
+  - @opengeni/events@0.3.66
+  - @opengeni/observability@0.4.10
+  - @opengeni/runtime@0.18.4
+  - @opengeni/storage@0.2.60
+
+## 0.20.2
+
+### Patch Changes
+
+- Updated dependencies [b121e7c]
+  - @opengeni/contracts@0.35.0
+  - @opengeni/db@0.26.0
+  - @opengeni/config@0.10.6
+  - @opengeni/documents@0.3.2
+  - @opengeni/events@0.3.65
+  - @opengeni/observability@0.4.9
+  - @opengeni/runtime@0.18.3
+  - @opengeni/storage@0.2.59
+
+## 0.20.1
+
+### Patch Changes
+
+- Updated dependencies [b83af7a]
+  - @opengeni/contracts@0.34.0
+  - @opengeni/db@0.25.0
+  - @opengeni/config@0.10.5
+  - @opengeni/documents@0.3.1
+  - @opengeni/events@0.3.64
+  - @opengeni/observability@0.4.8
+  - @opengeni/runtime@0.18.2
+  - @opengeni/storage@0.2.58
+
+## 0.20.0
+
+### Minor Changes
+
+- d1f0c3d: Add immutable organization, workspace, and initiating-user personal authority to Documents and chunks; filter retrieval by exact account and authority before ranking; require exact account-admin authority for organization publication; and preserve authority through a drained API, worker, and indexing-workflow cutover.
+
+### Patch Changes
+
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [088d7cb]
+- Updated dependencies [74bd3a5]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/documents@0.3.0
+  - @opengeni/db@0.24.0
+  - @opengeni/config@0.10.4
+  - @opengeni/runtime@0.18.1
+  - @opengeni/events@0.3.63
+  - @opengeni/observability@0.4.7
+  - @opengeni/storage@0.2.57
+
+## 0.19.0
+
+### Minor Changes
+
+- 13b961e: Add an atomic terminal session-subtree cancellation command that drains queued work, fences concurrent prompts and child creation, interrupts live attempts, durably reports cancelled children to surviving parents, and exposes the operation through the API/core/SDK control surface.
+- e03397d: Freeze workspace instruction policies and structured preference descriptors at
+  the accepted logical-turn boundary, add immutable per-session policy roles, and
+  compose the resulting exact-attempt governance into agent and compaction prompts.
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [acfcf38]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/db@0.23.0
+  - @opengeni/runtime@0.18.0
+  - @opengeni/codex@0.2.10
+  - @opengeni/config@0.10.3
+  - @opengeni/documents@0.2.72
+  - @opengeni/events@0.3.62
+  - @opengeni/observability@0.4.6
+  - @opengeni/storage@0.2.56
+
+## 0.18.2
+
+### Patch Changes
+
+- e62495f: Allow session creators to explicitly opt out of a workspace default rig, and make live release acceptance prove its fixture command completed before waiting for a workspace capture.
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+- Updated dependencies [70e6d56]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/config@0.10.2
+  - @opengeni/runtime@0.17.2
+  - @opengeni/db@0.22.3
+  - @opengeni/documents@0.2.71
+  - @opengeni/events@0.3.61
+  - @opengeni/observability@0.4.5
+  - @opengeni/storage@0.2.55
+
+## 0.18.1
+
+### Patch Changes
+
+- 9c4d73d: Add curated OpenGeni-credit and workspace-key Vercel AI Gateway model paths for
+  DeepSeek V4 Flash and Kimi K3, including exact provider routing, cache-aware
+  pricing and metering, Responses tool continuity, provider-blind catalog UX, and
+  stable remote-compaction cache prefixes.
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+  - @opengeni/db@0.22.2
+  - @opengeni/runtime@0.17.1
+  - @opengeni/documents@0.2.70
+  - @opengeni/storage@0.2.54
+  - @opengeni/events@0.3.60
+  - @opengeni/observability@0.4.4
+
+## 0.18.0
+
+### Minor Changes
+
+- 8b3e46f: Allow a digest-pinned capability-pack sandbox image to bind an immutable Modal image ID. OpenGeni now preserves the logical OCI digest on the lease, starts the provider-native image through `ModalImageSelector.fromId`, records the actual ID in the Modal session envelope, clears lower-precedence IDs when a rig overrides the image, and keeps catalog image metadata aligned with the runtime manifest.
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+  - @opengeni/runtime@0.17.0
+  - @opengeni/db@0.22.1
+  - @opengeni/documents@0.2.69
+  - @opengeni/storage@0.2.53
+  - @opengeni/events@0.3.59
+  - @opengeni/observability@0.4.3
+
+## 0.17.3
+
+### Patch Changes
+
+- c4a0031: Add a fail-closed, secret-redacted, byte-bounded Workspace Memory Slack
+  publication policy and immutable projection contract, including deterministic
+  denial for secret-bearing selectors, malformed projection input, and
+  self-referential change lineage.
+- Updated dependencies [e07eb52]
+- Updated dependencies [4fcb6af]
+  - @opengeni/db@0.22.0
+  - @opengeni/runtime@0.16.3
+  - @opengeni/documents@0.2.68
+  - @opengeni/events@0.3.58
+
+## 0.17.2
+
+### Patch Changes
+
+- Updated dependencies [6500589]
+  - @opengeni/documents@0.2.67
+
+## 0.17.1
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+  - @opengeni/db@0.21.0
+  - @opengeni/config@0.9.3
+  - @opengeni/documents@0.2.66
+  - @opengeni/events@0.3.57
+  - @opengeni/observability@0.4.2
+  - @opengeni/runtime@0.16.2
+  - @opengeni/storage@0.2.52
+
+## 0.17.0
+
+### Minor Changes
+
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+
+### Patch Changes
+
+- Updated dependencies [f4fa05c]
+- Updated dependencies [dd71248]
+- Updated dependencies [03ed7eb]
+  - @opengeni/runtime@0.16.1
+  - @opengeni/contracts@0.29.0
+  - @opengeni/db@0.20.0
+  - @opengeni/config@0.9.2
+  - @opengeni/documents@0.2.65
+  - @opengeni/events@0.3.56
+  - @opengeni/observability@0.4.1
+  - @opengeni/storage@0.2.51
+
+## 0.16.3
+
+### Patch Changes
+
+- Updated dependencies [38ba6bc]
+  - @opengeni/observability@0.4.0
+  - @opengeni/runtime@0.16.0
+
+## 0.16.2
+
+### Patch Changes
+
+- Updated dependencies [1a2d41f]
+  - @opengeni/db@0.19.0
+  - @opengeni/documents@0.2.64
+  - @opengeni/events@0.3.55
+
+## 0.16.1
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/db@0.18.1
+  - @opengeni/config@0.9.1
+  - @opengeni/documents@0.2.63
+  - @opengeni/events@0.3.54
+  - @opengeni/runtime@0.15.3
+  - @opengeni/storage@0.2.50
+
+## 0.16.0
+
+### Minor Changes
+
+- 5a4c559: Add first-party X and Reddit social connectors: OAuth connect flows (X PKCE
+  S256, Reddit permanent grant) with encrypted token storage and just-in-time
+  refresh, live first-party MCP tools (search, mentions, thread fetch, own-post
+  sync, permission-gated reply publishing), a reddit provider in the marketing
+  pack, operator config via OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON, and SDK
+  startSocialOAuth/listSocialConnections.
+
+### Patch Changes
+
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [3b8d653]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/db@0.18.0
+  - @opengeni/config@0.9.0
+  - @opengeni/runtime@0.15.2
+  - @opengeni/documents@0.2.62
+  - @opengeni/events@0.3.53
+  - @opengeni/storage@0.2.49
+
+## 0.15.1
+
+### Patch Changes
+
+- Updated dependencies [8243ffe]
+  - @opengeni/config@0.8.1
+  - @opengeni/db@0.17.1
+  - @opengeni/documents@0.2.61
+  - @opengeni/runtime@0.15.1
+  - @opengeni/storage@0.2.48
+  - @opengeni/events@0.3.52
+
+## 0.15.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- dcc35c5: Add authenticated Slack mentions, commands, message shortcuts, atomically private bot-DM sessions, durable thread continuation, and globally bounded idempotent progress delivery.
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/config@0.8.0
+  - @opengeni/contracts@0.27.0
+  - @opengeni/db@0.17.0
+  - @opengeni/runtime@0.15.0
+  - @opengeni/documents@0.2.60
+  - @opengeni/storage@0.2.47
+  - @opengeni/events@0.3.51
+
+## 0.14.4
+
+### Patch Changes
+
+- Updated dependencies [cb4d78d]
+  - @opengeni/runtime@0.14.16
+
+## 0.14.3
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- Updated dependencies [c52acc0]
+  - @opengeni/codex@0.2.9
+  - @opengeni/config@0.7.22
+  - @opengeni/contracts@0.26.1
+  - @opengeni/db@0.16.2
+  - @opengeni/runtime@0.14.15
+  - @opengeni/documents@0.2.59
+  - @opengeni/storage@0.2.46
+  - @opengeni/events@0.3.50
+
+## 0.14.2
+
+### Patch Changes
+
+- Updated dependencies [11cdf20]
+  - @opengeni/runtime@0.14.14
+
+## 0.14.1
+
+### Patch Changes
+
+- Updated dependencies [02fb98c]
+  - @opengeni/db@0.16.1
+  - @opengeni/documents@0.2.58
+  - @opengeni/events@0.3.49
+
+## 0.14.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+### Patch Changes
+
+- Updated dependencies [b5175a8]
+- Updated dependencies [f413e6c]
+  - @opengeni/db@0.16.0
+  - @opengeni/contracts@0.26.0
+  - @opengeni/documents@0.2.57
+  - @opengeni/events@0.3.48
+  - @opengeni/config@0.7.21
+  - @opengeni/runtime@0.14.13
+  - @opengeni/storage@0.2.45
+
+## 0.13.10
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [7b65614]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/db@0.15.6
+  - @opengeni/runtime@0.14.12
+  - @opengeni/config@0.7.20
+  - @opengeni/storage@0.2.44
+  - @opengeni/documents@0.2.56
+  - @opengeni/events@0.3.47
+
+## Unreleased
+
+### Minor Changes
+
+- Add `TranscriptionService` / `TranscriptionProvider` port and optional
+  `AppDependencies.transcription` for native workspace voice-input transcription.
+- Allow `available({ workspaceId })` so providers can require a workspace-attached
+  credential during selection (Codex subscription STT).
+
+## 0.13.9
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+- b7df541: Prevent provider-native checkpoint capture from racing sandbox operations while
+  the provider has paused the source box. Capture now owns a durable
+  lease/epoch/instance/generation claim, blocks new holders and mutations, drains
+  provider-local reads before entering the exclusive snapshot call, and retains
+  ownership through late provider settlement and exact stale-claim recovery.
+  Modal's typed completed-exec stdin race is also normalized into a side-effect-free
+  terminal poll, so an exec that exits between local lookup and the provider write
+  settles its retained process instead of failing the enclosing turn.
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+  - @opengeni/db@0.15.5
+  - @opengeni/runtime@0.14.11
+  - @opengeni/documents@0.2.55
+  - @opengeni/events@0.3.46
+  - @opengeni/storage@0.2.43
+
+## 0.13.8
+
+### Patch Changes
+
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/db@0.15.4
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+  - @opengeni/runtime@0.14.10
+  - @opengeni/storage@0.2.42
+  - @opengeni/documents@0.2.54
+  - @opengeni/events@0.3.45
+
+## 0.13.7
+
+### Patch Changes
+
+- Updated dependencies [510eae3]
+  - @opengeni/db@0.15.3
+  - @opengeni/documents@0.2.53
+  - @opengeni/events@0.3.44
+
+## 0.13.6
+
+### Patch Changes
+
+- Updated dependencies [3450ee5]
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/runtime@0.14.9
+  - @opengeni/contracts@0.24.1
+  - @opengeni/db@0.15.2
+  - @opengeni/documents@0.2.52
+  - @opengeni/config@0.7.17
+  - @opengeni/storage@0.2.41
+  - @opengeni/events@0.3.43
+
 ## 0.13.5
 
 ### Patch Changes

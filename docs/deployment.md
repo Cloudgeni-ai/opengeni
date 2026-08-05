@@ -379,9 +379,32 @@ bun run deployment:conformance -- \
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
 the signed `PUT`. Managed and external buckets must allow direct upload CORS
-for the deployed web origin. Prefer exact HTTPS origins in production; use `*`
-only for disposable private evaluation stacks where signed URLs and the
-OpenGeni access key are the real access boundaries.
+from `*` because the OpenGeni browser SDK is designed to run inside arbitrary
+customer products, whose origins are not known to the OpenGeni operator. CORS
+is transport policy, not upload authorization: the API first authenticates the
+workspace request, then returns a short-lived, object-scoped signed URL. The
+storage account/container remains private and browser PUTs carry no storage
+credentials or cookies beyond that signed URL.
+
+API CORS has a separate trust boundary. Public API requests are available from
+any browser origin with explicit bearer credentials, so the SDK can be embedded
+without per-application origin registration. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`
+is only the allowlist for origins that may send browser cookies cross-origin.
+Keep that regex narrow; unlisted origins receive wildcard, non-credentialed
+CORS responses and therefore cannot use a managed-login session cookie.
+
+For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
+(plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
+and exposed headers. S3/GCS equivalents must express the same wildcard-origin
+contract. Do not add each embedding application to an origin allowlist.
+
+For S3-compatible storage on a split network, keep
+`OPENGENI_OBJECT_STORAGE_ENDPOINT` browser-reachable and set
+`OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT` to the private address reachable
+from the API and workers. Signed URLs retain the public host while authenticated
+server-side completion checks and object operations use the internal address.
+`OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT` is separate and only describes the
+address reachable from agent sandboxes.
 
 Do not treat a successful presign as storage acceptance. Release conformance
 must exercise the provider-native `OPTIONS` + signed browser `PUT`, API finalize
@@ -476,6 +499,12 @@ Without the shared-path identity, the worker and sandbox see different
 filesystems even though Docker accepts the mount.
 
 ## Build Images
+
+The production web image serves the built SPA through the repository-owned Bun
+server, not Vite's preview server. The build precompresses text assets;
+content-hashed `/assets/*` responses are served with immutable one-year caching,
+while the HTML shell revalidates. The API compresses JSON responses and leaves
+SSE and other streaming transports uncompressed.
 
 Build local OpenGeni workload images:
 
@@ -705,6 +734,11 @@ It derives every unpublished publishable workspace package directly from the
 exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images under
 full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
+Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
+SHA-configured images and records that tag in the dogfood receipt. The
+release-owned `sha-<source>` namespace therefore remains available for the
+accepted product-version manifests even when the two build configurations
+produce different digests from the same source tree.
 Each manifest is built at most once; retries reuse existing partial results.
 Before acceptance, the same workflow packages the Helm chart twice through the
 deterministic release packager, requires byte-for-byte equality, and freezes the
@@ -970,8 +1004,67 @@ The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, optional Ter
 
 The stack wrapper may install upstream charts as a convenience layer. That
 keeps lifecycle commands visible and reversible without making those charts
-OpenGeni chart dependencies. For managed cloud profiles, the generated stack
-plan includes:
+OpenGeni chart dependencies.
+
+### Shared Prometheus and Grafana distribution
+
+`deploy/observability` is the optional public observability wrapper. It pins
+`kube-prometheus-stack` exactly, provisions persistent Prometheus,
+Alertmanager, and Grafana defaults, and renders the canonical dashboard
+ConfigMaps directly from `deploy/observability/dashboards`. The dashboard JSON
+therefore has one source for self-hosted and managed installations; environment
+overlays add ingress, credentials, alert receivers, remote-write targets, and
+environment-only rules without copying the canonical boards.
+
+Print the ordered install plan with:
+
+```bash
+bun run deployment:observability -- --profile single-node
+```
+
+The wrapper plan installs only the monitoring platform; it never reconciles
+OpenGeni workloads and never runs application hooks. After it is ready, include
+`deploy/observability/opengeni.values.example.yaml` in the next ordinary
+application release using that release's exact chart version and complete
+authoritative values. The application chart deliberately renders
+`ServiceMonitor` and `PrometheusRule` only after the Prometheus Operator CRDs
+exist. Both the wrapper's Prometheus selectors and the application integration
+resources use
+`opengeni.ai/monitoring=enabled`; the same label is required on the application
+and observability namespaces, limiting cross-namespace discovery. Grafana reads
+dashboard ConfigMaps only in the wrapper namespace through
+`grafana_dashboard=1` and the `grafana_folder` annotation; its dashboard sidecar
+does not watch Secrets or every namespace.
+
+The default profile is a persistent, non-HA single-node stack. The committed
+production example increases retention, storage, and resources and requires an
+existing Grafana administrator Secret, but it is not a substitute for an
+environment-specific storage, backup, HA, ingress, and alert-routing review.
+Clusters that already run a compatible monitoring platform can set
+`kube-prometheus-stack.enabled=false` and consume only the canonical dashboard
+ConfigMaps and application integration labels.
+
+After installation, run the live receipt:
+
+```bash
+bun run deployment:observability-verify -- \
+  --namespace observability \
+  --release opengeni-observability \
+  --app-namespace opengeni
+```
+
+The receipt binds dashboard bytes to their hashes and source revision, checks
+the application monitoring resources, confirms required rules through the live
+Prometheus API, requires healthy discovered targets for every OpenGeni
+`ServiceMonitor`, and verifies Grafana health plus the dashboard provisioner
+files. Existing Kubernetes monitoring platforms can pass explicit Prometheus
+and Grafana URLs plus the Grafana pod selector, sidecar container, namespace,
+and dashboard directory. `--skip-live-apis` is only an object-level diagnostic
+and leaves an explicit consumption gap. Full values, security, capacity,
+existing-platform, upgrade, and uninstall guidance lives in
+`deploy/observability/README.md`.
+
+For managed cloud profiles, the generated stack plan includes:
 
 - upstream NATS from `https://nats-io.github.io/k8s/helm/charts`, release
   `opengeni-nats` in namespace `opengeni-platform`;
@@ -1037,7 +1130,7 @@ Use this boundary when building a production cluster:
 | Postgres | Managed cloud Postgres, existing database, or CloudNativePG from `https://cloudnative-pg.github.io/charts` | `postgres.enabled=false` plus `OPENGENI_DATABASE_URL` |
 | Secrets | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery | `externalSecret.enabled=true` or `secret.existingSecret` |
 | TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
-| Observability | OpenTelemetry Collector/Operator, Prometheus Operator CRDs, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule` |
+| Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels |
 
 The runtime secret must provide values such as:
 
@@ -1203,7 +1296,7 @@ for other OS/arch assets and the self-update channel. Route these paths (and an
 optional `get.<domain>` host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.8`).
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.9`).
 `OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
 back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move
@@ -1300,14 +1393,14 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), sandbox create failure ratio, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, and scraped target availability. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
-- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_leases{liveness}`, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
+- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_operations_total{backend,op,outcome}`, `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue and billing: `opengeni_turns_queued`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, CPU/memory saturation, pod pending time, collector scrape/export errors, and OTLP export failures.
@@ -1378,8 +1471,8 @@ It supports:
 - Managed Azure Blob storage when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
 - Existing Azure Blob or S3-compatible object storage through runtime secrets.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed Blob URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed Blob URLs without per-application registration.
 
 Before applying anything in Azure:
 
@@ -1401,8 +1494,8 @@ The AWS Terraform root lives at `deploy/terraform/aws`.
 
 It supports EKS, ECR, S3, AWS Secrets Manager, optional RDS PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.aws-managed.example.yaml` as the non-secret Helm values shape.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed S3 URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed S3 URLs without per-application registration.
 
 Before applying anything in AWS:
 
@@ -1424,8 +1517,8 @@ The GCP Terraform root lives at `deploy/terraform/gcp`.
 
 It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed GCS URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed GCS URLs without per-application registration.
 
 Before applying anything in GCP:
 

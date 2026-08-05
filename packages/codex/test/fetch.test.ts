@@ -13,6 +13,7 @@ import {
   codexRequestStorage,
   codexSubscriptionFetch,
   isCodexTransportError,
+  opaqueProviderArtifactFingerprint,
   parseCodexUsageHeaders,
 } from "../src";
 
@@ -134,6 +135,41 @@ describe("codexSubscriptionFetch", () => {
     expect("id" in sent.input[0]).toBe(false);
   });
 
+  test("reports only the exact opaque artifacts on the normalized wire request", async () => {
+    const { base } = baseRecorder();
+    const observed: Array<{ requestId: string; fingerprints: readonly string[] }> = [];
+    const opaque = {
+      type: "reasoning",
+      id: "rs-wire",
+      content: [],
+      providerData: { encrypted_content: "opaque-wire-secret" },
+    };
+    await codexRequestStorage.run(
+      ctx({
+        nextRequestId: () => "request-wire-1",
+        onRequestOpaqueArtifacts: (artifacts) => observed.push(artifacts),
+      }),
+      () =>
+        codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            input: [opaque, { type: "message", role: "user", content: "continue" }],
+          }),
+        }),
+    );
+
+    const fingerprint = opaqueProviderArtifactFingerprint(opaque);
+    if (!fingerprint) throw new Error("opaque fixture did not produce a fingerprint");
+    expect(observed).toEqual([
+      {
+        requestId: "request-wire-1",
+        fingerprints: [fingerprint],
+      },
+    ]);
+    expect(JSON.stringify(observed)).not.toContain("opaque-wire-secret");
+  });
+
   test("sends the session_id affinity header when the context carries a sessionId", async () => {
     // The backend's sticky cache-routing key: without it, byte-identical
     // resends miss the prompt cache ~50% (measured shard lottery); with it
@@ -160,6 +196,39 @@ describe("codexSubscriptionFetch", () => {
       }),
     );
     expect(new Headers(captures[0]?.init?.headers).get("session_id")).toBeNull();
+  });
+
+  test("advertises remote compaction v2 beta features and turn metadata", async () => {
+    const { base, captures } = baseRecorder();
+    const fetchImpl = codexSubscriptionFetch(base);
+    await codexRequestStorage.run(
+      ctx({
+        betaFeatures: ["remote_compaction_v2"],
+        turnMetadata: {
+          request_kind: "compaction",
+          compaction: { implementation: "responses_compaction_v2", strategy: "memento" },
+        },
+      }),
+      () =>
+        fetchImpl("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            input: [{ type: "compaction_trigger" }],
+            stream: false,
+          }),
+        }),
+    );
+    const headers = new Headers(captures[0]?.init?.headers);
+    expect(headers.get("x-codex-beta-features")).toBe("remote_compaction_v2");
+    expect(JSON.parse(headers.get("x-codex-turn-metadata")!)).toEqual({
+      request_kind: "compaction",
+      compaction: { implementation: "responses_compaction_v2", strategy: "memento" },
+    });
+    const body = JSON.parse(captures[0]?.init?.body as string) as {
+      input: Array<{ type: string }>;
+    };
+    expect(body.input.some((item) => item.type === "compaction_trigger")).toBe(true);
   });
 
   test("does not double-rewrite when url already targets /codex/responses", async () => {

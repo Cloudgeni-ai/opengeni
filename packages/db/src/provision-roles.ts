@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import type { RlsStrategy } from "./index";
+import type { RlsStrategy } from "./database";
 import {
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
@@ -435,12 +435,96 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.knowledge_memory_apply_operation(jsonb,text,text,text,uuid,uuid,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.knowledge_memory_apply_operation(jsonb, text, text, text, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.knowledge_memory_revert_operation(uuid,uuid,text,text,text,uuid,uuid,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.knowledge_memory_revert_operation(uuid, uuid, text, text, text, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.preference_registry_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
         ${literal(schema)}
       )
     ) IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.preference_registry_get_or_create_snapshot(uuid, uuid, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.workspace_instruction_policy_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.workspace_instruction_policy_get_or_create_snapshot(uuid, uuid, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.scoped_knowledge_apply_lifecycle(uuid, text, uuid, text, bigint, text, text, text, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.scoped_knowledge_advance_source_acl(uuid, uuid, bigint, bigint, uuid, text, text, text, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.scoped_knowledge_complete_sync(uuid,uuid,text,text,timestamptz,jsonb,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.scoped_knowledge_complete_sync(uuid, uuid, text, text, timestamptz, jsonb, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.scoped_knowledge_advance_object_version(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.scoped_knowledge_advance_object_version(uuid, uuid, bigint, bigint, uuid, text, text, text, text, text, text) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );
