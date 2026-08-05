@@ -190,6 +190,24 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("sandbox inventory describes idle home sandboxes as wakeable", async () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["sandboxes_list"]));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "sandbox-inventory-description-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (candidate) => candidate.name === "sandboxes_list",
+      );
+      expect(tool?.description).toContain("may report offline/cold/draining");
+      expect(tool?.description).toContain("still wake or restore");
+      expect(tool?.description).toContain("typed operation/attach failure");
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   test("the dedicated files tool is also permission-gated at registration", () => {
     const files = buildFilesMcpServer(deps(), {
       accountId,
