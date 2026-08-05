@@ -84,6 +84,7 @@ describe("observability", () => {
     const obs = createObservability(settings, { component: "worker", now: () => 1 });
     const observe = sandboxOperationMetricObserver(obs);
     observe({ backend: "modal", op: "execCommand", outcome: "ok", durationMs: 250 });
+    observe({ backend: "modal", op: "listDir", outcome: "not_found", durationMs: 5 });
     observe({
       backend: "sb-user-controlled-provider-id",
       op: "readFile:/private/path",
@@ -97,6 +98,9 @@ describe("observability", () => {
     );
     expect(metrics).toMatch(
       /opengeni_sandbox_operations_total\{[^}]*backend="unknown"[^}]*op="unknown"[^}]*outcome="failed"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="listDir"[^}]*outcome="not_found"[^}]*\} 1\b/,
     );
     expect(metrics).not.toContain("sb-user-controlled-provider-id");
     expect(metrics).not.toContain("/private/path");
