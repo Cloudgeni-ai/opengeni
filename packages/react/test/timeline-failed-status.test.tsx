@@ -435,6 +435,120 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
     await r.unmount();
   });
 
+  test("complete retained screenshot loads authenticated bytes into the timeline image", async () => {
+    const item = toolItem({
+      name: "computer_screenshot",
+      output: {
+        available: true,
+        artifactId: "11111111-1111-4111-8111-111111111111",
+        kind: "computer_screenshot",
+        contentType: "image/png",
+        originalBytes: 4,
+        sha256: "a".repeat(64),
+        retainedAt: "2026-08-05T00:00:00.000Z",
+        dimensions: { width: 1, height: 1 },
+        retention: {
+          policy: "session_screenshot",
+          expiresAt: "2026-09-04T00:00:00.000Z",
+        },
+        retrieval: {
+          method: "GET",
+          path: "/v1/workspaces/w/sessions/s/artifacts/11111111-1111-4111-8111-111111111111/content",
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    const revoked: string[] = [];
+    let loads = 0;
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => "blob:retained-screenshot",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: (url: string) => revoked.push(url),
+    });
+    try {
+      const r = await renderComponent(
+        <Renderer
+          item={item}
+          loadRetainedScreenshot={async () => {
+            loads += 1;
+            return Uint8Array.of(0x89, 0x50, 0x4e, 0x47);
+          }}
+        />,
+      );
+      await flush();
+      await flush();
+
+      expect(loads).toBe(1);
+      expect(r.container.textContent).not.toContain("unavailable");
+      expect(r.container.querySelector('img[src="blob:retained-screenshot"]')).not.toBeNull();
+      await r.unmount();
+      expect(revoked).toEqual(["blob:retained-screenshot"]);
+    } finally {
+      if (createDescriptor) Object.defineProperty(URL, "createObjectURL", createDescriptor);
+      else Reflect.deleteProperty(URL, "createObjectURL");
+      if (revokeDescriptor) Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+      else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
+  });
+
+  test("retained screenshot loader 404 and 410 states stay truthful and image-free", async () => {
+    for (const [status, label] of [
+      [404, "deleted"],
+      [410, "expired or unavailable"],
+    ] as const) {
+      const item = toolItem({
+        name: "computer_screenshot",
+        output: {
+          available: true,
+          artifactId: "22222222-2222-4222-8222-222222222222",
+          kind: "computer_screenshot",
+          contentType: "image/png",
+          originalBytes: 4,
+          sha256: "b".repeat(64),
+          retainedAt: "2026-08-05T00:00:00.000Z",
+          dimensions: { width: 1, height: 1 },
+          retention: {
+            policy: "session_screenshot",
+            expiresAt: "2026-09-04T00:00:00.000Z",
+          },
+          retrieval: {
+            method: "GET",
+            path: "/v1/workspaces/w/sessions/s/artifacts/22222222-2222-4222-8222-222222222222/content",
+            acceptRanges: "bytes",
+            maxRangeBytes: 1024 * 1024,
+          },
+        },
+        status: "complete",
+      });
+      const Renderer = defaultToolRegistry.resolve(item);
+      const r = await renderComponent(
+        <Renderer
+          item={item}
+          loadRetainedScreenshot={async () => {
+            throw Object.assign(new Error("unavailable"), { status });
+          }}
+        />,
+      );
+      await flush();
+      await flush();
+
+      const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+      await actRun(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      await flush();
+      expect(r.container.textContent).toContain(label);
+      expect(r.container.querySelector("img")).toBeNull();
+      await r.unmount();
+    }
+  });
+
   test("complete screenshot with omitted media says not retained instead of empty or success image", async () => {
     const item = toolItem({
       name: "computer_call",

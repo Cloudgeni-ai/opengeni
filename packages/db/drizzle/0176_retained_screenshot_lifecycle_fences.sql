@@ -199,6 +199,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 SECURITY DEFINER
+SET search_path = pg_catalog, public
 AS $$
   WITH candidates AS (
     SELECT
