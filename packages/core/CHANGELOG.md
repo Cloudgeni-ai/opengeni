@@ -1,5 +1,24 @@
 # @opengeni/core
 
+## 0.21.3
+
+### Patch Changes
+
+- 41f7ae3: Treat the SDK's exact UnixLocal missing-workspace proof as provider loss so stale local leases can recover or drain cleanly, and expose ordinary sandbox-operation availability separately from live attach/swap readiness.
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [41f7ae3]
+- Updated dependencies [ce823ce]
+  - @opengeni/runtime@0.18.18
+  - @opengeni/contracts@0.39.1
+  - @opengeni/db@0.28.2
+  - @opengeni/config@0.11.1
+  - @opengeni/documents@0.5.11
+  - @opengeni/events@0.3.81
+  - @opengeni/observability@0.5.1
+  - @opengeni/storage@0.2.69
+
 ## 0.21.2
 
 ### Patch Changes

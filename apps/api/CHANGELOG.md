@@ -1,5 +1,25 @@
 # @opengeni/api-router
 
+## 0.22.3
+
+### Patch Changes
+
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [41f7ae3]
+- Updated dependencies [ce823ce]
+  - @opengeni/core@0.21.3
+  - @opengeni/runtime@0.18.18
+  - @opengeni/contracts@0.39.1
+  - @opengeni/db@0.28.2
+  - @opengeni/config@0.11.1
+  - @opengeni/documents@0.5.11
+  - @opengeni/events@0.3.81
+  - @opengeni/github@0.4.32
+  - @opengeni/observability@0.5.1
+  - @opengeni/storage@0.2.69
+
 ## 0.22.2
 
 ### Patch Changes

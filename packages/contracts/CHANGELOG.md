@@ -1,5 +1,13 @@
 # @opengeni/contracts
 
+## 0.39.1
+
+### Patch Changes
+
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+
 ## 0.39.0
 
 ### Minor Changes

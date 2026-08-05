@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.46.2
+
+### Patch Changes
+
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+  - @opengeni/sdk@0.46.0
+
 ## 0.46.1
 
 ### Patch Changes
