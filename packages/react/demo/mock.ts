@@ -371,6 +371,20 @@ export class MockOpenGeniClient implements SessionClientLike {
   ): Promise<SessionEvent> {
     const bus = this.bus(sessionId);
     const text = typeof message === "string" ? message : message.text;
+    // The managed API accepts the message and clears the matching durable
+    // composer draft atomically. Mirror that ordering before publishing the
+    // user.message invalidation so a reconciliation read cannot resurrect the
+    // just-submitted text and leave the Send action enabled.
+    const currentDraft = await this.getComposerDraft(_workspaceId, sessionId);
+    this.drafts.set(sessionId, {
+      ...currentDraft,
+      revision: currentDraft.revision + 1,
+      text: "",
+      resources: [],
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
     const event = bus.append("user.message", { text });
     this.queueResponse(bus, text);
     return event;

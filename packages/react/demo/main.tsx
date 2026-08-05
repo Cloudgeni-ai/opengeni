@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import { CalendarClockIcon, MessagesSquareIcon, NetworkIcon, PanelRightIcon } from "lucide-react";
 import {
@@ -94,6 +94,8 @@ function Harness() {
   });
   const [view, setView] = useState<DemoView>(initialRoute.view);
   const [workspaceOpen, setWorkspaceOpen] = useState(initialRoute.workspaceOpen);
+  const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const previousWorkspaceOpenRef = useRef(workspaceOpen);
   // Mount the whole workbench through its public `<SandboxWorkspace>` surface —
   // the exact integration an external embedder uses. The deterministic client
   // supplies realistic data without pretending this public demo is a customer workspace.
@@ -150,6 +152,25 @@ function Harness() {
     [closeWorkspace, compact, openWorkspace],
   );
 
+  // A controlled Workspace can mount already open after reload, so the shared
+  // dock has no live opener element to remember. Restore focus to this host's
+  // stable trigger after any compact close; a second frame runs after the
+  // dock's own modal cleanup without competing with its normal opener path.
+  useEffect(() => {
+    const wasOpen = previousWorkspaceOpenRef.current;
+    previousWorkspaceOpenRef.current = workspaceOpen;
+    if (!compact || !wasOpen || workspaceOpen) return;
+
+    let focusFrame = 0;
+    const settleFrame = requestAnimationFrame(() => {
+      focusFrame = requestAnimationFrame(() => workspaceTriggerRef.current?.focus());
+    });
+    return () => {
+      cancelAnimationFrame(settleFrame);
+      if (focusFrame) cancelAnimationFrame(focusFrame);
+    };
+  }, [compact, workspaceOpen]);
+
   return (
     <div
       className="og-root box-border h-dvh overflow-hidden bg-og-bg pt-[env(safe-area-inset-top)]"
@@ -180,6 +201,7 @@ function Harness() {
               onSelectView={selectView}
               onOpenWorkspace={openWorkspace}
               workspaceOpen={workspaceOpen}
+              workspaceTriggerRef={workspaceTriggerRef}
             />
           ) : null}
           <div className="min-h-0 flex-1">
@@ -207,11 +229,13 @@ function DemoNavigation({
   onSelectView,
   onOpenWorkspace,
   workspaceOpen,
+  workspaceTriggerRef,
 }: {
   activeView: DemoView;
   onSelectView: (view: DemoView) => void;
   onOpenWorkspace: () => void;
   workspaceOpen: boolean;
+  workspaceTriggerRef: RefObject<HTMLButtonElement | null>;
 }) {
   const itemClass =
     "flex min-h-11 min-w-0 flex-col items-center justify-center gap-0.5 rounded-og-sm px-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent";
@@ -251,6 +275,7 @@ function DemoNavigation({
         <span className="truncate">Schedules</span>
       </button>
       <button
+        ref={workspaceTriggerRef}
         type="button"
         onClick={onOpenWorkspace}
         aria-haspopup="dialog"

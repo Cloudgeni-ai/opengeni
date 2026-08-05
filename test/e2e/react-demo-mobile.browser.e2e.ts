@@ -152,7 +152,19 @@ describe("public React demo mobile product acceptance", () => {
       .getByText(submittedPrompt, { exact: true })
       .waitFor({ timeout: 15_000 });
     await waitForBodyText(page, 'Got it — "Summarize the rollout risk', 15_000);
+    expect(await textbox.inputValue()).toBe("");
+    expect(await page.getByRole("button", { name: "Send message" }).isDisabled()).toBe(true);
     await capture(page, "390-after-send.png");
+
+    const keyboardPrompt = "Confirm the keyboard send clears this draft.";
+    await textbox.fill(keyboardPrompt);
+    await textbox.press("Enter");
+    await page
+      .locator('[id^="og-user-message-"]')
+      .getByText(keyboardPrompt, { exact: true })
+      .waitFor({ timeout: 15_000 });
+    expect(await textbox.inputValue()).toBe("");
+    expect(await page.getByRole("button", { name: "Send message" }).isDisabled()).toBe(true);
 
     await openClearConfirmation(page, textbox);
     await page.getByRole("button", { name: "Cancel" }).click();
@@ -182,6 +194,15 @@ describe("public React demo mobile product acceptance", () => {
     await workspace.waitFor();
     await page.goBack();
     await workspace.waitFor({ state: "hidden" });
+
+    await workspaceButton.click();
+    await workspace.waitFor();
+    await page.reload({ waitUntil: "networkidle" });
+    await workspace.waitFor();
+    await page.keyboard.press("Escape");
+    await workspace.waitFor({ state: "hidden" });
+    await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "Workspace");
+    expect(await workspaceButton.getAttribute("aria-expanded")).toBe("false");
 
     await navigation.getByRole("button", { name: "Fleet", exact: true }).click();
     await page.reload({ waitUntil: "networkidle" });
