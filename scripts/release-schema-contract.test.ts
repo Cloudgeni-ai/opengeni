@@ -154,12 +154,13 @@ describe("release schema contract", () => {
         (migrations.has("0137_preference_registry.sql") ? 1 : 0) +
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
-        (migrations.has("0140_retained_screenshot_artifacts.sql") ? 1 : 0),
+        (migrations.has("0140_retained_screenshot_artifacts.sql") ? 1 : 0) +
+        (migrations.has("0176_retained_screenshot_lifecycle_fences.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "e63e88c1b6544300b93bd1e4920dbda218167e74bdd21e06ae623ada1e6284dc",
+      "d606be002fb867ec28c26c23ccec0222d68ac5d9d232a051e92825eaebfaf8b9",
     );
-    expect(contract.latestMigration).toBe("0140_retained_screenshot_artifacts.sql");
+    expect(contract.latestMigration).toBe("0176_retained_screenshot_lifecycle_fences.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",

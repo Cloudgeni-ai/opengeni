@@ -3624,22 +3624,26 @@ export type RetainedScreenshotArtifactStatus =
   | "pending"
   | "reconciling"
   | "ready"
+  | "cleanup_queued"
   | "cleanup_pending"
   | "failed"
   | "expired"
   | "deleted";
 
+export type RetainedScreenshotQuotaState = "reserved" | "ready" | "released";
+
 export type RetainedScreenshotArtifact = {
   artifactId: string;
   accountId: string;
   workspaceId: string;
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
+  sessionId: string | null;
+  turnId: string | null;
+  attemptId: string | null;
   settlementKey: string;
   toolCallId: string;
   toolOutputId: string;
   status: RetainedScreenshotArtifactStatus;
+  quotaState: RetainedScreenshotQuotaState;
   mediaType: string;
   sizeBytes: number;
   sha256: string;
@@ -3649,6 +3653,8 @@ export type RetainedScreenshotArtifact = {
   readyAt: Date | null;
   cleanupReason: string | null;
   lastError: string | null;
+  maintenanceClaimId: string | null;
+  maintenanceClaimedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
   file: FileAsset;
@@ -3777,6 +3783,7 @@ export async function prepareRetainedScreenshotArtifact(
             toolCallId: input.toolCallId,
             toolOutputId: input.toolOutputId,
             status: "pending",
+            quotaState: "reserved",
             mediaType: input.mediaType,
             sizeBytes: input.sizeBytes,
             sha256: input.sha256,
@@ -3806,7 +3813,13 @@ export async function prepareRetainedScreenshotArtifact(
 /** Settle one exact pending/reconciling artifact ready and move its quota once. */
 export async function settleRetainedScreenshotArtifactReady(
   db: Database,
-  input: { accountId: string; workspaceId: string; artifactId: string; settlementKey: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    artifactId: string;
+    settlementKey: string;
+    maintenanceClaimId?: string;
+  },
 ): Promise<RetainedScreenshotArtifact> {
   return await withRlsContext(
     db,
@@ -3846,11 +3859,28 @@ export async function settleRetainedScreenshotArtifactReady(
           .limit(1);
         if (!quota || !file)
           throw new Error(`Retained screenshot backing rows missing: ${input.artifactId}`);
-        if (artifact.status === "ready" && file.status === "ready") {
+        if (
+          artifact.status === "ready" &&
+          artifact.quotaState === "ready" &&
+          file.status === "ready"
+        ) {
           return mapRetainedScreenshotArtifact(artifact, file);
         }
         if (artifact.status !== "pending" && artifact.status !== "reconciling") {
           throw new Error(`Retained screenshot is ${artifact.status}: ${input.artifactId}`);
+        }
+        if (artifact.quotaState !== "reserved") {
+          throw new Error(
+            `Retained screenshot quota state is ${artifact.quotaState}: ${input.artifactId}`,
+          );
+        }
+        if (
+          input.maintenanceClaimId !== undefined &&
+          artifact.maintenanceClaimId !== input.maintenanceClaimId
+        ) {
+          throw new Error(
+            `Retained screenshot maintenance claim was superseded: ${input.artifactId}`,
+          );
         }
         if (quota.reservedBytes < artifact.sizeBytes) {
           throw new Error(
@@ -3862,9 +3892,12 @@ export async function settleRetainedScreenshotArtifactReady(
           .update(schema.retainedScreenshotArtifacts)
           .set({
             status: "ready",
+            quotaState: "ready",
             readyAt: now,
             cleanupReason: null,
             lastError: null,
+            maintenanceClaimId: null,
+            maintenanceClaimedAt: null,
             updatedAt: now,
           })
           .where(eq(schema.retainedScreenshotArtifacts.artifactId, artifact.artifactId))
@@ -3952,10 +3985,11 @@ export async function getRetainedScreenshotArtifact(
 
 export type RetainedScreenshotMaintenanceClaim = {
   action: "reconcile" | "delete";
+  claimId: string;
   artifactId: string;
   accountId: string;
   workspaceId: string;
-  sessionId: string;
+  sessionId: string | null;
   objectKey: string;
   mediaType: string;
   sizeBytes: number;
@@ -3973,10 +4007,11 @@ export async function claimRetainedScreenshotMaintenance(
 ): Promise<RetainedScreenshotMaintenanceClaim[]> {
   const rows = await rawRows<{
     action: "reconcile" | "delete";
+    claim_id: string;
     artifact_id: string;
     account_id: string;
     workspace_id: string;
-    session_id: string;
+    session_id: string | null;
     object_key: string;
     media_type: string;
     size_bytes: string | number;
@@ -3995,6 +4030,7 @@ export async function claimRetainedScreenshotMaintenance(
   );
   return rows.map((row) => ({
     action: row.action,
+    claimId: row.claim_id,
     artifactId: row.artifact_id,
     accountId: row.account_id,
     workspaceId: row.workspace_id,
@@ -4011,6 +4047,46 @@ export async function claimRetainedScreenshotMaintenance(
 }
 
 /**
+ * Atomically transfer one exact reconcile claim into cleanup ownership before
+ * any provider delete. A concurrent ready settlement clears/replaces the claim
+ * and makes this a stale no-op.
+ */
+export async function promoteRetainedScreenshotMaintenanceCleanup(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    artifactId: string;
+    claimId: string;
+    cleanupReason: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [updated] = await scopedDb
+        .update(schema.retainedScreenshotArtifacts)
+        .set({
+          status: "cleanup_pending",
+          cleanupReason: input.cleanupReason.slice(0, 128),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
+            eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
+            eq(schema.retainedScreenshotArtifacts.status, "reconciling"),
+            eq(schema.retainedScreenshotArtifacts.maintenanceClaimId, input.claimId),
+          ),
+        )
+        .returning({ artifactId: schema.retainedScreenshotArtifacts.artifactId });
+      return updated !== undefined;
+    },
+  );
+}
+
+/**
  * Complete a claimed reconcile/delete operation and release exactly one quota
  * bucket. A lost response is idempotent on the requested terminal state.
  */
@@ -4020,6 +4096,7 @@ export async function completeRetainedScreenshotMaintenance(
     accountId: string;
     workspaceId: string;
     artifactId: string;
+    claimId: string;
     outcome: "ready" | "failed" | "expired" | "deleted";
   },
 ): Promise<boolean> {
@@ -4036,6 +4113,7 @@ export async function completeRetainedScreenshotMaintenance(
       workspaceId: input.workspaceId,
       artifactId: input.artifactId,
       settlementKey: current.settlementKey,
+      maintenanceClaimId: input.claimId,
     });
     return true;
   }
@@ -4047,12 +4125,52 @@ export async function completeRetainedScreenshotMaintenance(
         const [artifact] = await tx
           .select()
           .from(schema.retainedScreenshotArtifacts)
-          .where(eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId))
+          .where(
+            and(
+              eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
+              eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
+            ),
+          )
           .for("update")
           .limit(1);
-        if (!artifact) return false;
-        if (artifact.status === input.outcome) return true;
-        if (artifact.status !== "reconciling" && artifact.status !== "cleanup_pending") {
+        if (!artifact) {
+          if (input.outcome !== "deleted") return false;
+          const [file] = await tx
+            .select({ id: schema.files.id })
+            .from(schema.files)
+            .where(
+              and(
+                eq(schema.files.workspaceId, input.workspaceId),
+                eq(schema.files.id, input.artifactId),
+              ),
+            )
+            .limit(1);
+          return file === undefined;
+        }
+        if (artifact.status === input.outcome && artifact.quotaState === "released") {
+          if (input.outcome !== "deleted") return true;
+          await tx
+            .delete(schema.retainedScreenshotArtifacts)
+            .where(
+              and(
+                eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
+                eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
+              ),
+            );
+          await tx
+            .delete(schema.files)
+            .where(
+              and(
+                eq(schema.files.workspaceId, input.workspaceId),
+                eq(schema.files.id, input.artifactId),
+              ),
+            );
+          return true;
+        }
+        if (
+          artifact.status !== "cleanup_pending" ||
+          artifact.maintenanceClaimId !== input.claimId
+        ) {
           return false;
         }
         const [quota] = await tx
@@ -4064,13 +4182,22 @@ export async function completeRetainedScreenshotMaintenance(
         const [file] = await tx
           .select()
           .from(schema.files)
-          .where(eq(schema.files.id, input.artifactId))
+          .where(
+            and(
+              eq(schema.files.workspaceId, input.workspaceId),
+              eq(schema.files.id, input.artifactId),
+            ),
+          )
           .for("update")
           .limit(1);
         if (!quota || !file) return false;
-        const wasReady = artifact.readyAt !== null;
+        if (artifact.quotaState === "released") {
+          throw new Error(
+            `Retained screenshot quota was already released before terminal settlement: ${input.artifactId}`,
+          );
+        }
         if (
-          wasReady
+          artifact.quotaState === "ready"
             ? quota.readyBytes < artifact.sizeBytes
             : quota.reservedBytes < artifact.sizeBytes
         ) {
@@ -4081,18 +4208,22 @@ export async function completeRetainedScreenshotMaintenance(
           .update(schema.retainedScreenshotArtifacts)
           .set({
             status: input.outcome,
+            quotaState: "released",
             cleanupReason: artifact.cleanupReason ?? input.outcome,
+            maintenanceClaimId: null,
+            maintenanceClaimedAt: null,
             updatedAt: now,
           })
-          .where(eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId));
-        await tx
-          .update(schema.files)
-          .set({ status: input.outcome === "failed" ? "failed" : input.outcome, updatedAt: now })
-          .where(eq(schema.files.id, input.artifactId));
+          .where(
+            and(
+              eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
+              eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
+            ),
+          );
         await tx
           .update(schema.workspaceScreenshotQuotas)
           .set({
-            ...(wasReady
+            ...(artifact.quotaState === "ready"
               ? {
                   readyBytes: sql`${schema.workspaceScreenshotQuotas.readyBytes} - ${artifact.sizeBytes}`,
                 }
@@ -4102,6 +4233,34 @@ export async function completeRetainedScreenshotMaintenance(
             updatedAt: now,
           })
           .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId));
+        if (input.outcome === "deleted") {
+          await tx
+            .delete(schema.retainedScreenshotArtifacts)
+            .where(
+              and(
+                eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
+                eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
+              ),
+            );
+          await tx
+            .delete(schema.files)
+            .where(
+              and(
+                eq(schema.files.workspaceId, input.workspaceId),
+                eq(schema.files.id, input.artifactId),
+              ),
+            );
+        } else {
+          await tx
+            .update(schema.files)
+            .set({ status: input.outcome, updatedAt: now })
+            .where(
+              and(
+                eq(schema.files.workspaceId, input.workspaceId),
+                eq(schema.files.id, input.artifactId),
+              ),
+            );
+        }
         return true;
       }),
   );
@@ -4135,7 +4294,12 @@ async function getRetainedScreenshotArtifactByWorkspace(
       .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
       .from(schema.retainedScreenshotArtifacts)
       .innerJoin(schema.files, eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId))
-      .where(eq(schema.retainedScreenshotArtifacts.artifactId, artifactId))
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.artifactId, artifactId),
+        ),
+      )
       .limit(1);
     return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
   });
@@ -39921,6 +40085,7 @@ function mapRetainedScreenshotArtifact(
     toolCallId: artifact.toolCallId,
     toolOutputId: artifact.toolOutputId,
     status: artifact.status as RetainedScreenshotArtifactStatus,
+    quotaState: artifact.quotaState as RetainedScreenshotQuotaState,
     mediaType: artifact.mediaType,
     sizeBytes: artifact.sizeBytes,
     sha256: artifact.sha256,
@@ -39930,6 +40095,8 @@ function mapRetainedScreenshotArtifact(
     readyAt: artifact.readyAt,
     cleanupReason: artifact.cleanupReason,
     lastError: artifact.lastError,
+    maintenanceClaimId: artifact.maintenanceClaimId,
+    maintenanceClaimedAt: artifact.maintenanceClaimedAt,
     createdAt: artifact.createdAt,
     updatedAt: artifact.updatedAt,
     file: mapFile(file),

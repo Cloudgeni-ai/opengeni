@@ -498,7 +498,11 @@ function retainedArtifactMetadata(artifact: RetainedFileArtifact): RetainedArtif
 function retainedScreenshotMetadata(
   artifact: RetainedScreenshotArtifact,
 ): RetainedArtifactMetadata {
-  if (artifact.status === "ready" && artifact.retentionExpiresAt.getTime() > Date.now()) {
+  if (
+    artifact.status === "ready" &&
+    artifact.sessionId &&
+    artifact.retentionExpiresAt.getTime() > Date.now()
+  ) {
     const reference = retainedScreenshotReferenceFromFile({
       ...artifact.file,
       sessionId: artifact.sessionId,

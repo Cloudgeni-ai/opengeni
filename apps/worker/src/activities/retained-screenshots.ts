@@ -418,8 +418,15 @@ export async function retainComputerScreenshot(input: {
       input.sessionId,
       identity.artifactId,
     ).catch(() => undefined);
+    if (stillReferenced?.status === "ready") {
+      return (await verifyReadyArtifact(input.objectStorage, stillReferenced))
+        ? reference(stillReferenced)
+        : unavailable(identity.artifactId, "missing_storage");
+    }
     if (
       stillReferenced === null ||
+      stillReferenced?.status === "cleanup_queued" ||
+      stillReferenced?.status === "cleanup_pending" ||
       stillReferenced?.status === "failed" ||
       stillReferenced?.status === "expired" ||
       stillReferenced?.status === "deleted"
@@ -723,6 +730,9 @@ async function visitSerializedRunStateItemArraysAsync(
 }
 
 function reference(artifact: RetainedScreenshotArtifact): RetainedArtifactReference {
+  if (!artifact.sessionId) {
+    throw new Error(`Ready retained screenshot is detached: ${artifact.artifactId}`);
+  }
   const value = retainedScreenshotReferenceFromFile({
     ...artifact.file,
     sessionId: artifact.sessionId,
@@ -753,6 +763,7 @@ function unavailableReasonForStatus(
     case "pending":
     case "reconciling":
       return "pending";
+    case "cleanup_queued":
     case "cleanup_pending":
       return "failed";
     case "failed":

@@ -2,6 +2,7 @@ import type { FileAsset } from "@opengeni/contracts";
 import {
   claimRetainedScreenshotMaintenance,
   completeRetainedScreenshotMaintenance,
+  promoteRetainedScreenshotMaintenanceCleanup,
   type RetainedScreenshotMaintenanceClaim,
 } from "@opengeni/db";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
@@ -88,6 +89,7 @@ export function createRetainedScreenshotMaintenanceActivities(
           accountId: claim.accountId,
           workspaceId: claim.workspaceId,
           artifactId: claim.artifactId,
+          claimId: claim.claimId,
           outcome,
         });
         if (!settled) throw new Error("retained screenshot cleanup claim was superseded");
@@ -121,35 +123,58 @@ async function reconcileClaim(
     Pick<RetainedScreenshotMaintenanceActivityOptions, "fileExists" | "headFile" | "deleteObject">
   >,
 ): Promise<"ready" | "failed"> {
-  const matches = await objectMatchesClaim(storage, claim, provider);
-  if (!matches && (await provider.fileExists(storage, claimFile(storage, claim)))) {
-    // Mismatched bytes are never made ready. Delete first; terminal DB truth is
-    // committed only after the provider confirms the idempotent operation.
-    await provider.deleteObject(storage, claim.objectKey);
+  const observation = await observeClaimObject(storage, claim, provider);
+  if (observation === "matches") {
+    const settled = await completeRetainedScreenshotMaintenance(db, {
+      accountId: claim.accountId,
+      workspaceId: claim.workspaceId,
+      artifactId: claim.artifactId,
+      claimId: claim.claimId,
+      outcome: "ready",
+    });
+    if (!settled) throw new Error("retained screenshot reconcile claim was superseded");
+    return "ready";
   }
+
+  // A mismatch/missing observation cannot authorize provider deletion while
+  // the artifact is still eligible for a concurrent ready settlement. Promote
+  // the exact claim first; a ready winner clears the claim and makes this stale.
+  const promoted = await promoteRetainedScreenshotMaintenanceCleanup(db, {
+    accountId: claim.accountId,
+    workspaceId: claim.workspaceId,
+    artifactId: claim.artifactId,
+    claimId: claim.claimId,
+    cleanupReason: "failed",
+  });
+  if (!promoted) throw new Error("retained screenshot reconcile claim was superseded");
+
+  // Deletes are idempotent. Calling it for an authoritative missing observation
+  // also closes a race with a late writer that began before cleanup ownership.
+  await provider.deleteObject(storage, claim.objectKey);
   const settled = await completeRetainedScreenshotMaintenance(db, {
     accountId: claim.accountId,
     workspaceId: claim.workspaceId,
     artifactId: claim.artifactId,
-    outcome: matches ? "ready" : "failed",
+    claimId: claim.claimId,
+    outcome: "failed",
   });
   if (!settled) throw new Error("retained screenshot reconcile claim was superseded");
-  return matches ? "ready" : "failed";
+  return "failed";
 }
 
-async function objectMatchesClaim(
+async function observeClaimObject(
   storage: ObjectStorage,
   claim: RetainedScreenshotMaintenanceClaim,
   provider: Required<Pick<RetainedScreenshotMaintenanceActivityOptions, "fileExists" | "headFile">>,
-): Promise<boolean> {
+): Promise<"matches" | "mismatch" | "missing"> {
   const file = claimFile(storage, claim);
-  if (!(await provider.fileExists(storage, file))) return false;
+  if (!(await provider.fileExists(storage, file))) return "missing";
   const head = await provider.headFile(storage, file);
-  return (
-    head.ContentLength === claim.sizeBytes &&
+  return head.ContentLength === claim.sizeBytes &&
     head.ContentType === claim.mediaType &&
     head.Metadata?.sha256 === claim.sha256
-  );
+    ? "matches"
+    : "mismatch";
 }
 
 function claimFile(storage: ObjectStorage, claim: RetainedScreenshotMaintenanceClaim): FileAsset {
