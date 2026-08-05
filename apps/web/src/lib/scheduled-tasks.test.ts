@@ -27,6 +27,7 @@ function scheduledTask(): ScheduledTask {
       metadata: {},
       slackBotConnectionId: connectionId,
     },
+    targetSessionId: null,
     reusableSessionId: null,
     variableSetId: null,
     environmentId: null,
@@ -50,5 +51,24 @@ describe("scheduled task Slack bot selection", () => {
     const fresh = newScheduledTaskFormState(true);
     expect(fresh.slackBotConnectionId).toBe("");
     expect(agentConfigFromFormState(fresh)).not.toHaveProperty("slackBotConnectionId");
+  });
+
+  test("round-trips an exact existing-session target without changing cadence", () => {
+    const targetSessionId = "55555555-5555-4555-8555-555555555555";
+    const intervalTask = scheduledTask();
+    intervalTask.runMode = "existing_session";
+    intervalTask.targetSessionId = targetSessionId;
+    const intervalForm = formStateFromScheduledTask(intervalTask);
+    expect(intervalForm.targetSessionId).toBe(targetSessionId);
+    expect(intervalForm.intervalMinutes).toBe(60);
+
+    const calendarTask = scheduledTask();
+    calendarTask.runMode = "existing_session";
+    calendarTask.targetSessionId = targetSessionId;
+    calendarTask.schedule = { type: "calendar", timeZone: "UTC", hour: 9, minute: 30 };
+    const calendarForm = formStateFromScheduledTask(calendarTask);
+    expect(calendarForm.targetSessionId).toBe(targetSessionId);
+    expect(calendarForm.calendarTime).toBe("09:30");
+    expect(calendarForm.timeZone).toBe("UTC");
   });
 });

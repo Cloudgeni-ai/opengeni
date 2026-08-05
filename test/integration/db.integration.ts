@@ -53,6 +53,9 @@ import {
   updateScheduledTask,
   updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
+  requireScheduledTaskTargetInTransaction,
+  ScheduledTaskTargetConflictError,
+  withWorkspaceRls,
   withRlsContext,
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
@@ -680,6 +683,73 @@ describe("DB integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.error).toBe("no worker");
+  });
+
+  test("persists and fences an exact existing-session scheduled task target", async () => {
+    const grant = await testGrant(dbClient.db);
+    const firstTarget = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "first scheduled target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const secondTarget = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "second scheduled target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createScheduledTask(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "continue exact session",
+      status: "active",
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "existing_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "continue", resources: [], tools: [], metadata: {} },
+      targetSessionId: firstTarget.id,
+      metadata: {},
+    });
+    expect(task).toMatchObject({
+      runMode: "existing_session",
+      targetSessionId: firstTarget.id,
+      reusableSessionId: null,
+    });
+
+    const [stored] = await withWorkspaceRls(
+      dbClient.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.execute<{ reusable_session_id: string | null }>(dbSql`
+          select reusable_session_id
+          from scheduled_tasks
+          where id = ${task.id}
+        `),
+    );
+    expect(stored?.reusable_session_id).toBe(firstTarget.id);
+
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      targetSessionId: secondTarget.id,
+    });
+    await expect(
+      withWorkspaceRls(dbClient.db, grant.workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          requireScheduledTaskTargetInTransaction(tx as typeof scopedDb, {
+            workspaceId: grant.workspaceId,
+            taskId: task.id,
+            targetSessionId: firstTarget.id,
+          }),
+        ),
+      ),
+    ).rejects.toBeInstanceOf(ScheduledTaskTargetConflictError);
   });
 
   test("session goal lifecycle: set, revise, complete, replace", async () => {

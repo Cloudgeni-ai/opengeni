@@ -70,6 +70,7 @@ import {
   resourceMountPathCollisionKey,
   turnExecutionPolicyAuditMetadata,
   TurnExecutionPolicyV1,
+  UpdateScheduledTaskRequest,
 } from "../src";
 
 describe("contracts", () => {
@@ -1304,6 +1305,49 @@ describe("contracts", () => {
     });
     expect(payload.schedule.type).toBe("calendar");
     expect(payload.agentConfig.tools[0]?.id).toBe("opengeni");
+  });
+
+  test("requires an exact target only for existing-session scheduled tasks", () => {
+    const targetSessionId = "00000000-0000-4000-8000-000000000021";
+    const base = {
+      name: "Continue one session",
+      schedule: { type: "interval" as const, everySeconds: 3600 },
+      agentConfig: { prompt: "Continue the existing work" },
+    };
+    expect(
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        runMode: "existing_session",
+        targetSessionId,
+      }),
+    ).toMatchObject({ runMode: "existing_session", targetSessionId });
+    expect(() =>
+      CreateScheduledTaskRequest.parse({ ...base, runMode: "existing_session" }),
+    ).toThrow();
+    expect(() =>
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        runMode: "new_session_per_run",
+        targetSessionId,
+      }),
+    ).toThrow();
+    expect(() =>
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        runMode: "existing_session",
+        targetSessionId,
+        agentConfig: { prompt: "Continue", goal: { text: "Replace the current goal" } },
+      }),
+    ).toThrow();
+    expect(
+      UpdateScheduledTaskRequest.parse({
+        runMode: "existing_session",
+        targetSessionId,
+      }),
+    ).toEqual({ runMode: "existing_session", targetSessionId });
+    expect(() =>
+      UpdateScheduledTaskRequest.parse({ runMode: "new_session_per_run", targetSessionId }),
+    ).toThrow();
   });
 
   test("accepts pack enable and marketing daily analysis defaults", () => {

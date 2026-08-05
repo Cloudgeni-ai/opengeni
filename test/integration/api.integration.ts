@@ -4118,6 +4118,108 @@ describe("API component integration", () => {
     expect(invalidWindow.status).toBe(422);
   });
 
+  test("creates and triggers an exact existing-session scheduled task through REST and MCP", async () => {
+    const workflowClient = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const targetResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initialMessage: "existing schedule target" }),
+    });
+    expect(targetResponse.status).toBe(201);
+    const target = (await targetResponse.json()) as { id: string };
+
+    const createResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "continue existing session",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "existing_session",
+        targetSessionId: target.id,
+        agentConfig: { prompt: "continue exactly here" },
+      }),
+    });
+    expect(createResponse.status).toBe(201);
+    const task = (await createResponse.json()) as { id: string; targetSessionId: string | null };
+    expect(task.targetSessionId).toBe(target.id);
+
+    const triggerResponse = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`),
+      { method: "POST" },
+    );
+    expect(triggerResponse.status).toBe(202);
+    expect(workflowClient.triggers).toEqual([
+      expect.objectContaining({
+        task: expect.objectContaining({
+          id: task.id,
+          runMode: "existing_session",
+          targetSessionId: target.id,
+        }),
+      }),
+    ]);
+
+    const goalResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "invalid existing goal",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "existing_session",
+        targetSessionId: target.id,
+        agentConfig: { prompt: "continue", goal: { text: "replace target goal" } },
+      }),
+    });
+    expect(goalResponse.status).toBe(400);
+
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const mcpTarget = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "MCP exact target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const mcpWorkflow = new FakeWorkflowClient();
+    const mcp = buildOpenGeniMcpServer(
+      {
+        settings: testSettings({ databaseUrl: services.databaseUrl }),
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient: mcpWorkflow,
+        objectStorage: null,
+        githubStateSecret: "test-state-secret",
+        documentIndexer: { indexDocument: async () => undefined },
+        getDocumentServices: () => {
+          throw new Error("document services are not used by scheduled task target tests");
+        },
+        resumeBoxById: fakeResumeBoxById,
+      },
+      grant,
+    );
+    const receipt = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
+      name: "MCP continue existing session",
+      schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "existing_session",
+      targetSessionId: mcpTarget.id,
+      agentConfig: { prompt: "continue MCP target" },
+    });
+    const summary = await callMcpTool<{ targetSessionId: string | null }>(
+      mcp,
+      "scheduled_tasks_get",
+      { id: receipt.resource.id },
+    );
+    expect(summary.targetSessionId).toBe(mcpTarget.id);
+  });
+
   test("reports file upload support when object storage is configured", async () => {
     const app = createApp({
       settings: testSettings({
