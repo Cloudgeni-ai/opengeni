@@ -1928,7 +1928,7 @@ function registerFleetTools(
     "sandboxes_list",
     {
       description:
-        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `liveness` is conservative: online requires observed provider existence and verified workspace readiness. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch are also reported separately. Use an entry `id` as an attach/swap/run_on target.",
+        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `liveness` is conservative: online requires observed provider existence and verified workspace readiness. An idle session-home sandbox may report offline/cold/draining and still wake or restore on the next ordinary sandbox operation; never infer that shell/files are unavailable from list liveness alone—only a typed operation/attach failure proves that. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch are also reported separately. Use an entry `id` as an attach/swap/run_on target.",
       inputSchema: {},
     },
     async () => json(await listFleet(services, await fleetContext())),

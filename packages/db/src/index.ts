@@ -29167,67 +29167,87 @@ async function verifyWorkspaceMutationSettlementForAuthority(
   },
 ): Promise<void> {
   const operation = normalizeWorkspaceMutationOperation(input.operation);
-  const settlement: SandboxWorkspaceMutationSettlementResult = await withRlsContext(
-    db,
+  const settleOnce = async (): Promise<SandboxWorkspaceMutationSettlementResult> =>
+    await withRlsContext(
+      db,
+      {
+        accountId: authorityInput.accountId,
+        workspaceId: authorityInput.workspaceId,
+      },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          // Admission and settlement must take the same canonical ownership
+          // prefix before either touches the lease. The former order
+          // (admission row -> authority -> lease) deadlocked a completed
+          // parallel exec settlement against retained-process promotion
+          // (admission row -> lease -> authority). PostgreSQL then rolled
+          // back the losing admission settlement and permanently blocked
+          // checkpoint capture.
+          //
+          // Preserve physical-settlement semantics when mutable authority
+          // is stale: retain the typed fence, settle the exact immutable
+          // admission below, commit, and only then reject its output.
+          let authority: LockedWorkspaceMutationAuthority | null = null;
+          let authorityFailure: SandboxWorkspaceMutationSettlementResult | null = null;
+          try {
+            authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+          } catch (error) {
+            const failure = workspaceMutationAuthorityFailure(error);
+            if (!failure) throw error;
+            authorityFailure = failure;
+          }
+
+          const actorKind = authorityInput.kind;
+          const actorId =
+            authorityInput.kind === "turn"
+              ? authorityInput.attemptId
+              : authorityInput.kind === "direct"
+                ? authorityInput.requestId
+                : authorityInput.processId;
+          const admission = await selectExactAdmissionForUpdate(tx, {
+            accountId: authorityInput.accountId,
+            workspaceId: authorityInput.workspaceId,
+            admissionId: input.admission.id,
+            actorKind,
+            actorId,
+            sessionId: authorityInput.sessionId,
+            admittedWorkspaceGeneration: input.admission.workspaceGeneration,
+            operation,
+          });
+          if (
+            !admission ||
+            !admissionMatchesSnapshot(admission, input.admission) ||
+            !admissionSnapshotMatchesAuthorityInput(input.admission, authorityInput) ||
+            admission.provider_outcome === "retained" ||
+            (admission.provider_outcome && admission.provider_outcome !== input.outcome)
+          ) {
+            return {
+              failure: "admission_fenced" as const,
+              detail: "Workspace mutation settlement did not match its exact durable admission",
+            };
+          }
+          if (!admission.settled_at) {
+            await tx.execute(sql`
+              update sandbox_workspace_mutation_admissions set
+                provider_outcome = ${input.outcome}, settled_at = now()
+              where id = ${input.admission.id} and settled_at is null
+            `);
+          }
+          if (input.outcome === "rejected") return { failure: null };
+          if (authorityFailure) return authorityFailure;
+          if (!authority) {
+            throw new Error("Workspace mutation settlement lost its locked authority");
+          }
+          return await verifyResolvedAdmissionAuthority(tx, authority, admission);
+        }),
+    );
+  const settlement = await runIdempotentPersistenceTransaction(
     {
-      accountId: authorityInput.accountId,
-      workspaceId: authorityInput.workspaceId,
+      stage: "sandbox_workspace_mutation_settlement",
+      maxAttempts: 5,
     },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const actorKind = authorityInput.kind;
-        const actorId =
-          authorityInput.kind === "turn"
-            ? authorityInput.attemptId
-            : authorityInput.kind === "direct"
-              ? authorityInput.requestId
-              : authorityInput.processId;
-        const admission = await selectExactAdmissionForUpdate(tx, {
-          accountId: authorityInput.accountId,
-          workspaceId: authorityInput.workspaceId,
-          admissionId: input.admission.id,
-          actorKind,
-          actorId,
-          sessionId: authorityInput.sessionId,
-          admittedWorkspaceGeneration: input.admission.workspaceGeneration,
-          operation,
-        });
-        if (
-          !admission ||
-          !admissionMatchesSnapshot(admission, input.admission) ||
-          !admissionSnapshotMatchesAuthorityInput(input.admission, authorityInput) ||
-          admission.provider_outcome === "retained" ||
-          (admission.provider_outcome && admission.provider_outcome !== input.outcome)
-        ) {
-          return {
-            failure: "admission_fenced" as const,
-            detail: "Workspace mutation settlement did not match its exact durable admission",
-          };
-        }
-        if (!admission.settled_at) {
-          await tx.execute(sql`
-            update sandbox_workspace_mutation_admissions set
-              provider_outcome = ${input.outcome}, settled_at = now()
-            where id = ${input.admission.id} and settled_at is null
-          `);
-        }
-        if (input.outcome === "rejected") return { failure: null };
-        // The provider has already returned. Lock and settle its immutable
-        // admission before consulting mutable turn/route/process authority, so
-        // a stale-authority rejection cannot roll the physical settlement back
-        // and strand archive capture. Only authority-fence errors are converted
-        // to a post-commit rejection; database failures still abort normally.
-        let authority: LockedWorkspaceMutationAuthority;
-        try {
-          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
-        } catch (error) {
-          const failure = workspaceMutationAuthorityFailure(error);
-          if (failure) return failure;
-          throw error;
-        }
-        return await verifyResolvedAdmissionAuthority(tx, authority, admission);
-      }),
+    settleOnce,
   );
   if (settlement.failure !== null) {
     throw new SandboxWorkspaceMutationFencedError(settlement.failure, settlement.detail);
@@ -29426,6 +29446,19 @@ export async function retainWorkspaceMutationProcess(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        // Use the same ownership prefix as mutation admission and settlement.
+        // A stale authority still cannot strand a provider process: remember
+        // the fence, durably promote the exact process, then reject its output
+        // after this transaction commits.
+        let authority: LockedWorkspaceMutationAuthority | null = null;
+        let authorityFailure: SandboxWorkspaceMutationSettlementResult | null = null;
+        try {
+          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+        } catch (error) {
+          const failure = workspaceMutationAuthorityFailure(error);
+          if (!failure) throw error;
+          authorityFailure = failure;
+        }
         const actorKind = authorityInput.kind;
         const actorId =
           authorityInput.kind === "turn" ? authorityInput.attemptId : authorityInput.requestId;
@@ -29586,16 +29619,13 @@ export async function retainWorkspaceMutationProcess(
         }
 
         // A yielded provider process is already a physical outcome. Persist its
-        // exact route and non-TTL holder before consulting mutable authority, so
-        // a route/turn race cannot leave an untracked process or open parent
-        // admission. Report staleness only after this transaction commits.
-        let authority: LockedWorkspaceMutationAuthority;
-        try {
-          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
-        } catch (error) {
-          const failure = workspaceMutationAuthorityFailure(error);
-          if (failure) return { process: mapRetainedProcess(process!), failure };
-          throw error;
+        // exact route and non-TTL holder even when the earlier authority check
+        // found a stale route/turn, then report staleness after commit.
+        if (authorityFailure) {
+          return { process: mapRetainedProcess(process!), failure: authorityFailure };
+        }
+        if (!authority) {
+          throw new Error("Retained process promotion lost its locked authority");
         }
         const identity = await verifyResolvedAdmissionAuthority(tx, authority, admission);
         return { process: mapRetainedProcess(process!), failure: identity };

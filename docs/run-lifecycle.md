@@ -659,6 +659,13 @@ metrics; dashboard/PromQL integration is coordinated separately.
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when
 that set is proven closed and `archive_generation === workspace_generation`.
+Admission, ordinary settlement, and yielded-process promotion acquire the
+canonical workspace/session/attempt-or-process prefix before the admission and
+lease rows. A provider-terminal settlement retries only its idempotent database
+transaction on PostgreSQL deadlock/serialization failure; it never reissues the
+provider operation. This prevents one parallel completed command and one yielded
+command from deadlocking, rolling back one settlement, and freezing checkpoint
+capture behind an admission that is no longer physically running.
 Late, concurrent, or replayed requests either remain blockers or are admitted
 into a successor generation; no admitted operation is replayed after provider
 rejection, provider loss, or a failed acceptance fence.

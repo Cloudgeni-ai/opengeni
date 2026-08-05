@@ -1846,6 +1846,237 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(afterReplay?.settledAt?.getTime()).toBe(first?.settledAt?.getTime());
   }, 60_000);
 
+  test("(1b-lock-order) settlement and retained promotion lock authority before admission", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 12,
+      expiresInMs: 600_000,
+      instanceId: "box-canonical-mutation-locks",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-canonical-mutation-locks" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    const settlementAdmission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: "box-canonical-mutation-locks",
+      operation: "parallelCompletedExec",
+    });
+    const promotionAdmission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: "box-canonical-mutation-locks",
+      operation: "parallelYieldedExec",
+    });
+
+    const assertAuthorityFirst = async <T>(
+      admissionId: string,
+      start: () => Promise<T>,
+    ): Promise<T> => {
+      let pending: Promise<T> | undefined;
+      await admin.begin(async (tx) => {
+        const [locker] = await tx<{ pid: number }[]>`
+          select pg_backend_pid()::integer as pid`;
+        await tx`
+          select id from sessions
+          where workspace_id = ${ids.workspaceId} and id = ${attempt.sessionId}
+          for update`;
+
+        pending = start();
+        let authorityWaitObserved = false;
+        for (let pollIndex = 0; pollIndex < 200; pollIndex += 1) {
+          const [state] = await admin<{ blocked: boolean }[]>`
+            select exists (
+              select 1 from pg_stat_activity
+              where ${locker!.pid} = any(pg_blocking_pids(pid))
+                and wait_event_type = 'Lock'
+            ) as blocked`;
+          if (state?.blocked) {
+            authorityWaitObserved = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(authorityWaitObserved).toBe(true);
+
+        // While the operation is blocked on canonical session authority, its
+        // admission row must remain unlocked. The old admission-first order
+        // deadlocked here against retained-process promotion in production.
+        await tx`set local lock_timeout = '2s'`;
+        const [lockedAdmission] = await tx<{ id: string }[]>`
+          select id from sandbox_workspace_mutation_admissions
+          where id = ${admissionId}
+          for update`;
+        expect(lockedAdmission?.id).toBe(admissionId);
+      });
+      if (!pending) throw new Error("Mutation lock-order probe did not start");
+      return await pending;
+    };
+
+    await assertAuthorityFirst(settlementAdmission.id, async () => {
+      await verifyWorkspaceMutationSettlement(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: "box-canonical-mutation-locks",
+        admission: settlementAdmission,
+        operation: "parallelCompletedExec",
+        outcome: "resolved",
+      });
+    });
+
+    const processId = crypto.randomUUID();
+    const retained = await assertAuthorityFirst(
+      promotionAdmission.id,
+      async () =>
+        await retainWorkspaceMutationProcess(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+          providerSessionId: 42,
+          admissionId: promotionAdmission.id,
+          admittedWorkspaceGeneration: promotionAdmission.workspaceGeneration,
+          operation: "parallelYieldedExec",
+          providerBinding: MODAL_PROVIDER_BINDING,
+          owner: {
+            kind: "turn",
+            turnId: attempt.turnId,
+            executionGeneration: attempt.executionGeneration,
+            attemptId: attempt.attemptId,
+            holderId: attempt.holderId,
+            sandboxGroupId: ids.groupId,
+            expectedEpoch: 12,
+            expectedInstanceId: "box-canonical-mutation-locks",
+            routeKind: promotionAdmission.routeKind,
+            routeTargetId: promotionAdmission.routeTargetId,
+            routeEpoch: promotionAdmission.routeEpoch,
+          },
+        }),
+    );
+    expect(retained).toMatchObject({ id: processId, state: "active" });
+    await settleRetainedProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+      expected: retainedProcessSettlementIdentity(retained),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "canonical lock-order regression cleanup",
+      idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+    });
+
+    const rows = await admin<
+      { id: string; providerOutcome: string | null; settledAt: Date | null }[]
+    >`
+      select id, provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions
+      where id in (${settlementAdmission.id}, ${promotionAdmission.id})
+      order by workspace_generation`;
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.providerOutcome === "resolved")).toBe(true);
+    expect(rows.every((row) => row.settledAt instanceof Date)).toBe(true);
+  }, 60_000);
+
+  test("(1b-settlement-retry) a provider-terminal admission retries only its deadlocked DB settlement", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 13,
+      expiresInMs: 600_000,
+      instanceId: "box-settlement-retry",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-settlement-retry" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 13,
+      expectedInstanceId: "box-settlement-retry",
+      operation: "providerAlreadyReturned",
+    });
+
+    const sequenceName = `sandbox_mutation_retry_${admission.id.replaceAll("-", "")}`;
+    const functionName = `${sequenceName}_fn`;
+    const triggerName = `${sequenceName}_trigger`;
+    await admin.unsafe(`create sequence ${sequenceName}`);
+    await admin.unsafe(`
+      create function ${functionName}() returns trigger
+      language plpgsql as $$
+      begin
+        if new.id = '${admission.id}'::uuid and nextval('${sequenceName}') = 1 then
+          raise exception 'injected retryable settlement deadlock' using errcode = '40P01';
+        end if;
+        return new;
+      end
+      $$`);
+    await admin.unsafe(`
+      create trigger ${triggerName}
+      before update on sandbox_workspace_mutation_admissions
+      for each row execute function ${functionName}()`);
+    try {
+      await verifyWorkspaceMutationSettlement(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 13,
+        expectedInstanceId: "box-settlement-retry",
+        admission,
+        operation: "providerAlreadyReturned",
+        outcome: "resolved",
+      });
+      const [row] = await admin<
+        { providerOutcome: string | null; settledAt: Date | null; retryAttempts: number }[]
+      >`
+        select admission.provider_outcome as "providerOutcome",
+          admission.settled_at as "settledAt",
+          (select last_value::integer from ${admin(sequenceName)}) as "retryAttempts"
+        from sandbox_workspace_mutation_admissions admission
+        where admission.id = ${admission.id}`;
+      expect(row).toMatchObject({ providerOutcome: "resolved", retryAttempts: 2 });
+      expect(row?.settledAt).toBeInstanceOf(Date);
+    } finally {
+      await admin.unsafe(
+        `drop trigger if exists ${triggerName} on sandbox_workspace_mutation_admissions`,
+      );
+      await admin.unsafe(`drop function if exists ${functionName}()`);
+      await admin.unsafe(`drop sequence if exists ${sequenceName}`);
+    }
+  }, 60_000);
+
   test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
