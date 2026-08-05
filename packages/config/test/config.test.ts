@@ -98,6 +98,16 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("Codex progressive tool disclosure", () => {
+  test("is enabled by default and supports an explicit emergency opt-out", () => {
+    expect(withEnv({}, () => getSettings()).codexToolSearchEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_CODEX_TOOL_SEARCH_ENABLED: "false" }, () => getSettings())
+        .codexToolSearchEnabled,
+    ).toBe(false);
+  });
+});
+
 describe("Google Drive integration settings", () => {
   test("loads the split localhost browser and API origins", () => {
     const settings = withEnv(

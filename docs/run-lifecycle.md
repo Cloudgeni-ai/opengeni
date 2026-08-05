@@ -345,12 +345,14 @@ For the Codex subscription catalog this means a 272,000-token raw window, a
 244,800 tokens (90%, reached with `>=`). Local checkpoint replacement retains
 only the newest real user messages that fit one cumulative 20,000-token budget,
 then appends the summary; internal resume notices are never retained as user
-intent. Complete-input estimation detects typed image items before generic JSON
-serialization. It uses retained detail/dimensions or bounded PNG/GIF/WebP/JPEG
-byte-prefix geometry, charges unknown geometry through one conservative bounded
-fallback; PNG geometry additionally requires a valid complete IHDR CRC32. It
-never counts typed inline image base64 as text. Ordinary textual
-data URLs remain text. See [`context-compaction.md`](context-compaction.md).
+intent. Automatic compaction uses provider-reported usage only: the durable
+prior-call input count at a turn boundary, or the immediately preceding
+same-activity provider total plus bounded newly appended input. With no bound
+provider count, OpenGeni sends the request and recovers from a genuine provider
+context overflow instead of compacting from a whole-request approximation.
+Local media-aware estimates remain confined to compaction-request fitting and
+history-only replacement reporting. See
+[`context-compaction.md`](context-compaction.md).
 
 Outside the explicit durable compaction transition, model-visible history is
 append-only. Given an unchanged canonical prefix and runtime settings, every

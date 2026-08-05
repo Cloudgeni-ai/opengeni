@@ -21967,7 +21967,6 @@ export async function applyContextCompaction(
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
     summaryItem: Record<string, unknown>;
-    replacementInputTokens: number;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
@@ -22056,7 +22055,10 @@ export async function applyContextCompaction(
         await tx
           .update(schema.sessions)
           .set({
-            lastInputTokens: Math.max(0, Math.floor(input.replacementInputTokens)),
+            // The active model input changed without an ordinary provider call.
+            // Keep this field provider-only and let the first successful
+            // post-compaction response install the next authoritative count.
+            lastInputTokens: null,
             ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
             ...(insertedEvents.length > 0
               ? {
@@ -22348,8 +22350,8 @@ export class SessionContextBusyError extends Error {
  *      reserved for an approval that paused mid-turn, and the API forbids a
  *      clear while such an approval or active turn exists.
  *
- * Also resets last_input_tokens to 0 so the next turn's compaction trigger
- * starts fresh against the now-short context.
+ * Also clears last_input_tokens because no provider has observed the new
+ * context yet.
  *
  * Idempotent: a re-run supersedes the (now sole, already-marker) active row,
  * inserts another marker at the next position. The post-condition (one active
@@ -22441,7 +22443,7 @@ export async function clearSessionContext(
 
         await tx
           .update(schema.sessions)
-          .set({ lastInputTokens: 0, updatedAt: new Date() })
+          .set({ lastInputTokens: null, updatedAt: new Date() })
           .where(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),

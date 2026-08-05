@@ -2331,7 +2331,6 @@ describe("clean session control plane", () => {
       expectedAttemptId: attemptId,
       replacementItems: [{ type: "message", role: "user", content: "retained request" }],
       summaryItem: { type: "message", role: "user", content: "durable checkpoint" },
-      replacementInputTokens: 10,
     });
     expect(compacted).toMatchObject({ applied: true });
 
@@ -4554,7 +4553,6 @@ describe("clean session control plane", () => {
       expectedAttemptId: firstAttemptId,
       replacementItems: [{ type: "message", role: "user", content: "stale rewrite" }],
       summaryItem: { type: "message", role: "user", content: "stale summary" },
-      replacementInputTokens: 1,
     });
     expect(staleCompaction).toMatchObject({ applied: false });
     expect(
@@ -4574,6 +4572,16 @@ describe("clean session control plane", () => {
     ).toEqual([{ type: "message", role: "user", content: "build it" }]);
 
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    expect(
+      await setSessionLastInputTokensForTurnAttempt(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: second!.id,
+        expectedExecutionGeneration: second!.executionGeneration,
+        expectedAttemptId: secondAttemptId,
+        lastInputTokens: 999,
+      }),
+    ).toBe(true);
     const currentCompaction = await applyContextCompaction(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -4587,7 +4595,6 @@ describe("clean session control plane", () => {
         role: "user",
         content: "current summary",
       },
-      replacementInputTokens: 42,
       clearRequestedCompaction: true,
       eventPayload: {
         trigger: "operator",
@@ -4612,6 +4619,9 @@ describe("clean session control plane", () => {
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       false,
     );
+    expect(
+      (await getSession(client.db, grant.workspaceId!, session.id))?.lastInputTokens,
+    ).toBeNull();
     expect(
       (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
         (row) => row.item,

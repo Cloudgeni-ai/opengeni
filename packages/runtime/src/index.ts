@@ -4777,26 +4777,31 @@ export function contextRobustnessFilterForSettings(
         hasModelGeneratedItem(current.input)
           ? reported
           : null;
-      const estimate = estimateCompleteModelInput({
-        current,
-        provider: boundProvider,
-        providerRequestFootprint: boundProvider ? (previousRequest?.footprint ?? null) : null,
-      });
-      const signalTokens = estimate.tokens;
+      // Without an exact provider response bound to the immediately preceding
+      // request, do not turn a whole-request approximation into a compaction
+      // decision. Let the provider accept the request or return its typed
+      // context-window error, which the worker already compacts and retries.
+      const signalTokens = boundProvider
+        ? estimateCompleteModelInput({
+            current,
+            provider: boundProvider,
+            providerRequestFootprint: previousRequest!.footprint,
+          }).tokens
+        : 0;
       previousRequest = { revision: ++requestRevision, footprint: current };
       if (await options.contextCompactionRequested?.()) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: boundProvider ? "provider" : "estimate",
+          signalSource: boundProvider ? "provider" : "operator",
           trigger: "operator",
         });
       }
-      if (signalTokens >= thresholdTokens) {
+      if (boundProvider && signalTokens >= thresholdTokens) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: boundProvider ? "provider" : "estimate",
+          signalSource: "provider",
         });
       }
     }
