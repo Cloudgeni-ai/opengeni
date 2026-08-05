@@ -1,5 +1,15 @@
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
 
+/**
+ * Server-owned upstream budget for one provider attempt. Resumable recording
+ * claims remain fenced for longer than this budget before another worker may
+ * reclaim them. Provider adapters must honor the supplied AbortSignal and must
+ * not return while their upstream request is still live; OpenGeni does not
+ * claim remote-side idempotency or cancellation for vendors that cannot meet
+ * that adapter contract.
+ */
+export const TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS = 10 * 60 * 1_000;
+
 export type TranscriptionLimits = {
   maxDurationSeconds: number;
   maxSizeBytes: number;
@@ -84,6 +94,8 @@ export type TranscriptionAvailabilityContext = {
  */
 export type TranscriptionProvider = {
   readonly id: string;
+  /** The adapter guarantees that its upstream transport honors AbortSignal. */
+  readonly supportsServerDeadline: true;
   readonly experimental?: boolean | undefined;
   /**
    * Deployment readiness when called without a workspace. When `workspaceId` is
@@ -95,6 +107,7 @@ export type TranscriptionProvider = {
     mimeType: string;
     filename: string;
     workspaceId: string;
+    requestId: string;
     signal?: AbortSignal | undefined;
   }): Promise<{ text: string; languages: string[] }>;
 };

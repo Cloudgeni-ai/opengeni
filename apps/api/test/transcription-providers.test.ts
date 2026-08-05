@@ -30,6 +30,7 @@ describe("transcription providers", () => {
     expect(result.languages).toEqual(["en"]);
     expect(request?.url).toBe("https://api.openai.com/v1/audio/transcriptions");
     expect(request?.headers.get("authorization")).toBe("Bearer test-openai-key");
+    expect(request?.headers.get("x-opengeni-request-id")).toBe("request");
     if (!request) throw new Error("transcription request missing");
     const form = await request.formData();
     expect(form.get("model")).toBe("gpt-transcribe");
@@ -118,6 +119,57 @@ describe("transcription providers", () => {
         requestId: "request",
       }),
     ).rejects.toMatchObject({ code: "cancelled" });
+  });
+
+  test("owns a shorter provider deadline and classifies its abort as retryable timeout", async () => {
+    let providerSignal: AbortSignal | undefined;
+    const service = createTranscriptionService({
+      settings: testSettings({ voiceInputProviderOrder: "openai" }),
+      db: {} as never,
+      providerRequestTimeoutMilliseconds: 5,
+      fetch: async (_input, init) => {
+        providerSignal = init?.signal;
+        await new Promise<never>((_resolve, reject) => {
+          providerSignal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+        throw new Error("unreachable");
+      },
+    });
+    await expect(
+      service.transcribe({
+        workspaceId: "workspace",
+        accountId: "account",
+        audio,
+        mimeType: "audio/webm",
+        requestId: "deadline-request",
+      }),
+    ).rejects.toMatchObject({ code: "timeout", retryable: true });
+    expect(providerSignal?.aborted).toBe(true);
+  });
+
+  test("rejects a late provider completion after the server deadline", async () => {
+    const service = createTranscriptionService({
+      settings: testSettings({ voiceInputProviderOrder: "openai" }),
+      db: {} as never,
+      providerRequestTimeoutMilliseconds: 5,
+      fetch: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return Response.json({ text: "late", language: "en" });
+      },
+    });
+    await expect(
+      service.transcribe({
+        workspaceId: "workspace",
+        accountId: "account",
+        audio,
+        mimeType: "audio/webm",
+        requestId: "late-request",
+      }),
+    ).rejects.toMatchObject({ code: "timeout", retryable: true });
   });
 
   test("prefers Codex when subscription is attached even if OpenAI is configured", async () => {

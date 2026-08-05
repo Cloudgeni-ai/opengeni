@@ -69,6 +69,9 @@ export type ObjectStorage = {
    * the presigned-URL round-trip, which on split public/internal topologies (a
    * public `objectStorageEndpoint` with no in-cluster route) would otherwise 401.
    * Browser uploads keep using `createPutUrl`; this is the trusted-server twin.
+   * Repeating a PUT for the same deterministic key and verified sha256 is
+   * permitted: storage backends converge to the same bytes, while the database
+   * completion fence remains the source of truth.
    */
   putObject: (args: {
     key: string;

@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assembleTranscriptionSegments,
+  canReclaimTranscriptionRecordingAttempt,
   FORCE_RLS_TABLES,
   RUNTIME_FULL_DML_TABLES,
   transcriptionRecordingChunkObjectKey,
@@ -59,6 +60,19 @@ describe("resumable transcription recording persistence", () => {
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION");
   });
 
+  test("provider deadline migration backfills active attempts and fails closed", async () => {
+    const sql = await readFile(
+      join(migrationsDir, "0175_resumable_transcription_provider_deadline.sql"),
+      "utf8",
+    );
+    expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
+    expect(sql).toContain('ADD COLUMN "attempt_deadline_at" timestamptz');
+    expect(sql).toContain("\"attempt_started_at\" + interval '10 minutes'");
+    expect(sql).toContain('"attempt_id" IS NULL AND "attempt_started_at" IS NULL');
+    expect(sql).toContain('"attempt_id" IS NOT NULL');
+    expect(sql).toContain('"attempt_deadline_at" IS NOT NULL');
+  });
+
   test("pins one private provider for every segment and retry in a recording", async () => {
     const source = await readFile(sourcePath, "utf8");
     expect(source).toContain(
@@ -76,9 +90,11 @@ describe("resumable transcription recording persistence", () => {
     const source = await readFile(sourcePath, "utf8");
     expect(source).toContain('eq(schema.transcriptionRecordingSegments.state, "transcribing")');
     expect(source).toContain('.limit(1)\n      .for("update")');
-    expect(source).toContain(
-      "if (active?.attemptStartedAt && active.attemptStartedAt >= input.staleBefore)",
-    );
+    expect(source).toContain("!canReclaimTranscriptionRecordingAttempt({");
+    expect(source).toContain("attemptDeadlineAt: active.attemptDeadlineAt");
+    expect(source).toContain("attemptDeadlineAt: input.providerDeadlineAt");
+    expect(source).toContain("attemptDeadlineAt: null");
+    expect(source).toContain("startTranscriptionRecordingSegmentProviderCall");
     expect(source).toContain('state: "failed"');
     expect(source).toContain("attemptId: null");
     expect(source).toContain(
@@ -88,6 +104,36 @@ describe("resumable transcription recording persistence", () => {
       "eq(schema.transcriptionRecordingSegments.attemptId, input.attemptId)",
     );
     expect(source).toContain("eq(schema.transcriptionRecordings.processingOwner, input.attemptId)");
+  });
+
+  test("requires both the durable lease and provider deadline to reclaim", () => {
+    const startedAt = new Date("2026-08-05T00:00:00.000Z");
+    const staleBefore = new Date("2026-08-05T00:15:00.000Z");
+    const now = new Date("2026-08-05T00:15:01.000Z");
+    expect(
+      canReclaimTranscriptionRecordingAttempt({
+        attemptStartedAt: startedAt,
+        attemptDeadlineAt: new Date("2026-08-05T00:20:00.000Z"),
+        staleBefore,
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      canReclaimTranscriptionRecordingAttempt({
+        attemptStartedAt: startedAt,
+        attemptDeadlineAt: new Date("2026-08-05T00:10:00.000Z"),
+        staleBefore,
+        now,
+      }),
+    ).toBe(true);
+    expect(
+      canReclaimTranscriptionRecordingAttempt({
+        attemptStartedAt: startedAt,
+        attemptDeadlineAt: null,
+        staleBefore,
+        now,
+      }),
+    ).toBe(false);
   });
 
   test("declares every transcription table in the runtime posture contract", () => {

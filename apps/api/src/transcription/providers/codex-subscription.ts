@@ -36,9 +36,10 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
     });
   return {
     id: "codex-subscription",
+    supportsServerDeadline: true,
     experimental: true,
     available: probe,
-    async transcribe({ audio, mimeType, filename, workspaceId, signal }) {
+    async transcribe({ audio, mimeType, filename, workspaceId, requestId, signal }) {
       const account = (await listCodexAccountStatuses(input.db, workspaceId)).find(
         (candidate) => candidate.isActive && candidate.status === "active",
       );
@@ -73,6 +74,8 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
             originator: CODEX_ORIGINATOR,
             "User-Agent": `${CODEX_ORIGINATOR}/${CODEX_CLIENT_VERSION}`,
             version: CODEX_CLIENT_VERSION,
+            // Observability only; the upstream API is not treated as idempotent.
+            "x-opengeni-request-id": requestId,
           },
           body: form,
           ...(signal ? { signal } : {}),

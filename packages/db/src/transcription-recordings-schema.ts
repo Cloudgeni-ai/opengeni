@@ -208,6 +208,7 @@ export const transcriptionRecordingSegments = pgTable(
     objectKey: text("object_key").notNull(),
     attemptId: uuid("attempt_id"),
     attemptStartedAt: timestamp("attempt_started_at", { withTimezone: true }),
+    attemptDeadlineAt: timestamp("attempt_deadline_at", { withTimezone: true }),
     transcriptText: text("transcript_text"),
     languages: jsonb("languages").$type<string[]>().notNull().default([]),
     providerId: text("provider_id"),
@@ -237,8 +238,12 @@ export const transcriptionRecordingSegments = pgTable(
         and ${table.sha256} ~ '^[0-9a-f]{64}$'
         and octet_length(${table.objectKey}) between 1 and 1024
         and (
-          (${table.attemptId} is null and ${table.attemptStartedAt} is null)
-          or (${table.attemptId} is not null and ${table.attemptStartedAt} is not null)
+          (${table.attemptId} is null
+            and ${table.attemptStartedAt} is null
+            and ${table.attemptDeadlineAt} is null)
+          or (${table.attemptId} is not null
+            and ${table.attemptStartedAt} is not null
+            and ${table.attemptDeadlineAt} is not null)
         )`,
     ),
   }),

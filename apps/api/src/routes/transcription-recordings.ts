@@ -13,6 +13,7 @@ import {
   isAcceptedMimeType,
   normalizeMimeType,
   requireAccessGrant,
+  TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
   TranscriptionServiceError,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -34,6 +35,7 @@ import {
   markTranscriptionRecordingObjectsCleaned,
   reserveTranscriptionRecordingChunk,
   reserveTranscriptionRecordingSegment,
+  startTranscriptionRecordingSegmentProviderCall,
   transcriptionRecordingObjectKeys,
   TranscriptionRecordingConflictError,
   TranscriptionRecordingNotFoundError,
@@ -164,6 +166,10 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         });
         if (!reservation.deduplicated) {
           try {
+            // A concurrent same-hash retry may still observe the row while it is
+            // uploading and repeat this PUT. The object key is hash-derived and
+            // the storage contract permits identical verified writes; the DB
+            // completion fence prevents duplicate chunk accounting.
             await deps.objectStorage.putObject({
               key: reservation.chunk.objectKey,
               contentType: existing.recording.mimeType,
@@ -352,6 +358,7 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           attemptId,
           providerId: selectedProvider,
           staleBefore: new Date(Date.now() - PROCESSING_LEASE_MILLISECONDS),
+          providerDeadlineAt: new Date(Date.now() + PROCESSING_LEASE_MILLISECONDS),
         });
         if (!claim.claimed || !claim.segment) {
           const cleaned = await cleanupTerminalObjects(deps, authority, claim.recording);
@@ -375,6 +382,16 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
             false,
           );
         }
+        await startTranscriptionRecordingSegmentProviderCall(deps.db, {
+          workspaceId: authority.workspaceId,
+          subjectId: authority.subjectId,
+          recordingId: uuidParam(c, "recordingId"),
+          segmentNumber,
+          attemptId,
+          providerDeadlineAt: new Date(
+            Date.now() + TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
+          ),
+        });
         const result = await service.transcribe({
           workspaceId: authority.workspaceId,
           accountId: authority.accountId,

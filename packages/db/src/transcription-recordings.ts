@@ -64,6 +64,25 @@ function languages(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
+/**
+ * A stale attempt is reclaimable only after both durable fences have expired:
+ * the processing lease and the server-owned provider deadline. Missing
+ * deadlines fail closed so an old pre-deadline row cannot create an overlap.
+ */
+export function canReclaimTranscriptionRecordingAttempt(input: {
+  attemptStartedAt: Date | null;
+  attemptDeadlineAt: Date | null;
+  staleBefore: Date;
+  now: Date;
+}): boolean {
+  return Boolean(
+    input.attemptStartedAt &&
+    input.attemptDeadlineAt &&
+    input.attemptStartedAt < input.staleBefore &&
+    input.attemptDeadlineAt <= input.now,
+  );
+}
+
 function segmentFromRow(row: SegmentRow): TranscriptionRecordingSegment {
   return {
     segmentNumber: row.segmentNumber,
@@ -828,6 +847,7 @@ export async function claimNextTranscriptionRecordingSegment(
     attemptId: string;
     providerId: string;
     staleBefore: Date;
+    providerDeadlineAt: Date;
   },
 ): Promise<TranscriptionRecordingSegmentClaim> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
@@ -863,7 +883,15 @@ export async function claimNextTranscriptionRecordingSegment(
       .orderBy(asc(schema.transcriptionRecordingSegments.segmentNumber))
       .limit(1)
       .for("update");
-    if (active?.attemptStartedAt && active.attemptStartedAt >= input.staleBefore) {
+    if (
+      active &&
+      !canReclaimTranscriptionRecordingAttempt({
+        attemptStartedAt: active.attemptStartedAt,
+        attemptDeadlineAt: active.attemptDeadlineAt,
+        staleBefore: input.staleBefore,
+        now: new Date(),
+      })
+    ) {
       return {
         recording: await detailForRow(scopedDb, recording),
         claimed: false,
@@ -878,6 +906,7 @@ export async function claimNextTranscriptionRecordingSegment(
           state: "failed",
           attemptId: null,
           attemptStartedAt: null,
+          attemptDeadlineAt: null,
           errorCode: "timeout",
           retryable: true,
           updatedAt: new Date(),
@@ -931,6 +960,7 @@ export async function claimNextTranscriptionRecordingSegment(
         state: "transcribing",
         attemptId: input.attemptId,
         attemptStartedAt: now,
+        attemptDeadlineAt: input.providerDeadlineAt,
         errorCode: null,
         retryable: false,
         providerId,
@@ -966,6 +996,43 @@ export async function claimNextTranscriptionRecordingSegment(
       attemptId: input.attemptId,
       segment: claimed,
     };
+  });
+}
+
+export async function startTranscriptionRecordingSegmentProviderCall(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    recordingId: string;
+    segmentNumber: number;
+    attemptId: string;
+    providerDeadlineAt: Date;
+  },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const recording = await requiredRecordingRow(
+      scopedDb,
+      input.workspaceId,
+      input.recordingId,
+      true,
+    );
+    if (recording.state !== "transcribing" || recording.processingOwner !== input.attemptId) {
+      throw new TranscriptionRecordingStateError("Provider call start was stale");
+    }
+    const [updated] = await scopedDb
+      .update(schema.transcriptionRecordingSegments)
+      .set({ attemptDeadlineAt: input.providerDeadlineAt, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.transcriptionRecordingSegments.recordingId, input.recordingId),
+          eq(schema.transcriptionRecordingSegments.segmentNumber, input.segmentNumber),
+          eq(schema.transcriptionRecordingSegments.state, "transcribing"),
+          eq(schema.transcriptionRecordingSegments.attemptId, input.attemptId),
+        ),
+      )
+      .returning({ segmentNumber: schema.transcriptionRecordingSegments.segmentNumber });
+    if (!updated) throw new TranscriptionRecordingStateError("Provider call start was stale");
   });
 }
 
@@ -1020,6 +1087,7 @@ export async function completeTranscriptionRecordingSegment(
         state: "complete",
         attemptId: null,
         attemptStartedAt: null,
+        attemptDeadlineAt: null,
         transcriptText: input.text,
         languages: input.languages,
         providerId: input.providerId,
@@ -1105,6 +1173,7 @@ export async function failTranscriptionRecordingSegment(
         state: "failed",
         attemptId: null,
         attemptStartedAt: null,
+        attemptDeadlineAt: null,
         errorCode: input.errorCode,
         retryable: input.retryable,
         updatedAt: now,

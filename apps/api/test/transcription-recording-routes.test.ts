@@ -276,6 +276,7 @@ describe("resumable transcription recording routes", () => {
         retryable: true,
       }),
     );
+    spyOn(dbModule, "startTranscriptionRecordingSegmentProviderCall").mockResolvedValue(undefined);
     spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
 
     const api = app({
@@ -318,6 +319,132 @@ describe("resumable transcription recording routes", () => {
         errorCode: "provider",
         retryable: true,
       }),
+    );
+  });
+
+  test("keeps concurrent clients to one live provider attempt and fences the late completion", async () => {
+    const firstAttemptId = "55555555-5555-4555-8555-555555555555";
+    const successorAttemptId = "66666666-6666-4666-8666-666666666666";
+    const segmentBytes = new Uint8Array([7, 8, 9]);
+    const segmentSha256 = createHash("sha256").update(segmentBytes).digest("hex");
+    const claimed = response("transcribing", { segmentCount: 1 });
+    const complete = response("complete", {
+      segmentCount: 1,
+      completedSegmentCount: 1,
+      transcriptText: "one provider call",
+    });
+    let claimCalls = 0;
+    let liveProviderCalls = 0;
+    let maximumLiveProviderCalls = 0;
+    let providerStarted!: () => void;
+    let releaseProvider!: () => void;
+    const providerStartedPromise = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    const providerReleasePromise = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const claimSegment = spyOn(
+      dbModule,
+      "claimNextTranscriptionRecordingSegment",
+    ).mockImplementation(async (_db, input) => {
+      claimCalls += 1;
+      if (claimCalls > 1) {
+        return {
+          recording: claimed,
+          claimed: false,
+          attemptId: firstAttemptId,
+          segment: null,
+        };
+      }
+      return {
+        recording: claimed,
+        claimed: true,
+        attemptId: input.attemptId,
+        segment: {
+          segmentNumber: 0,
+          durationMilliseconds: 50_000,
+          byteLength: segmentBytes.byteLength,
+          sha256: segmentSha256,
+          objectKey: "segment-0",
+          providerId: "openai",
+        } as never,
+      };
+    });
+    const completeSegment = spyOn(
+      dbModule,
+      "completeTranscriptionRecordingSegment",
+    ).mockResolvedValue(complete);
+    const startProviderCall = spyOn(
+      dbModule,
+      "startTranscriptionRecordingSegmentProviderCall",
+    ).mockResolvedValue(undefined);
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        liveProviderCalls += 1;
+        maximumLiveProviderCalls = Math.max(maximumLiveProviderCalls, liveProviderCalls);
+        providerStarted();
+        await providerReleasePromise;
+        liveProviderCalls -= 1;
+        return { text: "one provider call", languages: ["en"] };
+      },
+    };
+    const api = app({
+      transcription,
+      segmenter: { available: () => true, segment: async function* () {} },
+      objectStorage: storage({
+        getObjectBytes: async () => ({ bytes: segmentBytes, contentType: "audio/wav" }),
+      }),
+    });
+
+    const first = api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": firstAttemptId,
+        },
+      },
+    );
+    await providerStartedPromise;
+    const second = await api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": successorAttemptId,
+        },
+      },
+    );
+    expect(second.status).toBe(202);
+    expect(liveProviderCalls).toBe(1);
+    expect(maximumLiveProviderCalls).toBe(1);
+    releaseProvider();
+    expect((await first).status).toBe(200);
+    expect(completeSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ attemptId: firstAttemptId }),
+    );
+    expect(startProviderCall).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        attemptId: firstAttemptId,
+        providerDeadlineAt: expect.any(Date),
+      }),
+    );
+    expect(claimSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ providerDeadlineAt: expect.any(Date) }),
     );
   });
 
@@ -371,6 +498,7 @@ describe("resumable transcription recording routes", () => {
       expect.objectContaining({
         attemptId: CORRELATION_ID,
         staleBefore: expect.any(Date),
+        providerDeadlineAt: expect.any(Date),
       }),
     );
   });
