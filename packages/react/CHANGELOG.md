@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.45.0
+
+### Minor Changes
+
+- 7faf6a9: Add a lossless `UserMessageBody` disclosure for very tall sent messages, including per-message expansion memory and timeline-owned scroll anchoring.
+
 ## 0.44.6
 
 ### Patch Changes
