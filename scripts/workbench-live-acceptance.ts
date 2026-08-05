@@ -1849,7 +1849,9 @@ export async function runCaptureApiRegionalProbe(
     clearTimeout(timeout);
   }
   if (exitCode !== 0) {
-    const detail = stderr;
+    const detail = maskKnownPublicEvidenceValues(stderr, [request.cookieHeader])
+      .trim()
+      .slice(0, 2_048);
     throw new Error(
       `capture API regional probe failed with exit code ${exitCode}${detail ? `: ${detail}` : ""}`,
     );
@@ -1861,6 +1863,20 @@ export async function runCaptureApiRegionalProbe(
     throw new Error("capture API regional probe did not return one JSON object");
   }
   return validateCaptureApiRegionalProbeResult(value, request);
+}
+
+/**
+ * Mask exact values already known to this public CI/release evidence sink.
+ * This intentionally does not scan arbitrary OpenGeni content for patterns.
+ */
+export function maskKnownPublicEvidenceValues(
+  value: string,
+  knownSecretValues: readonly string[],
+): string {
+  const secrets = [...new Set(knownSecretValues.filter((secret) => secret.length > 0))].sort(
+    (left, right) => right.length - left.length,
+  );
+  return secrets.reduce((result, secret) => result.replaceAll(secret, "[masked]"), value);
 }
 
 export function captureApiRegionalProbeEnvironment(

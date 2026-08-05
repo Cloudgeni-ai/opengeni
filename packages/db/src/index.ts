@@ -19972,16 +19972,11 @@ type SessionEventProjectionRow = {
 };
 
 /**
- * Read one direction-aware session-event page without transferring legacy raw
- * payloads or malformed free-form envelope strings out of PostgreSQL.
- *
- * Migration 0067 deliberately leaves historical rows untouched. This query
- * invokes its immutable payload projector in SQL and mirrors the rolling
- * envelope guard in SQL, then accumulates small batches under one RLS
- * transaction. `bytes` is the exact UTF-8 size of `JSON.stringify(events)`;
- * `hasMore` is true whenever count or byte selection stopped before the durable
- * range ended. A nonempty durable range can therefore never become an empty,
- * non-advancing HTTP page.
+ * Read one direction-aware session-event page. Full mode selects the canonical
+ * row exactly; summary/none modes derive bounded monitoring projections in SQL
+ * without rewriting the retained source. `bytes` is the exact UTF-8 size of
+ * `JSON.stringify(events)`; `hasMore` is true whenever count or byte selection
+ * stopped before the durable range ended.
  */
 export async function listSessionEventPage(
   db: Database,
@@ -20195,44 +20190,47 @@ function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "fu
   end`;
   const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
   const selectedPayload =
-    payloadMode === "none"
-      ? sql<unknown>`jsonb_build_object(
+    payloadMode === "full"
+      ? schema.sessionEvents.payload
+      : payloadMode === "none"
+        ? sql<unknown>`jsonb_build_object(
           '_monitoring', jsonb_build_object(
             'payloadMode', 'none',
             'payloadOmitted', true,
             'projectedPayloadBytes', ${projectedPayloadBytes}
           )
         )`
-      : payloadMode === "summary"
-        ? sql<unknown>`case
-            when ${projectedPayloadBytes} <= 4096 then ${projectedPayload}
-            else jsonb_build_object(
-              '_monitoring', jsonb_build_object(
-                'payloadMode', 'summary',
-                'payloadTruncated', true,
-                'projectedPayloadBytes', ${projectedPayloadBytes},
-                'fullForensicPayload', 'request payloadMode=full explicitly'
-              ),
-              'preview', left((${projectedPayload})::text, 2048)
-            )
-          end`
-        : projectedPayload;
+        : sql<unknown>`case
+          when ${projectedPayloadBytes} <= 4096 then ${projectedPayload}
+          else jsonb_build_object(
+            '_monitoring', jsonb_build_object(
+              'payloadMode', 'summary',
+              'payloadTruncated', true,
+              'projectedPayloadBytes', ${projectedPayloadBytes},
+              'fullForensicPayload', 'request payloadMode=full explicitly'
+            ),
+            'preview', left((${projectedPayload})::text, 2048)
+          )
+        end`;
 
   return {
     id: schema.sessionEvents.id,
     workspaceId: schema.sessionEvents.workspaceId,
     sessionId: schema.sessionEvents.sessionId,
     sequence: schema.sessionEvents.sequence,
-    type: projectedType,
+    type: payloadMode === "full" ? schema.sessionEvents.type : projectedType,
     payload: selectedPayload,
     occurredAt: schema.sessionEvents.occurredAt,
-    clientEventId: projectedClientEventId,
+    clientEventId:
+      payloadMode === "full" ? schema.sessionEvents.clientEventId : projectedClientEventId,
     turnId: schema.sessionEvents.turnId,
     turnGeneration: schema.sessionEvents.turnGeneration,
     turnAttemptId: schema.sessionEvents.turnAttemptId,
-    turnAssociation: projectedTurnAssociation,
+    turnAssociation:
+      payloadMode === "full" ? schema.sessionEvents.turnAssociation : projectedTurnAssociation,
     duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
-    duplicateReason: projectedDuplicateReason,
+    duplicateReason:
+      payloadMode === "full" ? schema.sessionEvents.duplicateReason : projectedDuplicateReason,
   };
 }
 

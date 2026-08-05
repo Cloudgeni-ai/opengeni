@@ -4955,8 +4955,8 @@ describe("API component integration", () => {
   });
 
   test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
-    const stateSecret = [redacted];
-    const delegationSecret = [redacted];
+    const stateSecret = "github-owner-authority-state";
+    const delegationSecret = "test-delegation-secret";
     const installationId = 438826628;
     const grant = await bootstrapMcpGrant(dbClient.db);
     const managerBearer = await signDelegatedBearer(delegationSecret, grant, {

@@ -23,6 +23,12 @@ import {
   uuid,
   customType,
 } from "drizzle-orm/pg-core";
+import {
+  fromPostgresLosslessJson,
+  fromPostgresLosslessText,
+  toPostgresLosslessJson,
+  toPostgresLosslessText,
+} from "./lossless-json";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -30,6 +36,30 @@ const vector = customType<{ data: number[]; driverData: string }>({
   },
   toDriver(value) {
     return `[${value.join(",")}]`;
+  },
+});
+
+const losslessJsonb = customType<{ data: unknown; driverData: unknown }>({
+  dataType() {
+    return "jsonb";
+  },
+  toDriver(value) {
+    return toPostgresLosslessJson(value);
+  },
+  fromDriver(value) {
+    return fromPostgresLosslessJson(value);
+  },
+});
+
+const losslessText = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return "text";
+  },
+  toDriver(value) {
+    return toPostgresLosslessText(value);
+  },
+  fromDriver(value) {
+    return fromPostgresLosslessText(value);
   },
 });
 
@@ -1826,8 +1856,8 @@ export const sessionRealtimeEntries = pgTable(
     // result/error to the same ordinary turn. It never denotes a child/fork
     // session.
     turnId: uuid("turn_id"),
-    text: text("text"),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    text: losslessText("text"),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
     providerAckedAt: timestamp("provider_acked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1890,14 +1920,6 @@ export const sessionRealtimeEntries = pgTable(
     delegationItemValid: check(
       "session_realtime_entries_delegation_item_check",
       sql`${table.delegationItemId} is null or octet_length(${table.delegationItemId}) between 1 and 1024`,
-    ),
-    textValid: check(
-      "session_realtime_entries_text_check",
-      sql`${table.text} is null or octet_length(${table.text}) <= 131072`,
-    ),
-    payloadValid: check(
-      "session_realtime_entries_payload_check",
-      sql`octet_length(${table.payload}::text) <= 131072`,
     ),
     turnValid: check(
       "session_realtime_entries_turn_check",
@@ -3473,7 +3495,7 @@ export const sessionEvents = pgTable(
     duplicateReason: text("duplicate_reason"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
-    payload: jsonb("payload").$type<unknown>().notNull().default({}),
+    payload: losslessJsonb("payload").$type<unknown>().notNull().default({}),
     clientEventId: text("client_event_id"),
     producerId: text("producer_id"),
     producerSeq: integer("producer_seq"),
@@ -3514,10 +3536,6 @@ export const sessionEvents = pgTable(
         sql`${table.type} not in ('agent.message.delta', 'agent.reasoning.delta', 'sandbox.command.output.delta', 'terminal.pty.output.delta')`,
       ),
     duplicateOfEvent: index("session_events_duplicate_of_event_idx").on(table.duplicateOfEventId),
-    payloadBytes: check(
-      "session_events_payload_bytes_check",
-      sql`octet_length(${table.payload}::text) <= 65536`,
-    ),
     typeBytes: check(
       "session_events_type_bytes_check",
       sql`octet_length(${table.type}) <= 256 and position(E'\n' in ${table.type}) = 0 and position(E'\r' in ${table.type}) = 0`,
@@ -3677,7 +3695,7 @@ export const sessionHistoryItems = pgTable(
     // positions; only the summary uses the half-step. `mode: "number"` maps the
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
-    item: jsonb("item").$type<Record<string, unknown>>().notNull(),
+    item: losslessJsonb("item").$type<Record<string, unknown>>().notNull(),
     // Live-row flag for client-side context compaction. The read path selects
     // only active rows; a compaction supersedes the summarized prefix (sets this
     // false — never deletes, so the full transcript stays as an audit trail) and
@@ -4550,7 +4568,7 @@ export const sessionRecordings = pgTable(
     width: integer("width").notNull(),
     height: integer("height").notNull(),
 
-    reason: text("reason"),
+    reason: losslessText("reason"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     finalizedAt: timestamp("finalized_at", { withTimezone: true }),
@@ -6012,11 +6030,11 @@ export const rigChanges = pgTable(
     }),
     // 'setup_append' | 'definition_edit' (CHECK in migration 0047).
     kind: text("kind").notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull(),
     // 'proposed' | 'verifying' | 'merged' | 'rejected' | 'failed' (CHECK in 0047).
     status: text("status").notNull().default("proposed"),
     proposedBy: text("proposed_by"),
-    verification: jsonb("verification").$type<Record<string, unknown>>(),
+    verification: losslessJsonb("verification").$type<Record<string, unknown>>(),
     resultVersionId: uuid("result_version_id").references(() => rigVersions.id, {
       onDelete: "set null",
     }),

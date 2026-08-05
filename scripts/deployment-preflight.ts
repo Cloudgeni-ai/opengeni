@@ -11,6 +11,11 @@ import {
 import { spawnSync } from "node:child_process";
 import net from "node:net";
 
+import {
+  publicEndpointOrigin,
+  publicProbeErrorDiagnostic,
+} from "./deployment-preflight-diagnostics";
+
 interface Args {
   profile: string;
   productOverlay: string;
@@ -316,7 +321,9 @@ async function tcpConnectProbe(
     });
     socket.once("error", (error) => {
       clearTimeout(timeout);
-      resolve(failed(id, `failed to connect to ${host}:${port}: ${error.message}`));
+      resolve(
+        failed(id, `failed to connect to ${host}:${port}: ${publicProbeErrorDiagnostic(error)}`),
+      );
     });
   });
 }
@@ -325,17 +332,18 @@ async function httpReachabilityProbe(
   id: LiveProbeResult["id"],
   endpoint: string,
 ): Promise<LiveProbeResult> {
+  const publicEndpoint = publicEndpointOrigin(endpoint);
   try {
     const response = await fetch(endpoint, {
       method: "GET",
       signal: AbortSignal.timeout(5_000),
     });
     if (response.status >= 200 && response.status < 500) {
-      return passed(id, `HTTP ${response.status} from ${endpoint}`);
+      return passed(id, `HTTP ${response.status} from ${publicEndpoint}`);
     }
-    return failed(id, `HTTP ${response.status} from ${endpoint}`);
+    return failed(id, `HTTP ${response.status} from ${publicEndpoint}`);
   } catch (error) {
-    return failed(id, `failed to reach ${endpoint}: ${errorMessage(error)}`);
+    return failed(id, `failed to reach ${publicEndpoint}: ${publicProbeErrorDiagnostic(error)}`);
   }
 }
 

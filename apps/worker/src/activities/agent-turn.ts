@@ -841,24 +841,20 @@ function compactionFailureReason(reason: string): string {
 
 export type SafeErrorDiagnostic = {
   name: string;
-  message: string;
   status?: number;
   code?: string;
 };
 
 /**
  * Produce the only exception shape allowed in worker logs. It deliberately
- * excludes stack, cause, response/request bodies, and arbitrary enumerable
- * properties while retaining the exact source message and code.
+ * excludes the arbitrary source message, stack, cause, response/request
+ * bodies, and enumerable properties. Exact failure content belongs in the
+ * permission-controlled session event, not stdout or telemetry.
  */
 export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
   const rawName = error instanceof Error ? error.name : "Error";
   const name = /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error";
-  const rawMessage = error instanceof Error ? error.message : String(error);
-  const diagnostic: SafeErrorDiagnostic = {
-    name,
-    message: rawMessage,
-  };
+  const diagnostic: SafeErrorDiagnostic = { name };
   if (error && typeof error === "object") {
     const status = Number(
       (error as { status?: unknown; statusCode?: unknown }).status ??
@@ -878,7 +874,15 @@ export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
 
 function safeErrorForTelemetry(error: unknown): Error {
   const diagnostic = safeErrorDiagnostic(error);
-  const safe = new Error(diagnostic.message);
+  const metadata = [
+    diagnostic.code ? `code=${diagnostic.code}` : undefined,
+    diagnostic.status ? `status=${diagnostic.status}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  const safe = new Error(
+    metadata.length > 0
+      ? `worker operation failed (${metadata.join(", ")})`
+      : "worker operation failed",
+  );
   safe.name = diagnostic.name;
   return safe;
 }
