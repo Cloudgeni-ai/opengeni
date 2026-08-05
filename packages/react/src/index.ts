@@ -460,6 +460,8 @@ export {
 export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
+export type { UserMessageBodyProps } from "./components/user-message-body";
 export { Markdown } from "./components/markdown";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
