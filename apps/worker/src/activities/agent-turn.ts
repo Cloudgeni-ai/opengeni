@@ -2378,6 +2378,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       acknowledgeQuiescence = true;
       noteCancellationRequested();
     };
+    const acknowledgeRecoveryQuiescence = (): void => {
+      // requestSessionTurnRecovery closed this exact attempt and durably
+      // recorded the replacement cause. The activity still owns the physical
+      // tool/credential boundary until finally drains it and publishes the
+      // exact quiescence receipt; a workflow result alone is never that proof.
+      acknowledgeQuiescence = true;
+      noteCancellationRequested();
+    };
     let turnId: string | undefined;
     let triggerEventId: string | undefined;
     const claimedResult = (
@@ -7142,6 +7150,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -7193,6 +7202,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -7242,6 +7252,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -8029,6 +8040,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return claimedResult({ status: "cancelled" });
         }
         if (recovery.action === "recovering") {
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -8105,6 +8117,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,

@@ -39397,7 +39397,10 @@ export type SessionAttemptInterruptionSettlement = {
  * exact turn -> exact attempt lock order and require the durable interruption.
  * Temporal activity cancellation/terminalization is transport state only. The
  * workflow admits a replacement from this durable receipt, never from the
- * activity promise.
+ * activity promise. The same boundary also applies when the activity itself
+ * durably requested same-turn recovery (for example during a worker rollout):
+ * that recovery event is the logical settlement cause in place of a
+ * Pause/Steer interruption row.
  */
 export async function markSessionAttemptQuiesced(
   db: Database,
@@ -39493,23 +39496,48 @@ export async function markSessionAttemptQuiesced(
           .orderBy(asc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1)
       : [];
-    if (!interruption) {
+    const [recoveryRequest] =
+      attempt && !interruption
+        ? await scopedDb
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.accountId, attempt.accountId),
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.turnId, attempt.turnId),
+                eq(schema.sessionEvents.turnAttemptId, input.attemptId),
+                eq(schema.sessionEvents.type, "turn.recovery.requested"),
+              ),
+            )
+            .limit(1)
+        : [];
+    const recoveryQuiescence =
+      !interruption &&
+      recoveryRequest !== undefined &&
+      attempt.state === "closed" &&
+      attempt.outcome === "interrupted_recoverable";
+    if (!interruption && !recoveryQuiescence) {
       if (input.allowUninterrupted) return [];
       throw new SessionControlInvariantError(
-        `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption`,
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption or recovery request`,
       );
     }
     const liveQuiescence =
+      interruption !== undefined &&
       (attempt.state === "claimed" || attempt.state === "running") &&
       (interruption.state === "pending" ||
         interruption.state === "delivered" ||
         interruption.state === "acknowledged");
     const settledQuiescence =
-      attempt.state === "closed" &&
-      (interruption.state === "settled" || interruption.state === "rejected_stale");
+      recoveryQuiescence ||
+      (interruption !== undefined &&
+        attempt.state === "closed" &&
+        (interruption.state === "settled" || interruption.state === "rejected_stale"));
     if (!liveQuiescence && !settledQuiescence) {
       throw new SessionControlInvariantError(
-        `Attempt ${input.attemptId} cannot acknowledge quiescence from ${attempt.state}/${interruption.state}`,
+        `Attempt ${input.attemptId} cannot acknowledge quiescence from ${attempt.state}/${interruption?.state ?? "recovery"}`,
       );
     }
 
@@ -39806,6 +39834,7 @@ export async function reconcileSessionAttemptQuiescence(
         temporal_activity_id: string;
         interruption_settled: boolean;
         interruption_pending: boolean;
+        recovery_requested: boolean;
         writer_pending: boolean;
       }>(sql`
         select
@@ -39831,6 +39860,16 @@ export async function reconcileSessionAttemptQuiescence(
               and interruption.attempt_id = attempt.id
               and interruption.state in ('pending', 'delivered', 'acknowledged')
           ) as interruption_pending,
+          exists (
+            select 1
+            from session_events event
+            where event.account_id = attempt.account_id
+              and event.workspace_id = attempt.workspace_id
+              and event.session_id = attempt.session_id
+              and event.turn_id = attempt.turn_id
+              and event.turn_attempt_id = attempt.id
+              and event.type = 'turn.recovery.requested'
+          ) as recovery_requested,
           (
             exists (
               select 1
@@ -39882,7 +39921,7 @@ export async function reconcileSessionAttemptQuiescence(
     eligibility.temporal_workflow_run_id !== input.temporalWorkflowRunId ||
     eligibility.temporal_activity_id !== input.temporalActivityId ||
     eligibility.state !== "closed" ||
-    !eligibility.interruption_settled ||
+    (!eligibility.interruption_settled && !eligibility.recovery_requested) ||
     eligibility.interruption_pending
   ) {
     return { action: "stale", events: [] };
@@ -40281,11 +40320,11 @@ export type SessionWorkPeek =
   | { kind: "idle" };
 
 /**
- * Return the oldest exact attempt whose logical interruption settled but whose
- * physical quiescence receipt is still missing. This deliberately searches all
- * attempts: a provider-recovery race can create a newer generation before the
- * predecessor receipt is reconciled, and looking only at the newest attempt
- * would strand the replacement forever.
+ * Return the oldest exact attempt whose logical interruption or same-turn
+ * recovery request settled but whose physical quiescence receipt is still
+ * missing. This deliberately searches all attempts: a provider-recovery race
+ * can create a newer generation before the predecessor receipt is reconciled,
+ * and looking only at the newest attempt would strand the replacement forever.
  */
 async function nextSessionAttemptAwaitingQuiescence(
   db: Database,
@@ -40299,27 +40338,38 @@ async function nextSessionAttemptAwaitingQuiescence(
       attemptId: schema.sessionTurnAttempts.id,
     })
     .from(schema.sessionTurnAttempts)
-    .innerJoin(
-      schema.sessionAttemptInterruptions,
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
-        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
-        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
-      ),
-    )
     .where(
       and(
         eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
         eq(schema.sessionTurnAttempts.sessionId, sessionId),
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
-        inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+        sql`(
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+              and interruption.session_id = ${schema.sessionTurnAttempts.sessionId}
+              and interruption.attempt_id = ${schema.sessionTurnAttempts.id}
+              and interruption.state in ('settled', 'rejected_stale')
+          )
+          or (
+            ${schema.sessionTurnAttempts.outcome} = 'interrupted_recoverable'
+            and exists (
+              select 1
+              from session_events event
+              where event.account_id = ${schema.sessionTurnAttempts.accountId}
+                and event.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+                and event.session_id = ${schema.sessionTurnAttempts.sessionId}
+                and event.turn_id = ${schema.sessionTurnAttempts.turnId}
+                and event.turn_attempt_id = ${schema.sessionTurnAttempts.id}
+                and event.type = 'turn.recovery.requested'
+            )
+          )
+        )`,
       ),
     )
-    .orderBy(
-      asc(schema.sessionAttemptInterruptions.requestedAt),
-      asc(schema.sessionAttemptInterruptions.id),
-    )
+    .orderBy(asc(schema.sessionTurnAttempts.closedAt), asc(schema.sessionTurnAttempts.id))
     .limit(1);
   return row ?? null;
 }

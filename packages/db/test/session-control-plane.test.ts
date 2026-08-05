@@ -4032,16 +4032,19 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "quiesced" });
   });
 
-  test("worker death recovers the same compaction execution without entering the queue", async () => {
+  test("graceful worker shutdown waits for quiescence before recovering the same compaction", async () => {
     const { grant, session } = await fixture();
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
     const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
     const first = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
       session.id,
-      `session-${session.id}`,
-      { attemptId },
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
     );
     expect(
       await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -4053,11 +4056,36 @@ describe("clean session control plane", () => {
       }),
     ).toMatchObject({ action: "recovering" });
 
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    const quiescence = await reconcileSessionAttemptQuiescence(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      activitySettled: true,
+    });
+    expect(quiescence).toMatchObject({
+      action: "quiesced",
+      events: [
+        expect.objectContaining({
+          type: "session.queue.changed",
+          turnAttemptId: attemptId,
+          payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+        }),
+      ],
+    });
+
     const recovered = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
       session.id,
-      `session-${session.id}`,
+      workflowId,
     );
     expect(recovered).toMatchObject({
       id: first!.id,
