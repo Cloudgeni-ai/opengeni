@@ -14,7 +14,6 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import type { FileAsset } from "@opengeni/contracts";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
