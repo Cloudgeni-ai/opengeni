@@ -19,6 +19,7 @@ import {
   listPendingCodexCapacityWakeTargets,
   mutateSessionControlInTransaction,
   reconcileCodexCapacityWait,
+  recordCodexAccountUsageWithWakeTargets,
   registerPendingSessionToolCall,
   setSessionCodexPin,
   submitHumanPromptInTransaction,
@@ -724,6 +725,48 @@ describe("durable Codex capacity waits", () => {
       executionGeneration: 2,
     });
     expect(claimed[0]?.activeAttemptId).not.toBe(scenario.attemptId);
+  });
+
+  test("an identical usage refresh updates freshness without advancing waiter revisions", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, false);
+    const scenario = await seedScenario(ws);
+    const armed = await arm(scenario);
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+    const resetAt = new Date(Date.now() + 5 * 60 * 60_000);
+    const first = await recordCodexAccountUsageWithWakeTargets(dbA, ws.workspaceId, credentialId, {
+      primaryUsedPercent: 100,
+      primaryResetAt: resetAt,
+      secondaryUsedPercent: 25,
+      secondaryResetAt: null,
+      checkedAt: new Date(),
+    });
+    expect(first.result).toBe(true);
+    expect(first.wakeTargets).toEqual([
+      expect.objectContaining({
+        waiterId: armed.waiter.id,
+        wakeRevision: armed.waiter.wakeRevision + 1,
+      }),
+    ]);
+
+    const repeated = await recordCodexAccountUsageWithWakeTargets(
+      dbA,
+      ws.workspaceId,
+      credentialId,
+      {
+        primaryUsedPercent: 100,
+        primaryResetAt: resetAt,
+        secondaryUsedPercent: 25,
+        secondaryResetAt: null,
+        checkedAt: new Date(Date.now() + 1_000),
+      },
+    );
+    expect(repeated.result).toBe(true);
+    expect(repeated.wakeTargets).toEqual([]);
+    expect(
+      (await getCodexCapacityWaitForSession(dbA, ws.workspaceId, scenario.sessionId))?.wakeRevision,
+    ).toBe(first.wakeTargets[0]!.wakeRevision);
   });
 
   test("a policy-pin CAS advances the waiter outbox in the same allocator transaction", async () => {

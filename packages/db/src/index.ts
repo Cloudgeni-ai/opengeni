@@ -15287,6 +15287,24 @@ export async function recordCodexAccountUsageWithWakeTargets(
     db,
     { workspaceId, reason: "codex_usage_refreshed" },
     async (tx) => {
+      const [previous] = await tx
+        .select({
+          primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
+          primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
+          secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
+          secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
+        })
+        .from(schema.codexSubscriptionCredentials)
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.id, credentialId),
+            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+          ),
+        )
+        .for("update");
+      if (!previous) {
+        return { result: false, changed: false };
+      }
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
         .set({
@@ -15316,8 +15334,17 @@ export async function recordCodexAccountUsageWithWakeTargets(
           ),
         )
         .returning({ id: schema.codexSubscriptionCredentials.id });
-      const changed = updated.length > 0;
-      return { result: changed, changed };
+      const rowUpdated = updated.length > 0;
+      const timestampChanged = (before: Date | null, after: Date | null): boolean =>
+        before?.getTime() !== after?.getTime();
+      const capacityChanged =
+        rowUpdated &&
+        snapshot.checkedAt !== undefined &&
+        (previous.primaryUsedPercent !== (snapshot.primaryUsedPercent ?? null) ||
+          timestampChanged(previous.primaryResetAt, snapshot.primaryResetAt ?? null) ||
+          previous.secondaryUsedPercent !== (snapshot.secondaryUsedPercent ?? null) ||
+          timestampChanged(previous.secondaryResetAt, snapshot.secondaryResetAt ?? null));
+      return { result: rowUpdated, changed: capacityChanged };
     },
   );
 }

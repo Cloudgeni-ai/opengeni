@@ -229,6 +229,12 @@ waiter as resumed/stale and performs no work.
 eligibility or future pool membership/default write: it locks the workspace
 rotation row first, applies the mutation, increments matching waiter wake
 revisions only when truth changed, and returns secret-safe signal targets.
+Refreshing only `usage_checked_at` or reset-credit display metadata is not a
+capacity-truth change; an identical quota snapshot must not advance waiter or
+workflow wake revisions. With rotation disabled, an unpinned turn considers only
+the workspace active pointer: a capped pointer enters the same durable wait and
+never becomes “available” merely because it remains connected, while healthy
+alternate subscriptions remain unused until rotation is explicitly enabled.
 `listPendingCodexCapacityWakeTargets` repairs commit→signal loss. The session
 workflow's `codexCapacityChanged` signal is only a nudge; the Postgres revision
 is authoritative. The workflow snapshots its wake counters before dispatching a
