@@ -39,6 +39,7 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { sameSessionForContext } from "@/lib/session-context";
 import { runSingleFlight } from "@/lib/single-flight";
 import {
@@ -90,6 +91,15 @@ const AnalyticsManager = lazy(() =>
     default: module.AnalyticsManager,
   })),
 );
+
+function captureProductAnalyticsEvent(
+  name: AnalyticsEventName,
+  properties: AnalyticsProperties = {},
+): void {
+  void import("@/lib/analytics").then(({ captureAnalyticsEvent }) => {
+    captureAnalyticsEvent(name, properties);
+  });
+}
 
 export type AppContextValue = {
   client: OpenGeniCoreClient;
@@ -480,6 +490,11 @@ export function RootRouteComponent() {
       return null;
     }
     setWorkspaces((current) => upsertWorkspace(current, created));
+    captureProductAnalyticsEvent("workspace_created", {
+      $insert_id: `workspace_created:${created.id}`,
+      account_id: created.accountId,
+      workspace_id: created.id,
+    });
     // Refresh grants so the new workspace's owner permissions apply at once;
     // the workspace itself is already usable if this refresh fails — surface a
     // soft warning so a stale permission set doesn't fail silently.
@@ -835,6 +850,14 @@ export function RootRouteComponent() {
       }
       setSession(created);
       setConnectionState("idle");
+      captureProductAnalyticsEvent("session_started", {
+        $insert_id: `session_started:${created.id}`,
+        account_id: created.accountId,
+        workspace_id: created.workspaceId,
+        session_id: created.id,
+        ...(attempt.request.model ? { model: attempt.request.model } : {}),
+        start_mode: options?.startMode ?? "standard",
+      });
       return created;
     } catch (error) {
       // Keep the attempt on failure. An exact retry dedups against a create that
@@ -957,6 +980,10 @@ export function RootRouteComponent() {
   ) {
     if (mode === "signup") {
       await signUpEmail(input);
+      captureProductAnalyticsEvent("signup_submitted", {
+        method: "email",
+        verification_required: true,
+      });
     } else {
       await signInEmail({
         email: input.email,
@@ -1206,6 +1233,8 @@ export function RootRouteComponent() {
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager
+            analyticsAccountId={accessContext?.defaultAccountId ?? null}
+            analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
             isPublicAuthRoute={isPublicAuthRoute}

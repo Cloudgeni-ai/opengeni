@@ -77,7 +77,7 @@ export function SessionStatus({ status, label, size = "md", className }: Session
       data-status={status}
       className={cn(
         "og-root inline-flex shrink-0 items-center rounded-full border font-medium",
-        size === "sm" ? "gap-1 px-1.5 py-px text-og-xs" : "gap-1.5 px-2 py-0.5 text-xs",
+        size === "sm" ? "gap-1 px-1.5 py-px text-og-xs" : "gap-1.5 px-2 py-0.5 text-og-control",
         meta.badgeClassName,
         className,
       )}

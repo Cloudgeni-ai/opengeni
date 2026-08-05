@@ -281,7 +281,7 @@ describe("normalizeCodexRequestBody: tool_search replay shapes", () => {
     const out = normalizeCodexRequestBody(body, (m) => m);
     const call = (out.input as Array<Record<string, unknown>>)[0]!;
     expect(call.arguments).toEqual({ query: "send email", limit: 5 });
-    expect("id" in call).toBe(false); // account-bound tsc_ id stripped like every item id
+    expect("id" in call).toBe(false); // provider-stored tsc_ id stripped like every item id
     expect(call.call_id).toBe("c1"); // pairing key preserved
   });
 

@@ -22,9 +22,11 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
-      CapabilityCatalogResponse.parse(await buildCapabilityCatalog({ db, workspaceId, settings })),
+      CapabilityCatalogResponse.parse(
+        await buildCapabilityCatalog({ db, workspaceId, settings, subjectId: grant.subjectId }),
+      ),
     );
   });
 

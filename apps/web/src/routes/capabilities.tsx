@@ -58,7 +58,6 @@ import {
   oauthConnectionRef,
   oauthConnectionOwnership,
   oauthResumeAction,
-  preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
   type CapabilityFilter,
@@ -67,7 +66,7 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
-import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import {
   personalSlackAccountState,
   personalSlackCapability,
@@ -292,14 +291,14 @@ export function CapabilitiesRoute({
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
-  const selectedSocialConnection = selectedItem
+  const selectedSocialConnections = selectedItem
     ? (() => {
         const plan = capabilityConnectPlan(selectedItem);
         return plan.mode === "social_oauth"
-          ? preferredSocialConnection(socialConnections, plan.provider)
-          : null;
+          ? socialConnections.filter((connection) => connection.provider === plan.provider)
+          : [];
       })()
-    : null;
+    : [];
   const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
   useEffect(() => {
@@ -535,6 +534,7 @@ export function CapabilitiesRoute({
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
         const response = await client.startSocialOAuth(workspaceId, {
           provider: action.provider,
+          ownership: action.ownership,
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -753,14 +753,13 @@ export function CapabilitiesRoute({
       );
     } else {
       const reason = params.get("reason");
+      const message = mcpOAuthCallbackFailureMessage(params.get("stage"), reason);
       const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
       if (item) {
-        setSheetError(
-          reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
-        );
+        setSheetError(message);
         setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
       } else {
-        toast.error("Connection failed", { description: reason ?? undefined });
+        toast.error("Connection failed", { description: message });
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1388,7 +1387,7 @@ export function CapabilitiesRoute({
         }}
         busy={busyId === selectedItem?.id}
         errorMessage={sheetError}
-        socialConnection={selectedSocialConnection}
+        socialConnections={selectedSocialConnections}
         canManageSocial={canManageSocial}
         onAction={handleAction}
       />

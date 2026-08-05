@@ -80,7 +80,7 @@ export type UseCodexAccountsResult = {
 
 const EMPTY_SETTINGS: CodexRotationSettings = {
   rotationEnabled: false,
-  rotationStrategy: "most_remaining",
+  rotationStrategy: "sharded",
   activeCredentialId: null,
 };
 

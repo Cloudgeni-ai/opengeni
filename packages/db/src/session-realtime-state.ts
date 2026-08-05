@@ -1,6 +1,6 @@
 import { and, eq, gt } from "drizzle-orm";
 
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 
 export async function sessionRealtimeIsActiveInTransaction(

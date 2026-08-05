@@ -22,6 +22,7 @@ import {
 } from "@opengeni/observability";
 import {
   Connection,
+  isGrpcServiceError,
   ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   Client as TemporalClient,
@@ -125,6 +126,13 @@ export function temporalActivityLeaseSettled(
   return (
     heartbeatAt !== null && heartbeatTimeoutMs !== null && nowMs >= heartbeatAt + heartbeatTimeoutMs
   );
+}
+
+/** The exact Temporal workflow run is absent, so it cannot retain an activity. */
+export function temporalWorkflowExecutionNotFound(error: unknown): boolean {
+  // gRPC status code 5 is NOT_FOUND. The typed guard prevents unrelated
+  // provider/HTTP errors carrying a numeric code from proving quiescence.
+  return isGrpcServiceError(error) && error.code === 5;
 }
 
 type WorkerWorkflowDefinition =
@@ -312,10 +320,16 @@ export async function createWorkerWorkflowSignaler(
       // receipt and its exact wake revision atomically.
     },
     inspectSessionAttemptActivity: async ({ workflowId, workflowRunId, activityId }) => {
-      const description = await connection.workflowService.describeWorkflowExecution({
-        namespace: settings.temporalNamespace,
-        execution: { workflowId, runId: workflowRunId },
-      });
+      let description;
+      try {
+        description = await connection.workflowService.describeWorkflowExecution({
+          namespace: settings.temporalNamespace,
+          execution: { workflowId, runId: workflowRunId },
+        });
+      } catch (error) {
+        if (temporalWorkflowExecutionNotFound(error)) return "settled";
+        throw error;
+      }
       const pending = description.pendingActivities?.find(
         (activity) => activity.activityId === activityId,
       );

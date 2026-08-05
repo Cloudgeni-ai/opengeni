@@ -237,10 +237,18 @@ async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T
   const response = await fetch(`${apiBaseUrl}${path}`, {
     method: "POST",
     credentials: "include",
-    headers: { "content-type": "application/json" },
+    // Managed-session mutations intentionally authenticate only with the
+    // Better Auth cookie. The contract header is protocol negotiation, not an
+    // access-key/bearer credential, and is required by the API before routing
+    // protected state changes.
+    headers: {
+      "content-type": "application/json",
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    },
     body: JSON.stringify(body),
   });
   if (!response.ok) {
+    handleApiContractResponse(response);
     throw new ApiError(response.status, await response.text());
   }
   return (await response.json()) as T;

@@ -21,8 +21,8 @@ import {
   type PreferenceRegistryTrust,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
-import type { Database } from "./index";
-import { setSubjectRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./index";
+import type { Database } from "./database";
+import { setSubjectRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
 

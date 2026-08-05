@@ -128,7 +128,12 @@ never promoted into governance.
 
 Responses providers use the Agents SDK's structured Responses conversion, so
 tool calls/results remain real protocol items on the wire. Chat providers use a
-plain-text adapter because Chat Completions has a different item protocol.
+request-local transcript adapter because Chat Completions has a different item
+protocol. It projects only record types the Chat converter cannot express,
+preserves their readable historical facts, and never mutates canonical history.
+Historical `tool_search` calls and outputs are not rerun, compared with the
+current catalog, or reclassified. There is no switch-time rewrite and no second
+durable history form.
 
 Before the provider call, OpenGeni estimates the complete checkpoint input. It
 replaces aggregate oversized tool results oldest-first only in the temporary

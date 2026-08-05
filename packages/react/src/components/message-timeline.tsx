@@ -37,6 +37,11 @@ import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
 import { Markdown } from "./markdown";
 import {
+  UserMessageBody,
+  UserMessageDisclosureProvider,
+  type UserMessageDisclosureContextValue,
+} from "./user-message-body";
+import {
   createTipFollowState,
   readerScrollUpPx,
   tipFollowCancel,
@@ -359,6 +364,13 @@ export function MessageTimeline({
    */
   const programmaticScrollRef = useRef(0);
   /**
+   * Disclosure height changes are not reader navigation. While an unpinned
+   * Show more/less state is active, its clamp/native-anchor scroll echoes must
+   * never geometrically re-enable bottom-follow. A later real reader navigation
+   * or explicit Jump to latest releases this fence.
+   */
+  const disclosureKeepsUnpinnedRef = useRef(false);
+  /**
    * Unarmed scroll-away observed; waiting for scrollend (or rAF fallback).
    * Blocks layout tip-follow so a stream token cannot yank before leave settles.
    */
@@ -369,6 +381,7 @@ export function MessageTimeline({
   // deliberate chip remounts (activity→turn wrap, nested key flips) so a fold
   // that already settled closed — or that the reader closed — never reopens.
   const foldMemoryRef = useRef<Map<string, FoldRestingState>>(new Map());
+  const userMessageDisclosureMemoryRef = useRef<Map<string, boolean>>(new Map());
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const groupKeyByItemIdRef = useRef<Map<string, string>>(new Map());
   const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
@@ -513,14 +526,18 @@ export function MessageTimeline({
     target: EventTarget | null;
     currentTarget: EventTarget | null;
   }) => {
-    // Nested overflow (code / notice pre) or mostly-horizontal pan: not tip leave.
-    if (event.deltaY >= 0) {
-      return;
-    }
+    // Nested overflow (code / notice pre) or mostly-horizontal pan: not
+    // timeline reader intent. A real timeline wheel in either direction
+    // releases the disclosure fence; downward movement may then re-pin
+    // naturally when it reaches the bottom.
     if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
     if (wheelConsumedByNestedScrollable(event)) {
+      return;
+    }
+    disclosureKeepsUnpinnedRef.current = false;
+    if (event.deltaY >= 0) {
       return;
     }
     const node =
@@ -546,10 +563,21 @@ export function MessageTimeline({
     ) {
       return;
     }
+    disclosureKeepsUnpinnedRef.current = false;
     readerIntentArmRef.current = true;
   };
 
   const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
+    if (
+      event.key === "ArrowUp" ||
+      event.key === "ArrowDown" ||
+      event.key === "PageUp" ||
+      event.key === "PageDown" ||
+      event.key === "Home" ||
+      event.key === "End"
+    ) {
+      disclosureKeepsUnpinnedRef.current = false;
+    }
     if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
       return;
     }
@@ -572,6 +600,65 @@ export function MessageTimeline({
       };
     },
     [cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
+  );
+
+  const beginUserMessageDisclosureChange = useCallback(
+    (messageBody: HTMLElement, disclosureControl: HTMLElement) => {
+      const node = scrollRef.current;
+      if (!node || !node.contains(messageBody)) {
+        return null;
+      }
+      const keepBottom = autoFollow && pinnedRef.current && !hasNewerRef.current;
+      if (keepBottom) {
+        return () => {
+          const current = scrollRef.current;
+          if (current) {
+            snapToBottom(current);
+          }
+        };
+      }
+
+      disclosureKeepsUnpinnedRef.current = true;
+
+      const scrollerRect = node.getBoundingClientRect();
+      const group = messageBody.closest<HTMLElement>("[data-og-timeline-group-anchor]");
+      const groupRect = group?.getBoundingClientRect();
+      // Expanding from a visible message top keeps the beginning in place.
+      // Collapsing after reading deep in the message keeps the disclosure
+      // control in place because the message top is already above the viewport.
+      const anchor =
+        group &&
+        groupRect &&
+        groupRect.top >= scrollerRect.top - 1 &&
+        groupRect.top < scrollerRect.bottom
+          ? group
+          : disclosureControl;
+      const beforeTop = anchor.getBoundingClientRect().top - scrollerRect.top;
+
+      return () => {
+        const current = scrollRef.current;
+        if (!current || !current.contains(anchor)) {
+          return;
+        }
+        const currentScrollerTop = current.getBoundingClientRect().top;
+        const afterTop = anchor.getBoundingClientRect().top - currentScrollerTop;
+        const delta = afterTop - beforeTop;
+        if (Math.abs(delta) > 0.5) {
+          writeScrollTop(current, current.scrollTop + delta);
+        }
+        applyPinned(false);
+        syncScrollBaseline(current);
+      };
+    },
+    [applyPinned, autoFollow, snapToBottom, syncScrollBaseline, writeScrollTop],
+  );
+
+  const userMessageDisclosureContext = useMemo<UserMessageDisclosureContextValue>(
+    () => ({
+      expandedByMessageId: userMessageDisclosureMemoryRef.current,
+      beginChange: beginUserMessageDisclosureChange,
+    }),
+    [beginUserMessageDisclosureChange],
   );
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
@@ -868,6 +955,8 @@ export function MessageTimeline({
     groupKeyByItemIdRef.current = new Map();
     groupOffsetByKeyRef.current = new Map();
     foldMemoryRef.current.clear();
+    userMessageDisclosureMemoryRef.current.clear();
+    disclosureKeepsUnpinnedRef.current = false;
     seenActivityIdsRef.current.clear();
     applyPinned(true);
   }, [allGroups.length, revealed, applyPinned]);
@@ -1045,6 +1134,12 @@ export function MessageTimeline({
     if (programmatic) {
       programmaticScrollRef.current = 0;
     }
+    if (disclosureKeepsUnpinnedRef.current) {
+      stopFollow();
+      applyPinned(false);
+      syncScrollBaseline(node);
+      return;
+    }
 
     if (autoFollow && pinnedRef.current && !hasNewer) {
       // Fold / composer / SessionChrome: viewport shrink raises maxScroll without
@@ -1144,6 +1239,13 @@ export function MessageTimeline({
       return;
     }
     cancelLeaveFallback();
+    if (disclosureKeepsUnpinnedRef.current) {
+      programmaticScrollRef.current = 0;
+      stopFollow();
+      applyPinned(false);
+      syncScrollBaseline(node);
+      return;
+    }
     if (programmaticScrollRef.current > 0) {
       programmaticScrollRef.current = 0;
       syncScrollBaseline(node);
@@ -1164,6 +1266,8 @@ export function MessageTimeline({
           Unpinned: native scroll anchoring holds the reader's place. */}
                   <div
                     ref={scrollRef}
+                    data-og-timeline-scroller=""
+                    data-og-bottom-follow={autoFollow && pinned && !hasNewer ? "true" : "false"}
                     tabIndex={-1}
                     onScroll={onScroll}
                     onScrollEnd={onScrollEnd}
@@ -1183,7 +1287,7 @@ export function MessageTimeline({
                     <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
                       {groups.length === 0
                         ? (emptyState ?? (
-                            <p className="py-10 text-center text-sm text-og-fg-subtle">
+                            <p className="py-10 text-center text-og-menu text-og-fg-subtle">
                               No activity yet.
                             </p>
                           ))
@@ -1224,21 +1328,23 @@ export function MessageTimeline({
                                 turnSummary,
                               ]}
                             >
-                              <TimelineGroupView
-                                group={group}
-                                renderMessageText={renderMessageText}
-                                onOpenSession={onOpenSession}
-                                onMemoryClick={onMemoryClick}
-                                onReconnect={onReconnect}
-                                resolveProviderLogo={resolveProviderLogo}
-                                toolRegistry={toolRegistry}
-                                turnSummary={turnSummary}
-                                foldLiveCluster={isAgentProgress(next)}
-                                trailingAgentText={trailingAgentTextAfterTurn(group, next)}
-                                contextCompactionCount={
-                                  contextCompactionCount > 0 ? contextCompactionCount : undefined
-                                }
-                              />
+                              <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
+                                <TimelineGroupView
+                                  group={group}
+                                  renderMessageText={renderMessageText}
+                                  onOpenSession={onOpenSession}
+                                  onMemoryClick={onMemoryClick}
+                                  onReconnect={onReconnect}
+                                  resolveProviderLogo={resolveProviderLogo}
+                                  toolRegistry={toolRegistry}
+                                  turnSummary={turnSummary}
+                                  foldLiveCluster={isAgentProgress(next)}
+                                  trailingAgentText={trailingAgentTextAfterTurn(group, next)}
+                                  contextCompactionCount={
+                                    contextCompactionCount > 0 ? contextCompactionCount : undefined
+                                  }
+                                />
+                              </UserMessageDisclosureProvider>
                             </TimelineGroupRenderBoundary>
                           </div>
                         );
@@ -1270,7 +1376,7 @@ export function MessageTimeline({
                         className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
                       >
                         {loadingOlder || loadingOldest ? (
-                          <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                          <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
                             <span className="og-shimmer-text">
                               {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
                             </span>
@@ -1317,7 +1423,7 @@ export function MessageTimeline({
                             }}
                             className={cn(
                               "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                              "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                              "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                               "hover:border-og-border-strong disabled:opacity-60",
                             )}
                           >
@@ -1339,7 +1445,7 @@ export function MessageTimeline({
                         aria-live="polite"
                         className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
                       >
-                        <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                        <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
                           <span className="og-shimmer-text">Loading later activity…</span>
                         </span>
                       </motion.div>
@@ -1354,6 +1460,7 @@ export function MessageTimeline({
                         exit={{ opacity: 0, y: 8 }}
                         transition={{ duration: 0.15, ease: "easeOut" }}
                         onClick={() => {
+                          disclosureKeepsUnpinnedRef.current = false;
                           if (hasNewer) {
                             // Do not pin against the current history page — its bottom
                             // is not the tip. The pin + snap run when the tip window
@@ -1397,7 +1504,7 @@ export function MessageTimeline({
                         className={cn(
                           "absolute bottom-4 left-1/2 -translate-x-1/2",
                           "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                          "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                          "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                           "hover:border-og-border-strong",
                         )}
                       >
@@ -1541,7 +1648,7 @@ class TimelineGroupRenderBoundary extends Component<
         <div
           data-testid="timeline-group-render-error"
           role="status"
-          className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-sm text-og-fg-muted"
+          className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
         >
           <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
           <div>
@@ -2171,7 +2278,9 @@ function UserMessageRow({
             {renderMessageText ? (
               renderMessageText(item.text, item)
             ) : (
-              <Markdown>{item.text}</Markdown>
+              <UserMessageBody messageId={item.id} text={item.text}>
+                <Markdown>{item.text}</Markdown>
+              </UserMessageBody>
             )}
           </div>
         </CopyHoverFrame>
@@ -2505,12 +2614,12 @@ function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][
     <div className="flex min-w-0 items-start gap-2.5">
       <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
       <div className="min-w-0 flex-1">
-        <span className="text-xs font-medium text-og-fg-muted">
+        <span className="text-og-control font-medium text-og-fg-muted">
           {MACHINE_INPUT_META[member.kind]}
         </span>
-        {source && <span className="ml-1.5 text-xs text-og-fg-subtle">from {source}</span>}
+        {source && <span className="ml-1.5 text-og-control text-og-fg-subtle">from {source}</span>}
         {summary ? (
-          <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-og-fg">
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-og-menu leading-5 text-og-fg">
             {truncate(summary, 320)}
           </p>
         ) : null}
@@ -2531,7 +2640,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
     <div
       className={cn(
         enter && "animate-og-enter",
-        "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-sm",
+        "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-og-menu",
         tone,
       )}
       role="status"
@@ -2542,7 +2651,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       <div className="min-w-0 flex-1">
         <span className="whitespace-pre-wrap break-words">{item.text}</span>
         {item.details ? (
-          <details className="mt-2 text-xs">
+          <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
               {JSON.stringify(item.details.value, null, 2)}
@@ -2552,7 +2661,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       </div>
       {item.action ? (
         <a
-          className="shrink-0 rounded-og-sm border border-current/25 px-2 py-1 text-xs font-medium hover:bg-current/10"
+          className="shrink-0 rounded-og-sm border border-current/25 px-2 py-1 text-og-control font-medium hover:bg-current/10"
           href={item.action.url}
           rel="noreferrer"
           target="_blank"
@@ -2631,7 +2740,7 @@ function AuthNeededRow({
             onClick={() => void start()}
             disabled={busy}
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
               "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
             )}
           >
@@ -2644,7 +2753,7 @@ function AuthNeededRow({
             rel="noreferrer"
             target="_blank"
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
               "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
             )}
           >
@@ -2683,7 +2792,7 @@ function AuthProviderLogo({ src, label }: { src: string | null; label: string })
   const showImage = src && !failed;
   return (
     <span
-      className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-sm font-semibold text-og-fg-muted"
+      className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-og-menu font-semibold text-og-fg-muted"
       aria-hidden
     >
       {showImage ? (

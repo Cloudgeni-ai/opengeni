@@ -5,6 +5,7 @@ import {
   pinnedFetch,
   readResponseBodyBounded,
   readResponseJsonBounded,
+  RequestDeadlineError,
   resolvePinnedDestination,
   ResponseBodyLimitError,
   validateHttpUrl,
@@ -503,6 +504,30 @@ describe("bounded response readers", () => {
     await expect(readResponseBodyBounded(response, 32, "OAuth response")).rejects.toMatchObject<
       Partial<ResponseBodyLimitError>
     >({ reason: "invalid_content_length" });
+  });
+
+  test("aborts a chunked body that stays below the byte limit but never completes", async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(
+      readResponseBodyBounded(response, 32, "OAuth response", {
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(RequestDeadlineError);
+    await Bun.sleep(0);
+    expect(cancelled).toBe(true);
   });
 });
 

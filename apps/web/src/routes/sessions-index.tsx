@@ -23,7 +23,11 @@ import {
   type ComposerState,
 } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
-import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
+import {
+  NewSessionRealtimeControl,
+  RealtimeVoiceModelPanel,
+  useRealtimeModelSelection,
+} from "@opengeni/react/realtime";
 import { OpenGeniApiError, type SessionRealtimeModel } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -40,14 +44,20 @@ import { BillingClassMark } from "@/components/billing-class-mark";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
-import { RepositoryContextPicker } from "@/components/repository-picker";
+import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
+import {
+  EMPTY_COMPOSER_LAUNCH,
+  composerLaunchSearchKey,
+  type ComposerLaunchSearch,
+} from "@/lib/composer-launch";
 import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
+import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import {
@@ -86,17 +96,30 @@ import {
 } from "@/routes/sessions-index-submission";
 import type { Session } from "@/types";
 
-export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
+export function SessionsIndexRoute({
+  workspaceId,
+  launch = EMPTY_COMPOSER_LAUNCH,
+}: {
+  workspaceId: string;
+  launch?: ComposerLaunchSearch;
+}) {
   const { accessKeyVersion } = useAppContext();
   return (
     <SessionsIndexRouteContent
       key={`${workspaceId}:${accessKeyVersion}`}
       workspaceId={workspaceId}
+      launch={launch}
     />
   );
 }
 
-function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
+function SessionsIndexRouteContent({
+  workspaceId,
+  launch,
+}: {
+  workspaceId: string;
+  launch: ComposerLaunchSearch;
+}) {
   const context = useAppContext();
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
@@ -219,6 +242,12 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
+  // Shared with the bar start control and the mobile “+ → Voice model” panel.
+  const voiceSelection = useRealtimeModelSelection({
+    client: context.client,
+    workspaceId,
+    codexConnected,
+  });
 
   useEffect(() => {
     if (createComposerFocusGen === 0 || newSessionDraft.loading) return;
@@ -227,86 +256,189 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     textarea.focus();
   }, [createComposerFocusGen, newSessionDraft.loading]);
 
-  const submitNewSession = async (realtimeModel: SessionRealtimeModel | null): Promise<boolean> => {
-    const typedText = message.trim();
-    const text = typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-    if (busy || newSessionDraft.loading || newSessionDraft.conflict) return false;
-    if (
-      createdSessionAuthority === null &&
-      ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
-    ) {
-      return false;
-    }
-    setSubmitting(true);
-    try {
-      return await runNewSessionRouteSubmission({
-        authority: createdSessionAuthority,
-        onAuthorityChange: setCreatedSessionAuthority,
-        create: async () => {
-          const submittedResources =
-            draft.compute.kind === "machine"
-              ? attachments.readyResources
-              : persistedValue.resources;
-          const flushed = await newSessionDraft.flush();
-          if (!flushed) return null;
-          const submission = submissionFromSessionDraft(draft);
-          const created = await context.startSession(
-            workspaceId,
-            {
-              text,
-              resources: submittedResources,
-              tools: persistedValue.tools,
-              model: persistedValue.model,
-              reasoningEffort: persistedValue.reasoningEffort,
-              latencyMode: persistedValue.latencyMode,
-              ...submission.extras,
-            },
-            {
-              targetSandboxId: submission.options.targetSandboxId,
-              workingDir: submission.options.workingDir,
-              omitWorkspaceResources: submission.omitWorkspaceResources,
-              expectedNewSessionDraftRevision: flushed.revision,
-              ...(realtimeModel && !typedText ? { startMode: "realtime" as const } : {}),
-            },
-          );
-          if (!created) return null;
-          return {
-            sessionId: created.id,
-            settleDraft: async () => {
-              const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
-              if (acknowledged?.kind === "consumed") {
-                setMessage("");
-                setDraft(emptySessionDraft());
-                attachments.removeReadyFiles(
-                  submittedResources.flatMap((resource) =>
-                    resource.kind === "file" ? [resource.fileId] : [],
-                  ),
-                );
-              } else if (
-                !acknowledged ||
-                !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-              ) {
-                const preserved = await newSessionDraft.flush();
-                if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                  return false;
+  const submitNewSession = useLatestCallback(
+    async (
+      realtimeModel: SessionRealtimeModel | null,
+      policy?: Pick<ComposerLaunchSearch, "model" | "effort" | "latency">,
+    ): Promise<boolean> => {
+      const typedText = message.trim();
+      const text =
+        typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+      if (busy || newSessionDraft.loading || newSessionDraft.conflict) return false;
+      if (
+        createdSessionAuthority === null &&
+        ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
+      ) {
+        return false;
+      }
+      const model = policy?.model ?? persistedValue.model;
+      const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
+      const latencyMode = policy?.latency ?? persistedValue.latencyMode;
+      setSubmitting(true);
+      try {
+        return await runNewSessionRouteSubmission({
+          authority: createdSessionAuthority,
+          onAuthorityChange: setCreatedSessionAuthority,
+          create: async () => {
+            // Voice launch is realtime-only: never turn composer text/files into
+            // an initial message. Persist the draft so a pending autosave is not
+            // lost on navigate, but do not consume it — text stays for later.
+            if (realtimeModel) {
+              const flushed = await newSessionDraft.flush();
+              if (!flushed) return null;
+              const submission = submissionFromSessionDraft(draft);
+              const created = await context.startSession(
+                workspaceId,
+                {
+                  text: "",
+                  resources: [],
+                  tools: persistedValue.tools,
+                  model,
+                  reasoningEffort,
+                  latencyMode,
+                  ...submission.extras,
+                },
+                {
+                  targetSandboxId: submission.options.targetSandboxId,
+                  workingDir: submission.options.workingDir,
+                  omitWorkspaceResources: submission.omitWorkspaceResources,
+                  startMode: "realtime",
+                },
+              );
+              if (!created) return null;
+              return {
+                sessionId: created.id,
+                settleDraft: async () => true,
+              };
+            }
+
+            const submittedResources =
+              draft.compute.kind === "machine"
+                ? attachments.readyResources
+                : persistedValue.resources;
+            const flushed = await newSessionDraft.flush();
+            if (!flushed) return null;
+            const submission = submissionFromSessionDraft(draft);
+            const created = await context.startSession(
+              workspaceId,
+              {
+                text,
+                resources: submittedResources,
+                tools: persistedValue.tools,
+                model,
+                reasoningEffort,
+                latencyMode,
+                ...submission.extras,
+              },
+              {
+                targetSandboxId: submission.options.targetSandboxId,
+                workingDir: submission.options.workingDir,
+                omitWorkspaceResources: submission.omitWorkspaceResources,
+                expectedNewSessionDraftRevision: flushed.revision,
+              },
+            );
+            if (!created) return null;
+            return {
+              sessionId: created.id,
+              settleDraft: async () => {
+                const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+                if (acknowledged?.kind === "consumed") {
+                  setMessage("");
+                  setDraft(emptySessionDraft());
+                  attachments.removeReadyFiles(
+                    submittedResources.flatMap((resource) =>
+                      resource.kind === "file" ? [resource.fileId] : [],
+                    ),
+                  );
+                } else if (
+                  !acknowledged ||
+                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                ) {
+                  const preserved = await newSessionDraft.flush();
+                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                    return false;
+                  }
                 }
-              }
-              return true;
-            },
-          };
-        },
-        navigate: async (sessionId) => {
-          await navigate({
-            to: "/workspaces/$workspaceId/sessions/$sessionId",
-            params: { workspaceId, sessionId },
-            search: realtimeModel ? { realtime: realtimeModel } : {},
-          });
-        },
+                return true;
+              },
+            };
+          },
+          navigate: async (sessionId) => {
+            const search: ComposerLaunchSearch = {
+              ...(model ? { model } : {}),
+              ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+              ...(latencyMode ? { latency: latencyMode } : {}),
+              ...(realtimeModel ? { realtime: realtimeModel } : {}),
+            };
+            await navigate({
+              to: "/workspaces/$workspaceId/sessions/$sessionId",
+              params: { workspaceId, sessionId },
+              search,
+            });
+          },
+        });
+      } finally {
+        setSubmitting(false);
+      }
+    },
+  );
+
+  // URL launch: ?model=&effort=&latency= prefill the composer; +?realtime= also
+  // creates a realtime-first session and autostarts voice on the session page.
+  // Wait for the durable new-session draft so remote hydrate cannot stomp the
+  // URL policy after we apply it.
+  const launchModel = launch.model;
+  const launchEffort = launch.effort;
+  const launchLatency = launch.latency;
+  const launchRealtime = launch.realtime;
+  const launchKey = composerLaunchSearchKey(launch);
+  const handledLaunchKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!launchKey || handledLaunchKeyRef.current === launchKey) return;
+    if (newSessionDraft.loading || newSessionDraft.conflict !== null) return;
+    if (launchModel) setModel(launchModel);
+    if (launchEffort) setReasoningEffort(launchEffort);
+    if (launchLatency) setLatencyMode(launchLatency);
+    if (!launchRealtime) {
+      handledLaunchKeyRef.current = launchKey;
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId },
+        search: {},
+        replace: true,
       });
-    } finally {
-      setSubmitting(false);
+      return;
     }
-  };
+    if (busy || !computeReady || !context.workspaceMcpCatalogReady || attachments.hasUnresolved) {
+      return;
+    }
+    handledLaunchKeyRef.current = launchKey;
+    void submitNewSession(launchRealtime, {
+      model: launchModel,
+      effort: launchEffort,
+      latency: launchLatency,
+    }).then((ok) => {
+      if (!ok) handledLaunchKeyRef.current = null;
+    });
+  }, [
+    attachments.hasUnresolved,
+    busy,
+    computeReady,
+    context.workspaceMcpCatalogReady,
+    launchEffort,
+    launchLatency,
+    launchModel,
+    launchRealtime,
+    launchKey,
+    navigate,
+    newSessionDraft.conflict,
+    newSessionDraft.loading,
+    setLatencyMode,
+    setModel,
+    setReasoningEffort,
+    submitNewSession,
+    workspaceId,
+  ]);
 
   // The session does not exist yet, so this surface cannot use `useComposer`
   // (that hook sends to a session). It still renders the package ChatComposer
@@ -392,6 +524,34 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                     firstPartyMcpTools: selection.firstPartyToolIds,
                   }));
                 }}
+                {...(draft.compute.kind === "sandbox"
+                  ? {
+                      repositories: {
+                        selectedCount:
+                          context.selectedRepoIds.size +
+                          context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
+                        disabled: busy || newSessionDraft.loading,
+                        panel: (
+                          <WorkspaceRepositoryMenuBody
+                            workspaceId={workspaceId}
+                            disabled={busy || newSessionDraft.loading}
+                          />
+                        ),
+                      },
+                    }
+                  : {})}
+                voiceModel={{
+                  selectedLabel: voiceSelection.selectedModel.label,
+                  disabled: busy || newSessionDraft.loading,
+                  panel: (
+                    <RealtimeVoiceModelPanel
+                      models={voiceSelection.models}
+                      selectedModel={voiceSelection.selectedModel}
+                      disabled={busy || newSessionDraft.loading}
+                      onSelect={voiceSelection.selectModel}
+                    />
+                  ),
+                }}
               />
             }
             actions={
@@ -399,6 +559,10 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                 client={context.client}
                 workspaceId={workspaceId}
                 codexConnected={codexConnected}
+                models={voiceSelection.models}
+                selectedModel={voiceSelection.selectedModel}
+                onSelectModel={voiceSelection.selectModel}
+                modelMenu="split-desktop"
                 disabled={
                   busy ||
                   newSessionDraft.loading ||
@@ -639,67 +803,98 @@ function SessionControlStrip({
         onChange={onToolSelectionChange}
       />
       {showRepos ? (
-        <WorkspaceRepositoryPicker workspaceId={workspaceId} disabled={disabled} />
+        <WorkspaceRepositoryPicker
+          workspaceId={workspaceId}
+          disabled={disabled}
+          triggerClassName="max-sm:hidden"
+        />
       ) : null}
     </div>
   );
 }
 
+function workspaceRepositoryPickerProps(
+  context: ReturnType<typeof useAppContext>,
+  workspaceId: string,
+  disabled: boolean,
+) {
+  return {
+    setupMode:
+      context.githubStatus?.setupMode ??
+      (context.clientConfig.productAccessMode === "managed" ? "platform" : "operator"),
+    configured: context.githubStatus?.configured === true,
+    status: context.githubStatus?.status ?? ("disabled" as const),
+    installUrl: context.githubStatus?.installUrl ?? null,
+    linkUrl: context.githubStatus?.linkUrl ?? null,
+    installations: context.githubStatus?.installations ?? [],
+    repositories: context.githubRepos,
+    groups: context.repositoryGroups,
+    selectedRepoIds: context.selectedRepoIds,
+    selectedRepoRefs: context.selectedRepoRefs,
+    selectedInstallationId: context.selectedInstallationId,
+    manualRepos: context.manualRepos,
+    manualOpen: context.manualReposOpen,
+    githubAppOpen: context.githubAppOpen,
+    org: context.githubOrg,
+    pending: context.busy || disabled,
+    repoBusy: context.repoBusy,
+    githubAppBusy: context.githubAppBusy,
+    onRefresh: () => context.refreshGitHub(workspaceId, undefined, { sync: true }),
+    onToggleRepo: context.toggleGitHubRepository,
+    onRefChange: (repoId: number, ref: string) =>
+      context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref })),
+    onManualOpenChange: context.setManualReposOpen,
+    onManualAdd: context.addManualRepository,
+    onManualUpdate: (id: number, patch: Partial<RepoDraft>) =>
+      context.setManualRepos((current) =>
+        current.map((repo) => (repo.id === id ? { ...repo, ...patch } : repo)),
+      ),
+    onManualRemove: (id: number) =>
+      context.setManualRepos((current) => current.filter((repo) => repo.id !== id)),
+    onGitHubAppOpenChange: context.setGithubAppOpen,
+    onOrgChange: context.setGithubOrg,
+    onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
+    onDisconnectInstallation: (installationId: number) =>
+      context.disconnectGitHubInstallation(workspaceId, installationId),
+  };
+}
+
 // The workspace repository picker, wired to the cross-route selection in context.
 // Reused in both compute kinds: the primary clone source on a managed sandbox,
 // and grayed/disabled on a connected machine (which uses its own checkout).
+// Mobile opens the same body from ComposerMobilePlus — hide the bar pill there.
 function WorkspaceRepositoryPicker({
   workspaceId,
   disabled,
+  triggerClassName,
 }: {
   workspaceId: string;
   disabled: boolean;
+  triggerClassName?: string;
 }) {
   const context = useAppContext();
   return (
     <RepositoryContextPicker
-      setupMode={
-        context.githubStatus?.setupMode ??
-        (context.clientConfig.productAccessMode === "managed" ? "platform" : "operator")
-      }
-      configured={context.githubStatus?.configured === true}
-      status={context.githubStatus?.status ?? "disabled"}
-      installUrl={context.githubStatus?.installUrl ?? null}
-      linkUrl={context.githubStatus?.linkUrl ?? null}
-      installations={context.githubStatus?.installations ?? []}
-      repositories={context.githubRepos}
-      groups={context.repositoryGroups}
-      selectedRepoIds={context.selectedRepoIds}
-      selectedRepoRefs={context.selectedRepoRefs}
-      selectedInstallationId={context.selectedInstallationId}
-      manualRepos={context.manualRepos}
-      manualOpen={context.manualReposOpen}
-      githubAppOpen={context.githubAppOpen}
-      org={context.githubOrg}
-      pending={context.busy || disabled}
-      repoBusy={context.repoBusy}
-      githubAppBusy={context.githubAppBusy}
-      onRefresh={() => context.refreshGitHub(workspaceId, undefined, { sync: true })}
-      onToggleRepo={context.toggleGitHubRepository}
-      onRefChange={(repoId, ref) =>
-        context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }))
-      }
-      onManualOpenChange={context.setManualReposOpen}
-      onManualAdd={context.addManualRepository}
-      onManualUpdate={(id, patch) =>
-        context.setManualRepos((current) =>
-          current.map((repo) => (repo.id === id ? { ...repo, ...patch } : repo)),
-        )
-      }
-      onManualRemove={(id) =>
-        context.setManualRepos((current) => current.filter((repo) => repo.id !== id))
-      }
-      onGitHubAppOpenChange={context.setGithubAppOpen}
-      onOrgChange={context.setGithubOrg}
-      onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
-      onDisconnectInstallation={(installationId) =>
-        context.disconnectGitHubInstallation(workspaceId, installationId)
-      }
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...(triggerClassName ? { triggerClassName } : {})}
+    />
+  );
+}
+
+function WorkspaceRepositoryMenuBody({
+  workspaceId,
+  disabled,
+  leading,
+}: {
+  workspaceId: string;
+  disabled: boolean;
+  leading?: ReactNode;
+}) {
+  const context = useAppContext();
+  return (
+    <RepositoryContextMenuBody
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...(leading ? { leading } : {})}
     />
   );
 }

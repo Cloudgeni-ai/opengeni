@@ -215,6 +215,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   // every new run records v2 and uses the activity-owned receipt contract.
   const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
+  const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -565,7 +566,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   ): Promise<boolean> {
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
     const attemptId = uuid4();
-    const interruptionBaseline = interruptionWakeups;
+    let interruptionBaseline = interruptionWakeups;
 
     const scope = new CancellationScope();
     const workflowExecution = workflowInfo();
@@ -583,39 +584,52 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         trigger,
       }),
     );
-    const racedOutcome:
+    const turnOutcome: Promise<
       | { kind: "result"; result: activities.RunAgentTurnResult }
-      | { kind: "control" }
-      | { kind: "failure"; error: unknown } = await Promise.race([
-      turn.then(
-        (result: activities.RunAgentTurnResult) => ({
-          kind: "result" as const,
-          result,
-        }),
-        (error: unknown) => ({ kind: "failure" as const, error }),
-      ),
-      condition(() => interruptionWakeups !== interruptionBaseline).then(() => ({
-        kind: "control" as const,
-      })),
-    ]);
-    // A Steer/Pause transaction fences the active attempt before its Temporal
-    // signal is necessarily handled. That fence can make the activity's typed
-    // cancellation win Promise.race by one workflow activation. Give only that
-    // confirmed cancellation shape a short deterministic arbitration window;
-    // the durable control signal is authoritative once observed. Ordinary
-    // failures and timeouts never wait here, and a cancellation with no session
-    // control still follows the failure/cancellation path below.
-    if (
-      racedOutcome.kind === "failure" &&
-      isTurnActivityFenceCancellation(racedOutcome.error) &&
-      interruptionWakeups === interruptionBaseline
-    ) {
-      await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
-    }
-    const outcome =
-      interruptionWakeups !== interruptionBaseline ? ({ kind: "control" } as const) : racedOutcome;
+      | { kind: "failure"; error: unknown }
+    > = turn.then(
+      (result: activities.RunAgentTurnResult) => ({
+        kind: "result" as const,
+        result,
+      }),
+      (error: unknown) => ({ kind: "failure" as const, error }),
+    );
+    let outcome:
+      | { kind: "result"; result: activities.RunAgentTurnResult }
+      | { kind: "failure"; error: unknown };
+    while (true) {
+      const racedOutcome:
+        | { kind: "result"; result: activities.RunAgentTurnResult }
+        | { kind: "control" }
+        | { kind: "failure"; error: unknown } = await Promise.race([
+        turnOutcome,
+        condition(() => interruptionWakeups !== interruptionBaseline).then(() => ({
+          kind: "control" as const,
+        })),
+      ]);
+      // A Steer/Pause transaction fences the active attempt before its Temporal
+      // signal is necessarily handled. That fence can make the activity's typed
+      // cancellation win Promise.race by one workflow activation. Give only that
+      // confirmed cancellation shape a short deterministic arbitration window;
+      // the durable control signal is authoritative once observed. Ordinary
+      // failures and timeouts never wait here, and a cancellation with no session
+      // control still follows the failure/cancellation path below.
+      if (
+        racedOutcome.kind === "failure" &&
+        isTurnActivityFenceCancellation(racedOutcome.error) &&
+        interruptionWakeups === interruptionBaseline
+      ) {
+        await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
+      }
+      const observedOutcome =
+        interruptionWakeups !== interruptionBaseline
+          ? ({ kind: "control" } as const)
+          : racedOutcome;
 
-    if (outcome.kind === "control") {
+      if (observedOutcome.kind !== "control") {
+        outcome = observedOutcome;
+        break;
+      }
       if (!receiptGatedCancellation) {
         // Replay-only v1 command order. New histories always take the v2 path
         // below. The current runAgentTurn still owns and writes the truthful
@@ -647,6 +661,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         if (!physicalStopConfirmed) throw termination.error;
         return settlement.action !== "paused";
       }
+      const observedInterruptionWakeups = interruptionWakeups;
       const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
@@ -654,6 +669,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
+      if (staleControlSignalIsOnlyWakeHint && settlement.action === "stale") {
+        // sessionControl is replaceable transport, not authority. Keep
+        // observing the same activity when no durable interruption exists.
+        // Preserve signals received while settlement was in flight so a real
+        // concurrent Pause/Steer is evaluated on the next loop iteration.
+        interruptionBaseline = observedInterruptionWakeups;
+        continue;
+      }
       // The transaction above is the authority fence: every late model/tool/UI
       // write is rejected from this point onward. Request cancellation only
       // after it commits, then stop observing the Temporal activity promise.

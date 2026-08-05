@@ -2,17 +2,15 @@ import { analyticsHasProviders, storedAnalyticsConsent } from "@/lib/analytics-c
 import type { AnalyticsConsent } from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
 
-export type AnalyticsEventName =
-  | "signed_up"
-  | "workspace_created"
-  | "integration_connected"
-  | "session_started"
-  | "session_completed"
-  | "subscription_started";
+export type AnalyticsEventName = "signup_submitted" | "workspace_created" | "session_started";
 
 type AnalyticsConfig = ClientConfig["analytics"];
-type AnalyticsProperty = boolean | number | string;
-type AnalyticsProperties = Record<string, AnalyticsProperty>;
+export type AnalyticsProperty = boolean | number | string;
+export type AnalyticsProperties = Record<string, AnalyticsProperty>;
+export type AnalyticsIdentity = Readonly<{
+  userId: string;
+  accountId: string | null;
+}>;
 type PostHogClient = typeof import("posthog-js").default;
 type ReoClient = {
   init: (config: { clientID: string; dnt: string[] }) => void;
@@ -30,6 +28,9 @@ let providersReady = false;
 let posthogClient: PostHogClient | null = null;
 let ga4MeasurementId: string | null = null;
 let latestPathname: string | null = null;
+let activeIdentity: AnalyticsIdentity | null = null;
+let identifiedUserId: string | null = null;
+let identifiedAccountId: string | null = null;
 let suspended = false;
 
 declare global {
@@ -49,6 +50,7 @@ export function syncAnalytics(config: AnalyticsConfig, pathname: string): void {
   }
   if (initialization) {
     if (providersReady) {
+      applyActiveIdentity();
       dispatchPageView(pathname);
     }
     return;
@@ -67,19 +69,33 @@ export function applyAnalyticsConsent(consent: AnalyticsConsent): void {
     return;
   }
   if (consent === "denied") {
+    resetProviderIdentity(true);
     stopProviders();
   }
+}
+
+/**
+ * Associates consented analytics with stable internal IDs only. Names, email
+ * addresses, prompts, repository content, and other customer data stay out of
+ * the analytics boundary. Calling this is harmless when analytics is disabled.
+ */
+export function syncAnalyticsIdentity(identity: AnalyticsIdentity | null): void {
+  activeIdentity = identity;
+  if (!identity) {
+    resetProviderIdentity();
+    return;
+  }
+  runWhenProvidersReady(applyActiveIdentity);
 }
 
 export function captureAnalyticsEvent(
   name: AnalyticsEventName,
   properties: AnalyticsProperties = {},
 ): void {
-  if (!analyticsCollectionAllowed()) {
-    return;
-  }
-  posthogClient?.capture(name, properties);
-  window.gtag?.("event", name, properties);
+  runWhenProvidersReady(() => {
+    posthogClient?.capture(name, properties);
+    window.gtag?.("event", name, properties);
+  });
 }
 
 async function initializeProviders(config: AnalyticsConfig): Promise<void> {
@@ -96,10 +112,22 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
   ]).then(() => {
     if (generation === initializationGeneration && latestPathname && analyticsCollectionAllowed()) {
       providersReady = true;
+      applyActiveIdentity();
       dispatchPageView(latestPathname);
     }
   });
   await initialization;
+}
+
+function runWhenProvidersReady(callback: () => void): void {
+  if (!analyticsCollectionAllowed() || !activeConfig) {
+    return;
+  }
+  void initializeProviders(activeConfig).then(() => {
+    if (analyticsCollectionAllowed()) {
+      callback();
+    }
+  });
 }
 
 function analyticsCollectionAllowed(): boolean {
@@ -111,7 +139,9 @@ function analyticsCollectionAllowed(): boolean {
 }
 
 function dispatchPageView(pathname: string): void {
-  posthogClient?.capture("$pageview", { $current_url: pathname });
+  posthogClient?.capture("$pageview", {
+    $current_url: `${window.location.origin}${pathname}`,
+  });
   if (ga4MeasurementId) {
     window.gtag?.("event", "page_view", {
       page_location: `${window.location.origin}${pathname}`,
@@ -155,12 +185,47 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
   posthog.init(projectKey, {
     api_host: host,
     autocapture: false,
+    // PostHog can derive GeoIP properties before its project-level IP discard runs.
+    // Disable that enrichment at the event boundary as well.
+    before_send: (event) =>
+      event
+        ? {
+            ...event,
+            properties: { ...event.properties, $geoip_disable: true },
+          }
+        : null,
     capture_pageview: false,
     capture_pageleave: false,
     disable_session_recording: true,
     person_profiles: "identified_only",
   });
   posthogClient = posthog;
+}
+
+function applyActiveIdentity(): void {
+  if (!activeIdentity || !posthogClient || !analyticsCollectionAllowed()) {
+    return;
+  }
+  if (identifiedUserId !== activeIdentity.userId) {
+    if (identifiedUserId) {
+      posthogClient.reset();
+    }
+    posthogClient.identify(activeIdentity.userId);
+    identifiedUserId = activeIdentity.userId;
+    identifiedAccountId = null;
+  }
+  if (activeIdentity.accountId && identifiedAccountId !== activeIdentity.accountId) {
+    posthogClient.group("account", activeIdentity.accountId);
+    identifiedAccountId = activeIdentity.accountId;
+  }
+}
+
+function resetProviderIdentity(force = false): void {
+  if (force || identifiedUserId) {
+    posthogClient?.reset();
+  }
+  identifiedUserId = null;
+  identifiedAccountId = null;
 }
 
 async function initializeGa4(measurementId: string): Promise<void> {

@@ -3,14 +3,14 @@ import { createHash } from "node:crypto";
 import { ReasoningEffort } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
 
 export const SESSION_REALTIME_CONTEXT_MAX_BYTES = 65_536;
 export const SESSION_REALTIME_TAIL_SOURCE = "transcript_tail_flush";
 export const SESSION_REALTIME_TAIL_INSTRUCTION =
-  "The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.";
+  "The user just ended the realtime voice session but remains reachable by text. Ending voice changes only the communication mode; it does not stop, pause, or complete existing work. Treat the remaining transcript tail as additional context. If work was already underway, continue it from the current state. Change or stop that work only if the user explicitly requested it. If nothing was underway and the transcript contains no unhandled request, acknowledge briefly; otherwise handle any unhandled request.";
 
 export type SessionRealtimeContextProjection = {
   id: string;

@@ -1,7 +1,7 @@
 import type { SessionEvent } from "@opengeni/contracts";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import { and, asc, eq, sql } from "drizzle-orm";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import {
   privateAgentDurablePayload,
   sanitizeEventPayload,

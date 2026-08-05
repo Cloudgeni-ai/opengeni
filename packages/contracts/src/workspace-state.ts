@@ -16,6 +16,7 @@ export const WORKSPACE_STATE_MAX_GAPS = 16;
 export const WORKSPACE_STATE_BASE_NAME_MAX_CHARS = 160;
 export const WORKSPACE_STATE_TOPIC_MAX_CHARS = 96;
 export const WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT = 100;
+export const WORKSPACE_STATE_EXPORT_SCHEMA_VERSION = 1;
 
 const Count = z.number().int().nonnegative();
 
@@ -45,6 +46,17 @@ export const WorkspaceStateSourceKindCounts = z
   })
   .strict();
 export type WorkspaceStateSourceKindCounts = z.infer<typeof WorkspaceStateSourceKindCounts>;
+
+export const WorkspaceStateDocumentAuthorityKindCounts = z
+  .object({
+    organization: Count,
+    workspace: Count,
+    personal: Count,
+  })
+  .strict();
+export type WorkspaceStateDocumentAuthorityKindCounts = z.infer<
+  typeof WorkspaceStateDocumentAuthorityKindCounts
+>;
 
 export const WorkspaceStateMemoryStatusCounts = z
   .object({
@@ -116,6 +128,22 @@ export const WorkspaceStatePolicy = z
   })
   .strict();
 
+export const WorkspaceStatePreferences = z
+  .object({
+    authority: z.literal("preference_registry_preferences"),
+    activeDescriptorCount: Count.max(64),
+    activeDescriptorHash: z.string().regex(/^[0-9a-f]{64}$/),
+    scopeCounts: z
+      .object({
+        organization: Count,
+        workspace: Count,
+        user: Count,
+      })
+      .strict(),
+    truncated: z.boolean(),
+  })
+  .strict();
+
 export const WorkspaceStateKnowledgeBase = z
   .object({
     id: z.string().uuid(),
@@ -164,6 +192,7 @@ export const WorkspaceStateKnowledgeAvailable = z
     inspectedVisibleDocumentCount: Count,
     documentStatusCounts: WorkspaceStateDocumentStatusCounts,
     sourceKindCounts: WorkspaceStateSourceKindCounts,
+    authorityKindCounts: WorkspaceStateDocumentAuthorityKindCounts,
     topics: z.array(WorkspaceStateTopic).max(WORKSPACE_STATE_MAX_TOPICS),
     topicsTruncated: z.boolean(),
     latestDocumentUpdatedAt: z.string().datetime().nullable(),
@@ -323,7 +352,31 @@ export const WorkspaceStateResponse = z
       })
       .strict(),
     policy: WorkspaceStatePolicy,
+    preferences: WorkspaceStatePreferences,
     knowledge: WorkspaceStateKnowledge,
   })
   .strict();
 export type WorkspaceStateResponse = z.infer<typeof WorkspaceStateResponse>;
+
+export const WorkspaceStateExportOmission = z.enum([
+  "hidden_platform_prompts",
+  "policy_bodies",
+  "preference_content",
+  "document_content_and_private_metadata",
+  "memory_content_and_provenance",
+  "secret_values_and_credentials",
+  "session_messages_and_tool_outputs",
+]);
+export type WorkspaceStateExportOmission = z.infer<typeof WorkspaceStateExportOmission>;
+
+export const WorkspaceStateExportResponse = z
+  .object({
+    kind: z.literal("opengeni.workspace_state.sanitized_export"),
+    schemaVersion: z.literal(WORKSPACE_STATE_EXPORT_SCHEMA_VERSION),
+    generatedAt: z.string().datetime(),
+    stateSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    omissions: z.array(WorkspaceStateExportOmission).length(7),
+    state: WorkspaceStateResponse,
+  })
+  .strict();
+export type WorkspaceStateExportResponse = z.infer<typeof WorkspaceStateExportResponse>;

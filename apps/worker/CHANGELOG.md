@@ -1,5 +1,152 @@
 # @opengeni/worker-bundle
 
+## 0.16.17
+
+### Patch Changes
+
+- Updated dependencies [8135dbb]
+- Updated dependencies [17643a5]
+  - @opengeni/config@0.10.14
+  - @opengeni/db@0.27.11
+  - @opengeni/core@0.20.16
+  - @opengeni/documents@0.5.7
+  - @opengeni/github@0.4.30
+  - @opengeni/runtime@0.18.15
+  - @opengeni/storage@0.2.67
+  - @opengeni/events@0.3.77
+
+## 0.16.16
+
+### Patch Changes
+
+- c6c9acb: Recover required MCP setup when a transient socket failure is wrapped by the MCP SDK, while preserving only secret-safe transport classification.
+- Updated dependencies [c6c9acb]
+  - @opengeni/runtime@0.18.14
+  - @opengeni/core@0.20.15
+
+## 0.16.15
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+- Updated dependencies [69bc207]
+- Updated dependencies [144fd9e]
+- Updated dependencies [c0f8e40]
+  - @opengeni/codex@0.2.11
+  - @opengeni/core@0.20.14
+  - @opengeni/db@0.27.10
+  - @opengeni/runtime@0.18.13
+  - @opengeni/contracts@0.38.3
+  - @opengeni/config@0.10.13
+  - @opengeni/documents@0.5.6
+  - @opengeni/events@0.3.76
+  - @opengeni/github@0.4.29
+  - @opengeni/observability@0.4.16
+  - @opengeni/storage@0.2.66
+
+## 0.16.14
+
+### Patch Changes
+
+- Updated dependencies [8105c25]
+  - @opengeni/runtime@0.18.12
+  - @opengeni/core@0.20.13
+
+## 0.16.13
+
+### Patch Changes
+
+- Updated dependencies [4502474]
+- Updated dependencies [1ea5e62]
+- Updated dependencies [ee79969]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/core@0.20.12
+  - @opengeni/db@0.27.9
+  - @opengeni/runtime@0.18.11
+  - @opengeni/config@0.10.12
+  - @opengeni/documents@0.5.5
+  - @opengeni/events@0.3.75
+  - @opengeni/github@0.4.28
+  - @opengeni/observability@0.4.15
+  - @opengeni/storage@0.2.65
+
+## 0.16.12
+
+### Patch Changes
+
+- dfa3aef: Preserve Steer priority through provider recovery and repair interrupted attempts durably.
+- Updated dependencies [dfa3aef]
+  - @opengeni/core@0.20.11
+  - @opengeni/db@0.27.8
+  - @opengeni/documents@0.5.4
+  - @opengeni/events@0.3.74
+
+## 0.16.11
+
+### Patch Changes
+
+- Updated dependencies [c29fd4c]
+  - @opengeni/core@0.20.10
+  - @opengeni/db@0.27.7
+  - @opengeni/documents@0.5.3
+  - @opengeni/events@0.3.73
+
+## 0.16.10
+
+### Patch Changes
+
+- Updated dependencies [664c1d8]
+  - @opengeni/core@0.20.9
+  - @opengeni/db@0.27.6
+  - @opengeni/runtime@0.18.10
+  - @opengeni/documents@0.5.2
+  - @opengeni/events@0.3.72
+
+## 0.16.9
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+  - @opengeni/config@0.10.11
+  - @opengeni/core@0.20.8
+  - @opengeni/documents@0.5.1
+  - @opengeni/events@0.3.71
+  - @opengeni/github@0.4.27
+  - @opengeni/observability@0.4.14
+  - @opengeni/runtime@0.18.9
+  - @opengeni/storage@0.2.64
+
+## 0.16.8
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/config@0.10.10
+  - @opengeni/contracts@0.38.0
+  - @opengeni/documents@0.5.0
+  - @opengeni/core@0.20.7
+  - @opengeni/events@0.3.70
+  - @opengeni/github@0.4.26
+  - @opengeni/runtime@0.18.8
+  - @opengeni/storage@0.2.63
+  - @opengeni/observability@0.4.13
+
+## 0.16.7
+
+### Patch Changes
+
+- Updated dependencies [d5df927]
+- Updated dependencies [4976e1c]
+  - @opengeni/documents@0.4.1
+  - @opengeni/core@0.20.6
+  - @opengeni/db@0.27.3
+  - @opengeni/runtime@0.18.7
+  - @opengeni/events@0.3.69
+
 ## 0.16.6
 
 ### Patch Changes

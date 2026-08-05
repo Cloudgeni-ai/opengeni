@@ -1264,6 +1264,122 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
   });
 });
 
+describe("ToolSearchRenderer", () => {
+  test("running shows capability query without flashing Done", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: { query: "send an email to someone", limit: 8 },
+      raw: {
+        type: "tool_search_call",
+        call_id: "ts1",
+        execution: "client",
+        arguments: { query: "send an email to someone", limit: 8 },
+      },
+      status: "running",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    expect(Renderer.name).toBe("ToolSearchRenderer");
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Looking up tools");
+    expect(text).toContain("send an email to someone");
+    expect(text).not.toContain("Done");
+
+    await r.unmount();
+  });
+
+  test("settled disclosed-tools text lists leaves with source prefix", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: { query: "email" },
+      raw: { type: "tool_search_call", call_id: "ts2", execution: "client" },
+      output: {
+        type: "text",
+        text: "Disclosed tools: codex_apps__gmail_send_email, slack__post_message",
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Looked up tools");
+    expect(r.container.textContent).toContain("2 tools");
+
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("gmail_send_email");
+    expect(text).toContain("post_message");
+    expect(text).toContain("codex_apps");
+    expect(text).toContain("slack");
+    expect(text).toContain("capability query: email");
+    // Parsed list owns the face — no raw "Disclosed tools:" dump.
+    expect(text).not.toContain("Disclosed tools:");
+
+    await r.unmount();
+  });
+
+  test("no matches settles quietly", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: JSON.stringify({ query: "teleport to mars" }),
+      output: { type: "text", text: "No matching tools found." },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("No matches");
+
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect((r.container.textContent ?? "").toLowerCase()).toContain("no deferred tools matched");
+
+    await r.unmount();
+  });
+
+  test("structured tools array on output is accepted", async () => {
+    const item = toolItem({
+      name: "tool_search",
+      arguments: { query: "calendar" },
+      output: {
+        tools: [
+          { type: "function", name: "codex_apps__google_calendar_create_event" },
+          null,
+          { type: "function", name: "codex_apps__google_calendar_list_events" },
+        ],
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("2 tools");
+
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("google_calendar_create_event");
+    expect(r.container.textContent).toContain("google_calendar_list_events");
+
+    await r.unmount();
+  });
+});
+
 /* ---- Finding B: failed tool WITH non-empty output shows failure affordance */
 
 describe("ExecRenderer — failed status with non-empty output", () => {
@@ -1391,6 +1507,40 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     const text = r.container.textContent ?? "";
     expect(text).toContain("Edited");
     expect(text).not.toContain("Applying");
+
+    await r.unmount();
+  });
+
+  test("Codex function-tool { patch } shape uses the specialized renderer", async () => {
+    const freeform = [
+      "*** Begin Patch",
+      "*** Update File: src/hello.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    const item = toolItem({
+      name: "apply_patch",
+      raw: {
+        type: "function_call",
+        name: "apply_patch",
+        arguments: JSON.stringify({ patch: freeform }),
+      },
+      arguments: JSON.stringify({ patch: freeform }),
+      status: "complete",
+      output: "Patch applied.",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Edited");
+    expect(text).toContain("hello.ts");
+    // Must not fall through to GenericRenderer chrome.
+    expect(text).not.toMatch(/Apply patch/i);
+    expect(r.container.textContent).not.toContain("Arguments");
 
     await r.unmount();
   });

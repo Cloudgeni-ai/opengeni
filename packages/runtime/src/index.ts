@@ -56,8 +56,11 @@ import {
   boundedParallelMap,
   cancelMcpResponseBody,
   guardedMcpFetch,
+  mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
+  mcpRequestReplayInfo,
   undiciFetch,
+  type McpRequestReplayInfo,
 } from "./mcp-network";
 import {
   Agent,
@@ -139,12 +142,12 @@ import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox
 import OpenAI from "openai";
 import {
   CODEX_APPS_MCP_SERVER_ID,
+  CODEX_APPS_MCP_URL,
   CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
   CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   boundModelToolOutputItems,
   codexAppsSanitizingFetch,
-  codexRequestStorage,
   codexSubscriptionFetch,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
@@ -275,11 +278,17 @@ export {
   repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
   stripInternalModelMetadata,
-  stripReasoningEncryptedContent,
-  stripReasoningIdentityFromSerializedRunState,
-  neutralizeToolSearchItemsInSerializedRunState,
+  hasOpaqueProviderArtifact,
+  projectRejectedProviderArtifactsFromSerializedRunState,
+  projectRejectedReasoningArtifact,
+  serializedRunStateHasOpaqueProviderArtifact,
 } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
+export {
+  projectHistoryForProvider,
+  ProviderHistoryIncompatibleError,
+  type HistoryProviderApi,
+} from "./provider-history-adapter";
 
 // The provider-bound Model classes used by buildModelInstance/resolveTurnModel.
 // Re-exported so callers (and routing tests) can assert which wire API a
@@ -489,6 +498,8 @@ export type AgentSegmentInput =
 
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
+  /** Canonical durable prefix already present before this attempt adds items. */
+  persistedHistoryCount: number;
   sandboxSessionState?: SandboxSessionState;
   modelInputAlreadyProjected?: boolean;
 };
@@ -667,7 +678,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
       ? // Codex subscription: the static apiKey is a placeholder — the real per-request
         // bearer + ChatGPT-Account-ID, the /responses->/codex/responses rewrite, and the
         // body normalization are all injected by codexSubscriptionFetch, which reads the
-        // per-workspace token from codexRequestStorage (AsyncLocalStorage) at call time.
+        // per-workspace token from the Codex request context at call time.
         // The provider id is constant ("codex-subscription"), so one cached client serves
         // every workspace without baking a token into it.
         new OpenAI({
@@ -3022,12 +3033,10 @@ export type PreparedAgentTools = {
   /** Attempt-frozen successful broker identity for each prepared MCP server. */
   resolvedMcpConnectionIds: ReadonlyMap<string, string>;
   close: () => Promise<void>;
-  // P4 (Part B.1): the live, by-reference Set of ORIGINAL-dotted connector
-  // namespaces the codex_apps transport saw across this turn's tools/list calls.
-  // Accumulates as the agent lists tools during the run, so the worker reads it
-  // AFTER the turn (in its finally) to cache the serving account's connector set.
-  // Empty when this turn has no codex_apps server (or it never listed any
-  // namespaced tool) — the worker only persists a non-empty set.
+  // Live, by-reference set of connector namespaces observed from codex_apps during
+  // this preparation. The model-call builder reads it to keep the current turn's
+  // tool_search description accurate. It is never persisted or used for inference
+  // credential selection.
   codexConnectorNamespaces: Set<string>;
 };
 
@@ -3059,6 +3068,13 @@ export type PrepareToolsOptions = {
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
+  /** Exact workspace-designated ChatGPT credential; unrelated to inference. */
+  codexAppsAuth?: {
+    clientVersion: string;
+    withAuthorization: <T>(
+      use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
+    ) => Promise<T>;
+  };
   /** Injectable final MCP transport for tests and embedded hosts. */
   mcpFetchImpl?: FetchLike;
 };
@@ -3134,9 +3150,8 @@ export async function prepareAgentTools(
   tools: ToolRef[],
   options: PrepareToolsOptions = {},
 ): Promise<PreparedAgentTools> {
-  // P4 (Part B.1): one Set per prepareTools call, shared by reference into the
-  // codex_apps sanitizing fetch so every tools/list this turn accumulates the
-  // account's connector namespaces. Surfaced on PreparedAgentTools for the worker.
+  // One live Set per prepared tool environment, shared with the codex_apps
+  // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = new Set<string>();
   const resolvedMcpConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
@@ -3165,6 +3180,9 @@ export async function prepareAgentTools(
       if (!config) {
         throw new Error(`Unknown MCP server id: ${tool.id}`);
       }
+      if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
+        throw new Error("Codex Apps server id is reserved for the canonical endpoint");
+      }
       const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
       const firstParty = isFirstPartyMcpServer(settings, config);
       const baseFetch = isCodexAppsMcpServer(config)
@@ -3178,11 +3196,13 @@ export async function prepareAgentTools(
           ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
         },
       );
-      const fetchImpl = config.connectionRef
-        ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
-        : firstParty
-          ? firstPartyAuthFetch(guardedFetch, settings, options)
-          : guardedFetch;
+      const fetchImpl = isCodexAppsMcpServer(config)
+        ? codexAppsAuthFetch(guardedFetch, settings, options)
+        : config.connectionRef
+          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
+          : firstParty
+            ? firstPartyAuthFetch(guardedFetch, settings, options)
+            : guardedFetch;
       // A server is connected BEST-EFFORT (a connect OR tools-list failure drops
       // it — its tools go unavailable for the turn — instead of failing the turn)
       // in two cases:
@@ -3318,7 +3338,7 @@ function connectionBrokerFetch(
     return baseFetch;
   }
   return async (input, init) => {
-    const request = await mcpRequestInfo(input, init);
+    const request = await mcpRequestReplayInfo(input, init);
     const destinationUrl = mcpRequestDestinationUrl(input);
     const first = await resolveConnectionForRequest(
       options,
@@ -3347,9 +3367,16 @@ function connectionBrokerFetch(
         true,
       );
       if (refreshed.status === "auth_needed") {
+        if (!request.replaySafeAfter401) {
+          await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
+          return mcpOutcomeUncertainResponse(request);
+        }
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
+      if (!request.replaySafeAfter401) {
+        return mcpOutcomeUncertainResponse(request);
+      }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
         withConnectionHeaders(input, init, refreshed.headers),
@@ -3497,10 +3524,26 @@ function insufficientScopeAuth(
 async function authNeededFetchResponse(
   options: PrepareToolsOptions,
   serverId: string,
-  request: McpRequestInfo,
+  request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
 ): Promise<Response> {
+  await publishAuthNeededForRequest(options, serverId, request, auth, connectionRef);
+  if (request.method === "tools/call") {
+    return mcpToolAuthNeededResponse(request.id);
+  }
+  return new Response("Authentication required for MCP server connection", {
+    status: 401,
+  });
+}
+
+async function publishAuthNeededForRequest(
+  options: PrepareToolsOptions,
+  serverId: string,
+  request: McpRequestReplayInfo,
+  auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+  connectionRef: McpServerConnectionRef,
+): Promise<void> {
   const connectionId = auth.connectionId ?? connectionRef.connectionId;
   await publishAuthNeeded(options, {
     serverId,
@@ -3531,12 +3574,6 @@ async function authNeededFetchResponse(
     ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
     ...(options.subjectId ? { subjectId: options.subjectId } : {}),
   });
-  if (request.method === "tools/call") {
-    return mcpToolAuthNeededResponse(request.id);
-  }
-  return new Response("Authentication required for MCP server connection", {
-    status: 401,
-  });
 }
 
 async function publishAuthNeeded(
@@ -3551,55 +3588,8 @@ async function publishAuthNeeded(
   }
 }
 
-type McpRequestInfo = {
-  method?: string;
-  id?: string | number | null;
-  toolName?: string;
-};
-
 function mcpRequestDestinationUrl(input: string | URL | Request): string {
   return new URL(input instanceof Request ? input.url : input.toString()).toString();
-}
-
-async function mcpRequestInfo(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<McpRequestInfo> {
-  const body =
-    typeof init?.body === "string"
-      ? init.body
-      : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
-        ? await input
-            .clone()
-            .text()
-            .catch(() => "")
-        : "";
-  if (!body) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(body) as {
-      id?: unknown;
-      method?: unknown;
-      params?: { name?: unknown };
-    };
-    const method = typeof parsed.method === "string" ? parsed.method : undefined;
-    const id =
-      typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null
-        ? parsed.id
-        : undefined;
-    const toolName =
-      method === "tools/call" && typeof parsed.params?.name === "string"
-        ? parsed.params.name
-        : undefined;
-    return {
-      ...(method ? { method } : {}),
-      ...(id !== undefined ? { id } : {}),
-      ...(toolName ? { toolName } : {}),
-    };
-  } catch {
-    return {};
-  }
 }
 
 function withConnectionHeaders(
@@ -3662,6 +3652,12 @@ const MCP_AUTH_NEEDED_ERROR = {
   message: "Authentication required - a connection link was posted to the session.",
 } as const;
 
+const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
+  code: 40_102,
+  message:
+    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+} as const;
+
 function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
   return new Response(
     JSON.stringify({
@@ -3679,6 +3675,16 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
   );
 }
 
+function mcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
+  return new Response(
+    JSON.stringify(mcpJsonRpcErrorPayloadForRequest(request, MCP_TOOL_OUTCOME_UNCERTAIN_ERROR)),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
 function isAuthNeededMcpError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -3688,6 +3694,19 @@ function isAuthNeededMcpError(error: unknown): boolean {
     code === MCP_AUTH_NEEDED_ERROR.code &&
     (error.message === MCP_AUTH_NEEDED_ERROR.message ||
       error.message === `MCP error ${MCP_AUTH_NEEDED_ERROR.code}: ${MCP_AUTH_NEEDED_ERROR.message}`)
+  );
+}
+
+function isToolOutcomeUncertainMcpError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code &&
+    (error.message === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message ||
+      error.message ===
+        `MCP error ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code}: ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message}`)
   );
 }
 
@@ -3725,8 +3744,87 @@ function safeMcpErrorFields(error: unknown): {
 type SafeMcpTransportError = Error & {
   status?: number;
   code?: number;
-  mcpTransportFailureKind?: "request_timeout";
+  mcpTransportFailureKind?: "request_timeout" | "connectivity_unavailable";
 };
+
+const MCP_CONNECTIVITY_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "EPIPE",
+]);
+
+function mcpTransportHttpStatuses(error: unknown, seen = new WeakSet<object>()): number[] {
+  if (!error || typeof error !== "object" || seen.has(error)) {
+    return [];
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  const statuses: number[] = [];
+  for (const value of [record.status, record.statusCode, record.code]) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
+      statuses.push(value);
+    }
+  }
+  for (const key of ["error", "cause", "response", "data"]) {
+    statuses.push(...mcpTransportHttpStatuses(record[key], seen));
+  }
+  return statuses;
+}
+
+function hasMcpConnectivityErrorCode(error: unknown, seen = new WeakSet<object>()): boolean {
+  if (!error || typeof error !== "object" || seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (
+    typeof record.code === "string" &&
+    MCP_CONNECTIVITY_ERROR_CODES.has(record.code.toUpperCase())
+  ) {
+    return true;
+  }
+  return ["error", "cause", "response", "data"].some((key) =>
+    hasMcpConnectivityErrorCode(record[key], seen),
+  );
+}
+
+/**
+ * Preserve only an allowlisted transport-connectivity meaning across MCP SDK
+ * wrappers. HTTP client failures remain authoritative and fail closed even if
+ * a nested object also carries a socket-looking code. Raw messages, URLs,
+ * response bodies, and arbitrary provider codes are never copied forward.
+ */
+function isRawMcpTransportConnectivityError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if ((error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable") {
+    return true;
+  }
+  const statuses = mcpTransportHttpStatuses(error);
+  if (statuses.some((status) => status >= 400 && status < 500)) {
+    return false;
+  }
+  if (statuses.some((status) => status >= 500 && status < 600)) {
+    return true;
+  }
+  return hasMcpConnectivityErrorCode(error);
+}
+
+/**
+ * Test only the secret-safe marker emitted by `safeMcpTransportError`. Callers
+ * outside the MCP boundary must not infer MCP ownership from a generic 5xx or
+ * socket-shaped provider error.
+ */
+export function isMcpTransportConnectivityError(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    (error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable"
+  );
+}
 
 /**
  * Preserve the MCP SDK's exact request-timeout meaning without retaining or
@@ -3774,6 +3872,8 @@ export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
   }
   if (isMcpRequestTimeoutError(error)) {
     safeError.mcpTransportFailureKind = "request_timeout";
+  } else if (isRawMcpTransportConnectivityError(error)) {
+    safeError.mcpTransportFailureKind = "connectivity_unavailable";
   }
   return safeError;
 }
@@ -3812,11 +3912,10 @@ async function mcpServerRequestInit(
   settings: Settings,
   config: Settings["mcpServers"][number],
 ): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
-  // codex_apps is checked FIRST so the static-headers path can never apply to
-  // it: its refreshing ChatGPT/Codex bearer is resolved per-connect from the
-  // codex ALS, never from a baked `config.headers` value.
+  // codex_apps auth is applied by codexAppsAuthFetch on every request. Never
+  // allow a static header to become an alternate credential source.
   if (isCodexAppsMcpServer(config)) {
-    return await codexAppsMcpRequestInit(settings);
+    return {};
   }
   if (isFirstPartyMcpServer(settings, config)) {
     return await firstPartyMcpRequestInit(settings, config);
@@ -3928,44 +4027,32 @@ function firstPartyAuthFetch(
   };
 }
 
-/**
- * Builds the connect-time auth headers for the codex_apps connectors MCP. The
- * bearer is resolved from codexRequestStorage — the SAME refreshing token source
- * the model fetch uses (proactive refresh + single-flight + db persist) — so the
- * token is valid at connect. A missing store (non-codex turn, or prepareTools
- * ran outside the ALS) or a token failure (needs_relogin) returns {} so the
- * best-effort connect drops the server rather than crashing the turn.
- */
-async function codexAppsMcpRequestInit(
+/** Resolve explicit Apps authentication for each MCP request; no inference fallback. */
+function codexAppsAuthFetch(
+  baseFetch: FetchLike,
   settings: Settings,
-): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
-  const ctx = codexRequestStorage.getStore();
-  if (!ctx) {
-    return {};
-  }
-  let token;
-  try {
-    token = await ctx.getToken();
-  } catch {
-    return {};
-  }
-  const headers: Record<string, string> = {
-    authorization: `Bearer ${token.accessToken}`,
-    // The ChatGPT backend sits behind Cloudflare, which 403s requests bearing a
-    // default runtime User-Agent (confirmed live: an HTML bot-block page, NOT an
-    // auth failure). Send the codex client identity — the same originator/version/
-    // User-Agent the model fetch uses — so the MCP connect handshake passes the edge.
-    originator: CODEX_ORIGINATOR,
-    "user-agent": `${CODEX_ORIGINATOR}/${ctx.clientVersion}`,
-    version: ctx.clientVersion,
+  options: PrepareToolsOptions,
+): FetchLike {
+  return async (input, init) => {
+    const auth = options.codexAppsAuth;
+    if (!auth) {
+      throw new Error("Codex Apps has no explicit workspace designation");
+    }
+    return await auth.withAuthorization(async (token) => {
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${token.accessToken}`,
+        originator: CODEX_ORIGINATOR,
+        "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
+        version: auth.clientVersion,
+      };
+      if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
+      if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
+      return await baseFetch(
+        fetchInputForAttempt(input),
+        withConnectionHeaders(input, init, headers),
+      );
+    });
   };
-  if (token.chatgptAccountId) {
-    headers["chatgpt-account-id"] = token.chatgptAccountId;
-  }
-  if (settings.codexProductSku) {
-    headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
-  }
-  return { requestInit: { headers } };
 }
 
 // The first-party MCP permission set signed into a worker's delegated token
@@ -3983,7 +4070,12 @@ async function codexAppsMcpRequestInit(
 // into the first-party allowlist, which would wrongly sign an OpenGeni delegated
 // token to chatgpt.com.
 function isCodexAppsMcpServer(config: Settings["mcpServers"][number]): boolean {
-  return config.id === CODEX_APPS_MCP_SERVER_ID;
+  if (config.id !== CODEX_APPS_MCP_SERVER_ID) return false;
+  try {
+    return new URL(config.url).href === new URL(CODEX_APPS_MCP_URL).href;
+  } catch {
+    return false;
+  }
 }
 
 function isFirstPartyMcpServer(
@@ -4129,7 +4221,7 @@ class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort) {
-        throw error;
+        throw safeMcpTransportError(error);
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a
@@ -4186,6 +4278,16 @@ class PrefixedMcpServer implements MCPServer {
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       return output;
     } catch (error) {
+      // A brokered tools/call that receives 401 may already have changed provider
+      // state. The broker refreshed credentials for future requests but did not
+      // replay this call. Preserve that ambiguity as an explicit model-visible
+      // error for required and best-effort servers alike.
+      if (isToolOutcomeUncertainMcpError(error)) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message }],
+        };
+      }
       // The connection broker's auth-needed short-circuit arrives as a thrown
       // JSON-RPC error (an inline isError result would be stripped by the SDK
       // shim). Surface it to the model as a failed-but-recoverable tool result
@@ -4283,6 +4385,77 @@ export type PrepareInputOptions = {
   sandboxClient?: unknown;
 };
 
+type SerializedGeneratedRunItem = {
+  type?: unknown;
+  rawItem?: unknown;
+};
+
+/**
+ * Restore an interrupted SDK run without asking today's tool-search callback to
+ * reproduce yesterday's disclosure. The Agents SDK otherwise executes every
+ * historical client tool_search while deserializing and rejects the saved state
+ * when the current catalogue differs.
+ *
+ * The temporary JSON copy hides only the historical output schemas from that SDK
+ * rehydration hook. The returned RunState receives the exact saved raw items
+ * again before it is observed or serialized; execution remains `client`, the
+ * durable blob is untouched, and no search is rerun.
+ */
+export async function restoreInterruptedRunState(
+  agent: Agent<any, any>,
+  serializedRunState: string,
+): Promise<RunState<any, any>> {
+  let parsed: { generatedItems?: SerializedGeneratedRunItem[] };
+  try {
+    parsed = JSON.parse(serializedRunState) as {
+      generatedItems?: SerializedGeneratedRunItem[];
+    };
+  } catch {
+    // Preserve the SDK's established typed parse error.
+    return await RunState.fromString(agent, serializedRunState);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return await RunState.fromString(agent, serializedRunState);
+  }
+  const generatedItems = parsed.generatedItems;
+  if (!Array.isArray(generatedItems)) {
+    return await RunState.fromString(agent, serializedRunState);
+  }
+
+  const savedOutputs = new Map<number, unknown>();
+  for (const [index, item] of generatedItems.entries()) {
+    if (
+      item?.type !== "tool_search_output_item" ||
+      !item.rawItem ||
+      typeof item.rawItem !== "object"
+    ) {
+      continue;
+    }
+    const rawItem = item.rawItem as Record<string, unknown>;
+    if (rawItem.execution === "server" || !Array.isArray(rawItem.tools)) {
+      continue;
+    }
+    savedOutputs.set(index, rawItem);
+    item.rawItem = { ...rawItem, tools: [] };
+  }
+
+  if (savedOutputs.size === 0) {
+    return await RunState.fromString(agent, serializedRunState);
+  }
+
+  const state = await RunState.fromString(agent, JSON.stringify(parsed));
+  const restoredItems = (
+    state as unknown as {
+      _generatedItems: Array<{ rawItem?: unknown }>;
+    }
+  )._generatedItems;
+  for (const [index, rawItem] of savedOutputs) {
+    if (!restoredItems[index]) throw new Error("RunState tool_search output index changed");
+    restoredItems[index].rawItem = rawItem;
+  }
+  return state;
+}
+
 export async function prepareRunInput(
   agent: Agent<any, any>,
   input: AgentSegmentInput,
@@ -4332,6 +4505,7 @@ export async function prepareRunInput(
         sanitizedHistory.length === 0 && !input.internalContext?.trim() && input.text?.trim()
           ? input.text
           : assembled,
+      persistedHistoryCount: sanitizedHistory.length,
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
@@ -4349,7 +4523,7 @@ export async function prepareRunInput(
   for (const repair of compatibleRunState.repairs) {
     console.warn("[runtime] repaired incompatible RunState exposedPorts", repair);
   }
-  const state = await RunState.fromString(agent, compatibleRunState.serializedRunState);
+  const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
   const interruptions = state.getInterruptions();
   const interruptionId = input.kind === "human_input" ? input.toolCallId : input.approvalId;
   const target = interruptions.find((item: any) => approvalIdentifier(item) === interruptionId);
@@ -4363,7 +4537,7 @@ export async function prepareRunInput(
   } else {
     state.reject(target as any, input.message ? { message: input.message } : undefined);
   }
-  return { input: state };
+  return { input: state, persistedHistoryCount: state.history.length };
 }
 
 export type RunAgentStreamOptions = {
@@ -4887,7 +5061,11 @@ export async function runAgentStream(
   overrides: RunAgentStreamOptions = {},
 ) {
   const prepared: PreparedAgentInput =
-    typeof input === "string" || input instanceof RunState ? { input } : input;
+    typeof input === "string"
+      ? { input, persistedHistoryCount: 0 }
+      : input instanceof RunState
+        ? { input, persistedHistoryCount: input.history.length }
+        : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const toolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);

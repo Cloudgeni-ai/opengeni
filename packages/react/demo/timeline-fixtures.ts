@@ -335,6 +335,33 @@ export function tourEvents(): SessionEvent[] {
     },
     turn,
   );
+  // apply_patch — Codex function-tool freeform `{ patch }` (not hosted apply_patch_call)
+  {
+    const freeformPatch = [
+      "*** Begin Patch",
+      "*** Update File: src/realtime/controller.ts",
+      "@@",
+      "-export const legacy = true;",
+      "+export const legacy = false;",
+      "*** Add File: src/realtime/public.ts",
+      "+export { RealtimeController } from './controller';",
+      "*** End Patch",
+    ].join("\n");
+    log.tool(
+      {
+        name: "apply_patch",
+        id: "call-ap-codex-0",
+        raw: {
+          type: "function_call",
+          name: "apply_patch",
+          arguments: JSON.stringify({ patch: freeformPatch }),
+        },
+        arguments: JSON.stringify({ patch: freeformPatch }),
+        output: "Patch applied.",
+      },
+      turn,
+    );
+  }
 
   // computer_call — screenshot with image
   log.tool(

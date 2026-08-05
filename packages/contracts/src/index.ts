@@ -733,7 +733,6 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "variable_set_set_variable",
   "environment_set_variable",
   "github_connect_link",
-  "github_token",
   "github_repositories_list",
   "social_connections_list",
   "social_posts_recent",
@@ -2650,6 +2649,7 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+    connectionType: z.enum(["mcp", "social"]).optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
@@ -5687,6 +5687,9 @@ export type SocialProvider = z.infer<typeof SocialProvider>;
 export const SocialConnectionStatus = z.enum(["connected", "needs_reauth", "disabled"]);
 export type SocialConnectionStatus = z.infer<typeof SocialConnectionStatus>;
 
+export const ConnectionOwnership = z.enum(["workspace", "personal"]);
+export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
+
 export const SocialConnection = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -5695,6 +5698,7 @@ export const SocialConnection = z.object({
   accountHandle: z.string().min(1),
   accountName: z.string().nullable(),
   externalAccountId: z.string().nullable(),
+  ownership: ConnectionOwnership,
   status: SocialConnectionStatus,
   scopes: z.array(z.string()),
   credentialRef: z.string().nullable(),
@@ -5755,6 +5759,7 @@ export type SocialOAuthProviderId = z.infer<typeof SocialOAuthProviderId>;
 
 export const SocialOAuthStartRequest = z.object({
   provider: SocialOAuthProviderId,
+  ownership: ConnectionOwnership.default("workspace"),
   scopes: z.array(z.string().min(1)).optional(),
   returnPath: z.string().optional(),
 });
@@ -5875,9 +5880,6 @@ function compareDescending(left: number | string, right: number | string): numbe
 
 export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
-
-export const ConnectionOwnership = z.enum(["workspace", "personal"]);
-export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
 
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),
@@ -6210,6 +6212,9 @@ export const Session = z.object({
   // stale in-flight op and retry against the new active sandbox.
   activeSandboxId: z.string().uuid().nullable(),
   activeEpoch: z.number().int().nonnegative(),
+  // The explicit connected-machine project root selected for this session.
+  // Null means the enrolled agent's launch workspace root.
+  workingDir: z.string().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
@@ -9773,6 +9778,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     id: z.string(),
     label: z.string(),
+    /** Optional curated compact label for dense UI (e.g. mobile composer). */
+    shortLabel: z.string().min(1).max(64).optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),

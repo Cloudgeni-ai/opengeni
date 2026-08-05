@@ -22,6 +22,7 @@ import { OAUTH_MAX_RESPONSE_BYTES, pinnedFetch, readResponseJsonBounded } from "
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 import {
   integrationBaseUrl,
   oauthStateTtlMs,
@@ -140,6 +141,7 @@ type SocialOAuthStatePayload = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  ownership: "workspace" | "personal";
   provider: SocialOAuthProviderId;
   scopes: string[];
   encryptedPkceVerifier?: string;
@@ -154,8 +156,12 @@ export function socialOAuthClientFor(
 ): { clientId: string; clientSecret?: string | undefined } {
   const configured = parseSocialOauthClientsJson(settings.socialOauthClientsJson)[provider];
   if (!configured) {
-    throw new HTTPException(503, {
-      message: `social provider ${provider} requires an operator OAuth app in OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON`,
+    const providerLabel = provider === "x" ? "X" : "Reddit";
+    throw new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: `${providerLabel} connection is not configured. An operator must add ${providerLabel} OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON.`,
+      retryable: false,
+      details: { oauthReason: "operator_oauth_app_missing", provider },
     });
   }
   return configured;
@@ -185,6 +191,7 @@ export async function startSocialOAuth(
     accountId: context.accountId,
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
+    ownership: context.payload.ownership,
     provider: provider.id,
     scopes,
     ...(verifier && key ? { encryptedPkceVerifier: encryptEnvironmentValue(key, verifier) } : {}),
@@ -271,7 +278,7 @@ export async function completeSocialOAuthCallback(
     if (
       !grant ||
       grant.accountId !== state.accountId ||
-      !hasPermission(grant.permissions, "workspace:admin")
+      (state.ownership === "workspace" && !hasPermission(grant.permissions, "workspace:admin"))
     ) {
       throw new HTTPException(403, {
         message: "OAuth subject no longer has permission to connect social accounts",
@@ -309,6 +316,7 @@ export async function completeSocialOAuthCallback(
     const connection = await upsertSocialOAuthConnection(db, {
       accountId: state.accountId,
       workspaceId: state.workspaceId,
+      subjectId: state.ownership === "personal" ? state.subjectId : null,
       provider: provider.id,
       accountHandle: identity.handle,
       accountName: identity.name ?? null,
@@ -342,10 +350,15 @@ export async function completeSocialOAuthCallback(
  */
 export async function freshSocialAccessToken(
   deps: SocialOAuthDeps,
-  ref: { workspaceId: string; connectionId: string },
+  ref: { workspaceId: string; connectionId: string; subjectId?: string | null },
 ): Promise<{ connection: SocialConnection; bundle: SocialCredentialBundle }> {
   const { db, settings } = deps;
-  const loaded = await loadSocialConnectionCredential(db, ref.workspaceId, ref.connectionId);
+  const loaded = await loadSocialConnectionCredential(
+    db,
+    ref.workspaceId,
+    ref.connectionId,
+    ref.subjectId,
+  );
   if (!loaded) {
     throw new Error(`Social connection not found: ${ref.connectionId}`);
   }
@@ -392,7 +405,12 @@ export async function freshSocialAccessToken(
     // rotates refresh tokens per use, so the loser's token is already spent.
     // Re-read before declaring the connection dead — if another writer
     // persisted a newer bundle, use that instead of flipping needs_reauth.
-    const reloaded = await loadSocialConnectionCredential(db, ref.workspaceId, ref.connectionId);
+    const reloaded = await loadSocialConnectionCredential(
+      db,
+      ref.workspaceId,
+      ref.connectionId,
+      ref.subjectId,
+    );
     if (
       reloaded?.credentialEncrypted &&
       reloaded.credentialEncrypted !== loaded.credentialEncrypted
@@ -424,6 +442,7 @@ export async function freshSocialAccessToken(
     (await updateSocialConnectionCredential(db, {
       workspaceId: ref.workspaceId,
       connectionId: ref.connectionId,
+      ...(ref.subjectId !== undefined ? { subjectId: ref.subjectId } : {}),
       credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(refreshed)),
       status: "connected",
       tokenMetadata: publicTokenMetadata(refreshed),
@@ -433,11 +452,12 @@ export async function freshSocialAccessToken(
 
 export async function markNeedsReauth(
   deps: SocialOAuthDeps,
-  ref: { workspaceId: string; connectionId: string },
+  ref: { workspaceId: string; connectionId: string; subjectId?: string | null },
 ): Promise<void> {
   await updateSocialConnectionCredential(deps.db, {
     workspaceId: ref.workspaceId,
     connectionId: ref.connectionId,
+    ...(ref.subjectId !== undefined ? { subjectId: ref.subjectId } : {}),
     status: "needs_reauth",
   });
 }
@@ -666,6 +686,7 @@ function readSocialOAuthState(
     accountId: requiredStateString(payload.accountId, "accountId"),
     workspaceId: requiredStateString(payload.workspaceId, "workspaceId"),
     subjectId: requiredStateString(payload.subjectId, "subjectId"),
+    ownership: payload.ownership === "personal" ? "personal" : "workspace",
     provider,
     scopes: Array.isArray(payload.scopes)
       ? payload.scopes.filter((scope): scope is string => typeof scope === "string")

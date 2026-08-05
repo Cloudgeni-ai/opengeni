@@ -20,6 +20,7 @@ import type {
   BillingEntitlementsResponse,
   CodexAccount,
   CodexAccountsResponse,
+  CodexAppsUpdate,
   CodexRotationSettings,
   CodexOverviewResponse,
   CodexAllocatorUpdate,
@@ -235,7 +236,11 @@ import type {
   WorkspaceInstructionPolicyOnboardingProposalListResponse,
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
-import type { WorkspaceStateGetOptions, WorkspaceStateResponse } from "./workspace-state";
+import type {
+  WorkspaceStateExportResponse,
+  WorkspaceStateGetOptions,
+  WorkspaceStateResponse,
+} from "./workspace-state";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -1911,6 +1916,20 @@ export class OpenGeniClient {
     );
   }
 
+  /** Download the canonical, explicitly sanitized Workspace State export. */
+  async exportWorkspaceState(
+    workspaceId: string,
+    options: WorkspaceStateGetOptions = {},
+  ): Promise<WorkspaceStateExportResponse> {
+    const params = new URLSearchParams();
+    if (options.attemptId) params.set("attemptId", options.attemptId);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<WorkspaceStateExportResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/workspace-state/export${query}`,
+    );
+  }
+
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}`, request);
   }
@@ -3400,11 +3419,37 @@ export class OpenGeniClient {
     );
   }
 
-  /** P3: enable/disable Codex auto-rotation and/or pick the strategy. Returns the effective settings. */
+  /** Designate one owner-connected subscription for Apps only. */
+  async designateCodexAppsAccount(
+    workspaceId: string,
+    accountId: string,
+    expectedVersion: number,
+  ): Promise<CodexAppsUpdate> {
+    return await this.requestJson<CodexAppsUpdate>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/codex/apps`,
+      { accountId, expectedVersion },
+    );
+  }
+
+  /** Clear the Apps credential without changing any inference selection. */
+  async clearCodexAppsAccount(
+    workspaceId: string,
+    expectedVersion: number,
+  ): Promise<CodexAppsUpdate> {
+    return await this.requestJson<CodexAppsUpdate>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/codex/apps`,
+      { expectedVersion },
+    );
+  }
+
+  /** Enable or disable Codex auto-rotation. Returns the effective settings. */
   async setCodexRotationSettings(
     workspaceId: string,
     patch: {
       rotationEnabled?: boolean;
+      /** @deprecated Rotation now has one effective sharded strategy. */
       rotationStrategy?: CodexRotationSettings["rotationStrategy"];
     },
   ): Promise<CodexRotationSettings> {

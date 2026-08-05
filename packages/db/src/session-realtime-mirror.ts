@@ -4,7 +4,7 @@ import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
-import type { Database } from "./index";
+import type { Database } from "./database";
 import * as schema from "./schema";
 
 const SESSION_REALTIME_MIRROR_MAX_TEXT_BYTES = 131_072;

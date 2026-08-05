@@ -42,10 +42,14 @@ body {
   scrollbar-color: rgba(45, 48, 60, 0.15) transparent;
 }
 
-.northstar button,
-.northstar select,
-.northstar input,
-.northstar textarea {
+/* Keep a deliberately hostile host reset around the embedded SDK so this demo
+   exercises its isolation contract without flattening Northstar's own control
+   typography. :where() scopes the reset without making it stronger than the
+   SDK's semantic typography guard. Consumers customize metrics via --og-* tokens. */
+.northstar :where(.og-root) button,
+.northstar :where(.og-root) select,
+.northstar :where(.og-root) input,
+.northstar :where(.og-root) textarea {
   font: inherit;
 }
 
@@ -70,11 +74,6 @@ body {
 
 .northstar-agent-timeline > div:first-child > div {
   gap: 14px;
-}
-
-.northstar-agent-copy {
-  font-size: 13px;
-  line-height: 1.6;
 }
 
 .northstar-agent-copy p,

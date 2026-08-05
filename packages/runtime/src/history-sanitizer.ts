@@ -277,7 +277,7 @@ export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
  * Remove the {@link INTERNAL_RESUME_MESSAGE_MARKER} providerData key from a
  * single item before it reaches ANY model wire. Pure + non-mutating; returns
  * the SAME reference when there is nothing to strip (keeping the common path
- * byte-identical, mirroring {@link stripReasoningEncryptedContent}).
+ * byte-identical).
  *
  * WHY. The @openai/agents SDK serializes providerData keys verbatim into the
  * request item, and strict Responses backends reject unknown per-item fields —
@@ -312,95 +312,54 @@ export function stripInternalResumeMarker<T extends HistoryItem>(item: T): T {
 }
 
 /**
- * Drop the account/org-bound `reasoning.encrypted_content` blob from a single
- * history item, preserving everything else (the visible chain-of-thought text in
- * `summary`/`content`, and every non-reasoning field). Pure + non-mutating: when
- * there is nothing to strip the SAME reference is returned (so the common,
- * same-account path stays byte-identical); otherwise a shallow clone is returned.
+ * Build a one-attempt recovery view of a serialized RunState after the provider
+ * explicitly rejected an opaque artifact. The durable RunState string is never
+ * rewritten. Reasoning provider identity is removed and opaque remote compaction
+ * entries are omitted only from this retry view. Messages and all tool records,
+ * including tool_search, remain exactly as stored.
  *
- * WHY. A codex-subscription turn round-trips `reasoning.encrypted_content` — an
- * opaque blob minted by the ChatGPT/Codex backend that is bound to the account
- * (org) that produced it. After a manual switch from codex account A to B, the
- * carried history items still hold A-minted blobs; replaying them into a turn
- * running on B is rejected (400). The blob is purely a chain-of-thought
- * continuity optimization — dropping it costs at most one turn of lost CoT
- * continuity and never any message content.
- *
- * USED FOR `compaction` items only on the history-items read path: a foreign
- * `compaction` summary carries account-bound `encrypted_content` but its summary
- * is real conversation content that must be preserved, so we strip only the blob
- * (we do NOT drop the whole item). Foreign `reasoning` items are instead dropped
- * WHOLESALE by the caller (id + blob), because the Responses backend validates
- * the foreign `rs_…` id and rejects a reasoning item that has a foreign id and no
- * encrypted_content (so blanking the blob alone is not enough — see
- * {@link applyCodexHistoryStrip}).
- *
- * The SDK's Responses converter reads the blob via `providerData.encryptedContent`
- * (camel) or `providerData.encrypted_content` (snake); persisted rows use the
- * snake form, but we delete both casings defensively. We also clear a top-level
- * `encrypted_content` (the `compaction`-item shape) belt-and-braces — that blob
- * is likewise source-bound. Only `reasoning` and `compaction` items are touched;
- * messages, tool calls, and tool outputs pass through untouched by reference.
+ * A parse failure or no-op returns the original string by reference. The walk is
+ * deliberately limited to the SDK's known RunState item locations rather than a
+ * generic recursive rewrite.
  */
-export function stripReasoningEncryptedContent<T extends HistoryItem>(item: T): T {
-  const type = itemType(item);
-  if (type !== "reasoning" && type !== "compaction") {
-    return item;
+export function projectRejectedReasoningArtifact<T extends Record<string, unknown>>(item: T): T {
+  if (item.type !== "reasoning") return item;
+
+  let changed = false;
+  const projected: Record<string, unknown> = { ...item };
+  if ("id" in projected) {
+    delete projected.id;
+    changed = true;
   }
-  const record = item as Record<string, unknown>;
-  const providerData = record.providerData;
-  const providerHasBlob =
-    !!providerData &&
-    typeof providerData === "object" &&
-    ("encryptedContent" in (providerData as Record<string, unknown>) ||
-      "encrypted_content" in (providerData as Record<string, unknown>));
-  const topLevelHasBlob = "encrypted_content" in record;
-  if (!providerHasBlob && !topLevelHasBlob) {
-    // Nothing encrypted to strip — return the same reference (byte-identical).
-    return item;
+  if ("encrypted_content" in projected) {
+    delete projected.encrypted_content;
+    changed = true;
   }
-  const clone: Record<string, unknown> = { ...record };
-  if (providerHasBlob) {
-    const providerClone = { ...(providerData as Record<string, unknown>) };
-    delete providerClone.encryptedContent;
-    delete providerClone.encrypted_content;
-    clone.providerData = providerClone;
+  if ("encryptedContent" in projected) {
+    delete projected.encryptedContent;
+    changed = true;
   }
-  if (topLevelHasBlob) {
-    delete clone.encrypted_content;
+  const providerData = item.providerData;
+  if (providerData && typeof providerData === "object") {
+    const provider = { ...(providerData as Record<string, unknown>) };
+    if ("encryptedContent" in provider) {
+      delete provider.encryptedContent;
+      changed = true;
+    }
+    if ("encrypted_content" in provider) {
+      delete provider.encrypted_content;
+      changed = true;
+    }
+    if (Object.keys(provider).length > 0) {
+      projected.providerData = provider;
+    } else {
+      delete projected.providerData;
+    }
   }
-  return clone as unknown as T;
+  return (changed ? projected : item) as T;
 }
 
-/**
- * Neutralize the account/org-bound identity of EVERY `reasoning` item embedded
- * in a serialized RunState JSON string, returning the re-serialized string. Pure:
- * a parse failure or a no-op returns the SAME string reference (so an unchanged
- * or non-codex run-state replays byte-for-byte).
- *
- * WHY (HOLE C — approval replay). An approval decision resumes the serialized
- * RunState blob. That blob round-trips `reasoning.encrypted_content` minted by the ChatGPT/Codex
- * backend (bound to the freezing account/org — a foreign account 400s it) AND the
- * foreign `rs_…` reasoning ids the Responses backend validates (rejected once the
- * blob is gone). Unlike `session_history_items`, the blob carries NO per-item
- * producer tag, so foreign-ness cannot be decided per item; the worker instead
- * records the FREEZING codex account on the run-state row and calls this only when
- * the resuming turn's codex account DIFFERS from it. When the accounts differ we
- * conservatively neutralize every reasoning item: delete its provider id and its
- * `encrypted_content` (both casings, in `providerData`). The visible reasoning
- * `content`/`summary` and every message / tool-call / tool-output item are left
- * intact (message and tool content are never account-bound).
- *
- * A reasoning item with no id and no encrypted_content is exactly the shape the
- * production Azure path already sends (see `stripProviderItemIdsFilter`), so it
- * deserializes and replays cleanly. Reasoning items live in several places in the
- * blob — `originalInput` (when an array), each `modelResponses[].output`,
- * `lastModelResponse.output`, and the `generatedItems` wrappers (`reasoning_item`
- * → `rawItem`) — and we scrub all of them. `compaction` items are deliberately
- * left untouched: their `encrypted_content` is a protocol-REQUIRED field whose
- * removal would fail the SDK's run-state schema validation on deserialize.
- */
-export function stripReasoningIdentityFromSerializedRunState(serialized: string): string {
+export function projectRejectedProviderArtifactsFromSerializedRunState(serialized: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(serialized);
@@ -412,39 +371,28 @@ export function stripReasoningIdentityFromSerializedRunState(serialized: string)
     return serialized;
   }
   let changed = false;
-  const scrubReasoning = (candidate: unknown): void => {
-    if (!candidate || typeof candidate !== "object") {
-      return;
-    }
-    const record = candidate as Record<string, unknown>;
-    if (record.type !== "reasoning") {
-      return;
-    }
-    if ("id" in record) {
-      delete record.id;
-      changed = true;
-    }
-    const providerData = record.providerData;
-    if (providerData && typeof providerData === "object") {
-      const provider = providerData as Record<string, unknown>;
-      if ("encryptedContent" in provider) {
-        delete provider.encryptedContent;
-        changed = true;
-      }
-      if ("encrypted_content" in provider) {
-        delete provider.encrypted_content;
-        changed = true;
-      }
-    }
-    if ("encrypted_content" in record) {
-      delete record.encrypted_content;
-      changed = true;
-    }
-  };
   const scrubItemArray = (arr: unknown): void => {
     if (Array.isArray(arr)) {
-      for (const item of arr) {
-        scrubReasoning(item);
+      for (let index = arr.length - 1; index >= 0; index -= 1) {
+        const item = arr[index];
+        if (
+          item &&
+          typeof item === "object" &&
+          (item as Record<string, unknown>).type === "compaction" &&
+          hasOpaqueProviderArtifact(item)
+        ) {
+          arr.splice(index, 1);
+          changed = true;
+        } else {
+          const projected =
+            item && typeof item === "object"
+              ? projectRejectedReasoningArtifact(item as Record<string, unknown>)
+              : item;
+          if (projected !== item) {
+            arr[index] = projected;
+            changed = true;
+          }
+        }
       }
     }
   };
@@ -454,13 +402,29 @@ export function stripReasoningIdentityFromSerializedRunState(serialized: string)
   // 2. generatedItems are SDK run-item wrappers; a `reasoning_item` carries the
   //    protocol reasoning shape under `rawItem`.
   if (Array.isArray(root.generatedItems)) {
-    for (const wrapper of root.generatedItems) {
+    for (let index = root.generatedItems.length - 1; index >= 0; index -= 1) {
+      const wrapper = root.generatedItems[index];
       if (
         wrapper &&
         typeof wrapper === "object" &&
         "rawItem" in (wrapper as Record<string, unknown>)
       ) {
-        scrubReasoning((wrapper as Record<string, unknown>).rawItem);
+        const rawItem = (wrapper as Record<string, unknown>).rawItem;
+        if (
+          rawItem &&
+          typeof rawItem === "object" &&
+          (rawItem as Record<string, unknown>).type === "compaction" &&
+          hasOpaqueProviderArtifact(rawItem)
+        ) {
+          root.generatedItems.splice(index, 1);
+          changed = true;
+        } else if (rawItem && typeof rawItem === "object") {
+          const projected = projectRejectedReasoningArtifact(rawItem as Record<string, unknown>);
+          if (projected !== rawItem) {
+            (wrapper as Record<string, unknown>).rawItem = projected;
+            changed = true;
+          }
+        }
       }
     }
   }
@@ -482,91 +446,65 @@ export function stripReasoningIdentityFromSerializedRunState(serialized: string)
   return JSON.stringify(parsed);
 }
 
-/**
- * Neutralize tool_search items IN PLACE in a serialized RunState blob for a
- * cross-account codex resume — the run-state sibling of
- * `applyCodexHistoryStrip`'s tool_search rule, but COUNT-PRESERVING (HOLE E: the
- * blob path's reconcile watermark counts the blob's history length, so items
- * must never be removed — only mutated, exactly like the reasoning
- * neutralization above).
- *
- * The hazard: on deserialize, the SDK re-runs the registered CLIENT tool_search
- * execute callback per frozen pair (`rehydrateToolSearchRuntimeTools`) and
- * THROWS a UserError when the re-run's runtime-tool keys mismatch the serialized
- * expectation — which is exactly what happens when the RESUMING account's
- * connector pool differs from the FREEZING account's. The SDK skips that
- * rehydration entirely for `execution === 'server'` calls, so flipping the
- * frozen pairs' `execution` to `"server"` in place defuses the throw without
- * touching counts, ids, pairing, or content. The flipped shape is wire-safe:
- * LIVE-VERIFIED against /codex/responses — a replayed server-execution pair is
- * accepted (200) and its disclosure still holds. The account-bound `tsc_…` id is
- * separately stripped by the codex transport normalizer (all input item ids).
- *
- * Walks the same blob locations as {@link stripReasoningIdentityFromSerializedRunState}:
- * `originalInput` (array form), `generatedItems` (SDK run-item wrappers — the
- * raw shape under `rawItem`), every `modelResponses[].output`, and
- * `lastModelResponse.output`. Returns the input string unchanged when nothing
- * matched.
- */
-export function neutralizeToolSearchItemsInSerializedRunState(serialized: string): string {
+export function hasOpaqueProviderArtifact(item: unknown): boolean {
+  if (!item || typeof item !== "object") return false;
+  const record = item as Record<string, unknown>;
+  if (record.type !== "reasoning" && record.type !== "compaction") return false;
+  if (typeof record.encrypted_content === "string" && record.encrypted_content.length > 0) {
+    return true;
+  }
+  const providerData =
+    record.providerData && typeof record.providerData === "object"
+      ? (record.providerData as Record<string, unknown>)
+      : null;
+  return Boolean(
+    providerData &&
+    ((typeof providerData.encrypted_content === "string" &&
+      providerData.encrypted_content.length > 0) ||
+      (typeof providerData.encryptedContent === "string" &&
+        providerData.encryptedContent.length > 0)),
+  );
+}
+
+export function serializedRunStateHasOpaqueProviderArtifact(serialized: string): boolean {
   let parsed: unknown;
   try {
     parsed = JSON.parse(serialized);
   } catch {
-    return serialized;
+    return false;
   }
-  if (!parsed || typeof parsed !== "object") {
-    return serialized;
-  }
-  let changed = false;
-  const neutralize = (candidate: unknown): void => {
-    if (!candidate || typeof candidate !== "object") {
-      return;
-    }
-    const record = candidate as Record<string, unknown>;
-    if (record.type !== "tool_search_call" && record.type !== "tool_search_output") {
-      return;
-    }
-    if (record.execution !== "server") {
-      record.execution = "server";
-      changed = true;
-    }
-  };
-  const neutralizeArray = (arr: unknown): void => {
-    if (Array.isArray(arr)) {
-      for (const item of arr) {
-        neutralize(item);
-      }
-    }
-  };
+  if (!parsed || typeof parsed !== "object") return false;
   const root = parsed as Record<string, unknown>;
-  neutralizeArray(root.originalInput);
-  if (Array.isArray(root.generatedItems)) {
-    for (const wrapper of root.generatedItems) {
-      if (
-        wrapper &&
+  const itemArrayHasOpaque = (value: unknown): boolean =>
+    Array.isArray(value) && value.some(hasOpaqueProviderArtifact);
+  if (itemArrayHasOpaque(root.originalInput)) return true;
+  if (
+    Array.isArray(root.generatedItems) &&
+    root.generatedItems.some(
+      (wrapper) =>
+        wrapper !== null &&
         typeof wrapper === "object" &&
-        "rawItem" in (wrapper as Record<string, unknown>)
-      ) {
-        neutralize((wrapper as Record<string, unknown>).rawItem);
-      }
-    }
+        hasOpaqueProviderArtifact((wrapper as Record<string, unknown>).rawItem),
+    )
+  ) {
+    return true;
   }
-  const neutralizeResponseOutput = (response: unknown): void => {
-    if (response && typeof response === "object") {
-      neutralizeArray((response as Record<string, unknown>).output);
-    }
-  };
-  if (Array.isArray(root.modelResponses)) {
-    for (const response of root.modelResponses) {
-      neutralizeResponseOutput(response);
-    }
+  if (
+    Array.isArray(root.modelResponses) &&
+    root.modelResponses.some(
+      (response) =>
+        response !== null &&
+        typeof response === "object" &&
+        itemArrayHasOpaque((response as Record<string, unknown>).output),
+    )
+  ) {
+    return true;
   }
-  neutralizeResponseOutput(root.lastModelResponse);
-  if (!changed) {
-    return serialized;
-  }
-  return JSON.stringify(parsed);
+  return Boolean(
+    root.lastModelResponse &&
+    typeof root.lastModelResponse === "object" &&
+    itemArrayHasOpaque((root.lastModelResponse as Record<string, unknown>).output),
+  );
 }
 
 /**

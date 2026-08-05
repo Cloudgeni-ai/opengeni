@@ -49,7 +49,7 @@
     },
     "apps/api": {
       "name": "@opengeni/api-router",
-      "version": "0.15.5",
+      "version": "0.21.0",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",
@@ -130,7 +130,7 @@
     },
     "apps/worker": {
       "name": "@opengeni/worker-bundle",
-      "version": "0.13.10",
+      "version": "0.16.4",
       "dependencies": {
         "@opengeni/agent-proto": "workspace:*",
         "@opengeni/codex": "workspace:*",
@@ -159,7 +159,7 @@
     },
     "examples/northstar-support": {
       "name": "@opengeni/example-northstar-support",
-      "version": "0.0.44",
+      "version": "0.0.59",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/react": "workspace:*",
@@ -194,7 +194,7 @@
     },
     "packages/codex": {
       "name": "@opengeni/codex",
-      "version": "0.2.9",
+      "version": "0.2.10",
       "dependencies": {
         "zod": "^4.2.1",
       },
@@ -205,7 +205,7 @@
     },
     "packages/config": {
       "name": "@opengeni/config",
-      "version": "0.9.1",
+      "version": "0.10.7",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -218,7 +218,7 @@
     },
     "packages/contracts": {
       "name": "@opengeni/contracts",
-      "version": "0.28.1",
+      "version": "0.36.0",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
         "zod": "^4.2.1",
@@ -230,7 +230,7 @@
     },
     "packages/core": {
       "name": "@opengeni/core",
-      "version": "0.16.2",
+      "version": "0.20.3",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/codex": "workspace:*",
@@ -252,7 +252,7 @@
     },
     "packages/db": {
       "name": "@opengeni/db",
-      "version": "0.19.0",
+      "version": "0.27.0",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
@@ -281,7 +281,7 @@
     },
     "packages/documents": {
       "name": "@opengeni/documents",
-      "version": "0.2.64",
+      "version": "0.3.3",
       "dependencies": {
         "@llamaindex/liteparse": "^1.5.3",
         "@opengeni/config": "workspace:*",
@@ -292,13 +292,14 @@
         "openai": "6.36.0",
       },
       "devDependencies": {
+        "@opengeni/testing": "workspace:*",
         "tsup": "^8.5.0",
         "typescript": "7.0.2",
       },
     },
     "packages/events": {
       "name": "@opengeni/events",
-      "version": "0.3.55",
+      "version": "0.3.66",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
@@ -311,7 +312,7 @@
     },
     "packages/github": {
       "name": "@opengeni/github",
-      "version": "0.4.13",
+      "version": "0.4.23",
       "dependencies": {
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -335,7 +336,7 @@
     },
     "packages/observability": {
       "name": "@opengeni/observability",
-      "version": "0.3.0",
+      "version": "0.4.10",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "prom-client": "^15.1.3",
@@ -358,7 +359,7 @@
     },
     "packages/react": {
       "name": "@opengeni/react",
-      "version": "0.34.1",
+      "version": "0.41.0",
       "dependencies": {
         "@bufbuild/protobuf": "^2.2.0",
         "@dnd-kit/core": "6.3.1",
@@ -442,7 +443,7 @@
     },
     "packages/runtime": {
       "name": "@opengeni/runtime",
-      "version": "0.15.3",
+      "version": "0.18.4",
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
         "@noble/hashes": "^1.8.0",
@@ -467,7 +468,7 @@
     },
     "packages/sdk": {
       "name": "@opengeni/sdk",
-      "version": "0.34.1",
+      "version": "0.41.0",
       "devDependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -479,7 +480,7 @@
     },
     "packages/storage": {
       "name": "@opengeni/storage",
-      "version": "0.2.50",
+      "version": "0.2.60",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",

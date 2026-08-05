@@ -5,6 +5,8 @@ export type PickerBillingClass = "opengeni_credits" | "codex_subscription" | "by
 export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogModel> = {
   id: string;
   label: string;
+  /** Catalog-curated compact label for dense UI; fall back to `label` when absent. */
+  shortLabel?: string | undefined;
   billingClass: PickerBillingClass;
   billingClassLabel: string;
   selectable: boolean;
@@ -171,6 +173,7 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
       return {
         id: catalog.id,
         label: catalog.label,
+        ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
         billingClass,
         billingClassLabel: billingClassLabel(billingClass),
         selectable: catalog.availability.selectable,
@@ -191,6 +194,7 @@ export function projectClientModelRows(models: ClientModel[]): PickerModelRow<Cl
     return {
       id: catalog.id,
       label: catalog.label,
+      ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
       billingClass,
       billingClassLabel: billingClassLabel(billingClass),
       selectable: true,

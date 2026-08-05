@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessContext } from "@opengeni/contracts";
+import { resolveCodexAppsCredentialIdForRun } from "@opengeni/core";
 import {
   createDb,
   encryptEnvironmentValue,
@@ -36,6 +37,7 @@ const settings = testSettings({
   delegationSecret: DELEGATION_SECRET,
   environmentsEncryptionKey: Buffer.alloc(32, 42).toString("base64"),
   codexSubscriptionEnabled: true,
+  codexConnectedAppsEnabled: true,
 });
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
@@ -379,6 +381,179 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     expect(JSON.stringify(body)).not.toContain("managed browser origin is not configured");
     expect(provider.calls).toBe(callsBefore);
+  });
+
+  test("Codex Apps is owner-enabled, scoped-disableable, browser-only, and OCC-safe", async () => {
+    if (!available) return;
+    const api = app();
+    const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
+    const context = (await access.json()) as AccessContext;
+    const accountId = context.defaultAccountId!;
+    const workspaceId = crypto.randomUUID();
+    await admin`
+      insert into workspaces (id, account_id, name)
+      values (${workspaceId}, ${accountId}, ${`apps-api-${workspaceId}`})`;
+    await admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, subject_label, role, permissions
+      ) values
+        (
+          ${accountId}, ${workspaceId}, ${`user:${OWNER_USER_ID}`}, 'Apps owner', 'member',
+          ${admin.json(["workspace:read", "connections:write"])}
+        ),
+        (
+          ${accountId}, ${workspaceId}, ${`user:${OTHER_USER_ID}`}, 'Apps manager', 'member',
+          ${admin.json(["workspace:read", "connections:write"])}
+        )`;
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const connected = await upsertCodexSubscriptionCredential(client.db, {
+      accountId,
+      workspaceId,
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({ access_token: "apps-token", refresh_token: "refresh", id_token: "id" }),
+      ),
+      chatgptAccountId: `apps-api-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
+
+    const callsBefore = provider.calls;
+    const initial = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(initial.status).toBe(200);
+    const initialBody = (await initial.json()) as any;
+    expect(initialBody.apps).toMatchObject({
+      available: true,
+      credentialId: null,
+      version: 0,
+      canDisable: false,
+    });
+    expect(initialBody.accounts[0]).toMatchObject({
+      id: connected.id,
+      appsDesignated: false,
+      canEnableApps: true,
+    });
+
+    const enabled = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
+    });
+    expect(enabled.status).toBe(200);
+    expect(await enabled.json()).toMatchObject({
+      credentialId: connected.id,
+      version: 1,
+      changed: true,
+    });
+
+    await admin`
+      update workspace_memberships
+      set permissions = ${admin.json(["workspace:read"])}
+      where workspace_id = ${workspaceId} and subject_id = ${`user:${OTHER_USER_ID}`}`;
+    const unscopedDisable = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "DELETE",
+      headers: browserHeaders(OTHER_COOKIE),
+      body: JSON.stringify({ expectedVersion: 1 }),
+    });
+    expect(unscopedDisable.status).toBe(403);
+    await admin`
+      update workspace_memberships
+      set permissions = ${admin.json(["workspace:read", "connections:write"])}
+      where workspace_id = ${workspaceId} and subject_id = ${`user:${OTHER_USER_ID}`}`;
+
+    const bearer = await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId,
+      workspaceId,
+      subjectId: `user:${OWNER_USER_ID}`,
+      permissions: ["connections:write"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const bearerAttempt = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "DELETE",
+      headers: {
+        ...browserHeaders(OWNER_COOKIE),
+        authorization: `Bearer ${bearer}`,
+      },
+      body: JSON.stringify({ expectedVersion: 1 }),
+    });
+    expect(bearerAttempt.status).toBe(403);
+    const crossSiteAttempt = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "DELETE",
+      headers: { ...browserHeaders(OWNER_COOKIE), origin: "https://attacker.test" },
+      body: JSON.stringify({ expectedVersion: 1 }),
+    });
+    expect(crossSiteAttempt.status).toBe(403);
+
+    const disabledByManager = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "DELETE",
+      headers: browserHeaders(OTHER_COOKIE),
+      body: JSON.stringify({ expectedVersion: 1 }),
+    });
+    expect(disabledByManager.status).toBe(200);
+    expect(await disabledByManager.json()).toMatchObject({
+      credentialId: null,
+      version: 2,
+      changed: true,
+    });
+
+    const otherCannotEnable = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OTHER_COOKIE),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+    });
+    expect(otherCannotEnable.status).toBe(403);
+
+    const reenabled = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+    });
+    expect(reenabled.status).toBe(200);
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(connected.id);
+
+    // Designation is not durable authority: removing the exact owner's current
+    // connection-management permission makes Apps unavailable immediately.
+    await admin`
+      update workspace_memberships
+      set permissions = ${admin.json(["workspace:read"])}
+      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
+    await admin`
+      update workspace_memberships
+      set permissions = ${admin.json(["workspace:read", "connections:write"])}
+      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(connected.id);
+
+    const staleReplay = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+    });
+    expect(staleReplay.status).toBe(409);
+    expect(provider.calls).toBe(callsBefore);
+
+    const disabledApi = app({
+      appSettings: { ...settings, codexConnectedAppsEnabled: false },
+    });
+    const disabledRead = await disabledApi.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    const disabledReadBody = (await disabledRead.json()) as any;
+    expect(disabledReadBody.apps.available).toBe(false);
+    expect(disabledReadBody.accounts[0].canEnableApps).toBe(false);
+    const disabledEnable = await disabledApi.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 3 }),
+    });
+    expect(disabledEnable.status).toBe(409);
   });
 
   test("owner cookie works; overview/allocator never consume; another admin and nonhuman auth fail closed", async () => {
