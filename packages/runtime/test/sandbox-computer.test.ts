@@ -457,7 +457,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
         return formatted("", 75);
       },
     };
-    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 40 });
+    // Keep this far below the production 15s deadline while leaving enough event-loop
+    // headroom for the reserved cleanup admission under a loaded parallel test runner.
+    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 200 });
     const error = await c.screenshot().catch((value) => value);
     expect(error).toBeInstanceOf(ScreenshotReadError);
     expect((error as ScreenshotReadError).code).toBe("read_timeout");
