@@ -169,7 +169,7 @@ describe("observability", () => {
     }
   });
 
-  test("sanitizes and bounds span errors before OTLP export", async () => {
+  test("projects span errors and drops unknown attributes before OTLP export", async () => {
     const exported: Array<{ body: any }> = [];
     const obs = createObservability(settings, {
       component: "api",
@@ -205,8 +205,11 @@ describe("observability", () => {
       key: "error.status_code",
       value: { intValue: 502 },
     });
-    const large = spanBody.attributes.find((entry: any) => entry.key === "custom.large");
-    expect(large.value.stringValue.length).toBeLessThanOrEqual(512);
+    expect(spanBody.attributes).not.toContainEqual(
+      expect.objectContaining({
+        key: "custom.large",
+      }),
+    );
   });
 
   test("OTLP status projection tolerates hostile proxies without masking the span", async () => {
@@ -305,6 +308,32 @@ describe("observability", () => {
       status: 503,
       origin: "worker",
     });
+  });
+
+  test("public structured logs fail closed for unknown ordinary attributes", () => {
+    const sentinel = "PUBLIC_ORDINARY_ATTRIBUTE_SENTINEL_8d0cc3";
+    const observed: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.info("fixed operational message", {
+        method: "GET",
+        status: 200,
+        arbitraryDiagnostic: sentinel,
+      });
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toContain(sentinel);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "fixed operational message",
+      method: "GET",
+      status: 200,
+    });
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("arbitraryDiagnostic");
   });
 
   test("public diagnostics reject syntactically valid secret-shaped classes and codes", () => {

@@ -69,51 +69,53 @@ const SANDBOX_OPERATION_NAMES = new Set([
 
 /**
  * External logs and OTLP are public/third-party projections, not canonical
- * OpenGeni storage. These exact schema keys can carry tenant identifiers or
- * arbitrary source/provider content and are therefore omitted at the sink
- * boundary. This is key-based projection, never value inspection or rewriting.
+ * OpenGeni storage. Only this reviewed closed set of operational fields may
+ * cross that boundary. Unknown keys are omitted regardless of their value, so
+ * a new diagnostic, identifier, command, response, or provider field cannot
+ * become public by accident. This is schema projection, never value inspection
+ * or rewriting.
  */
-const PUBLIC_TELEMETRY_OMITTED_ATTRIBUTE_KEYS = new Set([
-  "accountId",
-  "account_id",
-  "opengeni.account_id",
-  "workspaceId",
-  "workspace_id",
-  "opengeni.workspace_id",
-  "sessionId",
-  "session_id",
-  "opengeni.session_id",
-  "turnId",
-  "turn_id",
-  "opengeni.turn_id",
-  "sourceKey",
-  "source_key",
-  "opengeni.source_key",
-  "consumerId",
-  "consumer_id",
-  "error",
-  "errorName",
-  "error_name",
-  "errorMessage",
-  "error_message",
-  "message",
-  "stack",
-  "cause",
-  "code",
-  "exception.message",
-  "exception.stacktrace",
-  "command",
-  "commandText",
-  "command_text",
-  "cmd",
-  "responseBody",
-  "response_body",
-  "url",
-  "url.full",
-  "url.path",
-  "endpoint",
-  "toolResult",
-  "tool_result",
+const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
+  "http.request.method",
+  "http.response.status_code",
+  "opengeni.route",
+  "opengeni.duration_ms",
+  "opengeni.finalization_duration_ms",
+  "opengeni.trigger_kind",
+  "opengeni.status",
+  "error.type",
+  "error.status_code",
+  "method",
+  "route",
+  "status",
+  "durationMs",
+  "attempt",
+  "attempts",
+  "delayMs",
+  "provider",
+  "providerApi",
+  "model",
+  "inputTokens",
+  "outputTokens",
+  "cachedTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+  "accountChangedFromPrevCall",
+  "rejectedFields",
+  "dependency",
+  "activity",
+  "backend",
+  "op",
+  "outcome",
+  "eventType",
+  "surface",
+  "reason",
+  "originalBytes",
+  "deliveredBytes",
+  "estimatedOriginalTokens",
+  "estimatedDeliveredTokens",
+  "fullEvidenceAvailable",
+  "retainedOutputKind",
 ]);
 
 /**
@@ -706,7 +708,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
   }
   return Object.fromEntries(
     Object.entries(attributes).filter(
-      ([key, value]) => value !== undefined && !PUBLIC_TELEMETRY_OMITTED_ATTRIBUTE_KEYS.has(key),
+      ([key, value]) => value !== undefined && PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key),
     ),
   );
 }
