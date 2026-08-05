@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.27.13
+
+### Patch Changes
+
+- 49c7f9c: Prevent deadlocks between sandbox mutation settlement and retained-process promotion, retry idempotent settlement transactions after transient database conflicts, and clarify that an idle session sandbox can be restored when the next operation needs it.
+
 ## 0.27.12
 
 ### Patch Changes

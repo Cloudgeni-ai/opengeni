@@ -1,5 +1,16 @@
 # @opengeni/api-router
 
+## 0.21.16
+
+### Patch Changes
+
+- 49c7f9c: Prevent deadlocks between sandbox mutation settlement and retained-process promotion, retry idempotent settlement transactions after transient database conflicts, and clarify that an idle session sandbox can be restored when the next operation needs it.
+- Updated dependencies [49c7f9c]
+  - @opengeni/db@0.27.13
+  - @opengeni/core@0.20.18
+  - @opengeni/documents@0.5.9
+  - @opengeni/events@0.3.79
+
 ## 0.21.15
 
 ### Patch Changes
