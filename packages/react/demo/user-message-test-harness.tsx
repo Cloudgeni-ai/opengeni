@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -91,6 +91,32 @@ function assistant(text: string): TimelineItem {
   };
 }
 
+function HiddenShadowActionFixture() {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+    const host = document.createElement("og-hidden-shadow-control");
+    host.setAttribute("data-hidden-shadow-control", "");
+    host.style.display = "block";
+    host.style.marginTop = "8px";
+    const shadowRoot = host.attachShadow({ mode: "open", delegatesFocus: true });
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Shadow hidden action";
+    button.style.font = "inherit";
+    button.style.padding = "4px 8px";
+    shadowRoot.append(button);
+    container.replaceChildren(host);
+    return () => container.replaceChildren();
+  }, []);
+
+  return <div ref={containerRef} data-hidden-shadow-fixture="" />;
+}
+
 function Harness() {
   const [streamed, setStreamed] = useState(false);
   const [prepended, setPrepended] = useState(false);
@@ -152,13 +178,31 @@ function Harness() {
           <div>
             <Markdown>{text}</Markdown>
             {item.id === "long-user-message" ? (
-              <button
-                type="button"
-                data-hidden-message-action=""
-                className="mt-2 rounded-og-sm border border-og-border px-2 py-1 text-og-sm"
-              >
-                Hidden message action
-              </button>
+              <>
+                <HiddenShadowActionFixture />
+                <button
+                  type="button"
+                  data-zero-size-message-action=""
+                  className="block h-0 w-0 overflow-hidden border-0 p-0"
+                >
+                  Zero-size hidden action
+                </button>
+                <button
+                  type="button"
+                  data-hidden-message-action=""
+                  className="mt-2 rounded-og-sm border border-og-border px-2 py-1 text-og-sm"
+                >
+                  Hidden message action
+                </button>
+                <button
+                  inert
+                  type="button"
+                  data-preexisting-inert-message-action=""
+                  className="mt-2 rounded-og-sm border border-og-border px-2 py-1 text-og-sm"
+                >
+                  Pre-existing inert action
+                </button>
+              </>
             ) : null}
           </div>
         </UserMessageBody>

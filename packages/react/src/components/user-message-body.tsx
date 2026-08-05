@@ -44,6 +44,69 @@ const INTERACTIVE_DESCENDANT_SELECTOR = [
   "[role='treeitem']",
 ].join(",");
 
+function composedParentElement(element: Element): Element | null {
+  if (element.assignedSlot) {
+    return element.assignedSlot;
+  }
+  if (element.parentElement) {
+    return element.parentElement;
+  }
+  const root = element.getRootNode();
+  return typeof ShadowRoot !== "undefined" && root instanceof ShadowRoot ? root.host : null;
+}
+
+function hasComposedInertAncestor(element: Element, boundary: Element): boolean {
+  let current: Element | null = element;
+  while (current) {
+    if (current.hasAttribute("inert")) {
+      return true;
+    }
+    if (current === boundary) {
+      return false;
+    }
+    current = composedParentElement(current);
+  }
+  return false;
+}
+
+/**
+ * Native inert crosses shadow boundaries, but ordinary selectors do not.
+ * Recursively inspect open roots control-by-control so visible shadow content
+ * stays interactive. An opaque custom-element host is the conservative focus
+ * boundary for a closed root that cannot be inspected.
+ */
+function collectInteractionBoundaries(root: ParentNode): HTMLElement[] {
+  const boundaries: HTMLElement[] = [];
+  const scopes: ParentNode[] = [root];
+  for (let scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+    for (const element of scopes[scopeIndex]!.querySelectorAll("*")) {
+      if (!(element instanceof HTMLElement)) {
+        continue;
+      }
+      const shadowRoot = element.shadowRoot;
+      const opaqueCustomElement = element.localName.includes("-") && !shadowRoot;
+      if (element.matches(INTERACTIVE_DESCENDANT_SELECTOR) || opaqueCustomElement) {
+        boundaries.push(element);
+      }
+      if (shadowRoot) {
+        scopes.push(shadowRoot);
+      }
+    }
+  }
+  return boundaries;
+}
+
+function isFullyInsideVisiblePreview(rect: DOMRect, clipRect: DOMRect): boolean {
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    rect.top >= clipRect.top - 1 &&
+    rect.bottom <= clipRect.bottom + 1 &&
+    rect.left >= clipRect.left - 1 &&
+    rect.right <= clipRect.right + 1
+  );
+}
+
 type RestoreDisclosureAnchor = (() => void) | null;
 
 export type UserMessageDisclosureContextValue = {
@@ -145,18 +208,12 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
       return;
     }
 
-    for (const descendant of content.querySelectorAll<HTMLElement>(
-      INTERACTIVE_DESCENDANT_SELECTOR,
-    )) {
-      if (descendant.closest("[inert]")) {
+    for (const descendant of collectInteractionBoundaries(content)) {
+      if (hasComposedInertAncestor(descendant, content)) {
         continue;
       }
       const rect = descendant.getBoundingClientRect();
-      if (rect.width <= 0 && rect.height <= 0) {
-        continue;
-      }
-      const fullyInsidePreview = rect.top >= clipRect.top - 1 && rect.bottom <= clipRect.bottom + 1;
-      if (fullyInsidePreview) {
+      if (isFullyInsideVisiblePreview(rect, clipRect)) {
         continue;
       }
       descendant.setAttribute("inert", "");
@@ -214,7 +271,7 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
   useLayoutEffect(() => {
     syncCollapsedInteractivity();
     return restoreManagedInertDescendants;
-  }, [restoreManagedInertDescendants, syncCollapsedInteractivity]);
+  });
 
   useLayoutEffect(() => {
     const restore = pendingRestoreRef.current;

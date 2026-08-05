@@ -138,7 +138,7 @@ describe("UserMessageBody", () => {
     await r.unmount();
   });
 
-  test("makes only clipped interactive descendants inert and restores focusability on expand", async () => {
+  test("covers composed and zero-size focus boundaries while preserving visible and preexisting state", async () => {
     const callbacks: ResizeObserverCallback[] = [];
     globalThis.ResizeObserver = class {
       constructor(callback: ResizeObserverCallback) {
@@ -160,6 +160,10 @@ describe("UserMessageBody", () => {
         <button data-testid="hidden-button" type="button">
           Hidden action
         </button>
+        <div data-testid="shadow-slot" />
+        <button data-testid="zero-size-button" type="button">
+          Zero-size action
+        </button>
         <button data-testid="preexisting-inert" type="button">
           Already inert
         </button>
@@ -176,17 +180,45 @@ describe("UserMessageBody", () => {
     const hiddenButton = r.container.querySelector<HTMLButtonElement>(
       "[data-testid='hidden-button']",
     )!;
+    const zeroSizeButton = r.container.querySelector<HTMLButtonElement>(
+      "[data-testid='zero-size-button']",
+    )!;
     const preexistingInert = r.container.querySelector<HTMLElement>(
       "[data-testid='preexisting-inert']",
     )!;
+    const shadowSlot = r.container.querySelector<HTMLElement>("[data-testid='shadow-slot']")!;
+    const clippedShadowHost = document.createElement("og-clipped-shadow-control");
+    const clippedShadowRoot = clippedShadowHost.attachShadow({
+      mode: "open",
+      delegatesFocus: true,
+    });
+    const clippedShadowButton = document.createElement("button");
+    clippedShadowButton.textContent = "Clipped shadow action";
+    clippedShadowRoot.append(clippedShadowButton);
+    const opaqueShadowHost = document.createElement("og-opaque-shadow-control");
+    opaqueShadowHost
+      .attachShadow({ mode: "closed", delegatesFocus: true })
+      .append(document.createElement("button"));
+    const visibleShadowHost = document.createElement("og-visible-shadow-control");
+    const visibleShadowRoot = visibleShadowHost.attachShadow({ mode: "open" });
+    const escapedShadowButton = document.createElement("button");
+    escapedShadowButton.textContent = "Escaped shadow action";
+    visibleShadowRoot.append(escapedShadowButton);
+    shadowSlot.append(clippedShadowHost, opaqueShadowHost, visibleShadowHost);
 
-    Object.defineProperty(content, "scrollHeight", { configurable: true, value: 520 });
+    Object.defineProperty(content, "scrollHeight", { configurable: true, value: 620 });
     Object.defineProperty(threshold, "offsetHeight", { configurable: true, value: 224 });
     clip.getBoundingClientRect = () => elementRect(0, 224);
     visibleLink.getBoundingClientRect = () => elementRect(24, 48);
     hiddenLink.getBoundingClientRect = () => elementRect(260, 284);
     hiddenButton.getBoundingClientRect = () => elementRect(300, 332);
-    preexistingInert.getBoundingClientRect = () => elementRect(348, 380);
+    clippedShadowHost.getBoundingClientRect = () => elementRect(348, 380);
+    clippedShadowButton.getBoundingClientRect = () => elementRect(352, 376);
+    opaqueShadowHost.getBoundingClientRect = () => elementRect(388, 420);
+    visibleShadowHost.getBoundingClientRect = () => elementRect(64, 88);
+    escapedShadowButton.getBoundingClientRect = () => elementRect(432, 460);
+    zeroSizeButton.getBoundingClientRect = () => elementRect(476, 476, 0, 0);
+    preexistingInert.getBoundingClientRect = () => elementRect(492, 524);
     preexistingInert.setAttribute("inert", "");
 
     await actRun(() => callbacks.forEach((callback) => callback([], {} as ResizeObserver)));
@@ -194,6 +226,12 @@ describe("UserMessageBody", () => {
     expect(hiddenLink.hasAttribute("inert")).toBe(true);
     expect(hiddenButton.hasAttribute("inert")).toBe(true);
     expect(hiddenLink.hasAttribute("data-og-user-message-managed-inert")).toBe(true);
+    expect(clippedShadowHost.hasAttribute("inert")).toBe(false);
+    expect(clippedShadowButton.hasAttribute("inert")).toBe(true);
+    expect(opaqueShadowHost.hasAttribute("inert")).toBe(true);
+    expect(visibleShadowHost.hasAttribute("inert")).toBe(false);
+    expect(escapedShadowButton.hasAttribute("inert")).toBe(true);
+    expect(zeroSizeButton.hasAttribute("inert")).toBe(true);
     expect(preexistingInert.hasAttribute("inert")).toBe(true);
     expect(preexistingInert.hasAttribute("data-og-user-message-managed-inert")).toBe(false);
 
@@ -201,6 +239,11 @@ describe("UserMessageBody", () => {
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
     expect(hiddenLink.hasAttribute("inert")).toBe(false);
     expect(hiddenButton.hasAttribute("inert")).toBe(false);
+    expect(clippedShadowHost.hasAttribute("inert")).toBe(false);
+    expect(clippedShadowButton.hasAttribute("inert")).toBe(false);
+    expect(opaqueShadowHost.hasAttribute("inert")).toBe(false);
+    expect(escapedShadowButton.hasAttribute("inert")).toBe(false);
+    expect(zeroSizeButton.hasAttribute("inert")).toBe(false);
     expect(preexistingInert.hasAttribute("inert")).toBe(true);
 
     hiddenButton.focus();
@@ -210,6 +253,22 @@ describe("UserMessageBody", () => {
     expect(document.activeElement).toBe(disclosure);
     expect(hiddenLink.hasAttribute("inert")).toBe(true);
     expect(hiddenButton.hasAttribute("inert")).toBe(true);
+    expect(clippedShadowHost.hasAttribute("inert")).toBe(false);
+    expect(clippedShadowButton.hasAttribute("inert")).toBe(true);
+    expect(opaqueShadowHost.hasAttribute("inert")).toBe(true);
+    expect(escapedShadowButton.hasAttribute("inert")).toBe(true);
+    expect(zeroSizeButton.hasAttribute("inert")).toBe(true);
+
+    clippedShadowButton.removeAttribute("inert");
+    opaqueShadowHost.removeAttribute("inert");
+    escapedShadowButton.removeAttribute("inert");
+    zeroSizeButton.removeAttribute("inert");
+    await actRun(() => callbacks.forEach((callback) => callback([], {} as ResizeObserver)));
+    expect(clippedShadowButton.hasAttribute("inert")).toBe(true);
+    expect(opaqueShadowHost.hasAttribute("inert")).toBe(true);
+    expect(escapedShadowButton.hasAttribute("inert")).toBe(true);
+    expect(zeroSizeButton.hasAttribute("inert")).toBe(true);
+    expect(preexistingInert.hasAttribute("inert")).toBe(true);
     await r.unmount();
   });
 
