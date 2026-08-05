@@ -211,6 +211,28 @@ test("does not turn MCP client failures or arbitrary codes into connectivity rec
   expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
 });
 
+test("fails closed on pathological MCP transport error wrappers", () => {
+  let deeplyWrapped: Record<string, unknown> = { code: "ECONNREFUSED" };
+  for (let depth = 0; depth < 10; depth += 1) {
+    deeplyWrapped = { cause: deeplyWrapped };
+  }
+  const throwingWrapper = {
+    code: "ECONNRESET",
+    get cause(): unknown {
+      throw new Error("unsafe transport getter");
+    },
+  };
+  const throwingFields = {
+    get code(): unknown {
+      throw new Error("unsafe code getter");
+    },
+  };
+
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(deeplyWrapped))).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingWrapper))).toBe(false);
+  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingFields))).toBe(false);
+});
+
 describe("structured human-input runtime boundary", () => {
   const interruption = {
     name: HUMAN_INPUT_TOOL_NAME,

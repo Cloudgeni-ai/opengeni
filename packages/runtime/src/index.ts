@@ -3739,11 +3739,18 @@ function safeMcpErrorFields(error: unknown): {
   errorClass: string;
   status?: number;
 } {
-  const errorClass = error instanceof Error ? error.constructor.name : typeof error;
-  const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
+  let errorClass: string;
+  let raw: unknown;
+  let altRaw: unknown;
+  try {
+    errorClass = error instanceof Error ? error.constructor.name : typeof error;
+    raw = (error as { code?: unknown; status?: unknown } | null)?.code;
+    altRaw = (error as { status?: unknown } | null)?.status;
+  } catch {
+    return { errorClass: "unknown" };
+  }
   const status = typeof raw === "number" ? raw : undefined;
   if (status === undefined) {
-    const altRaw = (error as { status?: unknown } | null)?.status;
     return typeof altRaw === "number" ? { errorClass, status: altRaw } : { errorClass };
   }
   return { errorClass, status };
@@ -3762,40 +3769,106 @@ const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNREFUSED",
   "EPIPE",
 ]);
+const MCP_REQUEST_TIMEOUT_MESSAGES = new Set([
+  "Request timed out",
+  "MCP error -32001: Request timed out",
+  "Maximum total timeout exceeded",
+  "MCP error -32001: Maximum total timeout exceeded",
+]);
 
-function mcpTransportHttpStatuses(error: unknown, seen = new WeakSet<object>()): number[] {
-  if (!error || typeof error !== "object" || seen.has(error)) {
-    return [];
-  }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
+const MCP_TRANSPORT_ERROR_MAX_DEPTH = 8;
+const MCP_TRANSPORT_ERROR_MAX_NODES = 32;
+const MCP_TRANSPORT_ERROR_NESTED_KEYS = ["error", "cause", "response", "data"] as const;
+
+function inspectMcpTransportError(
+  error: unknown,
+  seen = new WeakSet<object>(),
+): {
+  complete: boolean;
+  hasConnectivityCode: boolean;
+  hasConnectivityMarker: boolean;
+  hasRequestTimeout: boolean;
+  statuses: number[];
+} {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
   const statuses: number[] = [];
-  for (const value of [record.status, record.statusCode, record.code]) {
-    if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
-      statuses.push(value);
+  let hasConnectivityCode = false;
+  let hasConnectivityMarker = false;
+  let hasRequestTimeout = false;
+  let inspectedNodes = 0;
+  let complete = true;
+
+  while (pending.length > 0 && inspectedNodes < MCP_TRANSPORT_ERROR_MAX_NODES) {
+    const current = pending.shift()!;
+    if (!current.value || typeof current.value !== "object" || seen.has(current.value)) {
+      continue;
+    }
+    seen.add(current.value);
+    inspectedNodes += 1;
+    const record = current.value as Record<string, unknown>;
+    let statusValues: unknown[];
+    let code: unknown;
+    let failureKind: unknown;
+    let message: unknown;
+    try {
+      statusValues = [record.status, record.statusCode, record.code];
+      code = record.code;
+      failureKind = record.mcpTransportFailureKind;
+      message = record.message;
+    } catch {
+      complete = false;
+      continue;
+    }
+    for (const value of statusValues) {
+      if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
+        statuses.push(value);
+      }
+    }
+    if (typeof code === "string" && MCP_CONNECTIVITY_ERROR_CODES.has(code.toUpperCase())) {
+      hasConnectivityCode = true;
+    }
+    if (failureKind === "connectivity_unavailable") {
+      hasConnectivityMarker = true;
+    }
+    const timeoutCode = typeof code === "number" ? code : statusValues[0];
+    if (
+      failureKind === "request_timeout" ||
+      (timeoutCode === -32_001 &&
+        typeof message === "string" &&
+        MCP_REQUEST_TIMEOUT_MESSAGES.has(message))
+    ) {
+      hasRequestTimeout = true;
+    }
+
+    for (const key of MCP_TRANSPORT_ERROR_NESTED_KEYS) {
+      let nested: unknown;
+      try {
+        nested = record[key];
+      } catch {
+        complete = false;
+        continue;
+      }
+      if (!nested || typeof nested !== "object" || seen.has(nested)) {
+        continue;
+      }
+      if (current.depth >= MCP_TRANSPORT_ERROR_MAX_DEPTH) {
+        complete = false;
+        continue;
+      }
+      pending.push({ depth: current.depth + 1, value: nested });
     }
   }
-  for (const key of ["error", "cause", "response", "data"]) {
-    statuses.push(...mcpTransportHttpStatuses(record[key], seen));
-  }
-  return statuses;
-}
 
-function hasMcpConnectivityErrorCode(error: unknown, seen = new WeakSet<object>()): boolean {
-  if (!error || typeof error !== "object" || seen.has(error)) {
-    return false;
+  if (pending.length > 0) {
+    complete = false;
   }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  if (
-    typeof record.code === "string" &&
-    MCP_CONNECTIVITY_ERROR_CODES.has(record.code.toUpperCase())
-  ) {
-    return true;
-  }
-  return ["error", "cause", "response", "data"].some((key) =>
-    hasMcpConnectivityErrorCode(record[key], seen),
-  );
+  return {
+    complete,
+    hasConnectivityCode,
+    hasConnectivityMarker,
+    hasRequestTimeout,
+    statuses,
+  };
 }
 
 /**
@@ -3808,17 +3881,20 @@ function isRawMcpTransportConnectivityError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  if ((error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable") {
+  const inspection = inspectMcpTransportError(error);
+  if (inspection.hasConnectivityMarker) {
     return true;
   }
-  const statuses = mcpTransportHttpStatuses(error);
-  if (statuses.some((status) => status >= 400 && status < 500)) {
+  if (!inspection.complete) {
     return false;
   }
-  if (statuses.some((status) => status >= 500 && status < 600)) {
+  if (inspection.statuses.some((status) => status >= 400 && status < 500)) {
+    return false;
+  }
+  if (inspection.statuses.some((status) => status >= 500 && status < 600)) {
     return true;
   }
-  return hasMcpConnectivityErrorCode(error);
+  return inspection.hasConnectivityCode;
 }
 
 /**
@@ -3841,31 +3917,7 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
  * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
  */
 export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  if (seen.has(error)) {
-    return false;
-  }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  if (record.mcpTransportFailureKind === "request_timeout") {
-    return true;
-  }
-  const code = typeof record.code === "number" ? record.code : record.status;
-  const message = typeof record.message === "string" ? record.message : "";
-  const sdkTimeoutMessages = new Set([
-    "Request timed out",
-    "MCP error -32001: Request timed out",
-    "Maximum total timeout exceeded",
-    "MCP error -32001: Maximum total timeout exceeded",
-  ]);
-  if (code === -32_001 && sdkTimeoutMessages.has(message)) {
-    return true;
-  }
-  return ["error", "cause", "response", "data"].some((key) =>
-    isMcpRequestTimeoutError(record[key], seen),
-  );
+  return inspectMcpTransportError(error, seen).hasRequestTimeout;
 }
 
 export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
