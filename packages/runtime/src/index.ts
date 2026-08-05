@@ -253,11 +253,13 @@ export {
   ComputerUseCapability,
   computerUse,
   ComputerUnavailableError,
+  ScreenshotReadError,
   ComputerReadOnlyError,
   ComputerActionError,
   type SandboxComputerOptions,
   type ComputerUseArgs,
   type ComputerToolMode,
+  type ScreenshotReadErrorCode,
 } from "./sandbox-computer";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
@@ -3016,6 +3018,7 @@ export function buildAgentCapabilities(
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
+      ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
       toolMode: options.computerToolMode ?? "disabled",
     });

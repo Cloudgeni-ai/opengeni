@@ -14,6 +14,9 @@ import {
   ComputerUnavailableError,
   ComputerActionError,
   ScreenshotReadError,
+  MAX_SCREENSHOT_BYTES,
+  MAX_SCREENSHOT_READ_CHUNKS,
+  SCREENSHOT_READ_CHUNK_BYTES,
   type NativeDesktopSession,
 } from "../src/sandbox-computer";
 import {
@@ -116,6 +119,11 @@ function makeMockSession(
     // Simulate the Modal exec-output cap truncating EACH `dd … | base64` chunk to at most
     // this many decoded bytes — the read then reconstructs short and must fail LOUD.
     truncateChunkBytes?: number;
+    // Override the exact wc stdout body to exercise strict parsing and hard bounds.
+    sizeOutput?: string | ((actualSize: number) => string);
+    // Make cleanup return a settled nonzero result so primary-error settlement can prove
+    // cleanup was attempted without being masked by a second failure.
+    cleanupExit?: number;
     // Model the RoutingSandboxSession fronting a Modal box: it EXPOSES an `exec` method
     // (so typeof session.exec === "function"), but for a Modal backend that method falls
     // back to execCommand and returns the formatted banner STRING — NOT a {output} object.
@@ -144,15 +152,17 @@ function makeMockSession(
   // and returns its length; each dd returns the base64 of that byte-range.
   let attemptBytes: Uint8Array = new Uint8Array();
   const readBody = (cmd: string): string | null => {
-    const sm = cmd.match(/wc -c < (\/tmp\/og-shot-\S+?\.png)/);
-    if (sm) {
+    const screenshotPath = cmd.match(/\/tmp\/og-shot-[A-Za-z0-9.-]+\.png/)?.[0];
+    if (screenshotPath && cmd.includes("wc -c <")) {
       attemptBytes = nextAttemptBytes();
-      return String(attemptBytes.length);
+      return typeof opts.sizeOutput === "function"
+        ? opts.sizeOutput(attemptBytes.length)
+        : (opts.sizeOutput ?? String(attemptBytes.length));
     }
-    const cm = cmd.match(/dd if=(\/tmp\/og-shot-\S+?\.png) bs=(\d+) skip=(\d+)/);
-    if (cm) {
-      const bs = Number(cm[2]!),
-        skip = Number(cm[3]!);
+    const cm = cmd.match(/\bdd if=.*? bs=(\d+) skip=(\d+)/);
+    if (screenshotPath && cm) {
+      const bs = Number(cm[1]!),
+        skip = Number(cm[2]!);
       let slice = attemptBytes.slice(skip * bs, (skip + 1) * bs);
       if (opts.truncateChunkBytes !== undefined) slice = slice.slice(0, opts.truncateChunkBytes);
       return Buffer.from(slice).toString("base64");
@@ -167,6 +177,9 @@ function makeMockSession(
     }
     const body = readBody(cmd);
     if (body !== null) return formatted(body);
+    if (cmd.includes("rm -f --") && opts.cleanupExit !== undefined) {
+      return formatted("", opts.cleanupExit);
+    }
     if (opts.stillRunning) return stillRunningStr;
     return formatted("", opts.failExit ?? 0);
   };
@@ -234,13 +247,17 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     // The read sizes the file (`wc -c`) then base64s it in `dd … | base64` chunks — the
     // chunked form that stays under Modal's exec-output cap (a single `base64 <file>`
     // silently empties a full-frame read).
-    expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
-    const chunkReads = execCalls.filter((cmd) =>
-      /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd),
+    expect(execCalls.some((cmd) => cmd.includes("wc -c <") && cmd.includes("/tmp/og-shot-"))).toBe(
+      true,
+    );
+    const chunkReads = execCalls.filter(
+      (cmd) => cmd.includes("dd if=") && cmd.includes("/tmp/og-shot-") && cmd.includes("| base64"),
     );
     expect(chunkReads.length).toBe(1); // a 6-byte PNG is a single chunk
     // The temp file is cleaned up.
-    expect(execCalls.some((cmd) => cmd.includes("rm -f /tmp/og-shot-"))).toBe(true);
+    expect(execCalls.some((cmd) => cmd.includes("rm -f --") && cmd.includes("/tmp/og-shot-"))).toBe(
+      true,
+    );
   });
 
   test("400-FIX: the exec-object provider path also reads the PNG via the chunked read (structured stdout body)", async () => {
@@ -249,10 +266,15 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     const c = new SandboxComputer(session as never);
     const shot = await c.screenshot();
     expect(shot).toBe(Buffer.from(png).toString("base64"));
-    expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
-    expect(execCalls.some((cmd) => /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd))).toBe(
+    expect(execCalls.some((cmd) => cmd.includes("wc -c <") && cmd.includes("/tmp/og-shot-"))).toBe(
       true,
     );
+    expect(
+      execCalls.some(
+        (cmd) =>
+          cmd.includes("dd if=") && cmd.includes("/tmp/og-shot-") && cmd.includes("| base64"),
+      ),
+    ).toBe(true);
   });
 
   test("ROUTING-PROXY-FIX: a proxy exec() that returns the execCommand banner STRING is banner-stripped, not dropped to ''", async () => {
@@ -268,9 +290,14 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     const shot = await c.screenshot();
     expect(shot).toBe(Buffer.from(png).toString("base64")); // full frame, byte-exact — NOT empty
     // Drove the read through the exec() (proxy string) path, not execCommand directly.
-    expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
+    expect(execCalls.some((cmd) => cmd.includes("wc -c <") && cmd.includes("/tmp/og-shot-"))).toBe(
+      true,
+    );
     expect(
-      execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\| base64/.test(cmd)).length,
+      execCalls.filter(
+        (cmd) =>
+          cmd.includes("dd if=") && cmd.includes("/tmp/og-shot-") && cmd.includes("| base64"),
+      ).length,
     ).toBeGreaterThanOrEqual(3);
   });
 
@@ -288,7 +315,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     const shot = await c.screenshot();
     expect(shot).toBe(Buffer.from(png).toString("base64"));
     // 250000 / 98304 = 3 chunks.
-    const chunkReads = execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\| base64/.test(cmd));
+    const chunkReads = execCalls.filter(
+      (cmd) => cmd.includes("dd if=") && cmd.includes("/tmp/og-shot-") && cmd.includes("| base64"),
+    );
     expect(chunkReads.length).toBe(3);
   });
 
@@ -308,8 +337,164 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     if (result.ok)
       throw new Error("screenshot() resolved on a truncated read — a short frame must fail loud");
     expect(result.e).toBeInstanceOf(ScreenshotReadError);
-    // The message carries BOTH byte counts for diagnosis.
-    expect(String((result.e as Error).message)).toMatch(/of 250000B/);
+    expect((result.e as ScreenshotReadError).code).toBe("truncated_read");
+    // The message carries the expected and reconstructed byte counts for diagnosis.
+    expect(String((result.e as Error).message)).toMatch(/reconstructed 1000B of 98304B/);
+  });
+
+  test("P0: strict wc parser rejects wrapper contamination, negatives, multiple values, and non-decimals without admitting a chunk", async () => {
+    const malformed = [
+      "Chunk ID: abc123\nWall time: 0.01\nOutput:\n4",
+      "-1",
+      "+1",
+      "1 2",
+      "1\n2",
+      "1.0",
+      "",
+    ];
+    for (const sizeOutput of malformed) {
+      const { session, execCalls } = makeMockSession({ sizeOutput });
+      const c = new SandboxComputer(session as never);
+      const error = await c.screenshot().catch((value) => value);
+      expect(error).toBeInstanceOf(ScreenshotReadError);
+      expect((error as ScreenshotReadError).code).toBe("invalid_size_output");
+      expect(execCalls.some((cmd) => /\bdd if=/.test(cmd))).toBe(false);
+      expect(execCalls.some((cmd) => cmd.includes("rm -f --"))).toBe(true);
+      // scrot + wc + cleanup: malicious size output cannot grow provider calls.
+      expect(execCalls.length).toBeLessThanOrEqual(3);
+    }
+  });
+
+  test("P0: strict wc parser accepts one bounded decimal with explicit space/tab/CRLF framing", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const { session } = makeMockSession({ pngBytes: png, sizeOutput: " \t0004 \t\r\n" });
+    const c = new SandboxComputer(session as never);
+    await expect(c.screenshot()).resolves.toBe(Buffer.from(png).toString("base64"));
+  });
+
+  test("P0: huge and overflow wc values fail at the byte cap before any chunk admission", async () => {
+    for (const sizeOutput of [
+      String(MAX_SCREENSHOT_BYTES + 1),
+      String(Number.MAX_SAFE_INTEGER),
+      "9".repeat(1_000),
+    ]) {
+      const { session, execCalls } = makeMockSession({ sizeOutput });
+      const c = new SandboxComputer(session as never);
+      const error = await c.screenshot().catch((value) => value);
+      expect(error).toBeInstanceOf(ScreenshotReadError);
+      expect((error as ScreenshotReadError).code).toBe("size_limit_exceeded");
+      expect(execCalls.some((cmd) => /\bdd if=/.test(cmd))).toBe(false);
+      expect(execCalls.length).toBeLessThanOrEqual(3);
+    }
+  });
+
+  test("P0: exact maximum byte/chunk boundary succeeds with a hard provider-call ceiling", async () => {
+    const png = new Uint8Array(MAX_SCREENSHOT_BYTES).fill(0x5a);
+    const { session, execCalls } = makeMockSession({ pngBytes: png });
+    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 5_000 });
+    const shot = await c.screenshot();
+    expect(Buffer.from(shot, "base64").byteLength).toBe(MAX_SCREENSHOT_BYTES);
+    const chunks = execCalls.filter((cmd) => /\bdd if=/.test(cmd));
+    expect(chunks.length).toBe(MAX_SCREENSHOT_READ_CHUNKS);
+    expect(MAX_SCREENSHOT_READ_CHUNKS).toBe(
+      Math.floor((MAX_SCREENSHOT_BYTES - 1) / SCREENSHOT_READ_CHUNK_BYTES) + 1,
+    );
+    // Exactly scrot + wc + bounded chunks + cleanup.
+    expect(execCalls.length).toBe(MAX_SCREENSHOT_READ_CHUNKS + 3);
+  });
+
+  test("P0: aggregate readback timeout aborts the in-flight provider call, admits no later chunk, and cleans up", async () => {
+    const calls: Array<{ cmd: string; signal?: AbortSignal }> = [];
+    const formatted = (body: string, exit = 0): string =>
+      `Chunk ID: bounded\nProcess exited with code ${exit}\nOutput:\n${body}`;
+    const bytes = new Uint8Array(SCREENSHOT_READ_CHUNK_BYTES * 3).fill(0x41);
+    let hungSignal: AbortSignal | undefined;
+    const session = {
+      execCommand: async (args: { cmd: string; signal?: AbortSignal }): Promise<string> => {
+        calls.push(args);
+        if (args.cmd.includes("scrot --pointer")) return formatted("");
+        if (args.cmd.includes("wc -c <")) return formatted(String(bytes.length));
+        const chunk = args.cmd.match(/\bdd if=.* skip=(\d+)/);
+        if (chunk?.[1] === "0") {
+          return formatted(
+            Buffer.from(bytes.slice(0, SCREENSHOT_READ_CHUNK_BYTES)).toString("base64"),
+          );
+        }
+        if (chunk?.[1] === "1") {
+          hungSignal = args.signal;
+          return await new Promise<string>(() => undefined);
+        }
+        if (args.cmd.includes("rm -f --")) return formatted("");
+        return formatted("", 75);
+      },
+    };
+    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 40 });
+    const error = await c.screenshot().catch((value) => value);
+    expect(error).toBeInstanceOf(ScreenshotReadError);
+    expect((error as ScreenshotReadError).code).toBe("read_timeout");
+    expect(hungSignal?.aborted).toBe(true);
+    expect(calls.some(({ cmd }) => /\bdd if=.* skip=2/.test(cmd))).toBe(false);
+    expect(calls.some(({ cmd }) => cmd.includes("rm -f --"))).toBe(true);
+    expect(calls.length).toBe(5); // scrot, wc, chunk 0, hung chunk 1, cleanup
+  });
+
+  test("P0: turn abort stops new chunk admissions and still runs remote cleanup", async () => {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const formatted = (body: string, exit = 0): string =>
+      `Chunk ID: abort\nProcess exited with code ${exit}\nOutput:\n${body}`;
+    const session = {
+      execCommand: async (args: { cmd: string; signal?: AbortSignal }): Promise<string> => {
+        calls.push(args.cmd);
+        if (args.cmd.includes("scrot --pointer")) return formatted("");
+        if (args.cmd.includes("wc -c <")) {
+          return formatted(String(SCREENSHOT_READ_CHUNK_BYTES * 2));
+        }
+        if (/\bdd if=.* skip=0/.test(args.cmd)) {
+          queueMicrotask(() => controller.abort(new Error("turn cancelled")));
+          return await new Promise<string>(() => undefined);
+        }
+        if (args.cmd.includes("rm -f --")) return formatted("");
+        return formatted("", 75);
+      },
+    };
+    const c = new SandboxComputer(session as never, {
+      abortSignal: controller.signal,
+      screenshotReadbackTimeoutMs: 1_000,
+    });
+    const error = await c.screenshot().catch((value) => value);
+    expect(error).toBeInstanceOf(ScreenshotReadError);
+    expect((error as ScreenshotReadError).code).toBe("aborted");
+    expect(calls.some((cmd) => /\bdd if=.* skip=1/.test(cmd))).toBe(false);
+    expect(calls.some((cmd) => cmd.includes("rm -f --"))).toBe(true);
+    expect(calls.length).toBe(4); // scrot, wc, first chunk, cleanup
+  });
+
+  test("P0: cleanup failure is recorded on the primary typed read failure without masking it", async () => {
+    const { session, execCalls } = makeMockSession({
+      sizeOutput: "wrapper 123 output 4",
+      cleanupExit: 75,
+    });
+    const c = new SandboxComputer(session as never);
+    const error = await c.screenshot().catch((value) => value);
+    expect(error).toBeInstanceOf(ScreenshotReadError);
+    expect((error as ScreenshotReadError).code).toBe("invalid_size_output");
+    expect((error as ScreenshotReadError).cleanupFailed).toBe(true);
+    expect(execCalls.some((cmd) => cmd.includes("rm -f --"))).toBe(true);
+  });
+
+  test("P0: an unsettled scrot outcome is typed, cleaned, and never replayed as a warm-up retry", async () => {
+    const { session, execCalls } = makeMockSession({ stillRunning: true });
+    const c = new SandboxComputer(session as never, {
+      screenshotWarmupBudgetMs: 100,
+      screenshotRetryDelayMs: 1,
+    });
+    const error = await c.screenshot().catch((value) => value);
+    expect(error).toBeInstanceOf(ScreenshotReadError);
+    expect((error as ScreenshotReadError).code).toBe("capture_outcome_unknown");
+    expect(execCalls.some((cmd) => cmd.includes("wc -c <"))).toBe(false);
+    expect(execCalls.filter((cmd) => cmd.includes("scrot --pointer")).length).toBe(1);
+    expect(execCalls.some((cmd) => cmd.includes("rm -f --"))).toBe(true);
   });
 
   // ── Regression: the "400 Invalid input[N].output.image_url" turn-killer ──────
@@ -349,7 +534,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     // Two scrot attempts were made (the retry), and every attempt cleaned up its
     // temp file (no leak across retries).
     const scrots = execCalls.filter((cmd) => cmd.includes("scrot --pointer --overwrite"));
-    const cleanups = execCalls.filter((cmd) => cmd.includes("rm -f /tmp/og-shot-"));
+    const cleanups = execCalls.filter(
+      (cmd) => cmd.includes("rm -f --") && cmd.includes("/tmp/og-shot-"),
+    );
     expect(scrots.length).toBe(2);
     expect(cleanups.length).toBe(2);
   });
@@ -459,6 +646,7 @@ function makeNativeSession(
     // When set, screenshot() THROWS this per attempt (last value sticks; null = resolve).
     // Models the agent surfacing a capture AgentError (permission denied / null image).
     throwPerAttempt?: (Error | null)[];
+    screenshotImpl?: NativeDesktopSession["screenshot"];
   } = {},
 ) {
   const inputs: NonNullable<DesktopInputRequest["event"]>[] = [];
@@ -473,6 +661,7 @@ function makeNativeSession(
     },
     screenshot: async () => {
       const i = attempt++;
+      if (opts.screenshotImpl) return await opts.screenshotImpl();
       const toThrow = at(opts.throwPerAttempt, i);
       if (toThrow) throw toThrow;
       return {
@@ -629,7 +818,7 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     expect([ev.pointer.x, ev.pointer.y]).toEqual([640, 400]); // 1.0 factor, unchanged
   });
 
-  test("screenshot returns the base64 of the fake PNG (non-empty, no data-URL prefix)", async () => {
+  test("a bounded valid screenshot returns raw base64 without a data-URL prefix", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const { session } = makeNativeSession({ png });
     const c = new NativeDesktopComputer(session);
@@ -637,6 +826,121 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     expect(shot).toBe(Buffer.from(png).toString("base64"));
     // Raw base64 — the SDK adds the `data:image/png;base64,` prefix itself.
     expect(shot.startsWith("data:")).toBe(false);
+  });
+
+  test("an oversized native PNG is rejected before function-image serialization", async () => {
+    const { session, attempts } = makeNativeSession({
+      png: new Uint8Array(MAX_SCREENSHOT_BYTES + 1),
+    });
+    const c = new NativeDesktopComputer(session);
+    const screenshot = toolsByName(computerFunctionTools(c as never, false))["computer_screenshot"];
+    const output = await invokeTool(screenshot, {});
+    expect(output).toBe(
+      `computer screenshot failed [size_limit_exceeded]: native screenshot byte size exceeds the ${MAX_SCREENSHOT_BYTES}B safety limit`,
+    );
+    expect(String(output)).not.toContain("data:image/png;base64,");
+    expect(attempts()).toBe(1);
+  });
+
+  test("a stalled native provider capture fails at the aggregate readback deadline", async () => {
+    const { session, attempts } = makeNativeSession({
+      screenshotImpl: async () => await new Promise<never>(() => {}),
+    });
+    const c = new NativeDesktopComputer(session, { screenshotReadbackTimeoutMs: 10 });
+    const result = await c.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(result).toBeInstanceOf(ScreenshotReadError);
+    expect((result as ScreenshotReadError).code).toBe("read_timeout");
+    expect(attempts()).toBe(1);
+  });
+
+  test("repeated timeouts never accumulate native provider captures and settlement admits one fresh call", async () => {
+    type Result = Awaited<ReturnType<NativeDesktopSession["screenshot"]>>;
+    const resolvers: Array<(value: Result) => void> = [];
+    let started = 0;
+    let pending = 0;
+    const { session } = makeNativeSession({
+      screenshotImpl: async () => {
+        started += 1;
+        pending += 1;
+        return await new Promise<Result>((resolve) => {
+          resolvers.push((value) => {
+            pending -= 1;
+            resolve(value);
+          });
+        });
+      },
+    });
+    const c = new NativeDesktopComputer(session, { screenshotReadbackTimeoutMs: 5 });
+
+    const first = await c.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(first).toBeInstanceOf(ScreenshotReadError);
+    expect((first as ScreenshotReadError).code).toBe("read_timeout");
+    const second = await c.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(second).toBeInstanceOf(ScreenshotReadError);
+    expect((second as ScreenshotReadError).code).toBe("capture_outcome_unknown");
+    expect({ started, pending }).toEqual({ started: 1, pending: 1 });
+
+    const valid = {
+      png: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      width: 1280,
+      height: 800,
+      nativeWidth: 1280,
+      nativeHeight: 800,
+    };
+    resolvers[0]!(valid);
+    await Bun.sleep(0);
+
+    const fresh = c.screenshot();
+    expect({ started, pending }).toEqual({ started: 2, pending: 1 });
+    resolvers[1]!(valid);
+    await expect(fresh).resolves.toBe(Buffer.from(valid.png).toString("base64"));
+    expect({ started, pending }).toEqual({ started: 2, pending: 0 });
+  });
+
+  test("an in-flight abort ignores a late native result without mutating screenshot geometry", async () => {
+    const controller = new AbortController();
+    let settleProvider!: (value: Awaited<ReturnType<NativeDesktopSession["screenshot"]>>) => void;
+    const providerResult = new Promise<Awaited<ReturnType<NativeDesktopSession["screenshot"]>>>(
+      (resolve) => {
+        settleProvider = resolve;
+      },
+    );
+    const { session, attempts, inputs } = makeNativeSession({
+      screenshotImpl: async () => await providerResult,
+    });
+    const c = new NativeDesktopComputer(session, { abortSignal: controller.signal });
+    const request = c.screenshot();
+    await Promise.resolve();
+    controller.abort();
+    const result = await request.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(result).toBeInstanceOf(ScreenshotReadError);
+    expect((result as ScreenshotReadError).code).toBe("aborted");
+    expect(attempts()).toBe(1);
+
+    settleProvider({
+      png: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      width: 640,
+      height: 400,
+      nativeWidth: 1280,
+      nativeHeight: 800,
+    });
+    await Promise.resolve();
+    await c.click(10, 20, "left");
+    const event = inputs[0];
+    if (event?.$case !== "pointer") throw new Error("expected pointer");
+    expect([event.pointer.x, event.pointer.y]).toEqual([10, 20]);
   });
 
   test("REGRESSION: a persistently empty PNG THROWS (never an empty image_url / blank placeholder)", async () => {
@@ -737,6 +1041,26 @@ describe("computer backend selection (native vs xdotool)", () => {
     await computer.click(3, 4, "left");
     expect(inputs.length).toBe(1);
     expect(inputs[0]!.$case).toBe("pointer");
+  });
+
+  test("ComputerUseCapability threads an already-aborted turn fence into native capture", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { session, attempts } = makeNativeSession();
+    const cap = computerUse({
+      abortSignal: controller.signal,
+      readOnly: false,
+      toolMode: "hosted",
+    });
+    cap.bind(session as never).bindModel("responses", structuredModel());
+    const computer = (cap.tools()[0] as unknown as { computer: NativeDesktopComputer }).computer;
+    const result = await computer.screenshot().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(result).toBeInstanceOf(ScreenshotReadError);
+    expect((result as ScreenshotReadError).code).toBe("aborted");
+    expect(attempts()).toBe(0);
   });
 
   test("ComputerUseCapability bound to a Modal session selects the xdotool SandboxComputer", () => {
@@ -901,6 +1225,26 @@ describe("computerFunctionTools (codex text-transport routing)", () => {
     // mirroring the SDK's text view_image: a data URL whose bytes are the fake's PNG.
     expect(out).toBe(`data:image/png;base64,${b64}`);
     expect(calls).toContainEqual(["screenshot"]);
+  });
+
+  test("computer_screenshot settles a readback failure with its typed error code", async () => {
+    const failure = new ScreenshotReadError(
+      "invalid_size_output",
+      "screenshot byte-size command returned malformed or multiple values",
+    );
+    const computer = {
+      ...makeFakeComputer().computer,
+      screenshot: async () => {
+        throw failure;
+      },
+    };
+    const screenshot = toolsByName(computerFunctionTools(computer as never, false))[
+      "computer_screenshot"
+    ];
+    const output = await invokeTool(screenshot, {});
+    expect(output).toBe(
+      "computer screenshot failed [invalid_size_output]: screenshot byte-size command returned malformed or multiple values",
+    );
   });
 
   test("readOnly returns a clear message and never touches the Computer for writes; screenshot still works", async () => {
