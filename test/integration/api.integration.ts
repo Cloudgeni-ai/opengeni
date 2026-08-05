@@ -1283,7 +1283,10 @@ describe("API component integration", () => {
       managedAuth: {
         api: {
           getSession: async () => ({
-            user: { id: userId, email, name: "Managed Cookie User" },
+            headers: new Headers(),
+            response: {
+              user: { id: userId, email, name: "Managed Cookie User" },
+            },
           }),
         },
       } as any,

@@ -17,6 +17,7 @@ import {
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
+import { getManagedSession } from "../managed-session";
 
 const bearerPrefix = "Bearer ";
 
@@ -251,9 +252,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await deps.managedAuth.api.getSession({
-      headers: c.req.raw.headers,
-    });
+    const session = await getManagedSession(c, deps.managedAuth);
     if (session?.user) {
       return await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,

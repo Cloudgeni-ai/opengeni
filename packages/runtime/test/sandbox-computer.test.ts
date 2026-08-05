@@ -19,6 +19,7 @@ import {
   SCREENSHOT_READ_CHUNK_BYTES,
   type NativeDesktopSession,
 } from "../src/sandbox-computer";
+import { RoutingSandboxSession } from "../src/sandbox";
 import {
   KeyAction,
   PointerAction,
@@ -301,6 +302,34 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     ).toBeGreaterThanOrEqual(3);
   });
 
+  test("ROUTING-PROXY-FIX: an execCommand-only backend does not duplicate machine-parsed stdout", async () => {
+    const png = new Uint8Array(250_000);
+    for (let i = 0; i < png.length; i++) png[i] = (i * 31 + 7) & 0xff;
+    const { session, execCalls } = makeMockSession({ pngBytes: png });
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: session as never,
+        sandboxId: null,
+        kind: "modal",
+      }),
+    });
+
+    // RoutingSandboxSession.exec() preserves the Modal banner body in both
+    // `output` and `stdout`. Screenshot parsing must select stdout once rather
+    // than feed the display-oriented aggregate into the strict integer parser.
+    const c = new SandboxComputer(proxy as never);
+    const shot = await c.screenshot();
+
+    expect(shot).toBe(Buffer.from(png).toString("base64"));
+    expect(
+      execCalls.filter(
+        (cmd) =>
+          cmd.includes("dd if=") && cmd.includes("/tmp/og-shot-") && cmd.includes("| base64"),
+      ).length,
+    ).toBe(3);
+  });
+
   // ── The exec-output-cap fix: a fully-painted 1280x800 desktop PNG (~222 KB) base64s
   // to ~296 KB, which trips Modal's exec-stdout buffer cap and silently returns "" from a
   // single `base64 <file>` — the blank-frame incident. The chunked read reconstructs the
@@ -428,7 +457,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
         return formatted("", 75);
       },
     };
-    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 40 });
+    // Keep this far below the production 15s deadline while leaving enough event-loop
+    // headroom for the reserved cleanup admission under a loaded parallel test runner.
+    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 200 });
     const error = await c.screenshot().catch((value) => value);
     expect(error).toBeInstanceOf(ScreenshotReadError);
     expect((error as ScreenshotReadError).code).toBe("read_timeout");

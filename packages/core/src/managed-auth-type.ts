@@ -1,9 +1,10 @@
 // @opengeni/core ManagedAuth TYPE alias.
 //
 // WHY THIS MODULE LIVES IN CORE: `dependencies.ts` carries a `managedAuth?:
-// ManagedAuth | null` passthrough slot and the access layer calls
-// `managedAuth.api.getSession({ headers })`. Both are framework-agnostic, so
-// they belong in @opengeni/core. The CONSTRUCTION of a real Better Auth
+// ManagedAuth | null` passthrough slot and the access layer resolves managed
+// sessions through the cookie-renewing bridge in `managed-session.ts`. The
+// auth type is framework-agnostic, so it belongs in @opengeni/core. The
+// CONSTRUCTION of a real Better Auth
 // instance — `createManagedAuth`, which opens its own `pg.Pool` and wires
 // Resend — stays in `apps/api/src/auth/managed-auth.ts` (it pulls the `pg`
 // driver, which must NEVER enter @opengeni/core).

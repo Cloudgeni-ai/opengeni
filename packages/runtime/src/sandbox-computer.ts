@@ -40,12 +40,13 @@ import {
   type DesktopInputRequest,
 } from "@opengeni/agent-proto";
 
-import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunning } from "./index";
-// `stripExecBanner` is the SAME pure helper recording.ts uses to recover the raw
-// command body from Modal's execCommand banner ("…Output:\n<body>"). Imported from
-// the agent-loop-free leaf (importing a pure parser FROM the leaf is allowed — the
-// leaf boundary only forbids the leaf importing the agent loop, not the reverse).
-import { ensureDisplayStack, stripExecBanner } from "./sandbox";
+import {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStillRunning,
+  sandboxCommandStdout,
+} from "./index";
+import { ensureDisplayStack } from "./sandbox";
 
 // `requireBoundSession` lives in @openai/agents-core/sandbox/capabilities/base
 // but is NOT re-exported from the public @openai/agents/sandbox barrel, so we
@@ -774,7 +775,7 @@ export class SandboxComputer implements Computer {
     // A routing proxy fronting a Modal box can return the execCommand banner STRING;
     // a native structured exec returns an object. Handle both so neither silently
     // yields an empty body.
-    return typeof result === "string" ? stripExecBanner(result) : sandboxCommandOutput(result);
+    return sandboxCommandStdout(result);
   }
 
   private parseScreenshotByteSize(raw: string): number {
