@@ -6,7 +6,7 @@ A workspace owns named **variable-sets**: sets of variables whose values are sec
 
 1. **The current value API is write-only.** Generic workspace, session, event, capability, installation, and variable-set metadata responses remain value-free. Reads return names and metadata (version, timestamps) only; this emergency release does not yet expose a plaintext read route or tool.
 2. **No attachment, no injection.** A run whose session has `variableSetId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
-3. **Agents cannot self-attach or self-escalate.** The worker's **default** first-party MCP delegated token carries neither `variable-sets:use` nor `variable-sets:manage`. A session only holds stronger first-party permissions when its creator explicitly grants them at creation (`firstPartyMcpPermissions`, capped by the creating grant).
+3. **Agents cannot change their own attachment or self-escalate.** The current worker default includes `variable-sets:use` and `variable-sets:manage`, so an agent can manage sets and attach one when it creates a child session, but the write-only API does not reveal stored values. A session only holds a different first-party permission set when its creator explicitly grants one at creation (`firstPartyMcpPermissions`, capped by the creating grant), and there is no attach-after-create operation.
 4. **Workspace isolation.** Both tables are protected by the same forced row-level-security policy as every other workspace table.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
 6. **No content rewriting.** If an authorized agent echoes a configured value into model history, events, tool results, errors, memory, or UI-visible OpenGeni data, that content remains exact. Public or third-party telemetry uses a sink-local, closed schema and never writes back over canonical OpenGeni data.
@@ -134,10 +134,12 @@ The first-party MCP server exposes variable set tools, gated by the same permiss
 - `variable_set_set_variable` (`variable-sets:manage`) — set or rotate one variable, targeted by `variableSetId` or by `variableSetName` (created on first use). The value arrives in plain tool arguments by design; responses stay write-only and return metadata, never values.
 - `session_create` (`sessions:create`) accepts `variableSetId`; attachment requires `variable-sets:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
 
-The worker's **default** first-party delegated token carries neither
-`variable-sets:use` nor `variable-sets:manage`, so these tools are not registered
-for it. A manager-style session receives stronger current permissions only
-through explicit, creator-capped `firstPartyMcpPermissions`.
+The worker's current **default** first-party delegated token carries both
+`variable-sets:use` and `variable-sets:manage`, so these write-only tools are
+registered for it. It still cannot read a configured value or change its own
+creation-time attachment. A creator can narrow or otherwise customize a
+session's current permissions through explicit, creator-capped
+`firstPartyMcpPermissions`.
 
 ## Approved permissioned-read target — not yet live
 
