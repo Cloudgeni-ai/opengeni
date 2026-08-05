@@ -55,6 +55,9 @@ describe("long sent user-message browser acceptance", () => {
         const body = page.locator('[data-og-message-id="long-user-message"]');
         const clip = body.locator("[data-og-user-message-clip]");
         const disclosure = body.getByRole("button", { name: "Show more" });
+        const visibleLink = body.getByRole("link", { name: "Visible preview link" });
+        const hiddenLink = body.locator('a[href="https://example.test/hidden-review"]');
+        const hiddenAction = body.locator("[data-hidden-message-action]");
         await disclosure.scrollIntoViewIfNeeded();
         const collapsed = await body.evaluate((node) => {
           const clipNode = node.querySelector<HTMLElement>("[data-og-user-message-clip]")!;
@@ -86,6 +89,52 @@ describe("long sent user-message browser acceptance", () => {
         expect(collapsed.voiceOutsideClip).toBe(true);
         expect(collapsed.contextOutsideClip).toBe(true);
         expect(collapsed.pageOverflow).toBeLessThanOrEqual(1);
+        expect(
+          await body.evaluate((node) => {
+            const paragraph = [...node.querySelectorAll("p")].find((candidate) =>
+              candidate.textContent?.includes("This already-sent prompt"),
+            );
+            const selection = window.getSelection();
+            if (!paragraph || !selection) {
+              return "";
+            }
+            const range = document.createRange();
+            range.selectNodeContents(paragraph);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const selected = selection.toString();
+            selection.removeAllRanges();
+            return selected;
+          }),
+        ).toContain("This already-sent prompt");
+        expect(await visibleLink.evaluate((node) => node.hasAttribute("inert"))).toBe(false);
+        expect(await hiddenLink.evaluate((node) => node.hasAttribute("inert"))).toBe(true);
+        expect(await hiddenAction.evaluate((node) => node.hasAttribute("inert"))).toBe(true);
+
+        const collapsedAccessibility = await new AxeBuilder({ page })
+          .include('[data-og-message-id="long-user-message"]')
+          .analyze();
+        expect(collapsedAccessibility.violations).toEqual([]);
+
+        await visibleLink.focus();
+        await page.keyboard.press("Tab");
+        expect(
+          await page.evaluate(() =>
+            document.activeElement?.hasAttribute("data-og-user-message-disclosure"),
+          ),
+        ).toBe(true);
+        await hiddenLink.evaluate((node: HTMLElement) => node.focus());
+        expect(
+          await page.evaluate(() =>
+            document.activeElement?.hasAttribute("data-og-user-message-disclosure"),
+          ),
+        ).toBe(true);
+        await hiddenAction.evaluate((node: HTMLElement) => node.focus());
+        expect(
+          await page.evaluate(() =>
+            document.activeElement?.hasAttribute("data-og-user-message-disclosure"),
+          ),
+        ).toBe(true);
 
         if (evidenceDir) {
           await page.screenshot({
@@ -96,12 +145,47 @@ describe("long sent user-message browser acceptance", () => {
 
         await disclosure.focus();
         await page.keyboard.press("Enter");
-        const showLess = body.getByRole("button", { name: "Show less" });
+        let showLess = body.getByRole("button", { name: "Show less" });
         await showLess.waitFor();
         expect(await showLess.getAttribute("aria-expanded")).toBe("true");
         const expandedHeight = await clip.evaluate((node) => node.getBoundingClientRect().height);
         expect(expandedHeight).toBeGreaterThan(collapsed.clipHeight + 100);
         expect(await body.locator("[data-og-user-message-fade]").count()).toBe(0);
+        expect(await hiddenLink.evaluate((node) => node.hasAttribute("inert"))).toBe(false);
+        expect(await hiddenAction.evaluate((node) => node.hasAttribute("inert"))).toBe(false);
+
+        await visibleLink.focus();
+        await page.keyboard.press("Tab");
+        expect(
+          await body.evaluate((node) => {
+            const content = node.querySelector("[data-og-user-message-content]");
+            const active = document.activeElement;
+            return {
+              insideContent: Boolean(content && active && content.contains(active)),
+              insideInertSubtree: Boolean(active?.closest("[inert]")),
+            };
+          }),
+        ).toEqual({ insideContent: true, insideInertSubtree: false });
+
+        await hiddenLink.focus();
+        expect(await page.evaluate(() => document.activeElement?.getAttribute("href"))).toBe(
+          "https://example.test/hidden-review",
+        );
+
+        await hiddenAction.focus();
+        await showLess.evaluate((node: HTMLButtonElement) => node.click());
+        const showMoreAgain = body.getByRole("button", { name: "Show more" });
+        await showMoreAgain.waitFor();
+        expect(
+          await page.evaluate(() =>
+            document.activeElement?.hasAttribute("data-og-user-message-disclosure"),
+          ),
+        ).toBe(true);
+        expect(await hiddenLink.evaluate((node) => node.hasAttribute("inert"))).toBe(true);
+        expect(await hiddenAction.evaluate((node) => node.hasAttribute("inert"))).toBe(true);
+        await page.keyboard.press("Enter");
+        showLess = body.getByRole("button", { name: "Show less" });
+        await showLess.waitFor();
 
         const accessibility = await new AxeBuilder({ page })
           .include('[data-og-message-id="long-user-message"]')
@@ -122,6 +206,7 @@ describe("long sent user-message browser acceptance", () => {
                 expandedHeight,
                 ariaExpanded: await showLess.getAttribute("aria-expanded"),
                 focusedLabel: await page.evaluate(() => document.activeElement?.textContent),
+                collapsedAxeViolations: collapsedAccessibility.violations.length,
                 axeViolations: accessibility.violations.length,
               },
               null,

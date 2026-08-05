@@ -62,6 +62,20 @@ function agent(text: string): TimelineItem {
   };
 }
 
+function elementRect(top: number, bottom: number, left = 0, right = 240): DOMRect {
+  return {
+    x: left,
+    y: top,
+    top,
+    bottom,
+    left,
+    right,
+    width: right - left,
+    height: bottom - top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
 describe("UserMessageBody", () => {
   test("keeps the complete Markdown subtree mounted behind an accessible disclosure", async () => {
     const text = longMarkdown();
@@ -121,6 +135,81 @@ describe("UserMessageBody", () => {
     Object.defineProperty(content, "scrollHeight", { configurable: true, value: 180 });
     await actRun(() => callbacks.forEach((callback) => callback([], {} as ResizeObserver)));
     expect(r.container.querySelector("[data-og-user-message-disclosure]")).toBeNull();
+    await r.unmount();
+  });
+
+  test("makes only clipped interactive descendants inert and restores focusability on expand", async () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    const r = await renderComponent(
+      <UserMessageBody messageId="interactive" text={longMarkdown()}>
+        <a data-testid="visible-link" href="https://example.test/visible">
+          Visible link
+        </a>
+        <a data-testid="hidden-link" href="https://example.test/hidden">
+          Hidden link
+        </a>
+        <button data-testid="hidden-button" type="button">
+          Hidden action
+        </button>
+        <button data-testid="preexisting-inert" type="button">
+          Already inert
+        </button>
+      </UserMessageBody>,
+    );
+    const clip = r.container.querySelector<HTMLElement>("[data-og-user-message-clip]")!;
+    const content = r.container.querySelector<HTMLElement>("[data-og-user-message-content]")!;
+    const threshold = r.container.querySelector<HTMLElement>("[aria-hidden='true']")!;
+    const disclosure = r.container.querySelector<HTMLButtonElement>(
+      "[data-og-user-message-disclosure]",
+    )!;
+    const visibleLink = r.container.querySelector<HTMLElement>("[data-testid='visible-link']")!;
+    const hiddenLink = r.container.querySelector<HTMLElement>("[data-testid='hidden-link']")!;
+    const hiddenButton = r.container.querySelector<HTMLButtonElement>(
+      "[data-testid='hidden-button']",
+    )!;
+    const preexistingInert = r.container.querySelector<HTMLElement>(
+      "[data-testid='preexisting-inert']",
+    )!;
+
+    Object.defineProperty(content, "scrollHeight", { configurable: true, value: 520 });
+    Object.defineProperty(threshold, "offsetHeight", { configurable: true, value: 224 });
+    clip.getBoundingClientRect = () => elementRect(0, 224);
+    visibleLink.getBoundingClientRect = () => elementRect(24, 48);
+    hiddenLink.getBoundingClientRect = () => elementRect(260, 284);
+    hiddenButton.getBoundingClientRect = () => elementRect(300, 332);
+    preexistingInert.getBoundingClientRect = () => elementRect(348, 380);
+    preexistingInert.setAttribute("inert", "");
+
+    await actRun(() => callbacks.forEach((callback) => callback([], {} as ResizeObserver)));
+    expect(visibleLink.hasAttribute("inert")).toBe(false);
+    expect(hiddenLink.hasAttribute("inert")).toBe(true);
+    expect(hiddenButton.hasAttribute("inert")).toBe(true);
+    expect(hiddenLink.hasAttribute("data-og-user-message-managed-inert")).toBe(true);
+    expect(preexistingInert.hasAttribute("inert")).toBe(true);
+    expect(preexistingInert.hasAttribute("data-og-user-message-managed-inert")).toBe(false);
+
+    await actRun(() => disclosure.click());
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    expect(hiddenLink.hasAttribute("inert")).toBe(false);
+    expect(hiddenButton.hasAttribute("inert")).toBe(false);
+    expect(preexistingInert.hasAttribute("inert")).toBe(true);
+
+    hiddenButton.focus();
+    expect(document.activeElement).toBe(hiddenButton);
+    await actRun(() => disclosure.click());
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(disclosure);
+    expect(hiddenLink.hasAttribute("inert")).toBe(true);
+    expect(hiddenButton.hasAttribute("inert")).toBe(true);
     await r.unmount();
   });
 

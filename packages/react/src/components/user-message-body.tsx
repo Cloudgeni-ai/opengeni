@@ -13,6 +13,36 @@ import { cn } from "../lib/cn";
 const FALLBACK_LINE_THRESHOLD = 12;
 const FALLBACK_TEXT_THRESHOLD = 900;
 const FALLBACK_UNBROKEN_THRESHOLD = 260;
+const INTERACTIVE_DESCENDANT_SELECTOR = [
+  "a[href]",
+  "area[href]",
+  "button",
+  "input:not([type='hidden'])",
+  "select",
+  "textarea",
+  "iframe",
+  "object",
+  "embed",
+  "audio[controls]",
+  "video[controls]",
+  "summary",
+  "[contenteditable]:not([contenteditable='false'])",
+  "[tabindex]",
+  "[role='button']",
+  "[role='link']",
+  "[role='checkbox']",
+  "[role='radio']",
+  "[role='switch']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='textbox']",
+  "[role='combobox']",
+  "[role='listbox']",
+  "[role='menuitem']",
+  "[role='option']",
+  "[role='tab']",
+  "[role='treeitem']",
+].join(",");
 
 type RestoreDisclosureAnchor = (() => void) | null;
 
@@ -80,10 +110,60 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
   );
   const [collapsible, setCollapsible] = useState(() => userMessageLikelyNeedsDisclosure(text));
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const clipRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const thresholdRef = useRef<HTMLSpanElement | null>(null);
   const pendingRestoreRef = useRef<RestoreDisclosureAnchor>(null);
+  const managedInertDescendantsRef = useRef(new Set<HTMLElement>());
   const contentId = `og-user-message-${useId().replace(/:/g, "")}`;
+  const collapsed = collapsible && !expanded;
+
+  const restoreManagedInertDescendants = useCallback(() => {
+    for (const descendant of managedInertDescendantsRef.current) {
+      if (descendant.hasAttribute("data-og-user-message-managed-inert")) {
+        descendant.removeAttribute("inert");
+        descendant.removeAttribute("data-og-user-message-managed-inert");
+      }
+    }
+    managedInertDescendantsRef.current.clear();
+  }, []);
+
+  const syncCollapsedInteractivity = useCallback(() => {
+    restoreManagedInertDescendants();
+    if (!collapsed) {
+      return;
+    }
+
+    const clip = clipRef.current;
+    const content = contentRef.current;
+    if (!clip || !content) {
+      return;
+    }
+
+    const clipRect = clip.getBoundingClientRect();
+    if (clipRect.height <= 0) {
+      return;
+    }
+
+    for (const descendant of content.querySelectorAll<HTMLElement>(
+      INTERACTIVE_DESCENDANT_SELECTOR,
+    )) {
+      if (descendant.closest("[inert]")) {
+        continue;
+      }
+      const rect = descendant.getBoundingClientRect();
+      if (rect.width <= 0 && rect.height <= 0) {
+        continue;
+      }
+      const fullyInsidePreview = rect.top >= clipRect.top - 1 && rect.bottom <= clipRect.bottom + 1;
+      if (fullyInsidePreview) {
+        continue;
+      }
+      descendant.setAttribute("inert", "");
+      descendant.setAttribute("data-og-user-message-managed-inert", "");
+      managedInertDescendantsRef.current.add(descendant);
+    }
+  }, [collapsed, restoreManagedInertDescendants]);
 
   const measure = useCallback(() => {
     const content = contentRef.current;
@@ -108,19 +188,33 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
     const content = contentRef.current;
     const threshold = thresholdRef.current;
     const observer =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measure());
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            measure();
+            syncCollapsedInteractivity();
+          });
     if (content) {
       observer?.observe(content);
     }
     if (threshold) {
       observer?.observe(threshold);
     }
-    window.addEventListener("resize", measure);
+    const handleResize = () => {
+      measure();
+      syncCollapsedInteractivity();
+    };
+    window.addEventListener("resize", handleResize);
     return () => {
       observer?.disconnect();
-      window.removeEventListener("resize", measure);
+      window.removeEventListener("resize", handleResize);
     };
-  }, [measure]);
+  }, [measure, syncCollapsedInteractivity]);
+
+  useLayoutEffect(() => {
+    syncCollapsedInteractivity();
+    return restoreManagedInertDescendants;
+  }, [restoreManagedInertDescendants, syncCollapsedInteractivity]);
 
   useLayoutEffect(() => {
     const restore = pendingRestoreRef.current;
@@ -132,11 +226,12 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
     const root = rootRef.current;
     pendingRestoreRef.current = root && disclosure ? disclosure.beginChange(root, control) : null;
     const next = !expanded;
+    if (!next && contentRef.current?.contains(document.activeElement)) {
+      control.focus({ preventScroll: true });
+    }
     disclosure?.expandedByMessageId.set(messageId, next);
     setExpanded(next);
   };
-
-  const collapsed = collapsible && !expanded;
 
   return (
     <div
@@ -152,6 +247,7 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
         className="pointer-events-none absolute h-56 w-0 invisible sm:h-72"
       />
       <div
+        ref={clipRef}
         id={contentId}
         data-og-user-message-clip=""
         className={cn("relative min-w-0", collapsed && "max-h-56 overflow-hidden sm:max-h-72")}

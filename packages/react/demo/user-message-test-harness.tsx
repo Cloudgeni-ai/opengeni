@@ -26,6 +26,8 @@ declare global {
 const LONG_MESSAGE = [
   "# Launch review notes",
   "",
+  "[Visible preview link](https://example.test/visible-preview)",
+  "",
   "This already-sent prompt is intentionally long and must remain completely available. ".repeat(
     10,
   ),
@@ -42,6 +44,8 @@ const LONG_MESSAGE = [
   "const multilingual = 'こんにちは · مرحبا · 👩🏽‍💻 · café';",
   "const lossless = true;",
   "```",
+  "",
+  "[Hidden review link](https://example.test/hidden-review)",
   "",
   `https://example.test/${"very-long-unbroken-url-segment-".repeat(28)}`,
   "",
@@ -145,7 +149,18 @@ function Harness() {
           </div>
         ) : null}
         <UserMessageBody messageId={item.id} text={text}>
-          <Markdown>{text}</Markdown>
+          <div>
+            <Markdown>{text}</Markdown>
+            {item.id === "long-user-message" ? (
+              <button
+                type="button"
+                data-hidden-message-action=""
+                className="mt-2 rounded-og-sm border border-og-border px-2 py-1 text-og-sm"
+              >
+                Hidden message action
+              </button>
+            ) : null}
+          </div>
         </UserMessageBody>
         {item.presentation ? (
           <details data-voice-context="" className="mt-2 border-t border-og-border pt-2 text-og-sm">
