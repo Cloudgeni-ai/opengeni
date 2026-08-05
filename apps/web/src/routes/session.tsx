@@ -504,7 +504,7 @@ function SessionDock(props: {
           size="icon-sm"
           aria-label="Open navigation"
           onClick={props.onOpenNavigation}
-          className="pointer-coarse:size-10"
+          className="size-11"
         >
           <MenuIcon className="size-4" />
         </Button>

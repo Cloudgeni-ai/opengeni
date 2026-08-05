@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.46.1
+
+### Patch Changes
+
+- 2bfbfcc: Keep compact desktop controls while giving mobile model, voice, navigation,
+  composer, and session controls full-size touch targets.
+
 ## 0.46.0
 
 ### Minor Changes

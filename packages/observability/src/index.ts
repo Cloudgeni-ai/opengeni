@@ -28,6 +28,18 @@ export type Span = {
 
 export type MetricLabels = Record<string, AttributeValue>;
 
+/**
+ * Stable selectors shared by OpenGeni's runtime metrics and optional
+ * Prometheus/Grafana distribution. Operators can use these values for custom
+ * namespaces and dashboard ConfigMaps without duplicating chart internals.
+ */
+export const OPENGENI_OBSERVABILITY_DISTRIBUTION = {
+  monitoringNamespaceLabel: "opengeni.ai/monitoring",
+  monitoringNamespaceLabelValue: "enabled",
+  grafanaDashboardLabel: "grafana_dashboard",
+  grafanaDashboardLabelValue: "1",
+} as const;
+
 const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 const durationHistogramBuckets = [
   0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600,

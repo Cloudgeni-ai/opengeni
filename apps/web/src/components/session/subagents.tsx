@@ -126,7 +126,7 @@ function SubagentRow({
       {/* The container owns the hover wash + focus ring so the WHOLE row lights
           as one target; the Link inside covers dot→title→hint (the nav hit
           area), the chevron toggles without navigating. */}
-      <div className="group/row flex h-7 items-center gap-1.5 rounded-md pr-1.5 transition-colors hover:bg-surface-2 has-[a:focus-visible]:bg-surface-2">
+      <div className="group/row flex h-7 items-center gap-1.5 rounded-md pr-1.5 transition-colors hover:bg-surface-2 has-[a:focus-visible]:bg-surface-2 max-sm:h-11">
         {/* Lead cluster: expand chevron + child-count. Omitted entirely for
             flat fleets so the chrome agents panel stays dense. */}
         {showLead ? (
@@ -137,7 +137,7 @@ function SubagentRow({
                   type="button"
                   aria-label={open ? "Collapse" : "Expand"}
                   onClick={() => setOpen((prev) => !prev)}
-                  className="inline-flex size-4 shrink-0 items-center justify-center rounded text-fg-subtle/50 outline-none transition-colors hover:text-fg group-hover/row:text-fg-subtle focus-visible:text-fg"
+                  className="inline-flex size-4 shrink-0 items-center justify-center rounded text-fg-subtle/50 outline-none transition-colors hover:text-fg group-hover/row:text-fg-subtle focus-visible:text-fg max-sm:size-11"
                 >
                   <ChevronRightIcon
                     className={cn("size-3 transition-transform", open && "rotate-90")}
@@ -155,7 +155,7 @@ function SubagentRow({
           params={{ workspaceId, sessionId: node.session.id }}
           onClick={() => onNavigate?.()}
           title={title}
-          className="flex min-w-0 flex-1 items-center gap-2 text-xs text-fg-muted outline-none group-hover/row:text-fg"
+          className="flex h-full min-w-0 flex-1 items-center gap-2 text-xs text-fg-muted outline-none group-hover/row:text-fg"
         >
           <StatusDot tone={tone} pulse={live} className="size-1.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{title}</span>
@@ -313,7 +313,7 @@ function BreadcrumbLink({
       params={{ workspaceId, sessionId: session.id }}
       title={label}
       dir="auto"
-      className="max-w-40 truncate outline-none transition-colors hover:text-fg focus-visible:text-fg"
+      className="inline-flex max-w-40 items-center truncate outline-none transition-colors hover:text-fg focus-visible:text-fg max-sm:min-h-11"
     >
       {label}
     </Link>

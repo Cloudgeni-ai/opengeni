@@ -1,5 +1,13 @@
 # @opengeni/api-router
 
+## 0.22.2
+
+### Patch Changes
+
+- Updated dependencies [33166b0]
+  - @opengeni/observability@0.5.0
+  - @opengeni/core@0.21.2
+
 ## 0.22.1
 
 ### Patch Changes

@@ -403,7 +403,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         context.setInspectorOpen(false);
         rail.setDrawerOpen(true);
       }}
-      className="pointer-coarse:size-11"
+      className="size-11"
     >
       <MenuIcon className="size-4" />
     </Button>
