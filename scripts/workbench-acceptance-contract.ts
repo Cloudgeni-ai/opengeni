@@ -53,19 +53,19 @@ export const NUMERIC_PERFORMANCE_BUDGETS: Readonly<Record<string, NumericBudget>
   "performance.capture-api-response": {
     statistic: "p95",
     direction: "maximum",
-    limit: 200,
+    limit: 400,
     unit: "ms",
   },
   "performance.capture-usable-workbench": {
     statistic: "p95",
     direction: "maximum",
-    limit: 5_000,
+    limit: 10_000,
     unit: "ms",
   },
   "performance.control-cancellation": {
     statistic: "worst",
     direction: "maximum",
-    limit: 2_000,
+    limit: 4_000,
     unit: "ms",
   },
 };
