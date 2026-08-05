@@ -415,9 +415,11 @@ const SettingsSchema = z.object({
   // flag non-mandatory selected MCP tools `defer_loading:true` (dropping their
   // schemas from model context) and add one client-executed tool_search tool
   // that BM25-discloses bounded matches. The mandatory OpenGeni tools stay
-  // eager. Default OFF — a codex turn is byte-for-byte unchanged until enabled.
+  // eager. Default ON so selected connector catalogues do not consume every
+  // Codex turn's context. Operators may explicitly disable it for emergency
+  // compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
-  codexToolSearchEnabled: EnvBoolean.default(false),
+  codexToolSearchEnabled: EnvBoolean.default(true),
   // credential allocator atomic, workspace-local credential allocation. Default OFF is a
   // deliberate rolling-deploy fence: migrate + roll every worker first, then
   // enable. Turning it off restores the legacy sticky selector without a schema
