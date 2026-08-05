@@ -571,17 +571,19 @@ describe("clean session control plane", () => {
     expect(claimed?.id).toBe(replacement.turn.id);
   });
 
-  test("Steer immediately supersedes an ownerless turn during its recovery wait", async () => {
+  test("Steer supersedes an ownerless recovery turn but waits for its physical receipt", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run the predecessor");
     const attemptId = crypto.randomUUID();
     const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
     const predecessor = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
       session.id,
       workflowId,
-      { attemptId },
+      { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
     expect(
@@ -600,6 +602,22 @@ describe("clean session control plane", () => {
     expect((await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id))?.status).toBe(
       "superseded",
     );
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    expect(
+      await reconcileSessionAttemptQuiescence(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        activitySettled: true,
+      }),
+    ).toMatchObject({ action: "quiesced" });
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "runnable",
     });
