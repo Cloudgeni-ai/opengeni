@@ -459,6 +459,11 @@ also enqueues one deduplicated `child_terminal_result` with status `cancelled`
 for its surviving parent and copies the causal parent-turn delegation snapshot;
 cancelled descendants do not notify parents inside the same terminal subtree.
 Only physical attempt quiescence can clear the stopping projection.
+When paused control remains authoritative after that receipt is durable, the
+session parks as `idle` while retaining the same `recovering` logical turn and
+active-turn pointer. This is projection settlement only: no claim, model/tool
+work, queue row, or parent-completion notice is created. Resume later admits
+that preserved turn with a new exact attempt.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
 Wake repair treats only an undelivered control revision, an actionable
@@ -556,6 +561,10 @@ or retained processes—elapsed time alone is never proof. Queue telemetry follo
 the latest live interruption and any exact predecessor referenced by a queued
 human/API Steer, so `stoppingPreviousAttempt` remains truthful without allowing
 unrelated historical attempts to contaminate current UI.
+The same DB-only reconciliation lane also repairs a paused pre-fix row whose
+receipt is already durable but whose session status still says `recovering`;
+that case skips Temporal liveness inspection and idempotently parks only the
+session projection.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
