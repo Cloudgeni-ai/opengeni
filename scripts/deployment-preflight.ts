@@ -331,11 +331,11 @@ async function httpReachabilityProbe(
       signal: AbortSignal.timeout(5_000),
     });
     if (response.status >= 200 && response.status < 500) {
-      return passed(id, `HTTP ${response.status} from ${redactUrl(endpoint)}`);
+      return passed(id, `HTTP ${response.status} from ${endpoint}`);
     }
-    return failed(id, `HTTP ${response.status} from ${redactUrl(endpoint)}`);
+    return failed(id, `HTTP ${response.status} from ${endpoint}`);
   } catch (error) {
-    return failed(id, `failed to reach ${redactUrl(endpoint)}: ${errorMessage(error)}`);
+    return failed(id, `failed to reach ${endpoint}: ${errorMessage(error)}`);
   }
 }
 
@@ -354,21 +354,6 @@ function parseHostPort(value: string, defaultPort: number): { host: string; port
   }
   const port = Number(rawPort || defaultPort);
   return Number.isInteger(port) && port > 0 ? { host, port } : null;
-}
-
-function redactUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.username) {
-      url.username = "redacted";
-    }
-    if (url.password) {
-      url.password = "redacted";
-    }
-    return url.toString();
-  } catch {
-    return value.replace(/\/\/([^:@/]+):([^@/]+)@/, "//redacted:redacted@");
-  }
 }
 
 function passed(id: LiveProbeResult["id"], detail: string): LiveProbeResult {

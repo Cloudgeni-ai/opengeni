@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 
-import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./database";
 import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 import * as schema from "./schema";
@@ -71,7 +70,7 @@ function deterministicTerminalOperationId(turnId: string): string {
 }
 
 function boundedPayload(input: Record<string, unknown> | undefined): Record<string, unknown> {
-  const payload = sanitizeEventPayload(input ?? {});
+  const payload = input ?? {};
   if (Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_PAYLOAD_BYTES) {
     throw new Error("Realtime payload exceeds the durable ledger limit");
   }

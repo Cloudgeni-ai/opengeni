@@ -136,7 +136,6 @@ import {
   type ModelCallUsageNormalization,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
-  type RunAgentStreamOptions,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
@@ -269,12 +268,6 @@ import {
   settingsWithRigImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
-import {
-  createSecretRedactor,
-  isCredentialHeaderName,
-  redactSensitiveText,
-  type SecretForRedaction,
-} from "./redaction";
 import {
   createModelHistoryAttachmentProjector,
   turnInput,
@@ -856,18 +849,15 @@ export type SafeErrorDiagnostic = {
 /**
  * Produce the only exception shape allowed in worker logs. It deliberately
  * excludes stack, cause, response/request bodies, and arbitrary enumerable
- * properties while retaining bounded, redacted diagnostics.
+ * properties while retaining the exact source message and code.
  */
-export function safeErrorDiagnostic(
-  error: unknown,
-  redactText: (value: string) => string = redactSensitiveText,
-): SafeErrorDiagnostic {
+export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
   const rawName = error instanceof Error ? error.name : "Error";
   const name = /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error";
   const rawMessage = error instanceof Error ? error.message : String(error);
   const diagnostic: SafeErrorDiagnostic = {
     name,
-    message: redactText(rawMessage).slice(0, 2_048),
+    message: rawMessage,
   };
   if (error && typeof error === "object") {
     const status = Number(
@@ -879,49 +869,18 @@ export function safeErrorDiagnostic(
     }
     const rawCode = (error as { code?: unknown }).code;
     if (typeof rawCode === "string" || typeof rawCode === "number") {
-      const code = redactText(String(rawCode)).slice(0, 80);
+      const code = String(rawCode);
       if (/^[A-Za-z0-9_.:-]+$/.test(code)) diagnostic.code = code;
     }
   }
   return diagnostic;
 }
 
-function safeErrorForTelemetry(error: unknown, redactText: (value: string) => string): Error {
-  const diagnostic = safeErrorDiagnostic(error, redactText);
+function safeErrorForTelemetry(error: unknown): Error {
+  const diagnostic = safeErrorDiagnostic(error);
   const safe = new Error(diagnostic.message);
   safe.name = diagnostic.name;
   return safe;
-}
-
-export function headerSecretRedactions(
-  prefix: string,
-  headers: Readonly<Record<string, string>> | undefined,
-  credentialHeaderNames?: Iterable<string>,
-): SecretForRedaction[] {
-  const discovered: SecretForRedaction[] = [];
-  const explicitCredentialHeaders = credentialHeaderNames
-    ? new Set([...credentialHeaderNames].map((name) => name.toLowerCase()))
-    : null;
-  for (const [headerName, value] of Object.entries(headers ?? {})) {
-    if (
-      !explicitCredentialHeaders?.has(headerName.toLowerCase()) &&
-      !isCredentialHeaderName(headerName)
-    ) {
-      continue;
-    }
-    const safeHeaderName = headerName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-    discovered.push({ name: `${prefix}_${safeHeaderName || "HEADER"}`, value });
-    if (/^(?:proxy-)?authorization$/i.test(headerName)) {
-      const credential = value.match(/^\s*[A-Za-z][A-Za-z0-9_-]*\s+(.+)\s*$/)?.[1];
-      if (credential) {
-        discovered.push({
-          name: `${prefix}_${safeHeaderName || "AUTHORIZATION"}_CREDENTIAL`,
-          value: credential,
-        });
-      }
-    }
-  }
-  return discovered;
 }
 
 function compactionFailureReasonFromError(error: unknown): string {
@@ -1043,14 +1002,14 @@ function collectErrorStrings(value: unknown, seen = new WeakSet<object>()): stri
  * an earlier slice — the orphaned tool output that 400s the Responses API and
  * bricks the session on every replay.
  *
- * Defending: sanitize the full current history into an API-valid sequence (the
+ * Defending: structurally repair the full current history into an API-valid sequence (the
  * same pure rules the read path uses), then append only the new tail beyond the
  * watermark. A trailing dangling call is dropped here and re-evaluated next
  * pass once its result lands, so a call and its result are written together at
  * consecutive positions and a result is never persisted without its call. The
- * watermark advances to the sanitized length — never past anything unwritten —
+ * watermark advances to the repaired length — never past anything unwritten —
  * so a non-monotonic history can never desync it. When previously-persisted
- * rows already exceed the sanitized length (e.g. legacy orphans written before
+ * rows already exceed the repaired length (e.g. legacy orphans written before
  * this fix), nothing new is appended and the watermark holds steady.
  */
 /**
@@ -1580,16 +1539,13 @@ export function historyRowsToAppend(
   // positions from 0) when callers do not pass an explicit next position.
   nextPosition: number = persistedHistoryCount,
   toolOutputTruncationTokens?: number,
-  redactValue: (value: unknown) => unknown = (value) => value,
 ): {
   rows: Array<{ position: number; item: Record<string, unknown> }>;
   nextWatermark: number;
   nextPosition: number;
 } {
-  const sanitized = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens).map(
-    (item) => redactValue(item) as Record<string, unknown>,
-  );
-  if (sanitized.length <= persistedHistoryCount) {
+  const modelReady = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens);
+  if (modelReady.length <= persistedHistoryCount) {
     return { rows: [], nextWatermark: persistedHistoryCount, nextPosition };
   }
   // Canonical model-facing inputs (including machine-input batches) are
@@ -1599,7 +1555,7 @@ export function historyRowsToAppend(
   // notes—must not accidentally become conversation memory during reconciliation.
   // Advance the in-memory watermark past them, but only allocate durable
   // positions to actual model/tool output.
-  const rows = sanitized
+  const rows = modelReady
     .slice(persistedHistoryCount)
     .filter((item) => !(item.type === "message" && item.role === "system"))
     .map((item, offset) => ({
@@ -1608,7 +1564,7 @@ export function historyRowsToAppend(
     }));
   return {
     rows,
-    nextWatermark: sanitized.length,
+    nextWatermark: modelReady.length,
     nextPosition: nextPosition + rows.length,
   };
 }
@@ -1650,16 +1606,7 @@ export function selectRejectedProviderArtifactHistoryIds(
 }
 
 /** Literal final per-call boundary for replayed and current-turn model input. */
-export function secretRedactionModelInputFilter(
-  redactValue: (value: unknown) => unknown,
-): NonNullable<RunAgentStreamOptions["callModelInputFilter"]> {
-  return ({ modelData }) => ({
-    ...modelData,
-    input: redactValue(modelData.input) as typeof modelData.input,
-  });
-}
-
-function isModelOrToolProgressHistoryItem(item: Record<string, unknown>): boolean {
+export function isModelOrToolProgressHistoryItem(item: Record<string, unknown>): boolean {
   if (item.type === "message") {
     return item.role === "assistant";
   }
@@ -3123,7 +3070,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             persistedHistoryCount,
             nextHistoryPosition,
             modelRunSettings.modelToolOutputTruncationTokens,
-            (value) => redact(value),
           );
           const hasModelOrToolProgress = rows.some((row) =>
             isModelOrToolProgressHistoryItem(row.item),
@@ -3164,27 +3110,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       } catch (persistError) {
         console.error(
           "session history dual-write failed (run unaffected)",
-          safeErrorDiagnostic(persistError, (value) => String(redact(value))),
+          safeErrorDiagnostic(persistError),
         );
         if (options.requireDurable) throw persistError;
       }
     };
-    // Reassigned after the variable set loads; the publish closure is
-    // created (and used for turn.started) before the variableSet is available.
-    // Generic auth/cookie/signed-URL/token classification is active before any
-    // exact run-secret provenance is available. Registered values strengthen
-    // this boundary as credentials are resolved and renewed during the turn.
-    let redact: (payload: unknown) => unknown = createSecretRedactor([]);
-    const secretRedactions = new Map<string, string>();
     const publishedRunCredentialNotices = new Set<string>();
-    const registerSecretRedactions = (secrets: SecretForRedaction[]): void => {
-      for (const secret of secrets) {
-        if (!secretRedactions.has(secret.value)) secretRedactions.set(secret.value, secret.name);
-      }
-      redact = createSecretRedactor(
-        [...secretRedactions].map(([value, name]) => ({ name, value })),
-      );
-    };
+
     let variableSetId = "";
     // Rig telemetry (M3): set once the session loads; empty string for a rig-less
     // turn (mirrors variableSetId). Read by the activity span's finally block.
@@ -3371,7 +3303,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ) => {
         const inputs = events.map((event) => ({
           ...event,
-          payload: redact(event.payload),
+          payload: event.payload,
           turnId: turnId!,
           producerId,
           producerSeq: ++producerSeq,
@@ -3439,13 +3371,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : undefined;
         const inputs = inputSettlement.events.map((event) => ({
           ...event,
-          payload: redact(event.payload),
+          payload: event.payload,
           turnId: turnId!,
           producerId,
           producerSeq: ++producerSeq,
         }));
-        const redactedRunState = inputSettlement.runState
-          ? (redact(inputSettlement.runState) as typeof inputSettlement.runState)
+        const runState = inputSettlement.runState
+          ? (inputSettlement.runState as typeof inputSettlement.runState)
           : undefined;
         const result = await applySessionTurnSettlement(db, input.workspaceId, {
           sessionId: input.sessionId,
@@ -3456,7 +3388,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionStatus: inputSettlement.sessionStatus,
           activeTurnId: inputSettlement.activeTurnId,
           events: inputs,
-          ...(redactedRunState ? { runState: redactedRunState } : {}),
+          ...(runState ? { runState } : {}),
           ...(recordingMutation ? { recording: recordingMutation } : {}),
           ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
         });
@@ -4200,33 +4132,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
       };
-      const sessionMcpHeaderNames = new Map<string, readonly string[]>();
       const runSettings = await settingsWithSessionMcpServersForRun(
         db,
         input.workspaceId,
         input.sessionId,
         input.attemptId,
         baseRunSettings,
-        {
-          onResolvedServers: (servers) => {
-            for (const server of servers) {
-              sessionMcpHeaderNames.set(server.id, server.headerNames);
-            }
-          },
-        },
       );
-      registerSecretRedactions([
-        ...(runSettings.accessKey
-          ? [{ name: "OPENGENI_ACCESS_KEY", value: runSettings.accessKey }]
-          : []),
-        ...runSettings.mcpServers.flatMap((server) => {
-          return headerSecretRedactions(
-            `MCP_${server.id.toUpperCase()}_STATIC`,
-            server.headers,
-            sessionMcpHeaderNames.get(server.id),
-          );
-        }),
-      ]);
+
       // Multi-provider per-turn routing → the provider gating (compaction mode,
       // hosted web search, encrypted reasoning, context window) the agent and
       // compaction summarizer must use; null falls back to the legacy global
@@ -4257,49 +4170,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
       const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
         await modelHistoryProjector(projectHistoryForProvider(items, providerApi));
-      const selectedProvider = resolvedModel?.provider;
-      const publicProviderHeaders = new Set(
-        selectedProvider?.publicDefaultHeaderNames?.map((name) => name.toLowerCase()) ?? [],
-      );
-      const publicProviderQueries = new Set(
-        selectedProvider?.publicDefaultQueryNames?.map((name) => name.toLowerCase()) ?? [],
-      );
-      const fallbackProviderApiKey =
-        capabilitySettings.openaiProvider === "azure"
-          ? (capabilitySettings.azureOpenaiApiKey ?? capabilitySettings.azureOpenaiAdToken)
-          : capabilitySettings.openaiApiKey;
-      registerSecretRedactions([
-        ...(selectedProvider?.apiKey
-          ? [
-              {
-                name: `MODEL_${selectedProvider.id.toUpperCase()}_API_KEY`,
-                value: selectedProvider.apiKey,
-              },
-            ]
-          : !resolvedModel && fallbackProviderApiKey
-            ? [
-                {
-                  name: "MODEL_PROVIDER_API_KEY",
-                  value: fallbackProviderApiKey,
-                },
-              ]
-            : []),
-        ...Object.entries(selectedProvider?.defaultHeaders ?? {}).flatMap(([name, value]) =>
-          publicProviderHeaders.has(name.toLowerCase())
-            ? []
-            : [
-                {
-                  name: `MODEL_PROVIDER_HEADER_${name.toUpperCase()}`,
-                  value,
-                },
-              ],
-        ),
-        ...Object.entries(selectedProvider?.defaultQuery ?? {}).flatMap(([name, value]) =>
-          publicProviderQueries.has(name.toLowerCase())
-            ? []
-            : [{ name: `MODEL_PROVIDER_QUERY_${name.toUpperCase()}`, value }],
-        ),
-      ]);
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
       // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
@@ -4354,15 +4224,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 input.workspaceId,
                 effectiveCodexCredentialId ?? "",
               );
-              const registerSnapshot = async (
-                snapshotPromise: ReturnType<typeof resolver.getToken>,
-              ) => {
-                const snapshot = await snapshotPromise;
-                registerSecretRedactions([
-                  { name: "CODEX_ACCESS_TOKEN", value: snapshot.accessToken },
-                ]);
-                return snapshot;
-              };
               return {
                 clientVersion: CODEX_CLIENT_VERSION,
                 // Backend sticky cache-routing key — the SAME id as the body's
@@ -4372,8 +4233,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // (per-request shard lottery = prod's measured 48.6% on sol);
                 // with it, resends pin to the warm shard (Codex CLI parity).
                 sessionId: input.sessionId,
-                getToken: () => registerSnapshot(resolver.getToken()),
-                refresh: () => registerSnapshot(resolver.refresh()),
+                getToken: () => resolver.getToken(),
+                refresh: () => resolver.refresh(),
                 resolveModel: buildModelResolver(
                   CODEX_FALLBACK_MODEL_SLUGS,
                   CODEX_FALLBACK_MODEL_SLUGS[0],
@@ -4648,7 +4509,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             );
             if (!isCompactionSummaryFailure(error)) throw error;
-            const errorMessage = String(redact(compactionFailureReasonFromError(error)));
+            const errorMessage = String(compactionFailureReasonFromError(error));
             if (
               !(await settle!({
                 events: [
@@ -4781,11 +4642,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         rigDefaultEnvironmentValues,
         workspaceVariableSet?.values ?? {},
       );
-      // Redact EVERY exported secret value (rig defaults + session set) from turn
-      // output, not just the session set's.
-      registerSecretRedactions(
-        Object.entries(sandboxWorkspaceEnvironmentValues).map(([name, value]) => ({ name, value })),
-      );
       // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
       // D1-lite) and reused for EVERY downstream decision: the env mint (skip
       // inert platform git tokens for a machine turn), the establish path (no phantom Modal
@@ -4891,7 +4747,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           )
         : null;
       if (initialRunCredentialMaterial) {
-        registerSecretRedactions(initialRunCredentialMaterial.redactions);
         for (const payload of runCredentialAuthNeededPayloads(initialRunCredentialMaterial)) {
           publishedRunCredentialNotices.add(JSON.stringify(payload));
           await publish!([{ type: "credential.auth_needed", payload }], true);
@@ -4993,19 +4848,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
-      registerSecretRedactions([
-        ...Object.entries(sandboxGitTokens ?? {}).flatMap(([provider, value]) =>
-          value ? [{ name: `GIT_${provider.toUpperCase()}_TOKEN`, value }] : [],
-        ),
-        ...(sandboxGitToken ? [{ name: "GIT_TOKEN", value: sandboxGitToken }] : []),
-        ...((sandboxGitCredentialBindings ?? []).map((binding) => ({
-          name: `GIT_${binding.provider.toUpperCase()}_BINDING_TOKEN`,
-          value: binding.token,
-        })) satisfies SecretForRedaction[]),
-        ...(sandboxToolspaceToken
-          ? [{ name: "TOOLSPACE_TOKEN", value: sandboxToolspaceToken }]
-          : []),
-      ]);
+
       const sandboxToolspaceTokenFile = sandboxToolspaceToken
         ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
         : undefined;
@@ -5051,12 +4894,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
               if (binding) {
                 assertGitCredentialRenewalTransportUnchanged(initialBinding, binding);
-                registerSecretRedactions([
-                  {
-                    name: `GIT_${binding.provider.toUpperCase()}_BINDING_TOKEN`,
-                    value: binding.token,
-                  },
-                ]);
               }
               pendingBinding = binding;
               return binding
@@ -5144,7 +4981,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             toolspaceAuthority,
           );
           if (material) {
-            registerSecretRedactions([{ name: "TOOLSPACE_TOKEN", value: material.token }]);
           }
           return material;
         };
@@ -5271,7 +5107,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
             return;
           }
-          registerSecretRedactions(material.redactions);
+
           await runWorkspaceMutationForSandbox(
             requireTargetSandbox(),
             "runCredentialMaterialization",
@@ -5622,9 +5458,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const resolveCredential: typeof rawResolveCredential = async (request) => {
         const result = await resolveFrozenCredential(request);
         if (result.status === "ok") {
-          registerSecretRedactions(
-            headerSecretRedactions("MCP", result.headers, Object.keys(result.headers)),
-          );
         }
         return result;
       };
@@ -5646,9 +5479,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }) => Promise<T>,
               ): Promise<T> => {
                 const snapshot = await resolver.getToken();
-                registerSecretRedactions([
-                  { name: "CODEX_APPS_ACCESS_TOKEN", value: snapshot.accessToken },
-                ]);
+
                 return await withCodexAppsRequestAuthorization(
                   db,
                   { workspaceId: input.workspaceId, credentialId: codexAppsCredentialId },
@@ -6200,7 +6031,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             );
             if (!isCompactionSummaryFailure(error)) throw error;
-            const errorMessage = String(redact(compactionFailureReasonFromError(error)));
+            const errorMessage = String(compactionFailureReasonFromError(error));
             if (
               !(await settle!({
                 events: [
@@ -6340,7 +6171,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           );
           if (!isCompactionSummaryFailure(compactError)) throw compactError;
-          const errorMessage = String(redact(compactionFailureReasonFromError(compactError)));
+          const errorMessage = String(compactionFailureReasonFromError(compactError));
           observability.error("context compaction failed", {
             sessionId: input.sessionId,
             turnId,
@@ -6472,16 +6303,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // total rows no longer equal max(position)+1. Pre-compaction both reduce to
         // the old total-count value, so the common path is unchanged.
         //
-        // CRITICAL: seed from the SANITIZED active-row length, not the raw active
+        // CRITICAL: seed from the structurally repaired active-row length, not the raw active
         // count. `prepareRunInput` builds `state.history` from
         // `sanitizeHistoryItemsForModel(activeRows)`, so when sanitization drops K
         // rows (a legacy orphan/dangling pair), the in-memory history this turn
         // starts from is K shorter than the raw row count. The reconcile slices the
-        // re-sanitized `state.history` off `persistedHistoryCount`; seeding it from
+        // repaired `state.history` off `persistedHistoryCount`; seeding it from
         // the raw count (K too high) skips K genuinely-new items, and a
         // `function_call` left in that skipped region can later have its
         // `function_call_result` persisted alone — the orphan that 400s on replay
-        // and bricks the session (issue-61). The sanitized seed is already
+        // and bricks the session (issue-61). The repaired seed is already
         // orphan-free, so it is a stable prefix of the re-sanitized history and the
         // slice begins exactly at the first genuinely-new item.
         persistedHistoryCount = prepared.persistedHistoryCount;
@@ -6674,7 +6505,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             contextCompactionSignal: () => modelResponseUsageContextSignal(modelResponseUsageState),
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
-            callModelInputFilter: secretRedactionModelInputFilter((value) => redact(value)),
             ...(toolCancellationFenceRef.current
               ? { turnToolCancellationFence: toolCancellationFenceRef.current }
               : {}),
@@ -6764,7 +6594,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // conversation context preserved for the post-top-up resume.
                 let serializedRunState: string | null = null;
                 try {
-                  serializedRunState = String(redact(stream.state.toString()));
+                  serializedRunState = String(stream.state.toString());
                 } catch {
                   serializedRunState = null;
                 }
@@ -6786,7 +6616,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 callId: pendingToolCall.callId,
                 callType: pendingToolCall.callType,
-                callItem: redact(pendingToolCall.callItem) as Record<string, unknown>,
+                callItem: pendingToolCall.callItem as Record<string, unknown>,
               });
               if (!registered.accepted) {
                 throw new TurnAttemptFencedError(
@@ -6811,7 +6641,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 attemptId: input.attemptId,
                 callId: completedToolCall.callId,
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-                resultItem: redact(completedToolCall.resultItem) as Record<string, unknown>,
+                resultItem: completedToolCall.resultItem as Record<string, unknown>,
               });
               if (!recorded.accepted) {
                 throw new TurnAttemptFencedError(
@@ -7059,7 +6889,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return claimedResult({ status: "requires_action" });
         }
 
-        const finalOutput = String(redact(String(stream.finalOutput ?? "")));
+        const finalOutput = String(stream.finalOutput ?? "");
         await reconcileConversationTruth();
         // Op-stream durability fence: the tool outputs are now durably in the
         // history store (a redispatch would NOT re-execute them), so this
@@ -7140,8 +6970,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
             turnId: activeTurnId,
             reason: recoveryKind,
-            code: overflow?.code ? String(redact(overflow.code)) : undefined,
-            error: String(redact(overflow?.message ?? compactionNeeded?.message ?? "")),
+            code: overflow?.code ? String(overflow.code) : undefined,
+            error: String(overflow?.message ?? compactionNeeded?.message ?? ""),
             signalTokens: compactionNeeded?.signalTokens,
             thresholdTokens: compactionNeeded?.thresholdTokens,
           });
@@ -7186,9 +7016,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
             compactionRequestCleared = landmark.requestConsumed;
             if (!isCompactionSummaryFailure(compactError)) throw compactError;
-            compactionFailureMessage = String(
-              redact(compactionFailureReasonFromError(compactError)),
-            );
+            compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
             observability.warn("context compaction recovery compaction failed", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
@@ -7322,7 +7150,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         } catch (recoveryError) {
           console.error(
             "sandbox lease supersession recovery failed",
-            safeErrorDiagnostic(recoveryError, (value) => String(redact(value))),
+            safeErrorDiagnostic(recoveryError),
           );
           throw recoveryError;
         }
@@ -7369,7 +7197,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         } catch (recoveryError) {
           console.error(
             "sandbox deadline rotation recovery failed",
-            safeErrorDiagnostic(recoveryError, (value) => String(redact(value))),
+            safeErrorDiagnostic(recoveryError),
           );
           throw recoveryError;
         }
@@ -7418,7 +7246,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // the turn through a second cancellation path.
           console.error(
             "worker-shutdown recovery checkpoint failed",
-            safeErrorDiagnostic(recoveryError, (value) => String(redact(value))),
+            safeErrorDiagnostic(recoveryError),
           );
           throw recoveryError;
         }
@@ -8208,15 +8036,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // truth, recover this SAME accepted turn, then let the workflow re-claim
       // it after a pacing delay. This is independent of goal state and never
       // relies on a synthetic continuation prompt.
-      const failure = redact(agentRunFailurePayload(error, { isCodexTurn })) as ReturnType<
+      const failure = agentRunFailurePayload(error, { isCodexTurn }) as ReturnType<
         typeof agentRunFailurePayload
       >;
       if (isSessionEventPersistenceError(error)) {
-        // Never pass the original Drizzle/postgres-js error to telemetry: its
-        // nested cause may contain raw SQL and bound parameters. The typed DB
-        // boundary retains only SQLSTATE, stage, correlation, and safe catalog
-        // identifiers. Provider inference has already happened and is NOT
-        // retried by this terminal classification.
+        // Preserve the exact source message in the internal runtime diagnostic;
+        // SQLSTATE/catalog facts remain separate classification attributes.
         observability.error("session event persistence failed", {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -8237,6 +8062,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           dbDataType: error.details.database.dataType,
           dbConstraint: error.details.database.constraint,
           dbRoutine: error.details.database.routine,
+          error: error.message,
         });
       }
       if (failure.retryable && publish && turnId && turnStartedPublished) {
@@ -8452,18 +8278,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             onReceiptFailure: (error) => {
               console.error(
                 "agent turn quiescence receipt exhausted; signalling proof",
-                safeErrorDiagnostic(error, (value) => String(redact(value))),
+                safeErrorDiagnostic(error),
               );
             },
             onPublishFailure: (error) => {
               console.error(
                 "agent turn quiescence event fanout failed",
-                safeErrorDiagnostic(error, (value) => String(redact(value))),
+                safeErrorDiagnostic(error),
               );
             },
             onSignalFailure: (error, attempt, retryMs) => {
               console.error("agent turn quiescence proof signal failed; retrying", {
-                error: safeErrorDiagnostic(error, (value) => String(redact(value))),
+                error: safeErrorDiagnostic(error),
                 attempt,
                 retryMs,
               });
@@ -8711,7 +8537,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxToRelease.release().catch((releaseError) => {
               console.error(
                 "sandbox lease release failed (turn outcome unaffected)",
-                safeErrorDiagnostic(releaseError, (value) => String(redact(value))),
+                safeErrorDiagnostic(releaseError),
               );
             }),
             finalizerSignal,
@@ -8721,7 +8547,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         finalizationError ??= error;
         console.error(
           "agent turn finalization failed (turn outcome unaffected)",
-          safeErrorDiagnostic(error, (value) => String(redact(value))),
+          safeErrorDiagnostic(error),
         );
       } finally {
         // If fallible finalization exited before the ordinary exact-holder
@@ -8782,9 +8608,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
           error:
             finalizationError || activityError
-              ? safeErrorForTelemetry(finalizationError ?? activityError, (value) =>
-                  String(redact(value)),
-                )
+              ? safeErrorForTelemetry(finalizationError ?? activityError)
               : undefined,
         });
         assertPhysicalToolQuiescenceForCancellation({
@@ -8942,15 +8766,8 @@ export function agentRunFailurePayload(
   }
   if (isSessionEventPersistenceError(error)) {
     const { details } = error;
-    const eventLabel = details.eventTypes.join(", ") || "session events";
-    const failureLabel =
-      details.code === "db_deadlock"
-        ? "Database deadlock"
-        : details.code === "db_serialization_failure"
-          ? "Database serialization failure"
-          : "Database failure";
     return {
-      error: `${failureLabel} while persisting ${eventLabel}. The completed provider call and external effects were not retried.`,
+      error: error.message,
       code: details.code,
       detail:
         details.retryOutcome === "exhausted"
@@ -9012,6 +8829,7 @@ export function agentRunFailurePayload(
         "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
       code: "mcp_transport_unavailable",
       retryable: true,
+      detail: message,
     };
   }
   if (

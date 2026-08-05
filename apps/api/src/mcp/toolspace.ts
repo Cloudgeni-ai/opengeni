@@ -51,7 +51,6 @@ import {
   type McpRequestReplayInfo,
 } from "@opengeni/runtime/mcp-network";
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
 
 export type ToolspaceCallResult = CallToolResult;
 
@@ -401,7 +400,7 @@ async function resolveToolListing(input: {
     }).catch((error) => {
       deps.observability?.warn("toolspace upstream connection failed", {
         serverId,
-        ...toolspaceErrorAttributes(error),
+        ...toolspaceTelemetryErrorAttributes(error),
       });
       return null;
     });
@@ -415,7 +414,7 @@ async function resolveToolListing(input: {
         .catch((error) => {
           deps.observability?.warn("toolspace upstream tool list failed", {
             serverId,
-            ...toolspaceErrorAttributes(error),
+            ...toolspaceTelemetryErrorAttributes(error),
           });
           return { tools: [] };
         });
@@ -629,17 +628,19 @@ function toolspaceToolFor(input: {
       if (mcpToolRequiresApproval(config.requireApproval, tool.name)) {
         return mcpError(APPROVAL_REQUIRED_MESSAGE);
       }
-      const connection = await connectToolspaceServer({
-        deps,
-        grant,
-        config,
-        sessionId,
-        rootSessionId,
-        turn: reservation.turn,
-        personalConnectionDelegations,
-      }).catch(() => null);
-      if (!connection) {
-        return mcpError(`upstream tool failed: ${name}`);
+      let connection: ConnectedToolspaceServer;
+      try {
+        connection = await connectToolspaceServer({
+          deps,
+          grant,
+          config,
+          sessionId,
+          rootSessionId,
+          turn: reservation.turn,
+          personalConnectionDelegations,
+        });
+      } catch (error) {
+        return mcpError(exactErrorMessage(error));
       }
       try {
         const callId = crypto.randomUUID();
@@ -659,7 +660,7 @@ function toolspaceToolFor(input: {
             type: "toolspace_call",
             id: callId,
             name,
-            arguments: toolspaceAuditSummary(args),
+            arguments: args,
             serverId,
             toolName: tool.name,
           },
@@ -718,7 +719,7 @@ function toolspaceToolFor(input: {
               producerId: grant.subjectId,
               payload: {
                 id: callId,
-                output: toolspaceAuditSummary(output),
+                output,
                 origin: "toolspace",
                 subjectId: grant.subjectId,
               },
@@ -768,37 +769,22 @@ async function callRemoteTool(
     if (isToolspaceOutcomeUncertainError(error)) {
       return mcpError(TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message);
     }
-    // The raw upstream error can carry provider-specific detail; log it
-    // server-side and return only a generic result to the sandbox so no header
-    // or credential material can ride the message back out.
+    const message = exactErrorMessage(error);
     deps.observability?.warn("toolspace upstream tool call failed", {
       serverId: server.config.id,
       toolName,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     });
-    return mcpError(`upstream tool failed: ${prefixedMcpToolName(server.config.id, toolName)}`);
+    return mcpError(message);
   }
 }
 
-function toolspaceAuditSummary(value: unknown): {
-  redacted: true;
-  sizeBytes: number;
-  sha256: string;
-} {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value) ?? "null";
-  } catch {
-    serialized = "[unserializable]";
-  }
-  return {
-    redacted: true,
-    sizeBytes: Buffer.byteLength(serialized),
-    sha256: createHash("sha256").update(serialized).digest("hex"),
-  };
+function exactErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function toolspaceErrorAttributes(error: unknown): {
+/** Bounded projection for the external observability sink; product data stays exact. */
+function toolspaceTelemetryErrorAttributes(error: unknown): {
   errorClass: string;
   errorCode?: string;
   errorMessage?: string;

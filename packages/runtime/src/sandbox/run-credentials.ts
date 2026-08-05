@@ -1,7 +1,6 @@
 import type {
   RunCredentialAuthNeeded,
   RunCredentialFile,
-  RunCredentialRedaction,
   RunCredentialsResolution,
 } from "@opengeni/contracts";
 import type {
@@ -17,7 +16,6 @@ const MAX_CREDENTIAL_FILES = 64;
 const MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_MATERIAL_BYTES = 4 * 1024 * 1024;
 const MAX_AUTH_NEEDED_NOTICES = 32;
-const MAX_REDACTION_VALUES = 256;
 const WRITE_CHUNK_BYTES = 24 * 1024;
 const COMMAND_OK_MARKER = "__OPENGENI_RUN_CREDENTIAL_COMMAND_OK__";
 const AUTH_NEEDED_REASONS = new Set([
@@ -40,7 +38,6 @@ export type NormalizedRunCredentialMaterial = {
   fileEnvironment: Record<string, string>;
   expiresAt: Date | null;
   authNeeded: RunCredentialAuthNeeded[];
-  redactions: RunCredentialRedaction[];
 };
 
 export type RunCredentialCommandSession = Pick<SandboxSessionLike, "exec" | "execCommand">;
@@ -251,7 +248,6 @@ export function normalizeRunCredentialsResolution(
       fileEnvironment: {},
       expiresAt: null,
       authNeeded,
-      redactions: [],
     };
   }
 
@@ -358,35 +354,6 @@ export function normalizeRunCredentialsResolution(
     );
   }
 
-  const redactions: RunCredentialRedaction[] = Object.entries(environment).map(([name, value]) => ({
-    name,
-    value,
-  }));
-  if (candidate.redactions !== undefined && !Array.isArray(candidate.redactions)) {
-    throw new RunCredentialValidationError("run credential redactions must be an array");
-  }
-  const additionalRedactions = candidate.redactions ?? [];
-  if (additionalRedactions.length > MAX_REDACTION_VALUES) {
-    throw new RunCredentialValidationError(
-      `run credential redactions exceed ${MAX_REDACTION_VALUES} entries`,
-    );
-  }
-  for (const [index, redaction] of additionalRedactions.entries()) {
-    if (!isRecord(redaction)) {
-      throw new RunCredentialValidationError(`redactions[${index}] must be an object`);
-    }
-    const name = requiredBoundedString(redaction.name, `redactions[${index}].name`, 128);
-    const value = requiredBoundedString(
-      redaction.value,
-      `redactions[${index}].value`,
-      MAX_ENVIRONMENT_VALUE_BYTES,
-    );
-    if (!name.trim() || !value) {
-      throw new RunCredentialValidationError(`redactions[${index}] must contain a name and value`);
-    }
-    redactions.push({ name, value });
-  }
-
   let expiresAt: Date | null = null;
   if (candidate.expiresAt !== undefined && candidate.expiresAt !== null) {
     const expiry = requiredBoundedString(candidate.expiresAt, "run credential expiry", 128);
@@ -401,7 +368,6 @@ export function normalizeRunCredentialsResolution(
     fileEnvironment,
     expiresAt,
     authNeeded,
-    redactions,
   };
 }
 

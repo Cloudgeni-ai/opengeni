@@ -88,7 +88,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
-  safeMcpTransportError,
+  mcpTransportErrorWithRetryMetadata,
   serializeApprovals,
   serializeHumanInputRequests,
   refreshToolspaceTokenFile,
@@ -175,24 +175,26 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
   ).rejects.toThrow("MCP server connect timed out after 5ms");
 });
 
-test("sanitizes nested MCP connectivity failures into an allowlisted marker", () => {
+test("preserves nested MCP connectivity diagnostics while adding a typed retry marker", () => {
   const raw = new Error("MCP connect failed for https://private.example/token-value");
   raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
     code: "ECONNREFUSED",
   });
 
-  const sanitized = safeMcpTransportError(raw);
+  const classified = mcpTransportErrorWithRetryMetadata(raw);
 
   expect(isMcpTransportConnectivityError(raw)).toBe(false);
-  expect(isMcpTransportConnectivityError(sanitized)).toBe(true);
-  expect(sanitized).toMatchObject({
-    name: "McpTransportError",
-    message: "MCP transport operation failed (Error)",
+  expect(isMcpTransportConnectivityError(classified)).toBe(true);
+  expect(classified).toMatchObject({
+    name: "Error",
+    message: raw.message,
     mcpTransportFailureKind: "connectivity_unavailable",
   });
-  expect(JSON.stringify(sanitized)).not.toContain("private.example");
-  expect(JSON.stringify(sanitized)).not.toContain("token-value");
-  expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+  expect(classified.cause).toBe(raw);
+  expect(classified.message).toContain("private.example");
+  expect((classified.cause as Error).cause).toMatchObject({
+    message: "connect ECONNREFUSED 127.0.0.1:8000",
+  });
 });
 
 test("does not turn MCP client failures or arbitrary codes into connectivity recovery", () => {
@@ -205,9 +207,13 @@ test("does not turn MCP client failures or arbitrary codes into connectivity rec
   });
 
   expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
-  expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(clientFailure))).toBe(
+    false,
+  );
   expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
-  expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
+  expect(mcpTransportErrorWithRetryMetadata(arbitrary)).not.toHaveProperty(
+    "mcpTransportFailureKind",
+  );
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -1152,19 +1158,16 @@ describe("runtime event normalization", () => {
       expect(mcpToolErrorOutput("boom").content[0]?.text).toContain("boom");
     });
 
-    test("mcpToolErrorOutput redacts credential-bearing error details", () => {
-      const out = mcpToolErrorOutput(
-        new Error(
-          "upstream 401\nAuthorization: Bearer synthetic-bearer-value-123456\n" +
-            "Cookie: session=synthetic-cookie-value-123456",
-        ),
-      );
+    test("mcpToolErrorOutput preserves credential-shaped error details exactly", () => {
+      const bearer = "synthetic-bearer-value-123456";
+      const cookie = ["synthetic", "cookie", "value", "123456"].join("-");
+      const message = `upstream 401\nAuthorization: Bearer ${bearer}\nCookie: ${cookie}`;
+      const out = mcpToolErrorOutput(new Error(message));
       const text = out.content[0]?.text ?? "";
       expect(text).toContain("upstream 401");
-      expect(text).toContain("Authorization: Bearer [redacted]");
-      expect(text).toContain("Cookie: [redacted]");
-      expect(text).not.toContain("synthetic-bearer-value");
-      expect(text).not.toContain("synthetic-cookie-value");
+      expect(text).toContain(message);
+      expect(text).toContain(bearer);
+      expect(text).toContain(cookie);
     });
 
     test("every agent gets an mcpConfig.errorFunction that produces isError output", () => {
@@ -4353,7 +4356,7 @@ describe("runtime event normalization", () => {
       expect(text).toMatch(/did not replay/i);
       expect(text).toMatch(/do not retry automatically/i);
       expect(text).toMatch(/verify provider state/i);
-      expect(text).not.toContain("unauthorized");
+      expect(text).toContain("unauthorized");
       expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
         1,
       );
@@ -4978,7 +4981,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("MCP connect logging never emits raw response bodies or credential material", async () => {
+  test("MCP connect logging preserves exact provider diagnostics", async () => {
     const syntheticCredential = "synthetic-mcp-log-secret-123456";
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -5022,9 +5025,9 @@ describe("runtime event normalization", () => {
         .join("\n");
       expect(renderedLogs).toContain("synthetic-optional");
       expect(renderedLogs).toContain("401");
-      expect(renderedLogs).not.toContain(syntheticCredential);
-      expect(renderedLogs).not.toContain("Authorization: Bearer");
-      expect(renderedLogs).not.toContain("X-Amz-Signature");
+      expect(renderedLogs).toContain(syntheticCredential);
+      expect(renderedLogs).toContain("Authorization: Bearer");
+      expect(renderedLogs).toContain("X-Amz-Signature");
     } finally {
       console.warn = originalWarn;
       console.error = originalError;
@@ -5455,9 +5458,9 @@ describe("runtime event normalization", () => {
         const text = JSON.stringify(result);
         // Loop-safety: the copy must steer the model away from re-calling it.
         expect(text).toMatch(/do not retry/i);
-        // Safe surface only: class (+ status), NEVER the raw 401 body.
-        expect(text).toContain("StreamableHTTPError");
-        expect(text).not.toContain("unauthorized");
+        // Exact provider text remains visible; no-retry guidance is additive.
+        expect(text).toContain("Streamable HTTP error");
+        expect(text).toContain("unauthorized");
         // Sibling unaffected.
         const ok = await docs.callTool("docs__search_documents", {
           query: "y",
@@ -5466,7 +5469,7 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // Structured warn carries the safe fields, and never the raw body.
+      // Structured warning carries classification plus the exact provider message.
       const warned = warnings.find((args) =>
         args.some(
           (a) =>
@@ -5486,7 +5489,7 @@ describe("runtime event normalization", () => {
         errorClass: "StreamableHTTPError",
         status: 401,
       });
-      expect(JSON.stringify(payload)).not.toContain("unauthorized");
+      expect(JSON.stringify(payload)).toContain("unauthorized");
     } finally {
       console.warn = originalWarn;
       flaky.close();

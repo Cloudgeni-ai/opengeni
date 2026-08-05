@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
-import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./database";
 import * as schema from "./schema";
 import {
@@ -288,7 +287,7 @@ function assertBoundedString(
 }
 
 function boundedPayload(input: Record<string, unknown> | undefined): Record<string, unknown> {
-  const payload = sanitizeEventPayload(input ?? {});
+  const payload = input ?? {};
   if (
     Buffer.byteLength(JSON.stringify(payload), "utf8") > SESSION_REALTIME_LEDGER_MAX_PAYLOAD_BYTES
   ) {

@@ -5485,7 +5485,8 @@ describe("API component integration", () => {
     expect(pinResponse.status).toBe(200);
     expect(((await pinResponse.json()) as { pinned: boolean }).pinned).toBe(true);
 
-    // Edit text: PATCH bypasses dedup only, not sanitization/redaction/hash/embed.
+    // Edit text: PATCH bypasses dedup only; accepted bytes remain exact while
+    // hash/embed metadata is refreshed.
     const editedSecret = "AKIAIOSFODNN7EXAMPLE";
     const editResponse = await app.request(
       workspacePath(workspaceId, `/knowledge/memories/${created.id}`),
@@ -5500,8 +5501,7 @@ describe("API component integration", () => {
     expect(editResponse.status).toBe(200);
     const edited = (await editResponse.json()) as { text: string };
     expect(edited.text).toContain("release branch");
-    expect(edited.text).toContain("[REDACTED]");
-    expect(edited.text).not.toContain(editedSecret);
+    expect(edited.text).toContain(editedSecret);
     const [editedRow] = await dbClient.db.execute<{
       textHash: string | null;
       embeddingModel: string | null;
@@ -5515,7 +5515,7 @@ describe("API component integration", () => {
     expect(editedRow?.embeddingModel).toBeTruthy();
     expect(editedRow?.hasEmbedding).toBe(true);
 
-    // Status transitions into visible memory gate existing text too.
+    // Status transitions preserve the already-accepted exact text too.
     const activateSecret = "AKIAIOSFODNN7EXAMPLE";
     const proposedActiveResponse = await app.request(
       workspacePath(workspaceId, "/knowledge/memories"),
@@ -5546,8 +5546,7 @@ describe("API component integration", () => {
       status: string;
     };
     expect(activated.status).toBe("active");
-    expect(activated.text).toContain("[REDACTED]");
-    expect(activated.text).not.toContain(activateSecret);
+    expect(activated.text).toContain(activateSecret);
     const [activatedRow] = await dbClient.db.execute<{
       textHash: string | null;
       embeddingModel: string | null;
@@ -5591,8 +5590,7 @@ describe("API component integration", () => {
       status: string;
     };
     expect(approvedTransition.status).toBe("approved");
-    expect(approvedTransition.text).toContain("[REDACTED]");
-    expect(approvedTransition.text).not.toContain(approveSecret);
+    expect(approvedTransition.text).toContain(approveSecret);
     const [approvedTransitionRow] = await dbClient.db.execute<{
       textHash: string | null;
       embeddingModel: string | null;

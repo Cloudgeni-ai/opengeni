@@ -214,7 +214,7 @@ export type UseTranscriptionOptions = {
   disabled?: boolean | undefined;
   createLocalSessionId?: (() => string) | undefined;
   lifecycleTimeouts?: Partial<TranscriptionLifecycleTimeouts> | undefined;
-  /** Receives bounded, redacted diagnostics; this detail is never rendered by the hook. */
+  /** Receives the exact diagnostic emitted by the transcription transport. */
   onDiagnostic?: ((diagnostic: TranscriptionDiagnostic) => void) | undefined;
 };
 
@@ -277,7 +277,7 @@ export function useTranscription({
     (diagnostic: unknown) => {
       if (!onDiagnostic) return;
       try {
-        onDiagnostic(sanitizeTranscriptionDiagnostic(diagnostic));
+        onDiagnostic(normalizeTranscriptionDiagnostic(diagnostic));
       } catch {
         // Observability must never break the local privacy or UI lifecycle.
       }
@@ -625,7 +625,7 @@ export function normalizeTranscriptionErrorCode(code: unknown): TranscriptionErr
   }
 }
 
-export function sanitizeTranscriptionDiagnostic(diagnostic: unknown): TranscriptionDiagnostic {
+export function normalizeTranscriptionDiagnostic(diagnostic: unknown): TranscriptionDiagnostic {
   const source = isRecord(diagnostic) ? diagnostic : {};
   const operation =
     source.operation === "start" ||
@@ -635,20 +635,10 @@ export function sanitizeTranscriptionDiagnostic(diagnostic: unknown): Transcript
       ? source.operation
       : "session";
   const rawDetail = typeof source.detail === "string" ? source.detail : "No diagnostic detail.";
-  const detail = rawDetail
-    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer [REDACTED]")
-    .replace(/\bsk-[A-Za-z0-9_-]{4,}\b/gu, "[REDACTED]")
-    .replace(
-      /\b(api[-_ ]?key|authorization|access[-_ ]?token|refresh[-_ ]?token|token|secret)\b\s*[:=]\s*[^\s,;]+/giu,
-      "$1=[REDACTED]",
-    )
-    .trim()
-    .slice(0, 512);
   return {
     operation,
     code: normalizeTranscriptionErrorCode(source.code),
-    detail: detail || "No diagnostic detail.",
+    detail: rawDetail,
   };
 }
 

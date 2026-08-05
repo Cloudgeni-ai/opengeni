@@ -90,7 +90,7 @@ Broker rules:
 - 403 step-up must NOT poison good credentials: `insufficient_scope` does not flip status to `needs_reauth`; only an unusable refresh grant does.
 - Settings carry only `connectionRef` (non-secret pointer); the `mcpServers` entry schema in `packages/config/src/index.ts` gains an optional `connectionRef { connectionId?, providerDomain, kind?, scopes?, resource?, subjectScope? }`.
 
-Tokens therefore never appear in: `session_turns.tools`, `session_events.payload`, `agent_run_states`, Temporal signals/activity inputs, sandbox env, model context, SDK/React client types, or logs. The event sanitizer (`packages/db/src/event-payload-sanitizer.ts`) already strips `mcpServers[].headers`/`headersEncrypted`; it gains guards for auth-flow fields.
+The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. OpenGeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
 
 ## 5. MCP OAuth client (spec rev 2025-11-25)
 

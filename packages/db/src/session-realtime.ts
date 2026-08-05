@@ -8,7 +8,6 @@ import type {
 } from "@opengeni/contracts";
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
-import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./database";
 import { flushSessionRealtimeTranscriptTailInTransaction } from "./session-realtime-context";
 import {
@@ -185,7 +184,7 @@ async function appendRealtimeLifecycleEvent(
       sessionId: session.id,
       sequence,
       type,
-      payload: sanitizeEventPayload(payload),
+      payload: payload,
       occurredAt: now,
     })
     .returning();

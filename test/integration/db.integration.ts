@@ -1616,21 +1616,20 @@ describe("DB integration", () => {
     ).rejects.toThrow(/empty/i);
   });
 
-  test("AC-3: secrets are redacted in the stored row", async () => {
+  test("AC-3: token-shaped and PEM-looking memory text is stored exactly", async () => {
     const grant = await testGrant(dbClient.db);
+    const tokenShaped = ["ghp", "synthetic", "memory", "1234567890"].join("_");
+    const text = `deploy uses ${tokenShaped} and a -----BEGIN RSA PRIVATE KEY-----\nMIIsecret\n-----END RSA PRIVATE KEY-----`;
     const saved = await saveWorkspaceMemory(
       dbClient.db,
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
-        text: "deploy uses AKIAIOSFODNN7EXAMPLE and a -----BEGIN RSA PRIVATE KEY-----\nMIIsecret\n-----END RSA PRIVATE KEY-----",
+        text,
       },
       memoryEmbedder,
     );
-    expect(saved.redactionCount).toBeGreaterThanOrEqual(2);
-    expect(saved.memory.text).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(saved.memory.text).not.toContain("MIIsecret");
-    expect(saved.memory.text).toContain("[REDACTED]");
+    expect(saved.memory.text).toBe(text);
   });
 
   test("AC-4: replaces_id supersedes the old record and links both ways", async () => {

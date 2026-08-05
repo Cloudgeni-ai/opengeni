@@ -1484,7 +1484,7 @@ function logOAuthCallbackFailure(
     "opengeni.oauth.authorization_server": state?.authorizationServer,
     "opengeni.oauth.issuer": state?.issuer,
     "opengeni.oauth.client_registration_method": state?.clientRegistrationMethod,
-    error: sanitizedError(error.cause),
+    error: exactErrorDescription(error.cause),
   });
 }
 
@@ -1497,7 +1497,7 @@ function logOAuthStartFailure(
     "opengeni.oauth.stage": error.stage,
     "opengeni.oauth.reason": error.reason,
     "opengeni.oauth.provider_domain": providerDomain,
-    error: sanitizedError(error.cause),
+    error: exactErrorDescription(error.cause),
   });
 }
 
@@ -1592,11 +1592,11 @@ function logOAuthVerificationWarning(
     "opengeni.oauth.authorization_server": state.authorizationServer,
     "opengeni.oauth.issuer": state.issuer,
     "opengeni.oauth.client_registration_method": state.clientRegistrationMethod,
-    error: sanitizedError(error.cause),
+    error: exactErrorDescription(error.cause),
   });
 }
 
-function sanitizedError(error: unknown): string {
+function exactErrorDescription(error: unknown): string {
   if (error instanceof HTTPException) {
     return `HTTPException ${error.status}: ${error.message}`;
   }

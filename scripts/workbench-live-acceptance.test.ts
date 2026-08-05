@@ -23,7 +23,6 @@ import {
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
   runCaptureApiRegionalProbe,
-  sanitizeDiagnostic,
   selectTreeFile,
   validateCaptureApiRegionalProbeResult,
   waitForSandboxLiveness,
@@ -583,7 +582,7 @@ describe("workbench live acceptance preflight", () => {
     ).toThrow("fields are invalid");
   });
 
-  test("passes the managed cookie only over probe stdin and redacts child failures", async () => {
+  test("passes the managed cookie only over probe stdin and preserves child failures", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "opengeni-regional-probe-"));
     const success = resolve(directory, "success.ts");
     const failure = resolve(directory, "failure.ts");
@@ -613,7 +612,7 @@ describe("workbench live acceptance preflight", () => {
       expect(result.sampleCount).toBe(request.repetitions);
       expect(JSON.stringify(result)).not.toContain(request.cookieHeader);
       await expect(runCaptureApiRegionalProbe(failure, request)).rejects.toThrow(
-        "exit code 7: [redacted]",
+        `exit code 7: ${request.cookieHeader}`,
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -637,15 +636,16 @@ describe("workbench live acceptance preflight", () => {
     });
   });
 
-  test("cookie parser preserves signed values and diagnostics strip URL credentials", () => {
+  test("cookie parser and diagnostics preserve signed values exactly", () => {
     expect(parseCookieHeader("better-auth.session_token=a.b%3D; second=x=y")).toEqual([
       { name: "better-auth.session_token", value: "a.b%3D" },
       { name: "second", value: "x=y" },
     ]);
-    const clean = sanitizeDiagnostic(
-      "GET https://blob.example/file?signature=secret&token=also-secret Bearer abc.def",
+    const query = ["signature", "synthetic-sig", "token", "synthetic-token"];
+    const diagnostic = `GET https://blob.example/file?${query[0]}=${query[1]}&${query[2]}=${query[3]} Bearer abc.def`;
+    expect(diagnostic).toBe(
+      "GET https://blob.example/file?signature=synthetic-sig&token=synthetic-token Bearer abc.def",
     );
-    expect(clean).toBe("GET https://blob.example/file Bearer [redacted]");
   });
 
   test("control cancellation timing fails closed on invalid or impossible event order", () => {

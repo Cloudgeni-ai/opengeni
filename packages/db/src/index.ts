@@ -193,7 +193,6 @@ import {
 } from "./turn-initiator";
 export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
-import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
 import {
@@ -255,7 +254,7 @@ import {
   MEMORY_SEARCH_DEFAULT_LIMIT,
   MEMORY_SEARCH_MAX_LIMIT,
   renderWorkspaceMemoryBlock,
-  sanitizeMemoryText,
+  memoryTextForStorage,
   WORKSPACE_MEMORY_BLOCK_EMPTY,
   type MemoryBlockRecord,
 } from "./memory-domain";
@@ -277,15 +276,10 @@ export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
 } from "./environment-crypto";
-export {
-  sanitizeEventPayload,
-  sanitizeEventString,
-  sanitizeModelPayload,
-} from "./event-payload-sanitizer";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
 export * from "./insights";
-export { sanitizeMemoryText } from "./memory-domain";
+export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
 // db:migrate script use it). Re-exporting does NOT run migrate.ts's
@@ -3694,12 +3688,12 @@ export function durableUserHistoryItem(
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
   );
-  return sanitizeModelPayload({
+  return {
     type: "message",
     role: "user",
     content: prompt,
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
-  });
+  };
 }
 
 export type RetainedFileArtifact = {
@@ -4665,8 +4659,8 @@ export async function enableCapabilityInstallation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const now = new Date();
-      // Read the raw row (not the redacted mapping) so an omitted config
-      // preserves stored credential-header ciphertext instead of the redaction.
+      // Read the raw row (not the generic projection) so an omitted config
+      // preserves stored credential-header ciphertext.
       const [existing] = await scopedDb
         .select()
         .from(schema.capabilityInstallations)
@@ -4899,7 +4893,7 @@ export function decryptedCapabilityHeaders(
  * Returns the encrypted credential-header map stored on a capability
  * installation, or null when none is stored. This is the only read path for
  * the ciphertext besides listEnabledMcpCapabilityServers; the generic
- * installation mapping redacts it to header names.
+ * installation mapping projects it to header names.
  */
 export async function getStoredCapabilityHeaderCiphertext(
   db: Database,
@@ -7749,8 +7743,8 @@ export async function updateKnowledgeMemory(
         : undefined;
 
   // A text edit is a human audit action: it bypasses the dedup/cap gates (an
-  // authorized curator's edit is intentional) but still sanitizes + redacts,
-  // recomputes text_hash, and re-embeds fail-soft so the row stays coherent.
+  // authorized curator's edit is intentional), preserves exact text, recomputes
+  // text_hash, and re-embeds fail-soft so the row stays coherent.
   type MemoryTextUpdate = {
     text: string;
     textHash: string;
@@ -7759,13 +7753,13 @@ export async function updateKnowledgeMemory(
     updateEmbedding: boolean;
   };
   const embedForMemoryUpdate = async (
-    sanitizedText: string,
+    exactText: string,
   ): Promise<{ embedding: number[] | null; embeddingModel: string | null }> => {
     let embedding: number[] | null = null;
     let embeddingModel: string | null = null;
     if (embedder) {
       try {
-        const [vector] = await embedder.embedMany([sanitizedText]);
+        const [vector] = await embedder.embedMany([exactText]);
         if (vector && vector.length > 0) {
           embedding = vector;
           embeddingModel = embedder.model;
@@ -7782,19 +7776,19 @@ export async function updateKnowledgeMemory(
 
   let textUpdate: MemoryTextUpdate | undefined;
   if (input.text !== undefined) {
-    const { text: sanitizedText } = sanitizeMemoryText(input.text);
-    if (sanitizedText.length === 0) {
-      throw new Error("Memory text is empty after sanitization; nothing to save.");
+    const exactText = memoryTextForStorage(input.text);
+    if (exactText.length === 0) {
+      throw new Error("Memory text is empty; nothing to save.");
     }
-    if (isMemoryTextTooLong(sanitizedText)) {
+    if (isMemoryTextTooLong(exactText)) {
       throw new Error(
-        `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
+        `Memory text is too long (${exactText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
       );
     }
-    const { embedding, embeddingModel } = await embedForMemoryUpdate(sanitizedText);
+    const { embedding, embeddingModel } = await embedForMemoryUpdate(exactText);
     textUpdate = {
-      text: sanitizedText,
-      textHash: hashMemoryText(sanitizedText),
+      text: exactText,
+      textHash: hashMemoryText(exactText),
       embedding,
       embeddingModel,
       updateEmbedding: true,
@@ -7848,24 +7842,24 @@ export async function updateKnowledgeMemory(
       }
     }
     if (!wasVisible && willBeVisible && textUpdate === undefined) {
-      const { text: sanitizedText } = sanitizeMemoryText(existing.text);
-      if (sanitizedText.length === 0) {
-        throw new Error("Memory text is empty after sanitization; nothing to save.");
+      const exactText = memoryTextForStorage(existing.text);
+      if (exactText.length === 0) {
+        throw new Error("Memory text is empty; nothing to save.");
       }
-      if (isMemoryTextTooLong(sanitizedText)) {
+      if (isMemoryTextTooLong(exactText)) {
         throw new Error(
-          `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
+          `Memory text is too long (${exactText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
         );
       }
-      const textChanged = sanitizedText !== existing.text;
+      const textChanged = exactText !== existing.text;
       const missingEmbedding = existing.embedding == null;
       const { embedding, embeddingModel } =
         textChanged || missingEmbedding
-          ? await embedForMemoryUpdate(sanitizedText)
+          ? await embedForMemoryUpdate(exactText)
           : { embedding: null, embeddingModel: null };
       textUpdate = {
-        text: sanitizedText,
-        textHash: hashMemoryText(sanitizedText),
+        text: exactText,
+        textHash: hashMemoryText(exactText),
         embedding,
         embeddingModel,
         updateEmbedding: textChanged || missingEmbedding,
@@ -8075,7 +8069,6 @@ export type SaveWorkspaceMemoryResult = {
   // true when `replacesId` matched the same row and the row was updated in place
   // instead of being superseded by a new/existing row.
   updated: boolean;
-  redactionCount: number;
   embedded: boolean;
 };
 
@@ -8266,16 +8259,16 @@ export async function saveWorkspaceMemory(
   input: SaveWorkspaceMemoryInput,
   embedder?: MemoryEmbedder,
 ): Promise<SaveWorkspaceMemoryResult> {
-  const { text: sanitizedText, redactionCount } = sanitizeMemoryText(input.text);
-  if (sanitizedText.length === 0) {
-    throw new Error("Memory text is empty after sanitization; nothing to save.");
+  const exactText = memoryTextForStorage(input.text);
+  if (exactText.length === 0) {
+    throw new Error("Memory text is empty; nothing to save.");
   }
-  if (isMemoryTextTooLong(sanitizedText)) {
+  if (isMemoryTextTooLong(exactText)) {
     throw new Error(
-      `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`,
+      `Memory text is too long (${exactText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`,
     );
   }
-  const textHash = hashMemoryText(sanitizedText);
+  const textHash = hashMemoryText(exactText);
   const kind: KnowledgeMemoryKind = input.kind ?? "semantic";
 
   // Embed fail-soft, OUTSIDE the transaction: a provider error must never block a
@@ -8284,7 +8277,7 @@ export async function saveWorkspaceMemory(
   let embeddingModel: string | null = null;
   if (embedder) {
     try {
-      const [vector] = await embedder.embedMany([sanitizedText]);
+      const [vector] = await embedder.embedMany([exactText]);
       if (vector && vector.length > 0) {
         embedding = vector;
         embeddingModel = embedder.model;
@@ -8348,7 +8341,7 @@ export async function saveWorkspaceMemory(
       const [updated] = await scopedDb
         .update(schema.knowledgeMemories)
         .set({
-          text: sanitizedText,
+          text: exactText,
           textHash,
           ...(normalizedTextChanged
             ? {
@@ -8386,7 +8379,6 @@ export async function saveWorkspaceMemory(
         superseded: null,
         supersededId: null,
         updated: true,
-        redactionCount,
         embedded: embedding !== null,
       };
     };
@@ -8429,7 +8421,6 @@ export async function saveWorkspaceMemory(
         superseded,
         supersededId: superseded?.id ?? null,
         updated: false,
-        redactionCount,
         embedded: embedding !== null,
       };
     };
@@ -8539,7 +8530,7 @@ export async function saveWorkspaceMemory(
               status: "active",
               kind,
               scope: "workspace",
-              text: sanitizedText,
+              text: exactText,
               textHash,
               sourceRefs,
               confidence: confidenceToStorage(input.confidence ?? 0.5),
@@ -8593,7 +8584,6 @@ export async function saveWorkspaceMemory(
       superseded,
       supersededId: superseded?.id ?? null,
       updated: false,
-      redactionCount,
       embedded: embedding !== null,
     };
   });
@@ -12353,7 +12343,7 @@ export type CodexCredentialLeasePolicyScopeResolver<TPolicyScope> = (
 export type CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic = never> = {
   /** Candidates from exactly one selected policy scope; never a union-ranked pool list. */
   accounts: readonly CodexLeaseAccountStatus[];
-  /** Downstream-owned, secret-safe diagnostics for rejected primary/fallback scopes. */
+  /** Downstream-owned, value-free metadata diagnostics for rejected primary/fallback scopes. */
   unavailableDiagnostics?: readonly TUnavailableDiagnostic[];
 };
 
@@ -13276,7 +13266,7 @@ export async function armCodexCapacityWait(
               sessionId: input.sessionId,
               sequence: ++sequence,
               type: "codex.capacity.waiting",
-              payload: sanitizeEventPayload({
+              payload: {
                 ...input.failurePayload,
                 recovery: "codex_capacity",
                 retryable: true,
@@ -13290,7 +13280,7 @@ export async function armCodexCapacityWait(
                 resetKind: input.resetKind,
                 earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
                 nextCheckAt: nextCheckAt.toISOString(),
-              }),
+              },
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               turnAttemptId: input.attemptId,
@@ -13586,11 +13576,11 @@ async function supersedeCodexCapacityWaitInTransaction(
       sessionId: input.session.id,
       sequence: input.session.lastSequence + 1,
       type: "codex.capacity.superseded",
-      payload: sanitizeEventPayload({
+      payload: {
         waiterId: updated.id,
         generation: updated.generation,
         reason: input.reason,
-      }),
+      },
       turnId: updated.blockedTurnId,
       turnGeneration: input.blockedTurn.executionGeneration,
       ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
@@ -13871,7 +13861,7 @@ export async function reconcileCodexCapacityWait<
               sessionId: input.sessionId,
               sequence: session.lastSequence + 1,
               type: "codex.capacity.resumed",
-              payload: sanitizeEventPayload({
+              payload: {
                 waiterId: waiter.id,
                 generation: waiter.generation,
                 wakeRevision: waiter.wakeRevision,
@@ -13880,7 +13870,7 @@ export async function reconcileCodexCapacityWait<
                 blockedTurnGeneration: waiter.blockedTurnGeneration,
                 policyHash: waiter.policyHash,
                 diagnostic: decision.diagnostic ?? null,
-              }),
+              },
               turnId: blockedTurn.id,
               turnGeneration: blockedTurn.executionGeneration,
               turnAssociation: "current",
@@ -21042,7 +21032,7 @@ export async function acceptSessionHumanInputResponse(
             turnAssociation: "current",
             sequence: session.lastSequence + 1,
             type: "user.humanInputResponse",
-            payload: sanitizeEventPayload({ requestId: request.id, response }),
+            payload: { requestId: request.id, response },
             clientEventId: expired ? null : (input.clientEventId ?? null),
             occurredAt: now,
           })
@@ -21387,9 +21377,7 @@ export async function appendSessionHistoryItems(
               // This is the canonical model-memory boundary. The pending-call
               // ledger and audit event may retain their separate raw/preview
               // forms, but conversation truth is always the bounded Codex form.
-              item: sanitizeModelPayload(
-                boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
-              ),
+              item: boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
             })),
           )
           .onConflictDoNothing({
@@ -21432,8 +21420,8 @@ function assertPendingToolOutputPolicyMatches(
 
 /**
  * Durably capture the raw SDK call item at the exact attempt boundary. This is
- * model-facing truth, deliberately separate from the redacted session-event
- * projection. The receipt belongs to the logical turn so an approval resume can
+ * model-facing truth, deliberately separate from the session-event timeline.
+ * The receipt belongs to the logical turn so an approval resume can
  * settle it from a newer attempt. Duplicate SDK delivery converges on the
  * unique (turn, call) identity.
  */
@@ -21465,7 +21453,7 @@ export async function registerPendingSessionToolCall(
             attemptId: input.attemptId,
             callId: input.callId,
             callType: input.callType,
-            callItem: sanitizeModelPayload(input.callItem),
+            callItem: input.callItem,
             modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
           })
           .onConflictDoNothing({
@@ -21625,7 +21613,7 @@ export async function recordPendingSessionToolCallResult(
         const recorded = await tx
           .update(schema.sessionPendingToolCalls)
           .set({
-            resultItem: sanitizeModelPayload(input.resultItem),
+            resultItem: input.resultItem,
             resultRecordedAt: new Date(),
           })
           .where(
@@ -22017,7 +22005,7 @@ export async function applyContextCompaction(
               sessionId: input.sessionId,
               turnId: null,
               position: supersededFrom + index,
-              item: sanitizeModelPayload(item),
+              item: item,
               active: true,
             })),
           );
@@ -22029,7 +22017,7 @@ export async function applyContextCompaction(
           sessionId: input.sessionId,
           turnId: input.turnId,
           position: summaryPosition,
-          item: sanitizeModelPayload(input.summaryItem),
+          item: input.summaryItem,
           active: true,
         });
         const insertedEvents = input.eventPayload
@@ -22045,10 +22033,10 @@ export async function applyContextCompaction(
                 turnAssociation: "current",
                 sequence: fence.session.lastSequence + 1,
                 type: "session.context.compacted",
-                payload: sanitizeEventPayload({
+                payload: {
                   ...input.eventPayload,
                   summaryPosition,
-                }),
+                },
                 occurredAt: new Date(),
               })
               .returning()
@@ -22129,13 +22117,13 @@ export async function recordStartedContextCompaction(
             turnAssociation: "current",
             sequence: fence.session.lastSequence + 1,
             type: "session.context.compaction.started",
-            payload: sanitizeEventPayload({
+            payload: {
               trigger: input.trigger,
               ...(input.implementation ? { implementation: input.implementation } : {}),
               ...(typeof input.estimatedTokensBefore === "number"
                 ? { estimatedTokensBefore: input.estimatedTokensBefore }
                 : {}),
-            }),
+            },
             occurredAt: new Date(),
           })
           .returning();
@@ -22225,7 +22213,7 @@ export async function recordSkippedContextCompaction(
             turnAssociation: "current",
             sequence: fence.session.lastSequence + 1,
             type: "session.context.compaction.skipped",
-            payload: sanitizeEventPayload({ reason: input.reason }),
+            payload: { reason: input.reason },
             occurredAt: new Date(),
           })
           .returning();
@@ -22428,7 +22416,7 @@ export async function clearSessionContext(
             sessionId: input.sessionId,
             turnId: null,
             position: markerPosition,
-            item: sanitizeModelPayload(clearedContextMarkerItem()),
+            item: clearedContextMarkerItem(),
             active: true,
           })
           .onConflictDoNothing({
@@ -32385,7 +32373,7 @@ async function commitWorkspaceCaptureRevision(
             sessionId: input.sessionId,
             sequence: session.lastSequence + 1,
             type,
-            payload: sanitizeEventPayload(payload),
+            payload: payload,
             clientEventId: `opengeni:workspace-capture:${revision}`,
             turnId: input.turnId,
             turnGeneration: attempt.executionGeneration,
@@ -34247,11 +34235,12 @@ export async function readMachineMetricsSeries(
 }
 
 // ============================================================================
-// P3.2 — the un-redacted-pixel consent gate + viewer revocation.
+// P3.2 — the direct-pixel consent gate + viewer revocation.
 //
 // The desktop-stream path is gated behind an explicit acknowledgment that the
-// pixel plane is un-redacted (it can show cloud creds the agent cat's into a
-// terminal — strictly broader than the redacted Channel-A event log). For a
+// pixel plane exposes the desktop exactly (it can show credentials the agent
+// renders in a terminal — strictly broader than the structured Channel-A event
+// log). For a
 // SHARED box (the group has >1 session) the principal must additionally consent
 // to the shared-exposure disclosure: watching A's desktop also shows B's agent
 // on the one :0 framebuffer (addendum E.1 / stress g). Consent is per-PRINCIPAL
@@ -34265,7 +34254,7 @@ export interface StreamAcknowledgment {
   acknowledgedShared: boolean;
 }
 
-// Record (or upsert) a principal's acknowledgment of the group's un-redacted
+// Record (or upsert) a principal's acknowledgment of the group's direct
 // pixel plane (and, when shared, the shared-exposure disclosure). Keyed on
 // (workspace, group, subject); a re-ack (e.g. a solo→shared upgrade adding the
 // shared consent) is ON CONFLICT DO UPDATE, never a duplicate row.
@@ -35124,11 +35113,11 @@ export async function clearSessionGoal(
             sessionId,
             sequence,
             type: "goal.cleared",
-            payload: sanitizeEventPayload({
+            payload: {
               goalId: existing.id,
               text: existing.text,
               version: existing.version,
-            }),
+            },
           })
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
@@ -35257,7 +35246,7 @@ export async function upsertSessionGoalWithEvent(
             sessionId: input.sessionId,
             sequence: session.lastSequence + 1,
             type: "goal.set",
-            payload: sanitizeEventPayload({
+            payload: {
               goalId: result.goal.id,
               text: result.goal.text,
               ...(result.goal.successCriteria
@@ -35266,7 +35255,7 @@ export async function upsertSessionGoalWithEvent(
               version: result.goal.version,
               actor: input.actor,
               replaced: result.replaced,
-            }),
+            },
             occurredAt: now,
           })
           .returning();
@@ -35445,14 +35434,14 @@ export async function updateSessionGoalWithEvent(
           sessionId,
           sequence: session.lastSequence + 1,
           type: "goal.updated",
-          payload: sanitizeEventPayload({
+          payload: {
             goalId: goal.id,
             text: goal.text,
             ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
             ...(input.progressNote ? { progressNote: input.progressNote } : {}),
             version: goal.version,
             actor: input.actor,
-          }),
+          },
           occurredAt: now,
         })
         .returning();
@@ -35732,7 +35721,7 @@ export async function setSessionGoalStatusWithEvent(
           sessionId,
           sequence: session.lastSequence + 1,
           type: input.event.type,
-          payload: sanitizeEventPayload(payload),
+          payload: payload,
           occurredAt: now,
         })
         .returning();
@@ -36382,14 +36371,14 @@ export async function materializeGoalContinuation(
               sessionId: input.sessionId,
               sequence: session.lastSequence + 1,
               type: "goal.paused",
-              payload: sanitizeEventPayload({
+              payload: {
                 goalId: decision.goal.id,
                 actor: "system",
                 reason: decision.reason,
                 ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
                 autoContinuations: decision.goal.autoContinuations,
                 noProgressStreak: decision.goal.noProgressStreak,
-              }),
+              },
               occurredAt: now,
             })
             .returning();
@@ -36499,7 +36488,7 @@ export async function materializeGoalContinuation(
               sessionId: input.sessionId,
               sequence: session.lastSequence + 1,
               type: "system.update.pending",
-              payload: sanitizeEventPayload({
+              payload: {
                 updateId: eventPreview.id,
                 kind: eventPreview.kind,
                 classification: eventPreview.classification,
@@ -36507,7 +36496,7 @@ export async function materializeGoalContinuation(
                 sourceIdTruncated: eventPreview.sourceIdTruncated,
                 summary: eventPreview.summary,
                 summaryTruncated: eventPreview.summaryTruncated,
-              }),
+              },
               occurredAt: now,
             },
             {
@@ -36516,13 +36505,13 @@ export async function materializeGoalContinuation(
               sessionId: input.sessionId,
               sequence: session.lastSequence + 2,
               type: "goal.continuation",
-              payload: sanitizeEventPayload({
+              payload: {
                 goalId: decision.goal.id,
                 text: decision.goal.text,
                 version: decision.goal.version,
                 goalWakeRevision,
                 autoContinuation: decision.autoContinuation,
-              }),
+              },
               occurredAt: now,
             },
           ])
@@ -36715,11 +36704,11 @@ export async function initializeSessionStartAtomically(
                   sessionId: session.id,
                   sequence: ++sequence,
                   type: "session.created",
-                  payload: sanitizeEventPayload({
+                  payload: {
                     ...input.createdEventPayload,
                     status: "idle",
                     createdBy: creator.initiator,
-                  }),
+                  },
                 },
                 ...(goal
                   ? [
@@ -36729,7 +36718,7 @@ export async function initializeSessionStartAtomically(
                         sessionId: session.id,
                         sequence: ++sequence,
                         type: "goal.set" as const,
-                        payload: sanitizeEventPayload({
+                        payload: {
                           goalId: goal.id,
                           text: goal.text,
                           ...(goal.successCriteria
@@ -36738,7 +36727,7 @@ export async function initializeSessionStartAtomically(
                           version: goal.version,
                           actor: "api",
                           replaced: false,
-                        }),
+                        },
                       },
                     ]
                   : []),
@@ -36813,11 +36802,11 @@ export async function initializeSessionStartAtomically(
                 sessionId: session.id,
                 sequence: ++sequence,
                 type: "session.created",
-                payload: sanitizeEventPayload({
+                payload: {
                   ...input.createdEventPayload,
                   status: publicQueuedStatus,
                   createdBy: creator.initiator,
-                }),
+                },
               },
               ...(goal
                 ? [
@@ -36827,14 +36816,14 @@ export async function initializeSessionStartAtomically(
                       sessionId: session.id,
                       sequence: ++sequence,
                       type: "goal.set" as const,
-                      payload: sanitizeEventPayload({
+                      payload: {
                         goalId: goal.id,
                         text: goal.text,
                         ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
                         version: goal.version,
                         actor: "api",
                         replaced: false,
-                      }),
+                      },
                     },
                   ]
                 : []),
@@ -36844,10 +36833,10 @@ export async function initializeSessionStartAtomically(
                 sessionId: session.id,
                 sequence: ++sequence,
                 type: "user.message",
-                payload: sanitizeEventPayload({
+                payload: {
                   ...initialPayload,
                   initiator: creator.initiator,
-                }),
+                },
                 clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
               },
               {
@@ -36856,7 +36845,7 @@ export async function initializeSessionStartAtomically(
                 sessionId: session.id,
                 sequence: ++sequence,
                 type: "session.status.changed",
-                payload: sanitizeEventPayload({ status: publicQueuedStatus }),
+                payload: { status: publicQueuedStatus },
               },
             ])
             .returning();
@@ -36956,12 +36945,12 @@ export async function initializeSessionStartAtomically(
               turnId: turn.id,
               sequence: ++sequence,
               type: "turn.queued",
-              payload: sanitizeEventPayload({
+              payload: {
                 turnId: turn.id,
                 triggerEventId: userEvent.id,
                 source: turn.source,
                 initiator: creator.initiator,
-              }),
+              },
             })
             .returning();
           if (!event) throw new Error("Failed to create initial turn event");
@@ -37364,11 +37353,11 @@ export async function claimSessionWorkForAttempt(
                     turnAssociation: null,
                     sequence: nextSequence,
                     type: "system.update.cancelled" as const,
-                    payload: sanitizeEventPayload({
+                    payload: {
                       updateIds: cancelledUpdateIds,
                       count: cancelledUpdateIds.length,
                       reason: "stale_goal_continuation",
-                    }),
+                    },
                     occurredAt,
                   }
                 : null;
@@ -37428,11 +37417,11 @@ export async function claimSessionWorkForAttempt(
               turnAssociation: "current",
               sequence: ++sequence,
               type: "system.update.cancelled",
-              payload: sanitizeEventPayload({
+              payload: {
                 updateIds: cancelledUpdateIds,
                 count: cancelledUpdateIds.length,
                 reason: "stale_goal_continuation",
-              }),
+              },
               occurredAt,
             });
           }
@@ -37447,13 +37436,13 @@ export async function claimSessionWorkForAttempt(
             turnAssociation: "current",
             sequence: ++sequence,
             type: "system.update.delivered",
-            payload: sanitizeEventPayload({
+            payload: {
               updateIds: deliverable.map((update) => update.id),
               historyItemId,
               count: deliverable.length,
               classifications: [...new Set(deliverable.map((update) => update.classification))],
               members: modelOrdered.map(internalUpdateEventMember),
-            }),
+            },
             occurredAt,
           };
           events.push(event);
@@ -37498,7 +37487,7 @@ export async function claimSessionWorkForAttempt(
             sessionId,
             turnId,
             position: Number(position),
-            item: sanitizeModelPayload(delivered.historyItem),
+            item: delivered.historyItem,
           });
         };
 
@@ -38328,10 +38317,10 @@ export async function claimSessionWorkForAttempt(
             internalInitiator = internalUpdateInitiator();
           }
           if (delivered.event) {
-            delivered.event.payload = sanitizeEventPayload({
+            delivered.event.payload = {
               ...(delivered.event.payload as Record<string, unknown>),
               initiator: internalInitiator.initiator,
-            });
+            };
           }
           const goalPolicy =
             routingGoalUpdate?.payload.policy &&
@@ -38773,11 +38762,11 @@ export async function markSessionAttemptQuiesced(
         sessionId: input.sessionId,
         sequence: session.lastSequence + 1,
         type: "session.queue.changed",
-        payload: sanitizeEventPayload({
+        payload: {
           operation: "attempt_quiesced",
           attemptId: input.attemptId,
           queueVersion,
-        }),
+        },
         clientEventId,
         turnId: attempt.turnId,
         turnGeneration: attempt.executionGeneration,
@@ -39203,7 +39192,7 @@ export async function settleSessionAttemptInterruptions(
               turnGeneration: turn.executionGeneration,
               turnAttemptId: attemptId,
               turnAssociation: "current",
-              payload: sanitizeEventPayload({ reason }),
+              payload: { reason },
               occurredAt: now,
             },
           ]
@@ -39219,7 +39208,7 @@ export async function settleSessionAttemptInterruptions(
                 turnGeneration: turn.executionGeneration,
                 turnAttemptId: attemptId,
                 turnAssociation: "current",
-                payload: sanitizeEventPayload({ reason: "steer" }),
+                payload: { reason: "steer" },
                 occurredAt: now,
               },
               {
@@ -39228,7 +39217,7 @@ export async function settleSessionAttemptInterruptions(
                 sessionId,
                 sequence: ++sequence,
                 type: "session.status.changed",
-                payload: sanitizeEventPayload({ status: "queued" }),
+                payload: { status: "queued" },
                 occurredAt: now,
               },
             ]
@@ -39243,7 +39232,7 @@ export async function settleSessionAttemptInterruptions(
                 turnGeneration: turn.executionGeneration,
                 turnAttemptId: attemptId,
                 turnAssociation: "current",
-                payload: sanitizeEventPayload({ reason }),
+                payload: { reason },
                 occurredAt: now,
               },
               {
@@ -39256,7 +39245,7 @@ export async function settleSessionAttemptInterruptions(
                 turnGeneration: turn.executionGeneration,
                 turnAttemptId: attemptId,
                 turnAssociation: "current",
-                payload: sanitizeEventPayload({ status: "recovering" }),
+                payload: { status: "recovering" },
                 occurredAt: now,
               },
             ];
@@ -39877,7 +39866,7 @@ export async function settleSessionIdleWithParentOutbox(
             sessionId,
             sequence: ++sequence,
             type: "session.status.changed",
-            payload: sanitizeEventPayload({ status: "idle" }),
+            payload: { status: "idle" },
             occurredAt: now,
           })
           .returning();
@@ -40696,14 +40685,12 @@ export async function applySessionTurnSettlement(
           sessionId: input.sessionId,
           sequence: ++sequence,
           type: event.type,
-          payload: sanitizeEventPayload(
+          payload:
             event.type === "session.status.changed" &&
-              payload.status === input.sessionStatus &&
-              effectiveSessionStatus !== input.sessionStatus
+            payload.status === input.sessionStatus &&
+            effectiveSessionStatus !== input.sessionStatus
               ? { ...payload, status: effectiveSessionStatus }
               : payload,
-            { fullEvidence: event.retainedOutputEvidence },
-          ),
           clientEventId: event.clientEventId ?? null,
           turnId: input.turnId,
           turnGeneration: turn.executionGeneration,
@@ -41041,7 +41028,7 @@ export async function settleCodexCredentialLeaseLoss(
                   sessionId: input.sessionId,
                   sequence: ++sequence,
                   type: "turn.recovery.requested",
-                  payload: sanitizeEventPayload(input.recoveryPayload),
+                  payload: input.recoveryPayload,
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
                   turnAttemptId: input.attemptId,
@@ -41072,7 +41059,7 @@ export async function settleCodexCredentialLeaseLoss(
                   sessionId: input.sessionId,
                   sequence: ++sequence,
                   type: "turn.failed",
-                  payload: sanitizeEventPayload(input.failedPayload),
+                  payload: input.failedPayload,
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
                   turnAttemptId: input.attemptId,
@@ -41308,10 +41295,10 @@ export async function settleCodexCredentialFailover(
               sessionId: input.sessionId,
               sequence: ++sequence,
               type: "turn.recovery.requested",
-              payload: sanitizeEventPayload({
+              payload: {
                 ...input.recoveryPayload,
                 failoverCount,
-              }),
+              },
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               turnAttemptId: input.attemptId,
@@ -41608,12 +41595,12 @@ export async function requestSessionTurnRecovery(
             turnGeneration: turn.executionGeneration,
             turnAttemptId: turn.activeAttemptId,
             turnAssociation: "current",
-            payload: sanitizeEventPayload({
+            payload: {
               ...(input.detail ?? {}),
               triggerEventId: input.triggerEventId,
               reason: input.reason,
               ...(providerArtifactsInvalidated > 0 ? { providerArtifactsInvalidated } : {}),
-            }),
+            },
             occurredAt: now,
           },
           {
@@ -41626,7 +41613,7 @@ export async function requestSessionTurnRecovery(
             turnGeneration: turn.executionGeneration,
             turnAttemptId: turn.activeAttemptId,
             turnAssociation: "current",
-            payload: sanitizeEventPayload({ status: "recovering" }),
+            payload: { status: "recovering" },
             occurredAt: now,
           },
         ])
@@ -41852,12 +41839,12 @@ export async function recoverSessionDispatch(
               turnGeneration: turn.executionGeneration,
               turnAttemptId: input.attemptId,
               turnAssociation: "current",
-              payload: sanitizeEventPayload({
+              payload: {
                 triggerEventId: turn.triggerEventId,
                 code: "worker_death_redispatch_exhausted",
                 error: `Worker died ${redispatches} times while running this turn (heartbeat timeout); giving up after ${input.maxRedispatches} re-dispatches.`,
                 redispatches: input.maxRedispatches,
-              }),
+              },
               occurredAt: now,
             },
             {
@@ -41870,7 +41857,7 @@ export async function recoverSessionDispatch(
               turnGeneration: turn.executionGeneration,
               turnAttemptId: input.attemptId,
               turnAssociation: "current",
-              payload: sanitizeEventPayload({ status: "failed" }),
+              payload: { status: "failed" },
               occurredAt: now,
             },
           ])
@@ -41950,11 +41937,11 @@ export async function recoverSessionDispatch(
             turnGeneration: turn.executionGeneration,
             turnAttemptId: input.attemptId,
             turnAssociation: "current",
-            payload: sanitizeEventPayload({
+            payload: {
               triggerEventId: turn.triggerEventId,
               reason: "worker_death",
               redispatches,
-            }),
+            },
             occurredAt: now,
           },
           {
@@ -41967,7 +41954,7 @@ export async function recoverSessionDispatch(
             turnGeneration: turn.executionGeneration,
             turnAttemptId: input.attemptId,
             turnAssociation: "current",
-            payload: sanitizeEventPayload({ status: "recovering" }),
+            payload: { status: "recovering" },
             occurredAt: now,
           },
         ])
@@ -43134,7 +43121,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
             sessionId: input.sessionId,
             sequence: session.lastSequence + 1,
             type: "system.update.pending",
-            payload: sanitizeEventPayload({
+            payload: {
               updateId: eventPreview.id,
               kind: eventPreview.kind,
               classification: eventPreview.classification,
@@ -43142,7 +43129,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
               sourceIdTruncated: eventPreview.sourceIdTruncated,
               summary: eventPreview.summary,
               summaryTruncated: eventPreview.summaryTruncated,
-            }),
+            },
             occurredAt: now,
           })
           .returning();
@@ -43324,9 +43311,7 @@ export async function appendSessionEvents(
         sessionId,
         sequence: ++sequence,
         type: input.type,
-        payload: sanitizeEventPayload(input.payload ?? {}, {
-          fullEvidence: input.retainedOutputEvidence,
-        }),
+        payload: input.payload ?? {},
         clientEventId: input.clientEventId ?? null,
         turnId: input.turnId ?? null,
         turnGeneration: input.turnGeneration ?? null,
@@ -43507,7 +43492,7 @@ export async function acceptSessionApprovalDecision(
             turnAssociation: "current",
             sequence: session.lastSequence + 1,
             type: "user.approvalDecision",
-            payload: sanitizeEventPayload(input.payload),
+            payload: input.payload,
             clientEventId: input.clientEventId ?? null,
           })
           .returning();
@@ -43667,7 +43652,7 @@ export async function appendSessionEventsForTurnAttempt(
               sessionId,
               sequence: ++sequence,
               type: "turn.event.rejected_late",
-              payload: sanitizeEventPayload({
+              payload: {
                 rejectedType: input.type,
                 rejectedPayload: input.payload ?? {},
                 reason: fence.reason,
@@ -43677,7 +43662,7 @@ export async function appendSessionEventsForTurnAttempt(
                 currentAttemptId: fence.turn?.activeAttemptId ?? null,
                 currentTurnStatus: fence.turn?.status ?? null,
                 currentActiveTurnId: session.activeTurnId,
-              }),
+              },
               clientEventId: input.clientEventId ?? null,
               turnId,
               turnGeneration: executionGeneration,
@@ -43702,9 +43687,7 @@ export async function appendSessionEventsForTurnAttempt(
             sessionId,
             sequence: ++sequence,
             type: input.type,
-            payload: sanitizeEventPayload(input.payload ?? {}, {
-              fullEvidence: input.retainedOutputEvidence,
-            }),
+            payload: input.payload ?? {},
             clientEventId: input.clientEventId ?? null,
             turnId,
             turnGeneration: executionGeneration,
@@ -43793,9 +43776,7 @@ export async function appendSessionEventToSandboxGroup(
           sessionId: row.id,
           sequence: row.lastSequence + 1,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}, {
-            fullEvidence: input.retainedOutputEvidence,
-          }),
+          payload: input.payload ?? {},
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -43873,9 +43854,7 @@ export async function appendSessionEventsAndUpdateSession(
           sessionId,
           sequence: ++sequence,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}, {
-            fullEvidence: input.retainedOutputEvidence,
-          }),
+          payload: input.payload ?? {},
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -44048,9 +44027,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           sessionId,
           sequence: ++sequence,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}, {
-            fullEvidence: input.retainedOutputEvidence,
-          }),
+          payload: input.payload ?? {},
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -44659,7 +44636,7 @@ function mapCapabilityInstallation(
     capabilityId: row.capabilityId,
     kind: row.kind as CapabilityKind,
     status: row.status as CapabilityInstallationStatus,
-    config: redactInstallationConfig(row.config),
+    config: projectInstallationConfig(row.config),
     metadata: row.metadata,
     enabledAt: row.enabledAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -44672,7 +44649,7 @@ function mapCapabilityInstallation(
  * The runtime reads ciphertext through listEnabledMcpCapabilityServers and
  * the enable flow through getStoredCapabilityHeaderCiphertext.
  */
-function redactInstallationConfig(config: Record<string, unknown>): Record<string, unknown> {
+function projectInstallationConfig(config: Record<string, unknown>): Record<string, unknown> {
   const headersEncrypted = encryptedHeadersConfig(config.headersEncrypted);
   if (!headersEncrypted) {
     return config;

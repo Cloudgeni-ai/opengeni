@@ -26,7 +26,7 @@ import {
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
-  safeMcpTransportError,
+  mcpTransportErrorWithRetryMetadata,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
@@ -49,7 +49,6 @@ import {
   ensureTurnModalRegistryImage,
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
-  headerSecretRedactions,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
@@ -74,7 +73,6 @@ import {
   resolveActiveSandboxBackend,
   safeErrorDiagnostic,
   sandboxDeadlineRotationRecoveryDelayMs,
-  secretRedactionModelInputFilter,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -88,7 +86,6 @@ import {
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
-import { createSecretRedactor } from "../src/activities/redaction";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
@@ -305,21 +302,15 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
   return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
 }
 
-describe("turn secret-redaction boundaries", () => {
-  const syntheticSecret = "synthetic-turn-secret-value-123456";
-  const redact = createSecretRedactor([{ name: "TURN_SECRET", value: syntheticSecret }]);
+describe("turn exact-content boundaries", () => {
+  const syntheticValue = ["synthetic", "turn", "value", "123456"].join("-");
 
-  test("redacts current history before durable append", () => {
-    const result = historyRowsToAppend(
-      [userMessage(`tool output ${syntheticSecret}`)],
-      0,
-      0,
-      undefined,
-      redact,
-    );
+  test("preserves current history exactly before durable append", () => {
+    const item = userMessage(`tool output ${syntheticValue}`);
+    const result = historyRowsToAppend([item], 0);
 
-    expect(JSON.stringify(result.rows)).not.toContain(syntheticSecret);
-    expect(JSON.stringify(result.rows)).toContain("[redacted:TURN_SECRET]");
+    expect(result.rows).toEqual([{ position: 0, item }]);
+    expect(JSON.stringify(result.rows)).toContain(syntheticValue);
   });
 
   test("preserves provider citations in the structured durable assistant item", () => {
@@ -340,130 +331,23 @@ describe("turn secret-redaction boundaries", () => {
     });
   });
 
-  test("redacts replayed and current items at the literal model-call seam", async () => {
-    const filter = secretRedactionModelInputFilter(redact);
-    const output = await filter({
-      modelData: {
-        input: [
-          userMessage(`legacy ${syntheticSecret}`),
-          {
-            type: "function_call_result",
-            callId: "call_safe",
-            output: "Authorization: Bearer synthetic-bearer-value-123456",
-          },
-        ],
-      },
-    } as never);
-
-    const serialized = JSON.stringify(output);
-    expect(serialized).not.toContain(syntheticSecret);
-    expect(serialized).not.toContain("synthetic-bearer-value");
-    expect(serialized).toContain("[redacted:TURN_SECRET]");
-    expect(serialized).toContain("Authorization: Bearer [redacted]");
-  });
-
-  test("safe logging diagnostics exclude stack, cause, and synthetic credentials", () => {
-    const error = Object.assign(new Error(`request rejected; token=${syntheticSecret}`), {
+  test("safe logging diagnostics retain exact messages while excluding object internals", () => {
+    const error = Object.assign(new Error(`request rejected; detail=${syntheticValue}`), {
       status: 401,
       code: "AUTH_REJECTED",
-      cause: { responseBody: syntheticSecret },
+      cause: { responseBody: syntheticValue },
     });
-    const diagnostic = safeErrorDiagnostic(error, (value) => String(redact(value)));
+    const diagnostic = safeErrorDiagnostic(error);
 
     expect(diagnostic).toEqual({
       name: "Error",
-      message: "request rejected; token=[redacted:TURN_SECRET]",
+      message: `request rejected; detail=${syntheticValue}`,
       status: 401,
       code: "AUTH_REJECTED",
     });
     expect(diagnostic).not.toHaveProperty("stack");
     expect(diagnostic).not.toHaveProperty("cause");
-    expect(JSON.stringify(diagnostic)).not.toContain(syntheticSecret);
-  });
-
-  test("registers only credential-bearing MCP headers", () => {
-    expect(
-      headerSecretRedactions("MCP", {
-        authorization: "Bearer synthetic-mcp-auth-value-123456",
-        cookie: "session=synthetic-mcp-cookie-value-123456",
-        "x-api-key": "synthetic-mcp-api-key-value-123456",
-        "content-type": "application/json",
-        accept: "application/json",
-        "user-agent": "mcp-client/1.0",
-        "x-page-token": "page-2",
-        "x-signature": "sha256=public-digest",
-      }),
-    ).toEqual([
-      { name: "MCP_AUTHORIZATION", value: "Bearer synthetic-mcp-auth-value-123456" },
-      { name: "MCP_AUTHORIZATION_CREDENTIAL", value: "synthetic-mcp-auth-value-123456" },
-      { name: "MCP_COOKIE", value: "session=synthetic-mcp-cookie-value-123456" },
-      { name: "MCP_X_API_KEY", value: "synthetic-mcp-api-key-value-123456" },
-    ]);
-  });
-
-  test("registers explicit custom static MCP credential headers by provenance", () => {
-    expect(
-      headerSecretRedactions(
-        "MCP_CRM_STATIC",
-        { "Private-Token": "synthetic-static-private-token-123456" },
-        ["Private-Token"],
-      ),
-    ).toEqual([
-      {
-        name: "MCP_CRM_STATIC_PRIVATE_TOKEN",
-        value: "synthetic-static-private-token-123456",
-      },
-    ]);
-  });
-
-  test("registers every renewed MCP header returned by the credential broker", () => {
-    expect(
-      headerSecretRedactions("MCP", { "Private-Token": "synthetic-renewed-private-token-123456" }, [
-        "Private-Token",
-      ]),
-    ).toEqual([
-      {
-        name: "MCP_PRIVATE_TOKEN",
-        value: "synthetic-renewed-private-token-123456",
-      },
-    ]);
-  });
-
-  test("pairs renewed custom MCP values with current names, not stale session metadata", () => {
-    const currentValue = "synthetic-current-private-token-123456";
-    const currentResolvedServer = {
-      id: "crm",
-      headers: { "Private-Token": currentValue, "X-Page-Token": "page-2" },
-      headerNames: ["Private-Token"],
-    };
-    const staleSessionProjection = {
-      id: currentResolvedServer.id,
-      headerNames: ["Old-Private-Token"],
-    };
-    const staleRegistration = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentResolvedServer.headers,
-      staleSessionProjection.headerNames,
-    );
-    const currentHeaderNamesById = new Map([
-      [currentResolvedServer.id, currentResolvedServer.headerNames],
-    ]);
-    const currentRegistration = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentResolvedServer.headers,
-      currentHeaderNamesById.get(currentResolvedServer.id),
-    );
-    const redacted = createSecretRedactor(currentRegistration)(currentResolvedServer.headers);
-
-    expect(staleRegistration).toHaveLength(0);
-    expect(currentRegistration).toEqual([
-      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
-    ]);
-    expect(redacted).toMatchObject({
-      "Private-Token": "[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]",
-      "X-Page-Token": "page-2",
-    });
-    expect(JSON.stringify(redacted)).not.toContain(currentValue);
+    expect(JSON.stringify(diagnostic)).toContain(syntheticValue);
   });
 });
 
@@ -2746,19 +2630,19 @@ describe("escaped MCP transport timeout classifier", () => {
       "MCP error -32001: Maximum total timeout exceeded",
     ];
     for (const message of sdkTimeoutMessages) {
-      const sanitized = safeMcpTransportError(
+      const classified = mcpTransportErrorWithRetryMetadata(
         Object.assign(new Error(message), {
           name: "McpError",
           code: -32_001,
         }),
       );
-      expect(classifyMcpTransportTimeoutError(sanitized)?.message).toBe(sanitized.message);
-      expect(agentRunFailurePayload(sanitized)).toEqual({
+      expect(classifyMcpTransportTimeoutError(classified)?.message).toBe(classified.message);
+      expect(agentRunFailurePayload(classified)).toEqual({
         error:
           "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
         code: "mcp_transport_timeout",
         retryable: true,
-        detail: sanitized.message,
+        detail: message,
       });
     }
 
@@ -2779,7 +2663,7 @@ describe("escaped MCP transport timeout classifier", () => {
       "MCP error -32001: Session not found",
       "MCP error -32001: operator cancelled this request",
     ]) {
-      const ambiguous = safeMcpTransportError(
+      const ambiguous = mcpTransportErrorWithRetryMetadata(
         Object.assign(new Error(message), {
           name: "McpError",
           code: -32_001,
@@ -2799,19 +2683,20 @@ describe("escaped MCP transport timeout classifier", () => {
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
   });
 
-  test("recovers a sanitized nested MCP connection refusal without exposing transport detail", () => {
+  test("recovers an exact nested MCP connection refusal with typed retry metadata", () => {
     const raw = new Error("MCP connect failed for https://private.example/token-value");
     raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
       code: "ECONNREFUSED",
     });
-    const sanitized = safeMcpTransportError(raw);
+    const classified = mcpTransportErrorWithRetryMetadata(raw);
 
-    expect(classifyMcpTransportTimeoutError(sanitized)).toBeNull();
-    expect(agentRunFailurePayload(sanitized)).toEqual({
+    expect(classifyMcpTransportTimeoutError(classified)).toBeNull();
+    expect(agentRunFailurePayload(classified)).toEqual({
       error:
         "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
       code: "mcp_transport_unavailable",
       retryable: true,
+      detail: raw.message,
     });
     expect(
       providerRecoveryResult({
@@ -2822,30 +2707,29 @@ describe("escaped MCP transport timeout classifier", () => {
       status: "recovering",
       continueDelayMs: 2_000,
     });
-    expect(JSON.stringify({ sanitized, payload: agentRunFailurePayload(sanitized) })).not.toContain(
-      "private.example",
-    );
-    expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+    expect(classified.message).toBe(raw.message);
+    expect(classified.cause).toBe(raw);
+    expect(agentRunFailurePayload(classified).detail).toContain("private.example");
   });
 
-  test("keeps sanitized MCP client and ambiguous failures terminal", () => {
-    const rejected = safeMcpTransportError(
+  test("keeps exact MCP client and ambiguous failures terminal", () => {
+    const rejected = mcpTransportErrorWithRetryMetadata(
       Object.assign(new Error("request rejected with secret body"), {
         status: 401,
         cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
       }),
     );
-    const ambiguous = safeMcpTransportError(
+    const ambiguous = mcpTransportErrorWithRetryMetadata(
       Object.assign(new Error("policy refused the connection"), {
         code: "CONNECTION_REFUSED_BY_POLICY",
       }),
     );
 
     expect(agentRunFailurePayload(rejected)).toEqual({
-      error: "MCP transport operation failed (Error 401)",
+      error: "request rejected with secret body",
     });
     expect(agentRunFailurePayload(ambiguous)).toEqual({
-      error: "MCP transport operation failed (Error)",
+      error: "policy refused the connection",
     });
   });
 
@@ -2968,7 +2852,7 @@ describe("transient provider error classifier", () => {
     expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
   });
 
-  test("an actual streamed Codex server failure settles as redacted same-turn recovery", async () => {
+  test("an actual streamed Codex server failure preserves exact detail during same-turn recovery", async () => {
     const observed = await actualCodexStreamingFailure({
       type: "response.failed",
       response: {
@@ -2986,11 +2870,13 @@ describe("transient provider error classifier", () => {
     expect(observed.forwarded).toBe("");
     const payload = agentRunFailurePayload(observed.error);
     expect(payload).toEqual({
-      error: "The Codex response failed",
+      error: "SECRET worker server provider detail",
       code: "provider_unavailable",
       retryable: true,
     });
-    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(JSON.stringify({ error: observed.error, payload })).toContain(
+      "SECRET worker server provider detail",
+    );
     expect(
       providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber: 1 }),
     ).toEqual({
@@ -2999,7 +2885,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("an actual streamed Codex context failure remains redacted and nonretryable", async () => {
+  test("an actual streamed Codex context failure remains exact and nonretryable", async () => {
     const observed = await actualCodexStreamingFailure({
       type: "response.failed",
       response: {
@@ -3019,9 +2905,11 @@ describe("transient provider error classifier", () => {
       "context_length_exceeded",
     );
     const payload = agentRunFailurePayload(observed.error);
-    expect(payload).toEqual({ error: "The Codex response failed" });
+    expect(payload).toEqual({ error: "SECRET worker context provider detail" });
     expect(payload.retryable).toBeUndefined();
-    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(JSON.stringify({ error: observed.error, payload })).toContain(
+      "SECRET worker context provider detail",
+    );
   });
 
   test("actual streamed Codex rate and usage terminals keep distinct truthful settlement", async () => {
@@ -3036,7 +2924,7 @@ describe("transient provider error classifier", () => {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
       code: "provider_rate_limited",
       retryable: true,
-      detail: "The Codex response stream reported an error",
+      detail: "SECRET worker rate provider detail",
     });
 
     const usage = await actualCodexStreamingFailure({
@@ -3056,10 +2944,12 @@ describe("transient provider error classifier", () => {
     const usagePayload = agentRunFailurePayload(usage.error);
     expect(usagePayload.code).toBe("codex_usage_limit_reached");
     expect(usagePayload.retryable).toBe(false);
-    expect(JSON.stringify({ rate, usage, usagePayload })).not.toContain("SECRET");
+    expect(JSON.stringify({ rate, usage, usagePayload })).toContain(
+      "SECRET worker usage provider detail",
+    );
   });
 
-  test("classifies nested database truth without retrying provider work or exposing SQL", () => {
+  test("classifies nested database truth without retrying provider work", () => {
     const error = new SessionEventPersistenceError({
       code: "db_deadlock",
       sqlState: "40P01",
@@ -3075,8 +2965,7 @@ describe("transient provider error classifier", () => {
     });
     const payload = agentRunFailurePayload(error);
     expect(payload).toEqual({
-      error:
-        "Database deadlock while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      error: "Database deadlock while persisting agent.model.usage",
       code: "db_deadlock",
       detail: "The idempotent persistence transaction failed after 3 attempts.",
       correlationId: "corr-safe",
@@ -3090,54 +2979,44 @@ describe("transient provider error classifier", () => {
       },
     });
     expect(payload.retryable).toBeUndefined();
-    expect(JSON.stringify(payload)).not.toContain("insert into");
-    expect(JSON.stringify(payload)).not.toContain("parameters");
   });
 
-  test("keeps no-SQLSTATE persistence failures safe for events, logs, and tracing", async () => {
+  test("preserves an exact non-SQLSTATE persistence failure in the session payload", async () => {
+    const syntheticValue = ["synthetic", "worker", "db", "123456"].join("-");
+    const source = Object.assign(new Error(`Failed query containing ${syntheticValue}`), {
+      query: "insert into session_events values ($1)",
+      params: [syntheticValue],
+      driverError: {
+        table_name: "session_events",
+        detail: syntheticValue,
+      },
+    });
     const error = await runIdempotentPersistenceTransaction(
       {
         stage: "session_events.append_for_turn_attempt",
         eventTypes: ["agent.model.usage"],
-        correlationId: "corr-unknown-safe",
+        correlationId: "corr-unknown-exact",
       },
       async () => {
-        throw Object.assign(new Error("Failed query containing private-token"), {
-          query: "insert into session_events values ($1)",
-          params: ["private-token"],
-          driverError: {
-            table_name: "session_events",
-            detail: "private-token",
-          },
-        });
+        throw source;
       },
     ).catch((caught) => caught);
 
     expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    expect((error as SessionEventPersistenceError).cause).toBe(source);
     const payload = agentRunFailurePayload(error);
     expect(payload).toEqual({
-      error:
-        "Database failure while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      error: `Database failure while persisting agent.model.usage: Failed query containing ${syntheticValue}`,
       code: "db_failure",
       detail: "The database rejected the idempotent persistence transaction.",
-      correlationId: "corr-unknown-safe",
+      correlationId: "corr-unknown-exact",
       stage: "session_events.append_for_turn_attempt",
       sqlState: null,
       attempts: 1,
       retryOutcome: "not_retryable",
       database: { table: "session_events" },
     });
-    const telemetrySurface = JSON.stringify({
-      payload,
-      name: (error as Error).name,
-      message: (error as Error).message,
-      stack: (error as Error).stack,
-      details: (error as SessionEventPersistenceError).details,
-      cause: (error as Error & { cause?: unknown }).cause,
-    });
-    expect(telemetrySurface).not.toContain("private-token");
-    expect(telemetrySurface).not.toContain("insert into");
-    expect(telemetrySurface).not.toContain("values ($1)");
+    expect(JSON.stringify(payload)).toContain(syntheticValue);
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {

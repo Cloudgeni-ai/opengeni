@@ -1016,9 +1016,9 @@ function codexSseFailureProjection(
  * A provider terminal carried inside an accepted HTTP-200 stream. The OpenAI
  * SDK cannot turn that late terminal into a non-2xx APIError because headers
  * have already been accepted, so the body transform throws this equivalent
- * bounded shape. Provider-supplied message/param text is intentionally absent:
- * the worker may persist Error.message, while identifiers/classifications are
- * sufficient for retry, compaction, and incident diagnostics.
+ * bounded shape. Provider-supplied message/param text remains exact within the
+ * explicit terminal-field byte contract; retry classification is additive and
+ * never substitutes for the source diagnostic.
  */
 export class CodexStreamingTerminalError extends Error {
   readonly status: number;
@@ -1030,8 +1030,8 @@ export class CodexStreamingTerminalError extends Error {
   readonly headers: Headers;
   readonly error: Record<string, unknown>;
 
-  constructor(projection: CodexSseFailureProjection, publicMessage: string) {
-    super(publicMessage);
+  constructor(projection: CodexSseFailureProjection) {
+    super(projection.error.message);
     this.name = "CodexStreamingTerminalError";
     this.status = projection.status;
     this.code = projection.error.code;
@@ -1049,6 +1049,8 @@ export class CodexStreamingTerminalError extends Error {
     this.error = {
       type: projection.error.type,
       code: projection.error.code,
+      message: projection.error.message,
+      ...(projection.error.param ? { param: projection.error.param } : {}),
       ...(projection.error.event_type ? { event_type: projection.error.event_type } : {}),
       ...(projection.error.response_id ? { response_id: projection.error.response_id } : {}),
       ...(projection.error.response_status
@@ -1072,7 +1074,6 @@ function codexSseFailureError(
 ): CodexStreamingTerminalError {
   return new CodexStreamingTerminalError(
     codexSseFailureProjection(source, rawError, fallbackCode, publicMessage, metadata),
-    publicMessage,
   );
 }
 

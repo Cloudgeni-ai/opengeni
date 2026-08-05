@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 
-import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./database";
 import * as schema from "./schema";
 
@@ -59,7 +58,7 @@ function boundedText(value: string): string {
 }
 
 function boundedPayload(value: Record<string, unknown>): Record<string, unknown> {
-  const payload = sanitizeEventPayload(value);
+  const payload = value;
   if (
     Buffer.byteLength(JSON.stringify(payload), "utf8") > SESSION_REALTIME_MIRROR_MAX_PAYLOAD_BYTES
   ) {

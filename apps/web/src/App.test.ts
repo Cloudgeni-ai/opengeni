@@ -6,11 +6,7 @@ import {
   filterCapabilityCatalogItems,
   summarizePackContents,
 } from "./lib/capabilities";
-import {
-  projectSessionTimeline,
-  sanitizeEventForDisplay,
-  summarizeSessionFailure,
-} from "./lib/events";
+import { projectSessionTimeline, summarizeSessionFailure } from "./lib/events";
 import {
   buildApiKeyPermissionGroups,
   buildSessionMcpPermissionGroups,
@@ -1001,7 +997,7 @@ describe("projectSessionTimeline", () => {
     expect(items).toEqual([]);
   });
 
-  test("hides archived terminal failure payloads in the main timeline projection", () => {
+  test("preserves archived terminal failure payloads in the main timeline projection", () => {
     const items = projectSessionTimeline(session({ status: "cancelled" }), [
       event(1, "user.message", { text: "Inspect" }),
       event(2, "turn.failed", {
@@ -1012,10 +1008,8 @@ describe("projectSessionTimeline", () => {
       }),
     ]);
 
-    expect(JSON.stringify(items)).not.toContain("RESOURCE_EXHAUSTED");
-    expect(JSON.stringify(items)).toContain(
-      "Historical failure payload hidden in the web console.",
-    );
+    expect(JSON.stringify(items)).toContain("RESOURCE_EXHAUSTED");
+    expect(JSON.stringify(items)).toContain("/modal.client.ModalClient/SandboxTerminate");
   });
 
   test("keeps active failure payloads visible in the main timeline projection", () => {
@@ -1041,7 +1035,7 @@ describe("projectSessionTimeline", () => {
     );
   });
 
-  test("redacts active provider-internal sandbox failures in the main timeline projection", () => {
+  test("preserves active provider-internal sandbox failures in the main timeline projection", () => {
     const items = projectSessionTimeline(session({ status: "running" }), [
       event(1, "user.message", { text: "Inspect" }),
       event(2, "turn.failed", {
@@ -1051,9 +1045,9 @@ describe("projectSessionTimeline", () => {
     ]);
 
     const json = JSON.stringify(items);
-    expect(json).not.toContain("RESOURCE_EXHAUSTED");
-    expect(json).not.toContain("ModalClient");
-    expect(json).toContain("temporary capacity limit");
+    expect(json).toContain("RESOURCE_EXHAUSTED");
+    expect(json).toContain("ModalClient");
+    expect(json).toContain("Bandwidth exhausted or memory limit exceeded");
   });
 });
 
@@ -1076,7 +1070,7 @@ describe("summarizeSessionFailure", () => {
     expect(summary.failedTurnCount).toBe(2);
   });
 
-  test("redacts provider-internal failure reasons like the timeline does", () => {
+  test("preserves provider-internal failure reasons like the timeline does", () => {
     const summary = summarizeSessionFailure(
       [
         event(1, "turn.failed", {
@@ -1086,8 +1080,9 @@ describe("summarizeSessionFailure", () => {
       "failed",
     );
 
-    expect(summary.reason).not.toContain("RESOURCE_EXHAUSTED");
-    expect(summary.reason).toContain("Sandbox setup failed");
+    expect(summary.reason).toBe(
+      "/modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED",
+    );
   });
 
   test("reports nothing for a clean session", () => {
@@ -1728,61 +1723,14 @@ describe("new-session draft tool policy", () => {
   });
 });
 
-describe("sanitizeEventForDisplay", () => {
-  test("hides historical terminal failure payloads in the web console", () => {
-    const sanitized = sanitizeEventForDisplay(
-      event(7, "turn.failed", {
-        error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
-      }),
-      "cancelled",
-    );
+describe("exact failure display", () => {
+  test("keeps provider and archived failure detail in the web timeline", () => {
+    const detail = "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED synthetic detail";
+    const timeline = projectSessionTimeline(session({ status: "cancelled" }), [
+      event(7, "turn.failed", { error: detail }),
+    ]);
 
-    expect(JSON.stringify(sanitized.payload)).not.toContain("RESOURCE_EXHAUSTED");
-    expect(sanitized.payload).toEqual({
-      archived: true,
-      status: "cancelled",
-      message: "Historical failure payload hidden in the web console.",
-    });
-  });
-
-  test("keeps active failure payloads available for current-run debugging", () => {
-    const active = sanitizeEventForDisplay(
-      event(7, "turn.failed", {
-        error: "Current run failed",
-      }),
-      "running",
-    );
-
-    expect(active.payload).toEqual({ error: "Current run failed" });
-  });
-
-  test("keeps failed-session failure payloads available: failed sessions are revivable, not archived", () => {
-    const active = sanitizeEventForDisplay(
-      event(7, "turn.failed", {
-        error: "Last turn failed",
-      }),
-      "failed",
-    );
-
-    expect(active.payload).toEqual({ error: "Last turn failed" });
-  });
-
-  test("redacts active provider-internal sandbox failures in debug payloads", () => {
-    const active = sanitizeEventForDisplay(
-      event(7, "turn.failed", {
-        error:
-          "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
-      }),
-      "running",
-    );
-
-    expect(JSON.stringify(active.payload)).not.toContain("RESOURCE_EXHAUSTED");
-    expect(JSON.stringify(active.payload)).not.toContain("ModalClient");
-    expect(active.payload).toEqual({
-      error:
-        "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.",
-      redacted: true,
-    });
+    expect(JSON.stringify(timeline)).toContain(detail);
   });
 });
 

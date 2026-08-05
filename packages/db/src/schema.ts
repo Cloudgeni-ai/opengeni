@@ -3652,8 +3652,8 @@ export const sessionHumanInputRequests = pgTable(
 );
 
 // Conversation truth: ordered, verbatim SDK input items (issue #35). The
-// model-facing memory store — unredacted and replay-ready. session_events
-// remains the redacted human/audit timeline.
+// model-facing memory store — exact and replay-ready. session_events is also
+// exact canonical OpenGeni data; transport projections must not rewrite it.
 export const sessionHistoryItems = pgTable(
   "session_history_items",
   {
@@ -3707,7 +3707,7 @@ export const sessionHistoryItems = pgTable(
 
 // Turn-lineage ledger for a tool call that the SDK emitted but has not yet
 // produced a durably reconciled result. The raw call item is model-facing truth
-// (not the redacted session-event projection). The attempt/generation identify
+// (not a transport projection). The attempt/generation identify
 // where the call originated, but the receipt survives an approval resume into a
 // newer attempt of the same logical turn. Turn-ending transactions
 // consume these rows atomically and append a valid interrupted result so a

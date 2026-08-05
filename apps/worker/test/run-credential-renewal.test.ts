@@ -14,7 +14,6 @@ function material(value: string, expiresAt: Date | null = null): NormalizedRunCr
     fileEnvironment: {},
     expiresAt,
     authNeeded: [],
-    redactions: [{ name: "TOKEN", value }],
   };
 }
 

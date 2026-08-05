@@ -2,7 +2,6 @@ import type { SessionEvent } from "@opengeni/contracts";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
 import * as schema from "./schema";
 
 export const TOOL_RESULT_TYPE_BY_CALL_TYPE: Readonly<Record<string, string>> = {
@@ -232,7 +231,7 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: sanitizeModelPayload(resolution.call.callItem),
+        item: resolution.call.callItem,
         active: true,
       });
     }
@@ -255,11 +254,9 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: sanitizeModelPayload(
-          boundModelToolOutputItem(
-            resolution.result,
-            resolution.call.modelToolOutputTruncationTokens ?? undefined,
-          ),
+        item: boundModelToolOutputItem(
+          resolution.result,
+          resolution.call.modelToolOutputTruncationTokens ?? undefined,
         ),
         active: true,
       });
@@ -280,7 +277,7 @@ export async function closePendingSessionToolCallsInTransaction(
       turnGeneration: resolution.call.executionGeneration,
       turnAttemptId: resolution.call.attemptId,
       turnAssociation: "current",
-      payload: sanitizeEventPayload({
+      payload: {
         id: resolution.call.callId,
         output: resolution.interrupted
           ? {
@@ -302,7 +299,7 @@ export async function closePendingSessionToolCallsInTransaction(
           unsupportedCallShape:
             resolution.interrupted && (!resolution.result || !resolution.rawCallIsValid),
         },
-      }),
+      },
       occurredAt: input.now,
     });
   }

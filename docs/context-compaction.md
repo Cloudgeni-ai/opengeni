@@ -104,8 +104,9 @@ model history.
 
 The final request-time filter is not a compaction boundary. For an unchanged
 canonical prefix and settings, a later provider request must reproduce the
-earlier serialized filtered prefix exactly. Deterministic normalization,
-redaction, and output bounding are allowed; deleting or reordering an earlier
+earlier serialized filtered prefix exactly. Deterministic protocol
+normalization and output bounding are allowed; arbitrary text must not be
+classified or rewritten, and deleting or reordering an earlier
 `view_image` call/result pair is not. Only the fenced durable replacement below
 may remove active history.
 

@@ -161,9 +161,6 @@ describe("run credential response validation", () => {
       normalizeRunCredentialsResolution(resolution({ authNeeded: {} as never }), expected),
     ).toThrow(RunCredentialValidationError);
     expect(() =>
-      normalizeRunCredentialsResolution(resolution({ redactions: {} as never }), expected),
-    ).toThrow(RunCredentialValidationError);
-    expect(() =>
       normalizeRunCredentialsResolution(resolution({ expiresAt: 42 as never }), expected),
     ).toThrow(RunCredentialValidationError);
   });
@@ -179,7 +176,6 @@ describe("run credential response validation", () => {
           fileEnvironment: {},
           expiresAt: null,
           authNeeded: [],
-          redactions: [],
         },
         {
           sessionId: "session-a",

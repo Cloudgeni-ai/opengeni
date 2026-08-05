@@ -182,11 +182,11 @@ export class Observability {
           return;
         }
         ended = true;
-        const sanitizedError =
+        const telemetryError =
           input.error !== undefined && input.error !== null
-            ? sanitizeSpanError(input.error)
+            ? projectSpanErrorForTelemetry(input.error)
             : undefined;
-        const errorAttributes = sanitizedError ? errorToAttributes(sanitizedError) : {};
+        const errorAttributes = telemetryError ? errorToAttributes(telemetryError) : {};
         this.exportSpan({
           traceId,
           spanId,
@@ -198,7 +198,7 @@ export class Observability {
             ...input.attributes,
             ...errorAttributes,
           },
-          ...(sanitizedError ? { error: sanitizedError } : {}),
+          ...(telemetryError ? { error: telemetryError } : {}),
         });
       },
     };
@@ -396,7 +396,7 @@ export class Observability {
     startMs: number;
     endMs: number;
     attributes: Attributes;
-    error?: SanitizedSpanError;
+    error?: TelemetrySpanError;
   }): void {
     if (!this.settings.observabilityOtlpEndpoint) {
       return;
@@ -526,13 +526,17 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
   ) as Record<string, string | number | boolean | null>;
 }
 
-type SanitizedSpanError = {
+type TelemetrySpanError = {
   type: string;
   statusCode?: number;
   statusMessage: string;
 };
 
-function sanitizeSpanError(error: unknown): SanitizedSpanError {
+/**
+ * External OTLP projection. It intentionally exports only error class/status
+ * metadata and never mutates canonical OpenGeni errors, events, or history.
+ */
+function projectSpanErrorForTelemetry(error: unknown): TelemetrySpanError {
   const type =
     error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.name)
       ? error.name
@@ -560,7 +564,7 @@ function errorStatusCode(error: unknown): number | undefined {
     : undefined;
 }
 
-function errorToAttributes(error: SanitizedSpanError): Attributes {
+function errorToAttributes(error: TelemetrySpanError): Attributes {
   return {
     "error.type": error.type,
     ...(error.statusCode === undefined ? {} : { "error.status_code": error.statusCode }),

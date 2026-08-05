@@ -27,7 +27,6 @@ import {
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
-  redactSensitiveText,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
@@ -2281,7 +2280,7 @@ export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = redactSensitiveText(error instanceof Error ? error.message : String(error));
+  const details = error instanceof Error ? error.message : String(error);
   return {
     isError: true,
     content: [
@@ -3233,7 +3232,7 @@ export async function prepareAgentTools(
           // The upstream transport logger receives raw thrown errors, whose
           // messages may contain response bodies, URLs, headers, or echoed
           // credentials. Keep its diagnostic surface structural only.
-          logger: safeMcpTransportLogger(config.id),
+          logger: mcpTransportLogger(config.id),
           // codex_apps returns connector tools with empty `outputSchema: {}` that the
           // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
           // sanitize the response on the wire before validation. The namespace Set
@@ -3300,7 +3299,7 @@ export async function prepareAgentTools(
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
         `[mcp] optional server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
-        safeMcpErrorFields(error),
+        mcpErrorFields(error),
       );
     }
   }
@@ -3357,7 +3356,16 @@ function connectionBrokerFetch(
       withConnectionHeaders(input, init, first.headers),
     );
     if (response.status === 401) {
-      await cancelMcpResponseBody(response);
+      const providerFailure = request.replaySafeAfter401
+        ? null
+        : {
+            status: response.status,
+            statusText: response.statusText,
+            body: await response.text(),
+          };
+      if (!providerFailure) {
+        await cancelMcpResponseBody(response);
+      }
       const refreshed = await resolveConnectionForRequest(
         options,
         config.id,
@@ -3369,13 +3377,13 @@ function connectionBrokerFetch(
       if (refreshed.status === "auth_needed") {
         if (!request.replaySafeAfter401) {
           await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
-          return mcpOutcomeUncertainResponse(request);
+          return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
-        return mcpOutcomeUncertainResponse(request);
+        return mcpOutcomeUncertainResponse(request, providerFailure!);
       }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
@@ -3675,9 +3683,23 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
   );
 }
 
-function mcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
+type McpOutcomeUncertainProviderFailure = {
+  status: number;
+  statusText: string;
+  body: string;
+};
+
+function mcpOutcomeUncertainResponse(
+  request: McpRequestReplayInfo,
+  providerFailure: McpOutcomeUncertainProviderFailure,
+): Response {
   return new Response(
-    JSON.stringify(mcpJsonRpcErrorPayloadForRequest(request, MCP_TOOL_OUTCOME_UNCERTAIN_ERROR)),
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, {
+        ...MCP_TOOL_OUTCOME_UNCERTAIN_ERROR,
+        data: { providerFailure },
+      }),
+    ),
     {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -3698,50 +3720,63 @@ function isAuthNeededMcpError(error: unknown): boolean {
 }
 
 function isToolOutcomeUncertainMcpError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const code = (error as { code?: unknown }).code;
   return (
-    code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code &&
-    (error.message === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message ||
-      error.message ===
-        `MCP error ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code}: ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message}`)
+    error instanceof Error &&
+    (error as { code?: unknown }).code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code
   );
 }
 
-// Model-facing text for a best-effort server whose tool call failed for a
-// non-auth reason (transport 401/403 that never became the broker's JSON-RPC
-// short-circuit, a provider 5xx, a network blip). The copy is LOOP-SAFE: it
-// tells the model the tool is dead for the REST OF THIS TURN and to NOT retry
-// it, so a model that would otherwise burn the turn re-calling the same broken
-// optional tool moves on instead. Only the safe error surface (JS error class +
-// numeric HTTP status) is interpolated — NEVER the raw error message/response
-// body, which for a broker 401/403 can echo request URLs/headers/credentials.
-function mcpToolUnavailableMessage(reason: string): string {
-  return `This tool is unavailable for the rest of this turn (${reason}). Do not retry it — continue without it or use another approach.`;
+function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; text: string }> {
+  const data = error && typeof error === "object" ? (error as { data?: unknown }).data : undefined;
+  const providerFailure =
+    data && typeof data === "object"
+      ? (data as { providerFailure?: unknown }).providerFailure
+      : undefined;
+  const body =
+    providerFailure && typeof providerFailure === "object"
+      ? (providerFailure as { body?: unknown }).body
+      : undefined;
+  return [
+    ...(typeof body === "string" ? [{ type: "text" as const, text: body }] : []),
+    { type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message },
+  ];
 }
 
-// The only error detail safe to surface to the model or the logs: the JS error
-// constructor name and, when present, a numeric HTTP status. A StreamableHTTP
-// transport error carries the raw response BODY in its `.message` (a broker
-// 401/403 body can echo request detail), so `.message` is never included; the
-// numeric `.code`/`.status` (e.g. 401) is safe and useful.
-function safeMcpErrorFields(error: unknown): {
+// Preserve the exact source diagnostic as one independent content item. The
+// second item is OpenGeni guidance and never substitutes for or mutates it.
+function mcpToolUnavailableContent(error: unknown): Array<{ type: "text"; text: string }> {
+  return [
+    { type: "text", text: exactErrorMessage(error) },
+    {
+      type: "text",
+      text: "This tool is unavailable for the rest of this turn. Do not retry it — continue without it or use another approach.",
+    },
+  ];
+}
+
+function exactErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// Structured metadata is additive; it never replaces the exact diagnostic.
+function mcpErrorFields(error: unknown): {
   errorClass: string;
   status?: number;
+  errorMessage: string;
 } {
   const errorClass = error instanceof Error ? error.constructor.name : typeof error;
   const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
   const status = typeof raw === "number" ? raw : undefined;
   if (status === undefined) {
     const altRaw = (error as { status?: unknown } | null)?.status;
-    return typeof altRaw === "number" ? { errorClass, status: altRaw } : { errorClass };
+    return typeof altRaw === "number"
+      ? { errorClass, status: altRaw, errorMessage: exactErrorMessage(error) }
+      : { errorClass, errorMessage: exactErrorMessage(error) };
   }
-  return { errorClass, status };
+  return { errorClass, status, errorMessage: exactErrorMessage(error) };
 }
 
-type SafeMcpTransportError = Error & {
+type McpTransportError = Error & {
   status?: number;
   code?: number;
   mcpTransportFailureKind?: "request_timeout" | "connectivity_unavailable";
@@ -3791,10 +3826,10 @@ function hasMcpConnectivityErrorCode(error: unknown, seen = new WeakSet<object>(
 }
 
 /**
- * Preserve only an allowlisted transport-connectivity meaning across MCP SDK
+ * Classify an allowlisted transport-connectivity meaning across MCP SDK
  * wrappers. HTTP client failures remain authoritative and fail closed even if
- * a nested object also carries a socket-looking code. Raw messages, URLs,
- * response bodies, and arbitrary provider codes are never copied forward.
+ * a nested object also carries a socket-looking code. Classification never
+ * rewrites the source diagnostic.
  */
 function isRawMcpTransportConnectivityError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
@@ -3814,7 +3849,7 @@ function isRawMcpTransportConnectivityError(error: unknown): boolean {
 }
 
 /**
- * Test only the secret-safe marker emitted by `safeMcpTransportError`. Callers
+ * Test only the typed marker emitted by `mcpTransportErrorWithRetryMetadata`. Callers
  * outside the MCP boundary must not infer MCP ownership from a generic 5xx or
  * socket-shaped provider error.
  */
@@ -3827,8 +3862,7 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
 }
 
 /**
- * Preserve the MCP SDK's exact request-timeout meaning without retaining or
- * exposing a raw HTTP response body. The numeric code is not sufficient:
+ * Preserve the MCP SDK's exact request-timeout meaning. The numeric code is not sufficient:
  * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
  * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
  */
@@ -3860,25 +3894,25 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
   );
 }
 
-export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
-  const fields = safeMcpErrorFields(error);
-  const safeError = new Error(
-    `MCP transport operation failed (${mcpErrorReason(fields)})`,
-  ) as SafeMcpTransportError;
-  safeError.name = "McpTransportError";
+export function mcpTransportErrorWithRetryMetadata(error: unknown): McpTransportError {
+  const fields = mcpErrorFields(error);
+  const classified = new Error(fields.errorMessage, {
+    cause: error,
+  }) as McpTransportError;
+  classified.name = error instanceof Error ? error.name : "McpTransportError";
   if (fields.status !== undefined) {
-    safeError.status = fields.status;
-    safeError.code = fields.status;
+    classified.status = fields.status;
+    classified.code = fields.status;
   }
   if (isMcpRequestTimeoutError(error)) {
-    safeError.mcpTransportFailureKind = "request_timeout";
+    classified.mcpTransportFailureKind = "request_timeout";
   } else if (isRawMcpTransportConnectivityError(error)) {
-    safeError.mcpTransportFailureKind = "connectivity_unavailable";
+    classified.mcpTransportFailureKind = "connectivity_unavailable";
   }
-  return safeError;
+  return classified;
 }
 
-function safeMcpTransportLogger(serverId: string) {
+function mcpTransportLogger(serverId: string) {
   const logFailure = (_message: string, ...args: unknown[]) => {
     let error: unknown;
     for (let index = args.length - 1; index >= 0; index -= 1) {
@@ -3889,7 +3923,7 @@ function safeMcpTransportLogger(serverId: string) {
     }
     console.warn("[mcp] transport operation failed", {
       serverId,
-      ...safeMcpErrorFields(error),
+      ...mcpErrorFields(error),
     });
   };
   return {
@@ -3900,12 +3934,6 @@ function safeMcpTransportLogger(serverId: string) {
     dontLogModelData: true,
     dontLogToolData: true,
   };
-}
-
-// Compose the safe model/log reason string ("StreamableHTTPError 401", or just
-// the class when no numeric status is available). Never carries the raw body.
-function mcpErrorReason(fields: { errorClass: string; status?: number }): string {
-  return fields.status === undefined ? fields.errorClass : `${fields.errorClass} ${fields.status}`;
 }
 
 async function mcpServerRequestInit(
@@ -4189,9 +4217,9 @@ class PrefixedMcpServer implements MCPServer {
 
   connect(): Promise<void> {
     return this.inner.connect().catch((error: unknown) => {
-      // connectMcpServers has its own global logger and logs the thrown Error.
-      // Never let a raw transport response body cross that logging boundary.
-      throw safeMcpTransportError(error);
+      // Preserve the exact source diagnostic and attach retry metadata without
+      // changing the message.
+      throw mcpTransportErrorWithRetryMetadata(error);
     });
   }
 
@@ -4221,7 +4249,7 @@ class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort) {
-        throw safeMcpTransportError(error);
+        throw mcpTransportErrorWithRetryMetadata(error);
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a
@@ -4240,9 +4268,7 @@ class PrefixedMcpServer implements MCPServer {
         this.loggedListToolsFailure = true;
         console.warn(
           "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          // Safe surface only (class + numeric status), never the raw error
-          // message/response body — a broker 401/403 body can echo request detail.
-          { serverId: this.name, ...safeMcpErrorFields(error) },
+          { serverId: this.name, ...mcpErrorFields(error) },
         );
       }
       this.releaseAggregateBudget();
@@ -4285,7 +4311,7 @@ class PrefixedMcpServer implements MCPServer {
       if (isToolOutcomeUncertainMcpError(error)) {
         return {
           isError: true,
-          content: [{ type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message }],
+          content: mcpToolOutcomeUncertainContent(error),
         };
       }
       // The connection broker's auth-needed short-circuit arrives as a thrown
@@ -4313,19 +4339,13 @@ class PrefixedMcpServer implements MCPServer {
       // already published upstream by the connection-broker fetch before the
       // throw, so degrading here never silences it.
       if (this.bestEffort) {
-        const fields = safeMcpErrorFields(error);
         console.warn(
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
-          { serverId: this.name, toolName: unprefixed, ...fields },
+          { serverId: this.name, toolName: unprefixed, ...mcpErrorFields(error) },
         );
         return {
           isError: true,
-          content: [
-            {
-              type: "text",
-              text: mcpToolUnavailableMessage(mcpErrorReason(fields)),
-            },
-          ],
+          content: mcpToolUnavailableContent(error),
         };
       }
       throw error;

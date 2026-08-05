@@ -595,9 +595,9 @@ export const Permission = z.enum([
   "sessions:control",
   // sandbox workspace (sandbox contract §C.3 / crosscut PART 1.2). stream:view is a
   // REAL, distinct permission — strictly BROADER than sessions:read — because the
-  // pixel plane (Channel B) is UN-REDACTED: a viewer of raw pixels can see cloud
-  // creds the agent cat's into a terminal, which the redacted Channel-A event log
-  // never exposes. sessions:read is NOT permission to watch raw pixels.
+  // pixel plane (Channel B) exposes raw pixels: a viewer can see content the
+  // structured Channel-A event log never captured. sessions:read is NOT
+  // permission to watch raw pixels.
   "stream:view",
   // SEPARATE from stream:view: raw input to the desktop (bypasses approvalQueue /
   // interrupt). NEVER granted by default in v1 (the input plane is OFF —
@@ -2506,13 +2506,6 @@ export type RunCredentialAuthNeeded = {
   message?: string;
 };
 
-export type RunCredentialRedaction = {
-  /** Bounded diagnostic label used only in the replacement marker. */
-  name: string;
-  /** One atomic secret value that must be removed from streamed/audit output. */
-  value: string;
-};
-
 export type RunCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -2558,12 +2551,6 @@ export type RunCredentialsResolution =
       files?: RunCredentialFile[];
       /** Environment name to one returned relative file path. */
       fileEnvironment?: Record<string, string>;
-      /**
-       * Atomic sensitive values embedded inside credential files or derived
-       * material. Environment values are registered automatically; hosts list
-       * additional file-contained values here so chunked output is redacted.
-       */
-      redactions?: RunCredentialRedaction[];
       /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
       expiresAt?: string | null;
       /** Partial degradation: usable material may coexist with reconnect notices. */
@@ -6859,8 +6846,8 @@ export const RecordingFailedPayload = z.object({
   recordingId: z.string().uuid(),
   turnId: z.string().uuid().nullable(),
   reason: RecordingFailedReason,
-  // ffmpeg-stderr tail / error detail — agent/ffmpeg-controlled, so the producer
-  // caps + scrubs it before emit (it rides redact() like every payload).
+  // Exact ffmpeg stderr/error detail. Event transport limits must reject or
+  // paginate rather than rewriting this canonical diagnostic.
   detail: z.string().nullable().optional(),
 });
 export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
@@ -10078,7 +10065,6 @@ export function evaluateWorkspaceModelPolicy(
 }
 
 export * from "./codex-fleet-policy";
-export * from "./secret-redaction";
 export * from "./workspace-instruction-policies";
 export * from "./workspace-state";
 export * from "./preference-registry";

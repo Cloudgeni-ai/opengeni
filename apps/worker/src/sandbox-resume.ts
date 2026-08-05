@@ -21,7 +21,6 @@
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
 import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
-import { redactSensitiveText } from "@opengeni/contracts";
 import { randomUUID } from "node:crypto";
 import {
   acquireLease,
@@ -240,10 +239,7 @@ function safeSnapshotError(error: unknown): { name: string; message: string } {
   const rawName = error instanceof Error ? error.name : "Error";
   return {
     name: /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error",
-    message: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(
-      0,
-      2_048,
-    ),
+    message: error instanceof Error ? error.message : String(error),
   };
 }
 
