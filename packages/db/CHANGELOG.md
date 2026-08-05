@@ -1,5 +1,20 @@
 # @opengeni/db
 
+## 0.28.3
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- 23de73b: Add explicitly permissioned, audited plaintext reads for encrypted workspace variable-set values across REST, SDK, React, MCP, and UI surfaces.
+- 1503151: Keep capped rotation-off Codex sessions in one durable capacity wait and suppress wakes for identical usage snapshots.
+- a296081: Settle abandoned null-outcome direct sandbox mutation admissions when their physically completed request holder is released, preventing a failed settlement callback from blocking workspace checkpoint capture indefinitely. Require an exact physical-quiescence receipt before re-admitting a turn after graceful worker or provider recovery, and reconcile pre-fix attempts from their durable recovery event plus Temporal activity proof.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/codex@0.2.12
+  - @opengeni/config@0.11.2
+
 ## 0.28.2
 
 ### Patch Changes

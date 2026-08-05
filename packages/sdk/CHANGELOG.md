@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 0.46.3
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- 23de73b: Add explicitly permissioned, audited plaintext reads for encrypted workspace variable-set values across REST, SDK, React, MCP, and UI surfaces.
+
 ## 0.46.2
 
 ### Patch Changes
