@@ -75,6 +75,7 @@ import {
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
+  PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
   stripProviderItemIdsFilter,
@@ -89,7 +90,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
-  safeMcpTransportError,
+  mcpTransportErrorWithRetryMetadata,
   serializeApprovals,
   serializeHumanInputRequests,
   refreshToolspaceTokenFile,
@@ -109,6 +110,7 @@ import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
+import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
 import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -150,6 +152,9 @@ const codexAppsTestFetch =
     return await globalThis.fetch(raw === CODEX_APPS_MCP_URL ? url : input, init);
   };
 
+const runtimeMcpServerId = (server: MCPServer): string =>
+  server instanceof PrefixedMcpServer ? server.registryId : server.name;
+
 test("Agents SDK debug logging omits model and tool payload data", () => {
   const logger = getLogger("opengeni:test-sensitive-logging");
 
@@ -160,13 +165,20 @@ test("Agents SDK debug logging omits model and tool payload data", () => {
 });
 
 test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle", async () => {
-  const slowServer = {
-    name: "slow-connect",
-    connect: async () => {
-      await Bun.sleep(50);
-    },
-    close: async () => {},
-  } as unknown as MCPServer;
+  const slowServer = new PrefixedMcpServer(
+    {
+      name: "inner-slow-connect",
+      cacheToolsList: false,
+      connect: async () => {
+        await Bun.sleep(50);
+      },
+      close: async () => {},
+      listTools: async () => [],
+      callTool: async () => [],
+      invalidateToolsCache: async () => {},
+    } as MCPServer,
+    "slow-connect",
+  );
 
   await expect(
     connectMcpServersInBatches([slowServer], {
@@ -176,24 +188,21 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
   ).rejects.toThrow("MCP server connect timed out after 5ms");
 });
 
-test("sanitizes nested MCP connectivity failures into an allowlisted marker", () => {
+test("preserves nested MCP connectivity diagnostics while adding a typed retry marker", () => {
   const raw = new Error("MCP connect failed for https://private.example/token-value");
   raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
     code: "ECONNREFUSED",
   });
 
-  const sanitized = safeMcpTransportError(raw);
-
   expect(isMcpTransportConnectivityError(raw)).toBe(false);
-  expect(isMcpTransportConnectivityError(sanitized)).toBe(true);
-  expect(sanitized).toMatchObject({
-    name: "McpTransportError",
-    message: "MCP transport operation failed (Error)",
-    mcpTransportFailureKind: "connectivity_unavailable",
+  const classified = mcpTransportErrorWithRetryMetadata(raw);
+
+  expect(isMcpTransportConnectivityError(classified)).toBe(true);
+  expect(classified).toBe(raw);
+  expect(classified.message).toContain("private.example");
+  expect(classified.cause).toMatchObject({
+    message: "connect ECONNREFUSED 127.0.0.1:8000",
   });
-  expect(JSON.stringify(sanitized)).not.toContain("private.example");
-  expect(JSON.stringify(sanitized)).not.toContain("token-value");
-  expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
 });
 
 test("does not turn MCP client failures or arbitrary codes into connectivity recovery", () => {
@@ -206,9 +215,13 @@ test("does not turn MCP client failures or arbitrary codes into connectivity rec
   });
 
   expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
-  expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(clientFailure))).toBe(
+    false,
+  );
   expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
-  expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
+  expect(mcpTransportErrorWithRetryMetadata(arbitrary)).not.toHaveProperty(
+    "mcpTransportFailureKind",
+  );
 });
 
 test("fails closed on pathological MCP transport error wrappers", () => {
@@ -228,9 +241,15 @@ test("fails closed on pathological MCP transport error wrappers", () => {
     },
   };
 
-  expect(isMcpTransportConnectivityError(safeMcpTransportError(deeplyWrapped))).toBe(false);
-  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingWrapper))).toBe(false);
-  expect(isMcpTransportConnectivityError(safeMcpTransportError(throwingFields))).toBe(false);
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(deeplyWrapped))).toBe(
+    false,
+  );
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingWrapper))).toBe(
+    false,
+  );
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingFields))).toBe(
+    false,
+  );
 });
 
 test("recovers only rollout-safe first-party MCP setup 404 and statusless Error shapes", () => {
@@ -244,33 +263,38 @@ test("recovers only rollout-safe first-party MCP setup 404 and statusless Error 
   const authRejected = Object.assign(new Error("authentication failed"), { status: 401 });
   const typedProtocolFailure = new TypeError("invalid MCP response shape");
 
-  expect(isMcpTransportConnectivityError(safeMcpTransportError(routeNotReady))).toBe(false);
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(routeNotReady))).toBe(
+    false,
+  );
   expect(
     isMcpTransportConnectivityError(
-      safeMcpTransportError(routeNotReady, { recoverySafeSetup: true }),
+      mcpTransportErrorWithRetryMetadata(routeNotReady, { recoverySafeSetup: true }),
     ),
   ).toBe(true);
   expect(
     isMcpTransportConnectivityError(
-      safeMcpTransportError(statuslessTransport, { recoverySafeSetup: true }),
+      mcpTransportErrorWithRetryMetadata(statuslessTransport, { recoverySafeSetup: true }),
     ),
   ).toBe(true);
   expect(
-    isMcpTransportConnectivityError(safeMcpTransportError(typedCause, { recoverySafeSetup: true })),
-  ).toBe(false);
-  expect(
     isMcpTransportConnectivityError(
-      safeMcpTransportError(authRejected, { recoverySafeSetup: true }),
+      mcpTransportErrorWithRetryMetadata(typedCause, { recoverySafeSetup: true }),
     ),
   ).toBe(false);
   expect(
     isMcpTransportConnectivityError(
-      safeMcpTransportError(typedProtocolFailure, { recoverySafeSetup: true }),
+      mcpTransportErrorWithRetryMetadata(authRejected, { recoverySafeSetup: true }),
     ),
   ).toBe(false);
   expect(
-    JSON.stringify(safeMcpTransportError(routeNotReady, { recoverySafeSetup: true })),
-  ).not.toContain("secret detail");
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(typedProtocolFailure, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(mcpTransportErrorWithRetryMetadata(routeNotReady, { recoverySafeSetup: true })).toBe(
+    routeNotReady,
+  );
+  expect(routeNotReady.message).toContain("secret detail");
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -1231,19 +1255,16 @@ describe("runtime event normalization", () => {
       expect(mcpToolErrorOutput("boom").content[0]?.text).toContain("boom");
     });
 
-    test("mcpToolErrorOutput redacts credential-bearing error details", () => {
-      const out = mcpToolErrorOutput(
-        new Error(
-          "upstream 401\nAuthorization: Bearer synthetic-bearer-value-123456\n" +
-            "Cookie: session=synthetic-cookie-value-123456",
-        ),
-      );
+    test("mcpToolErrorOutput preserves credential-shaped error details exactly", () => {
+      const bearer = "synthetic-bearer-value-123456";
+      const cookie = ["synthetic", "cookie", "value", "123456"].join("-");
+      const message = `upstream 401\nAuthorization: Bearer ${bearer}\nCookie: ${cookie}`;
+      const out = mcpToolErrorOutput(new Error(message));
       const text = out.content[0]?.text ?? "";
       expect(text).toContain("upstream 401");
-      expect(text).toContain("Authorization: Bearer [redacted]");
-      expect(text).toContain("Cookie: [redacted]");
-      expect(text).not.toContain("synthetic-bearer-value");
-      expect(text).not.toContain("synthetic-cookie-value");
+      expect(text).toContain(message);
+      expect(text).toContain(bearer);
+      expect(text).toContain(cookie);
     });
 
     test("every agent gets an mcpConfig.errorFunction that produces isError output", () => {
@@ -4432,7 +4453,7 @@ describe("runtime event normalization", () => {
       expect(text).toMatch(/did not replay/i);
       expect(text).toMatch(/do not retry automatically/i);
       expect(text).toMatch(/verify provider state/i);
-      expect(text).not.toContain("unauthorized");
+      expect(text).toContain("unauthorized");
       expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
         1,
       );
@@ -5046,31 +5067,189 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // A warning names the skipped server so the drop is observable.
-      const warned = warnings.some((args) =>
-        args.some((arg) => typeof arg === "string" && arg.includes("geni-notebook")),
-      );
-      expect(warned).toBe(true);
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(JSON.stringify(warnings)).not.toContain("geni-notebook");
+      expect(JSON.stringify(warnings)).toContain('"origin":"runtime"');
     } finally {
       console.warn = originalWarn;
       broken.close();
     }
   });
 
-  test("MCP connect logging never emits raw response bodies or credential material", async () => {
-    const syntheticCredential = "synthetic-mcp-log-secret-123456";
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: () =>
-        new Response(
-          JSON.stringify({
-            error: "unauthorized",
-            echoed: `Authorization: Bearer ${syntheticCredential}`,
-            retry: `https://objects.example/file?X-Amz-Signature=${syntheticCredential}`,
-          }),
-          { status: 401, headers: { "content-type": "application/json" } },
-        ),
+  test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
+    const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
+    const registryId = `registry-${sentinel}`;
+    const exactSourceError = Object.assign(new Error(`connect failed: ${sentinel}`), {
+      name: sentinel,
+      code: sentinel,
+      status: 503,
+      responseBody: { sentinel },
+      cause: { exact: sentinel },
+    });
+    const makeFacade = () =>
+      new PrefixedMcpServer(
+        {
+          name: `inner-${registryId}`,
+          cacheToolsList: false,
+          async connect() {
+            throw exactSourceError;
+          },
+          async close() {},
+          async listTools() {
+            return [];
+          },
+          async callTool() {
+            return [];
+          },
+          async invalidateToolsCache() {},
+        } as MCPServer,
+        registryId,
+      );
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const bestEffortFacade = makeFacade();
+      const bestEffort = await connectMcpServersInBatches([bestEffortFacade], { strict: false });
+      const returnedError = bestEffort.errors.get(bestEffortFacade);
+      expect(returnedError).toBe(exactSourceError);
+      await bestEffort.close();
+
+      const strictFacade = makeFacade();
+      const strictError = await connectMcpServersInBatches([strictFacade], { strict: true }).then(
+        () => null,
+        (error) => error as Error,
+      );
+      expect(strictError).toBe(exactSourceError);
+
+      const renderedLogs = [...warnings, ...errors]
+        .flat()
+        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) => JSON.stringify(value))
+        .join("\n");
+      const lifecycleErrors = [...warnings, ...errors]
+        .flat()
+        .filter((value): value is Error => value instanceof Error);
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(lifecycleErrors).toContainEqual(
+        expect.objectContaining({
+          name: "McpLifecycleError",
+          code: "mcp_connect_failed",
+          status: 503,
+          origin: "runtime",
+        }),
+      );
+      expect(renderedLogs).not.toContain(registryId);
+      expect(renderedLogs).not.toContain(sentinel);
+      expect(exactSourceError.message).toContain(sentinel);
+      expect(exactSourceError.responseBody).toEqual({ sentinel });
+      expect(exactSourceError.cause).toEqual({ exact: sentinel });
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("SDK MCP lifecycle status projection tolerates hostile proxies without replacing exact errors", async () => {
+    const sentinel = "synthetic-mcp-hostile-status-proxy-123456";
+    const source = new Error(`connect failed: ${sentinel}`);
+    const exactSourceError = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile public status getter: ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const facade = new PrefixedMcpServer(
+      {
+        name: `inner-${sentinel}`,
+        cacheToolsList: false,
+        async connect() {
+          throw exactSourceError;
+        },
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      `registry-${sentinel}`,
+    );
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const result = await connectMcpServersInBatches([facade], { strict: false });
+      expect(result.errors.get(facade)).toBe(exactSourceError);
+      await result.close();
+      const lifecycleErrors = [...warnings, ...errors]
+        .flat()
+        .filter((value): value is Error => value instanceof Error);
+      const renderedLogs = [...warnings, ...errors]
+        .flat()
+        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) => JSON.stringify(value))
+        .join("\n");
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).not.toContain(sentinel);
+      expect(lifecycleErrors).toContainEqual(
+        expect.objectContaining({
+          name: "McpLifecycleError",
+          code: "mcp_connect_failed",
+          origin: "runtime",
+        }),
+      );
+      expect(lifecycleErrors.some((error) => "status" in error)).toBe(false);
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("MCP cleanup closes every batch and returns the first exact close error", async () => {
+    const sentinel = "synthetic-mcp-close-boundary-4d7e91";
+    const closeCalls: number[] = [];
+    const exactCloseErrors = new Map<number, Error>();
+    const servers = Array.from({ length: MCP_MAX_CONCURRENT_SERVER_OPERATIONS + 1 }, (_, index) => {
+      const exactCloseError = Object.assign(new Error(`close failed ${index}: ${sentinel}`), {
+        name: `${sentinel}-${index}`,
+        code: `${sentinel}-code-${index}`,
+        status: 502,
+        cause: { exact: `${sentinel}-cause-${index}` },
+      });
+      if (index === 0 || index === MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
+        exactCloseErrors.set(index, exactCloseError);
+      }
+      return new PrefixedMcpServer(
+        {
+          name: `inner-${sentinel}-${index}`,
+          cacheToolsList: false,
+          async connect() {},
+          async close() {
+            closeCalls.push(index);
+            const failure = exactCloseErrors.get(index);
+            if (failure) throw failure;
+          },
+          async listTools() {
+            return [];
+          },
+          async callTool() {
+            return [];
+          },
+          async invalidateToolsCache() {},
+        } as MCPServer,
+        `registry-${sentinel}-${index}`,
+      );
     });
     const warnings: unknown[][] = [];
     const errors: unknown[][] = [];
@@ -5079,35 +5258,25 @@ describe("runtime event normalization", () => {
     console.warn = (...args: unknown[]) => warnings.push(args);
     console.error = (...args: unknown[]) => errors.push(args);
     try {
-      const prepared = await prepareAgentTools(
-        testSettings({
-          mcpServers: [
-            {
-              id: "synthetic-optional",
-              name: "Synthetic optional MCP",
-              url: `http://127.0.0.1:${server.port}/mcp`,
-              cacheToolsList: false,
-            },
-          ],
-        }),
-        [{ kind: "mcp", id: "synthetic-optional", optional: true }],
+      const connected = await connectMcpServersInBatches(servers, { strict: true });
+      const closeError = await connected.close().then(
+        () => null,
+        (error) => error as Error,
       );
-      await prepared.close();
-
-      const renderedLogs = [...warnings, ...errors]
-        .flat()
-        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
-        .map((value) => JSON.stringify(value))
-        .join("\n");
-      expect(renderedLogs).toContain("synthetic-optional");
-      expect(renderedLogs).toContain("401");
-      expect(renderedLogs).not.toContain(syntheticCredential);
-      expect(renderedLogs).not.toContain("Authorization: Bearer");
-      expect(renderedLogs).not.toContain("X-Amz-Signature");
+      expect(closeCalls.toSorted((left, right) => left - right)).toEqual(
+        servers.map((_, index) => index),
+      );
+      expect(closeError).toBe(exactCloseErrors.get(MCP_MAX_CONCURRENT_SERVER_OPERATIONS));
+      expect(closeError?.cause).toEqual({
+        exact: `${sentinel}-cause-${MCP_MAX_CONCURRENT_SERVER_OPERATIONS}`,
+      });
+      const renderedLogs = JSON.stringify([...warnings, ...errors]);
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain("mcp_close_failed");
+      expect(renderedLogs).not.toContain(sentinel);
     } finally {
       console.warn = originalWarn;
       console.error = originalError;
-      server.stop(true);
     }
   });
 
@@ -5145,7 +5314,7 @@ describe("runtime event normalization", () => {
         ],
       );
       try {
-        expect(prepared.mcpServers.map((server) => server.name)).toEqual(["docs"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["docs"]);
         const tools = await prepared.mcpServers[0]!.listTools();
         expect(tools.map((tool) => tool.name)).toContain("docs__search_documents");
       } finally {
@@ -5318,10 +5487,7 @@ describe("runtime event normalization", () => {
       connected = true;
       try {
         // Both connected, so both are handed to the runner.
-        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual([
-          "cap-expired",
-          "docs",
-        ]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["cap-expired", "docs"]);
         // Drive the exact code path the agent runner uses. Pre-fix this REJECTS
         // (the expired server's tools/list 401 throws out of getAllMcpTools).
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
@@ -5341,18 +5507,20 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The drop is observable in the log as a structured warn carrying the
-      // server id and the error class (failure-visibility doctrine).
+      // The drop is observable as an allowlisted structural warning. Exact
+      // registry identity remains available through the internal auth-needed
+      // event above, but must not cross the public console boundary.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
             typeof arg === "object" &&
             arg !== null &&
-            (arg as { serverId?: unknown }).serverId === "cap-expired" &&
-            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+            typeof (arg as { errorClass?: unknown }).errorClass === "string" &&
+            (arg as { origin?: unknown }).origin === "runtime",
         ),
       );
       expect(warned).toBe(true);
+      expect(JSON.stringify(warnings)).not.toContain("cap-expired");
     } finally {
       console.warn = originalWarn;
       expired.close();
@@ -5400,7 +5568,7 @@ describe("runtime event normalization", () => {
       );
       try {
         // The optional server connects (initialize is fine); only tools/list 500s.
-        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual(["docs", "flaky"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["docs", "flaky"]);
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
         const toolNames = tools.map((tool) => tool.name);
         expect(toolNames).toContain("docs__search_documents");
@@ -5408,17 +5576,19 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The non-auth degrade is observable: server id + a real error class.
+      // The non-auth degrade is observable without leaking registry identity or
+      // the provider's raw response through the public console boundary.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
             typeof arg === "object" &&
             arg !== null &&
-            (arg as { serverId?: unknown }).serverId === "flaky" &&
-            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+            typeof (arg as { errorClass?: unknown }).errorClass === "string" &&
+            (arg as { origin?: unknown }).origin === "runtime",
         ),
       );
       expect(warned).toBe(true);
+      expect(JSON.stringify(warnings)).not.toContain("flaky");
     } finally {
       console.warn = originalWarn;
       brokenOptional.close();
@@ -5518,8 +5688,8 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const cap = prepared.mcpServers.find((s) => s.name === "cap")!;
-      const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+      const cap = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "cap")!;
+      const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
       await cap.listTools();
       const result = await cap.callTool("cap__search_documents", {
         query: "x",
@@ -5546,8 +5716,9 @@ describe("runtime event normalization", () => {
     // The prod case: a best-effort server's tool call throws a raw transport 401
     // that never became the broker's JSON-RPC short-circuit (e.g. a codex_apps
     // bearer expired mid-turn). callTool must return a tool-error RESULT the model
-    // sees — with LOOP-SAFE copy (do-not-retry) and only the safe error surface
-    // (class + status), never the raw response body — rather than throw.
+    // sees — with LOOP-SAFE copy (do-not-retry) and only the fixed public
+    // classification, never the raw response body or arbitrary Error fields —
+    // rather than throw.
     const flaky = startTestMcpServer({
       unauthorizedForMethods: ["tools/call"],
     });
@@ -5581,8 +5752,10 @@ describe("runtime event normalization", () => {
         ],
       );
       try {
-        const flakySrv = prepared.mcpServers.find((s) => s.name === "flaky")!;
-        const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+        const flakySrv = prepared.mcpServers.find(
+          (server) => runtimeMcpServerId(server) === "flaky",
+        )!;
+        const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
         await flakySrv.listTools(); // fine — only tools/call 401s
         const result = await flakySrv.callTool("flaky__search_documents", {
           query: "x",
@@ -5591,9 +5764,9 @@ describe("runtime event normalization", () => {
         const text = JSON.stringify(result);
         // Loop-safety: the copy must steer the model away from re-calling it.
         expect(text).toMatch(/do not retry/i);
-        // Safe surface only: class (+ status), NEVER the raw 401 body.
-        expect(text).toContain("StreamableHTTPError");
-        expect(text).not.toContain("unauthorized");
+        // Exact provider text remains visible; no-retry guidance is additive.
+        expect(text).toContain("Streamable HTTP error");
+        expect(text).toContain("unauthorized");
         // Sibling unaffected.
         const ok = await docs.callTool("docs__search_documents", {
           query: "y",
@@ -5602,13 +5775,15 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // Structured warn carries the safe fields, and never the raw body.
+      // The model-visible result above preserves the exact provider message;
+      // the public warning is an allowlisted structural projection only.
       const warned = warnings.find((args) =>
         args.some(
           (a) =>
             typeof a === "object" &&
             a !== null &&
-            (a as { serverId?: unknown }).serverId === "flaky",
+            (a as { errorClass?: unknown }).errorClass === "McpOperationError" &&
+            (a as { errorCode?: unknown }).errorCode === "mcp_tool_call_failed",
         ),
       );
       expect(warned).toBeDefined();
@@ -5617,12 +5792,14 @@ describe("runtime event normalization", () => {
         unknown
       >;
       expect(payload).toMatchObject({
-        serverId: "flaky",
-        toolName: "search_documents",
-        errorClass: "StreamableHTTPError",
-        status: 401,
+        errorClass: "McpOperationError",
+        errorCode: "mcp_tool_call_failed",
+        origin: "runtime",
       });
-      expect(JSON.stringify(payload)).not.toContain("unauthorized");
+      expect(payload.status).toBeUndefined();
+      expect(JSON.stringify(warnings)).not.toContain("flaky");
+      expect(JSON.stringify(warnings)).not.toContain("search_documents");
+      expect(JSON.stringify(warnings)).not.toContain("unauthorized");
     } finally {
       console.warn = originalWarn;
       flaky.close();

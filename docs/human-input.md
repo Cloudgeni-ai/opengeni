@@ -59,7 +59,8 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
   workflow/database clock skew re-arms with an interruptible floor instead of
   spinning the workflow and database;
 
-`session_events` remains the redacted audit/live projection. The request table
+`session_events` remains the exact audit/live projection for accepted payloads.
+The request table
 is the authoritative actionable read model; event delivery merely tells a
 client to reconcile it. Neither store is model conversation history.
 

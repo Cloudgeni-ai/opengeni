@@ -4,6 +4,7 @@ import { ReasoningEffort } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
+import { fromPostgresLosslessJson, fromPostgresLosslessText } from "./lossless-json";
 import * as schema from "./schema";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
 
@@ -233,7 +234,9 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
       sequence: schema.sessionRealtimeEntries.sequence,
       role: schema.sessionRealtimeEntries.role,
       text: schema.sessionRealtimeEntries.text,
+      textCodecVersion: schema.sessionRealtimeEntries.textCodecVersion,
       payload: schema.sessionRealtimeEntries.payload,
+      payloadCodecVersion: schema.sessionRealtimeEntries.payloadCodecVersion,
     })
     .from(schema.sessionRealtimeEntries)
     .where(
@@ -248,7 +251,12 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
       ),
     )
     .orderBy(asc(schema.sessionRealtimeEntries.sequence), asc(schema.sessionRealtimeEntries.id));
-  const rendered = renderSessionRealtimeTail(rows);
+  const decodedRows = rows.map((row) => ({
+    ...row,
+    text: row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion),
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+  }));
+  const rendered = renderSessionRealtimeTail(decodedRows);
   if (!rendered.context) return null;
 
   const [session] = await db
@@ -290,7 +298,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
         source: SESSION_REALTIME_TAIL_SOURCE,
         realtimeId: mode.id,
         lastDelegationItemId: latestDelegation?.delegationItemId ?? null,
-        sourceEntryIds: rows.map((entry) => entry.id),
+        sourceEntryIds: decodedRows.map((entry) => entry.id),
       },
     },
     source: "api",
@@ -346,7 +354,9 @@ export async function listSessionRealtimeContinuityEntriesInTransaction(
       sequence: schema.sessionRealtimeEntries.sequence,
       role: schema.sessionRealtimeEntries.role,
       text: schema.sessionRealtimeEntries.text,
+      textCodecVersion: schema.sessionRealtimeEntries.textCodecVersion,
       payload: schema.sessionRealtimeEntries.payload,
+      payloadCodecVersion: schema.sessionRealtimeEntries.payloadCodecVersion,
       createdAt: schema.sessionRealtimeEntries.createdAt,
       modeStartedAt: schema.sessionRealtimeModes.startedAt,
     })
@@ -371,10 +381,13 @@ export async function listSessionRealtimeContinuityEntriesInTransaction(
     )
     .limit(maximumEntries);
   return rows.reverse().flatMap((row) => {
-    const turnId = row.payload.turnId;
+    const text =
+      row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion);
+    const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion);
+    const turnId = payload.turnId;
     if (
       (row.role !== "user" && row.role !== "assistant") ||
-      typeof row.text !== "string" ||
+      typeof text !== "string" ||
       typeof turnId !== "string"
     ) {
       return [];
@@ -384,7 +397,7 @@ export async function listSessionRealtimeContinuityEntriesInTransaction(
         realtimeId: row.realtimeId,
         sequence: row.sequence,
         role: row.role,
-        text: takeUtf8Head(row.text, 16_000),
+        text: takeUtf8Head(text, 16_000),
         turnId,
         createdAt: row.createdAt.toISOString(),
       },

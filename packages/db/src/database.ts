@@ -7,6 +7,7 @@ import {
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 
 // §7.7 driver widening (Step I). `Database` is the structural, cross-driver
@@ -164,7 +165,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     // postgres-js IGNORES a URL `?search_path=`. Unset searchPath → omit it so the
     // server default (`public`) is unchanged for standalone.
     connection: {
-      application_name: "opengeni",
+      application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
       ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
     },
@@ -210,6 +211,11 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   await db.execute(
     sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`,
   );
+  // Transaction-local writer identity covers supported injected/embedded
+  // database handles whose connection-level application_name is host-owned.
+  // Old OpenGeni binaries do not set this GUC, so migration-installed update
+  // fences can distinguish their partial writes without inspecting content.
+  await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
   await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
 }
 

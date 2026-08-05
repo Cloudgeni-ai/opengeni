@@ -1847,7 +1847,8 @@ function isWorkspaceEscapeError(error: unknown): boolean {
 /** Classify only provider errors that carry an explicit path-miss fact. Generic
  * 404s and "not found" text are unsafe here because they can describe the box or
  * session disappearing rather than the requested file. */
-function isDefinitePathNotFoundError(error: unknown): boolean {
+export function isDefinitePathNotFoundError(error: unknown): boolean {
+  if (error instanceof ChannelANotFoundError) return true;
   if (!error || typeof error !== "object") return false;
   const candidate = error as { code?: unknown; errno?: unknown; osNotFound?: unknown };
   return (

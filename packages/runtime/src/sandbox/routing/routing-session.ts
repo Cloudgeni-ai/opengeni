@@ -30,7 +30,11 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
-import { isExecSessionLostBanner, stripExecBanner } from "../channel-a";
+import {
+  isDefinitePathNotFoundError,
+  isExecSessionLostBanner,
+  stripExecBanner,
+} from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -238,7 +242,7 @@ export interface RoutingSandboxSessionDeps {
 export type RoutingSandboxOperationObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "failed";
+  outcome: "ok" | "not_found" | "failed";
   durationMs: number;
 };
 
@@ -1102,6 +1106,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       const result = await withSandboxProviderOperation(backend.session, fn);
       outcome = "ok";
       return result;
+    } catch (error) {
+      if (
+        (op === "readFile" || op === "listDir" || op === "pathExists" || op === "viewImage") &&
+        isDefinitePathNotFoundError(error)
+      ) {
+        outcome = "not_found";
+      }
+      throw error;
     } finally {
       try {
         this.deps.onOperation?.({

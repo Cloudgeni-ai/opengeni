@@ -19,7 +19,10 @@ export type ToolspaceTokenRenewalOptions = {
   schedule?: (callback: () => void, delayMs: number) => unknown;
   clearSchedule?: (timer: unknown) => void;
   onSuccess?: (result: { nextDelayMs: number }) => void;
-  onFailure?: (failure: { retryDelayMs: number; errorClass: string }) => void;
+  onFailure?: (failure: {
+    retryDelayMs: number;
+    errorClass: "ToolspaceTokenRenewalOperationError";
+  }) => void;
 };
 
 class ToolspaceTokenRenewalError extends Error {
@@ -29,7 +32,10 @@ class ToolspaceTokenRenewalError extends Error {
 export function startToolspaceTokenRenewalLoop(
   options: ToolspaceTokenRenewalOptions,
 ): ToolspaceTokenRenewalController {
-  return startExpiringMaterialRenewalLoop<MintedSandboxToolspaceToken>({
+  return startExpiringMaterialRenewalLoop<
+    MintedSandboxToolspaceToken,
+    "ToolspaceTokenRenewalOperationError"
+  >({
     initialExpiresAt: options.initialExpiresAt,
     resolve: async () => {
       const minted = await options.mint();
@@ -40,6 +46,7 @@ export function startToolspaceTokenRenewalLoop(
     },
     write: options.write,
     expiresAt: (material) => material.expiresAt,
+    publicErrorClass: "ToolspaceTokenRenewalOperationError",
     policy: {
       defaultRefreshMs: TOOLSPACE_TOKEN_DEFAULT_REFRESH_MS,
       expiryLeadMs: TOOLSPACE_TOKEN_EXPIRY_LEAD_MS,

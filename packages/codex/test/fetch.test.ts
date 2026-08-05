@@ -100,6 +100,46 @@ describe("Codex encrypted artifact rejection classifier", () => {
 });
 
 describe("codexSubscriptionFetch", () => {
+  test("CODEX_DEBUG request logs omit rewritten URLs, query values, and body keys", async () => {
+    const sentinel = "SECRET_SENTINEL_123_query_and_body_key";
+    const { base } = baseRecorder();
+    const errors: unknown[][] = [];
+    const originalDebug = process.env.CODEX_DEBUG;
+    const originalError = console.error;
+    process.env.CODEX_DEBUG = "1";
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const url = new URL("https://chatgpt.com/backend-api/responses");
+      url.searchParams.set("credential", sentinel);
+      await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(base)(url, {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: true,
+            [sentinel]: "exact internal request content",
+          }),
+        }),
+      );
+    } finally {
+      console.error = originalError;
+      if (originalDebug === undefined) delete process.env.CODEX_DEBUG;
+      else process.env.CODEX_DEBUG = originalDebug;
+    }
+
+    expect(errors[0]).toEqual([
+      "[codex-debug] request dispatched",
+      {
+        method: "POST",
+        origin: "codex-subscription",
+        route: "codex_responses",
+        stream: true,
+      },
+    ]);
+    expect(JSON.stringify(errors)).not.toContain(sentinel);
+    expect(JSON.stringify(errors)).not.toContain("chatgpt.com");
+  });
+
   test("rewrites /responses, swaps headers, normalizes the body", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
@@ -1058,6 +1098,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "upstream_failed",
+      "provider secret failure detail",
     ],
     [
       "nested response.error",
@@ -1075,6 +1116,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "nested_stream_error",
+      "provider secret nested detail",
     ],
     [
       "top-level error",
@@ -1085,6 +1127,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "service_unavailable",
+      "provider secret top-level detail",
     ],
     [
       "response.incomplete",
@@ -1098,6 +1141,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "response_incomplete",
+      "The Codex response was incomplete (max_output_tokens)",
     ],
     [
       "non-retryable failed request",
@@ -1114,10 +1158,11 @@ describe("codexSubscriptionFetch", () => {
       },
       400,
       "context_length_exceeded",
+      "provider echoed private input",
     ],
   ] as const)(
-    "streaming caller: %s becomes a bounded marked provider failure without replay",
-    async (_name, event, expectedStatus, expectedCode) => {
+    "streaming caller: %s preserves the bounded exact provider failure without replay",
+    async (_name, event, expectedStatus, expectedCode, expectedMessage) => {
       let calls = 0;
       const response = await codexRequestStorage.run(ctx(), () =>
         codexSubscriptionFetch(async () => {
@@ -1151,8 +1196,8 @@ describe("codexSubscriptionFetch", () => {
         code: expectedCode,
       });
       expect(isCodexTransportError(observed)).toBe(true);
-      expect(String((observed as Error).message)).not.toContain("provider secret");
-      expect(JSON.stringify(observed)).not.toContain("provider secret");
+      expect(String((observed as Error).message)).toBe(expectedMessage);
+      expect(JSON.stringify(observed)).toContain(expectedMessage);
       expect(Buffer.byteLength(JSON.stringify(observed), "utf8")).toBeLessThan(4 * 1024);
       expect(calls).toBe(1);
     },

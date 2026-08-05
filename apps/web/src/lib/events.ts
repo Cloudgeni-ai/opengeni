@@ -10,15 +10,11 @@ export function isTerminalSessionStatus(value: SessionStatus): boolean {
 }
 
 /**
- * The console's timeline projection: the package's `buildTimeline` over
- * console-sanitized events (archived/provider-internal failure payloads are
- * redacted before they reach the timeline). Falls back to the session's
- * initial message while the event log is still empty.
+ * The console's timeline projection over exact session events. Falls back to
+ * the session's initial message while the event log is still empty.
  */
 export function projectSessionTimeline(session: Session, events: SessionEvent[]): TimelineItem[] {
-  const items = buildTimeline(
-    events.map((event) => sanitizeEventForDisplay(event, session.status)),
-  );
+  const items = buildTimeline(events);
   if (events.length === 0 && items.length === 0 && session.initialMessage) {
     return [
       {
@@ -34,49 +30,6 @@ export function projectSessionTimeline(session: Session, events: SessionEvent[])
   return items;
 }
 
-export function sanitizeEventForDisplay(
-  event: SessionEvent,
-  sessionStatus?: SessionStatus,
-): SessionEvent {
-  if (
-    isTerminalSessionStatus(sessionStatus ?? "idle") &&
-    (event.type === "turn.failed" || event.type === "sandbox.operation.failed")
-  ) {
-    return {
-      ...event,
-      payload: {
-        archived: true,
-        status: sessionStatus,
-        message: "Historical failure payload hidden in the web console.",
-      },
-    };
-  }
-  if (event.type === "turn.failed" || event.type === "sandbox.operation.failed") {
-    const payload =
-      event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
-        ? (event.payload as Record<string, unknown>)
-        : {};
-    const message = failurePayloadMessage(payload);
-    if (message && isProviderInternalFailure(message)) {
-      return {
-        ...event,
-        payload: {
-          error: providerInternalFailureDisplayMessage(message),
-          redacted: true,
-        },
-      };
-    }
-  }
-  if (event.type !== "agent.reasoning.delta") {
-    return event;
-  }
-  const text = reasoningSummaryText(event.payload);
-  return {
-    ...event,
-    payload: { text: text || "Reasoning summary received." },
-  };
-}
-
 export type SessionFailureSummary = {
   /** Human-readable reason from the most recent turn.failed event, if any. */
   reason: string | null;
@@ -90,12 +43,11 @@ export type SessionFailureSummary = {
 
 /**
  * Failure honesty for the session header/banner: the latest failure reason
- * (run through the same provider-internal redaction as the timeline) plus
- * the same-turn recovery history (`turn.recovery.requested`).
+ * plus the same-turn recovery history (`turn.recovery.requested`).
  */
 export function summarizeSessionFailure(
   events: SessionEvent[],
-  sessionStatus: SessionStatus,
+  _sessionStatus: SessionStatus,
 ): SessionFailureSummary {
   let reason: string | null = null;
   let failedAt: string | null = null;
@@ -107,12 +59,9 @@ export function summarizeSessionFailure(
     }
     if (event.type === "turn.failed") {
       failedTurnCount += 1;
-      const sanitized = sanitizeEventForDisplay(event, sessionStatus);
       const payload =
-        sanitized.payload &&
-        typeof sanitized.payload === "object" &&
-        !Array.isArray(sanitized.payload)
-          ? (sanitized.payload as Record<string, unknown>)
+        event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+          ? (event.payload as Record<string, unknown>)
           : {};
       reason = humanizeFailureReason(failurePayloadMessage(payload) ?? null) ?? reason;
       failedAt = event.occurredAt;
@@ -155,29 +104,6 @@ export function failurePayloadMessage(payload: Record<string, unknown>): string 
     return payload.message;
   }
   return undefined;
-}
-
-function isProviderInternalFailure(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return [
-    ["modal", ".client", ".modal", "client"],
-    ["container", "filesystem", "exec"],
-    ["sandbox", "terminate"],
-    ["resource", "_", "exhausted"],
-    ["failed to apply a ", "modal", " sandbox manifest"],
-    ["bandwidth exhausted", " or memory limit exceeded"],
-  ].some((parts) => normalized.includes(parts.join("")));
-}
-
-function providerInternalFailureDisplayMessage(message: string): string {
-  const normalized = message.toLowerCase();
-  if (
-    normalized.includes(["resource", "_", "exhausted"].join("")) ||
-    normalized.includes(["bandwidth exhausted", " or memory limit exceeded"].join(""))
-  ) {
-    return "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.";
-  }
-  return "Sandbox setup failed while preparing the execution environment. Start a new session.";
 }
 
 // Human labels for NAMED sandbox operations (the op `name` on a

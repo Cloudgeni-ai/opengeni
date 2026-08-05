@@ -151,7 +151,7 @@ describe("real Docker rig verification e2e", () => {
     ).toBe(1);
   }, 300_000);
 
-  test("verification output is redacted before persistence and audit metadata", async () => {
+  test("verification output is exact in persistence and audit metadata", async () => {
     const secret = "rig-secret-token-123456";
     const rig = await createRig(db.db, {
       accountId,
@@ -177,8 +177,7 @@ describe("real Docker rig verification e2e", () => {
     const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
     const storedSerialized = JSON.stringify(verified.verification);
     expect(verified.status).toBe("proposed");
-    expect(storedSerialized).not.toContain(secret);
-    expect(storedSerialized).toContain("[REDACTED]");
+    expect(storedSerialized).toContain(secret);
 
     await verifier().verifyRigVersion({ workspaceId, versionId: rig.activeVersion!.id });
     const [audit] = await db.db.transaction(async (tx) => {
@@ -194,8 +193,7 @@ describe("real Docker rig verification e2e", () => {
         limit 1`);
     });
     const auditSerialized = JSON.stringify(audit?.metadata);
-    expect(auditSerialized).not.toContain(secret);
-    expect(auditSerialized).toContain("[REDACTED]");
+    expect(auditSerialized).toContain(secret);
   }, 300_000);
 });
 

@@ -12,17 +12,25 @@ export type ExpiringMaterialRenewalController = {
   stop(): Promise<void>;
 };
 
-export type ExpiringMaterialRenewalOptions<T> = {
+export type ExpiringMaterialRenewalPublicErrorClass =
+  | "RunCredentialRenewalOperationError"
+  | "ToolspaceTokenRenewalOperationError";
+
+export type ExpiringMaterialRenewalOptions<
+  T,
+  ErrorClass extends ExpiringMaterialRenewalPublicErrorClass,
+> = {
   initialExpiresAt: Date | null;
   resolve: () => Promise<T>;
   write: (material: T) => Promise<void>;
   expiresAt: (material: T) => Date | null;
+  publicErrorClass: ErrorClass;
   policy: ExpiringMaterialRenewalPolicy;
   now?: () => number;
   schedule?: (callback: () => void, delayMs: number) => RenewalTimer;
   clearSchedule?: (timer: RenewalTimer) => void;
   onSuccess?: (result: { material: T; nextDelayMs: number }) => void;
-  onFailure?: (failure: { retryDelayMs: number; errorClass: string }) => void;
+  onFailure?: (failure: { retryDelayMs: number; errorClass: ErrorClass }) => void;
 };
 
 export function nextExpiringMaterialRenewalDelay(
@@ -45,9 +53,10 @@ export function nextExpiringMaterialRenewalDelay(
  * A late resolver cannot write after stop. A physical sandbox write that already
  * started is drained so turn settlement cannot race a stale mutation.
  */
-export function startExpiringMaterialRenewalLoop<T>(
-  options: ExpiringMaterialRenewalOptions<T>,
-): ExpiringMaterialRenewalController {
+export function startExpiringMaterialRenewalLoop<
+  T,
+  ErrorClass extends ExpiringMaterialRenewalPublicErrorClass,
+>(options: ExpiringMaterialRenewalOptions<T, ErrorClass>): ExpiringMaterialRenewalController {
   const now = options.now ?? Date.now;
   const schedule =
     options.schedule ??
@@ -102,14 +111,14 @@ export function startExpiringMaterialRenewalLoop<T>(
         // Observability never owns credential liveness.
       }
       scheduleRefresh(nextDelayMs);
-    } catch (error) {
+    } catch {
       if (stopped) return;
       const scheduledRetryMs = retryDelayMs;
       retryDelayMs = Math.min(retryDelayMs * 2, options.policy.maxRetryMs);
       try {
         options.onFailure?.({
           retryDelayMs: scheduledRetryMs,
-          errorClass: error instanceof Error ? error.name : "UnknownError",
+          errorClass: options.publicErrorClass,
         });
       } catch {
         // Observability never owns credential liveness.

@@ -193,7 +193,14 @@ import {
 } from "./turn-initiator";
 export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
-import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
+import {
+  fromPostgresLosslessJson,
+  fromPostgresLosslessText,
+  LOSSLESS_CONTENT_CODEC_VERSION,
+  toPostgresLosslessText,
+  withLosslessContentWriteVersion,
+} from "./lossless-json";
+export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
 import {
@@ -243,6 +250,10 @@ import {
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
+
+type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
+  payload: unknown;
+};
 import {
   AGENT_VISIBLE_MEMORY_STATUSES,
   hashMemoryText,
@@ -255,7 +266,7 @@ import {
   MEMORY_SEARCH_DEFAULT_LIMIT,
   MEMORY_SEARCH_MAX_LIMIT,
   renderWorkspaceMemoryBlock,
-  sanitizeMemoryText,
+  memoryTextForStorage,
   WORKSPACE_MEMORY_BLOCK_EMPTY,
   type MemoryBlockRecord,
 } from "./memory-domain";
@@ -277,15 +288,10 @@ export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
 } from "./environment-crypto";
-export {
-  sanitizeEventPayload,
-  sanitizeEventString,
-  sanitizeModelPayload,
-} from "./event-payload-sanitizer";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
 export * from "./insights";
-export { sanitizeMemoryText } from "./memory-domain";
+export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
 // db:migrate script use it). Re-exporting does NOT run migrate.ts's
@@ -509,11 +515,18 @@ type HostExportRow = {
   initiator_context: unknown;
   origin: string | null;
   payload: unknown;
+  payload_codec_version: number | null;
   occurred_at: Date | string;
   source_recorded_at: Date | string;
 };
 
-type HostExportClaimRow = Omit<HostExportRow, "root_session_id">;
+type HostExportClaimRow = Omit<HostExportRow, "root_session_id" | "payload_codec_version">;
+
+type HostExportClaimSidecarRow = {
+  export_cursor: string | number | bigint;
+  root_session_id: string | null;
+  payload_codec_version: number | null;
+};
 
 function hostExportCursor(value: string | number | bigint): string {
   return BigInt(value).toString();
@@ -616,52 +629,59 @@ export async function claimHostExportBatch(
   },
 ): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
-  const claimedRows = await rawRows<HostExportClaimRow>(
-    db,
-    sql`
-      select * from opengeni_host_export.claim_host_export_batch(
-        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
-        ${input.leaseHolderId}, ${input.leaseSeconds ?? 60},
-        ${input.limit ?? 100}, ${input.maxBytes ?? 1_048_576}
+  const rows = await db.transaction(async (tx) => {
+    const transaction = tx as unknown as Database;
+    const claimedRows = await rawRows<HostExportClaimRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.claim_host_export_batch(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+          ${input.leaseHolderId}, ${input.leaseSeconds ?? 60},
+          ${input.limit ?? 100}, ${input.maxBytes ?? 1_048_576}
+        )
+      `,
+    );
+    if (claimedRows.length === 0) return null;
+    const claimedFirst = claimedRows[0]!;
+    if (
+      claimedRows.some(
+        (row) =>
+          row.consumer_id !== claimedFirst.consumer_id ||
+          row.export_kind !== claimedFirst.export_kind ||
+          row.lease_token !== claimedFirst.lease_token ||
+          hostExportCursor(row.checkpoint) !== hostExportCursor(claimedFirst.checkpoint) ||
+          hostExportCursor(row.lease_through) !== hostExportCursor(claimedFirst.lease_through),
       )
-    `,
-  );
-  if (claimedRows.length === 0) return null;
-  const claimedFirst = claimedRows[0]!;
-  if (
-    claimedRows.some(
-      (row) =>
-        row.consumer_id !== claimedFirst.consumer_id ||
-        row.export_kind !== claimedFirst.export_kind ||
-        row.lease_token !== claimedFirst.lease_token ||
-        hostExportCursor(row.checkpoint) !== hostExportCursor(claimedFirst.checkpoint) ||
-        hostExportCursor(row.lease_through) !== hostExportCursor(claimedFirst.lease_through),
-    )
-  ) {
-    throw new Error("Host export claim returned inconsistent batch metadata");
-  }
-
-  const roots = await rawRows<{
-    export_cursor: string | number | bigint;
-    root_session_id: string | null;
-  }>(
-    db,
-    sql`
-      select * from opengeni_host_export.host_export_cursor_roots(
-        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
-      )
-    `,
-  );
-  const rootByExportCursor = new Map(
-    roots.map((row) => [hostExportCursor(row.export_cursor), row.root_session_id]),
-  );
-  const rows = claimedRows.map((row): HostExportRow => {
-    const cursor = hostExportCursor(row.export_cursor);
-    if (!rootByExportCursor.has(cursor)) {
-      throw new Error(`Host export root lookup omitted leased cursor ${cursor}`);
+    ) {
+      throw new Error("Host export claim returned inconsistent batch metadata");
     }
-    return { ...row, root_session_id: rootByExportCursor.get(cursor) ?? null };
+
+    const sidecars = await rawRows<HostExportClaimSidecarRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.host_export_claim_sidecars(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+        )
+      `,
+    );
+    const sidecarByExportCursor = new Map(
+      sidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
+    );
+    const materializedRows = claimedRows.map((row): HostExportRow => {
+      const cursor = hostExportCursor(row.export_cursor);
+      const sidecar = sidecarByExportCursor.get(cursor);
+      if (!sidecar) {
+        throw new Error(`Host export sidecar lookup omitted leased cursor ${cursor}`);
+      }
+      return {
+        ...row,
+        root_session_id: sidecar.root_session_id,
+        payload_codec_version: sidecar.payload_codec_version,
+      };
+    });
+    return materializedRows;
   });
+  if (!rows) return null;
   const first = rows[0]!;
 
   if (input.kind === "session_event") {
@@ -682,7 +702,7 @@ export async function claimHostExportBatch(
           sessionId: row.session_id,
           sequence: row.session_sequence,
           type: row.event_type,
-          payload: row.payload,
+          payload: fromPostgresLosslessJson(row.payload, row.payload_codec_version),
           occurredAt: hostExportTimestamp(row.occurred_at),
           clientEventId: row.client_event_id,
           turnId: row.turn_id,
@@ -789,7 +809,8 @@ export async function failHostExportBatch(
     sql`
       select opengeni_host_export.fail_host_export_batch(
         ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
-        ${input.error}, ${input.maxFailures ?? 20}
+        ${toPostgresLosslessText(input.error)}, ${input.maxFailures ?? 20},
+        ${LOSSLESS_CONTENT_CODEC_VERSION}
       ) as failures
     `,
   );
@@ -876,6 +897,7 @@ export async function getHostExportConsumerStatus(
     consecutive_failures: number;
     next_attempt_at: Date | string;
     last_error: string | null;
+    last_error_codec_version: number | null;
     last_error_at: Date | string | null;
     blocked_at: Date | string | null;
     lease_expires_at: Date | string | null;
@@ -886,9 +908,13 @@ export async function getHostExportConsumerStatus(
   }>(
     db,
     sql`
-      select * from opengeni_host_export.host_export_consumer_status(
+      select status.*, sidecar.last_error_codec_version
+      from opengeni_host_export.host_export_consumer_status(
         ${input.kind}, ${input.consumerId}
-      )
+      ) status
+      left join lateral opengeni_host_export.host_export_consumer_status_sidecar(
+        ${input.kind}, ${input.consumerId}
+      ) sidecar on true
     `,
   );
   if (!row) return null;
@@ -901,7 +927,10 @@ export async function getHostExportConsumerStatus(
     enabled: row.enabled,
     consecutiveFailures: Number(row.consecutive_failures),
     nextAttemptAt: hostExportTimestamp(row.next_attempt_at),
-    lastError: row.last_error,
+    lastError:
+      row.last_error === null
+        ? null
+        : fromPostgresLosslessText(row.last_error, row.last_error_codec_version),
     lastErrorAt: optionalTimestamp(row.last_error_at),
     blockedAt: optionalTimestamp(row.blocked_at),
     leaseExpiresAt: optionalTimestamp(row.lease_expires_at),
@@ -3258,6 +3287,16 @@ export type UpdateConnectionInput = {
   updatedBySubjectId?: string | null;
 };
 
+export type UpdateSlackBotDocumentDestinationInput = {
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  visibleToSubjectId: string;
+  expectedVersion: number;
+  metadata: Record<string, unknown>;
+  updatedBySubjectId: string;
+};
+
 export type TransitionConnectionStateInput = {
   workspaceId: string;
   connectionId: string;
@@ -3694,12 +3733,12 @@ export function durableUserHistoryItem(
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
   );
-  return sanitizeModelPayload({
+  return {
     type: "message",
     role: "user",
     content: prompt,
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
-  });
+  };
 }
 
 export type RetainedFileArtifact = {
@@ -4665,8 +4704,8 @@ export async function enableCapabilityInstallation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const now = new Date();
-      // Read the raw row (not the redacted mapping) so an omitted config
-      // preserves stored credential-header ciphertext instead of the redaction.
+      // Read the raw row (not the generic projection) so an omitted config
+      // preserves stored credential-header ciphertext.
       const [existing] = await scopedDb
         .select()
         .from(schema.capabilityInstallations)
@@ -4899,7 +4938,7 @@ export function decryptedCapabilityHeaders(
  * Returns the encrypted credential-header map stored on a capability
  * installation, or null when none is stored. This is the only read path for
  * the ciphertext besides listEnabledMcpCapabilityServers; the generic
- * installation mapping redacts it to header names.
+ * installation mapping projects it to header names.
  */
 export async function getStoredCapabilityHeaderCiphertext(
   db: Database,
@@ -5146,6 +5185,57 @@ export async function updateConnection(
     input.workspaceId,
     input.visibleToSubjectId,
     async (scopedDb) => await updateConnectionInScope(scopedDb, input),
+  );
+}
+
+async function updateSlackBotDocumentDestinationInScope(
+  db: Database,
+  input: UpdateSlackBotDocumentDestinationInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const [row] = await db
+    .update(schema.connections)
+    .set({
+      metadata: input.metadata,
+      version: sql`${schema.connections.version} + 1`,
+      // The install-verification trigger intentionally invalidates proof when
+      // metadata or version changes without a deliberate proof transition.
+      // Carry the proof to the exact new CAS generation in the same statement.
+      verifiedInstallVersion: sql`${schema.connections.version} + 1`,
+      updatedBySubjectId: input.updatedBySubjectId,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.connections.accountId, input.accountId),
+        eq(schema.connections.workspaceId, input.workspaceId),
+        eq(schema.connections.id, input.connectionId),
+        connectionSubjectVisibility(input.visibleToSubjectId),
+        isNull(schema.connections.subjectId),
+        eq(schema.connections.providerDomain, "slack.com"),
+        eq(schema.connections.kind, "app_install"),
+        eq(schema.connections.version, input.expectedVersion),
+        eq(schema.connections.verifiedInstallVersion, input.expectedVersion),
+        isNotNull(schema.connections.verifiedInstallAt),
+      ),
+    )
+    .returning(connectionMetadataColumns);
+  return row ? mapConnectionMetadata(row) : null;
+}
+
+/**
+ * Updates only pre-validated workspace Slack-bot destination metadata while
+ * atomically advancing its install proof to the new connection generation.
+ * A stale version or already-invalid proof returns null without writing.
+ */
+export async function updateSlackBotDocumentDestination(
+  db: Database,
+  input: UpdateSlackBotDocumentDestinationInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.visibleToSubjectId,
+    async (scopedDb) => await updateSlackBotDocumentDestinationInScope(scopedDb, input),
   );
 }
 
@@ -5884,7 +5974,10 @@ export async function getSlackInteractionSessionAccessForSession(
     sessionId: string;
   },
 ): Promise<
-  (Pick<SlackInteraction, "owningSubjectId" | "visibility"> & { rootSessionId: string }) | null
+  | (Pick<SlackInteraction, "owningSubjectId" | "visibility"> & {
+      rootSessionId: string;
+    })
+  | null
 > {
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb.execute<{
@@ -6063,7 +6156,10 @@ export async function claimSlackInteractionProgressDelivery(
       };
     }
     if (interaction.progressCount >= input.maxProgress) {
-      return { kind: "limit_reached", progressCount: interaction.progressCount };
+      return {
+        kind: "limit_reached",
+        progressCount: interaction.progressCount,
+      };
     }
 
     const slot = interaction.progressCount + 1;
@@ -6447,21 +6543,27 @@ async function insertSlackBotLifecycleSuccessAuditInScope(
   },
 ): Promise<void> {
   try {
-    await db.insert(schema.auditEvents).values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
-      action: input.action,
-      targetType: "connection",
-      targetId: input.connectionId,
-      metadata: {
-        credentialRole: input.credentialRole,
-        credentialLabel: input.credentialLabel,
-        connectionId: input.connectionId,
-        slackTeamId: input.slackTeamId,
-        outcome: "succeeded",
-      },
-    });
+    await db.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: input.action,
+          targetType: "connection",
+          targetId: input.connectionId,
+          metadata: {
+            credentialRole: input.credentialRole,
+            credentialLabel: input.credentialLabel,
+            connectionId: input.connectionId,
+            slackTeamId: input.slackTeamId,
+            outcome: "succeeded",
+          },
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
   } catch {
     // Do not leak a provider/database payload through the callback. Throwing from
     // the RLS transaction is what rolls the paired connection mutation back.
@@ -6637,20 +6739,26 @@ export async function recordSlackBotInstallCallbackFailure(
         )
         .limit(1);
       if (existing) return false;
-      await scopedDb.insert(schema.auditEvents).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        action: "slack_bot.install.callback.failed",
-        targetType: "slack_oauth_callback",
-        targetId: input.callbackDigest,
-        metadata: {
-          outcome: "failed",
-          installMode: input.installMode,
-          stage: input.stage,
-          reason: input.reason,
-        },
-      });
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            action: "slack_bot.install.callback.failed",
+            targetType: "slack_oauth_callback",
+            targetId: input.callbackDigest,
+            metadata: {
+              outcome: "failed",
+              installMode: input.installMode,
+              stage: input.stage,
+              reason: input.reason,
+            },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
       return true;
     },
   );
@@ -6901,15 +7009,21 @@ export async function completeSlackBotPostOperation(
           .where(eq(schema.slackBotPostOperations.id, current.id))
           .returning();
         if (!completed) throw new Error("Slack post completion returned no row");
-        await tx.insert(schema.auditEvents).values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId ?? null,
-          action: "slack_bot.message.post",
-          targetType: "connection",
-          targetId: input.connectionId,
-          metadata: input.auditMetadata,
-        });
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId ?? null,
+              action: "slack_bot.message.post",
+              targetType: "connection",
+              targetId: input.connectionId,
+              metadata: input.auditMetadata,
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
         return {
           kind: "completed",
           operation: mapSlackBotPostOperation(completed),
@@ -7224,15 +7338,21 @@ export async function completeSlackBotDeleteOperation(
           .where(eq(schema.slackBotDeleteOperations.id, current.id))
           .returning();
         if (!completed) throw new Error("Slack delete completion returned no row");
-        await tx.insert(schema.auditEvents).values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId ?? null,
-          action: "slack_bot.message.delete",
-          targetType: "connection",
-          targetId: input.connectionId,
-          metadata: input.auditMetadata,
-        });
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId ?? null,
+              action: "slack_bot.message.delete",
+              targetType: "connection",
+              targetId: input.connectionId,
+              metadata: input.auditMetadata,
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
         return {
           kind: "completed",
           operation: mapSlackBotDeleteOperation(completed),
@@ -7709,19 +7829,25 @@ export async function createKnowledgeMemory(
     async (scopedDb) => {
       const [row] = await scopedDb
         .insert(schema.knowledgeMemories)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          status: input.status ?? "proposed",
-          kind: input.kind ?? "semantic",
-          scope,
-          text,
-          textHash: hashMemoryText(text),
-          sourceRefs: input.sourceRefs ?? [],
-          confidence: confidenceToStorage(input.confidence ?? 0.5),
-          metadata: input.metadata ?? {},
-          createdBySessionId: input.createdBySessionId ?? null,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              status: input.status ?? "proposed",
+              kind: input.kind ?? "semantic",
+              scope,
+              text,
+              textHash: hashMemoryText(text),
+              sourceRefs: input.sourceRefs ?? [],
+              confidence: confidenceToStorage(input.confidence ?? 0.5),
+              metadata: input.metadata ?? {},
+              createdBySessionId: input.createdBySessionId ?? null,
+            },
+            "text",
+            "textCodecVersion",
+          ),
+        )
         .returning();
       if (!row) {
         throw new Error("Failed to create knowledge memory");
@@ -7749,8 +7875,8 @@ export async function updateKnowledgeMemory(
         : undefined;
 
   // A text edit is a human audit action: it bypasses the dedup/cap gates (an
-  // authorized curator's edit is intentional) but still sanitizes + redacts,
-  // recomputes text_hash, and re-embeds fail-soft so the row stays coherent.
+  // authorized curator's edit is intentional), preserves exact text, recomputes
+  // text_hash, and re-embeds fail-soft so the row stays coherent.
   type MemoryTextUpdate = {
     text: string;
     textHash: string;
@@ -7759,21 +7885,22 @@ export async function updateKnowledgeMemory(
     updateEmbedding: boolean;
   };
   const embedForMemoryUpdate = async (
-    sanitizedText: string,
+    exactText: string,
   ): Promise<{ embedding: number[] | null; embeddingModel: string | null }> => {
     let embedding: number[] | null = null;
     let embeddingModel: string | null = null;
     if (embedder) {
       try {
-        const [vector] = await embedder.embedMany([sanitizedText]);
+        const [vector] = await embedder.embedMany([exactText]);
         if (vector && vector.length > 0) {
           embedding = vector;
           embeddingModel = embedder.model;
         }
-      } catch (error) {
+      } catch {
         console.warn("workspace memory edit: embedding failed; storing keyword-only", {
-          workspaceId,
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "MemoryEmbeddingOperationError",
+          errorCode: "memory_edit_embedding_failed",
+          origin: "db",
         });
       }
     }
@@ -7782,19 +7909,19 @@ export async function updateKnowledgeMemory(
 
   let textUpdate: MemoryTextUpdate | undefined;
   if (input.text !== undefined) {
-    const { text: sanitizedText } = sanitizeMemoryText(input.text);
-    if (sanitizedText.length === 0) {
-      throw new Error("Memory text is empty after sanitization; nothing to save.");
+    const exactText = memoryTextForStorage(input.text);
+    if (exactText.length === 0) {
+      throw new Error("Memory text is empty; nothing to save.");
     }
-    if (isMemoryTextTooLong(sanitizedText)) {
+    if (isMemoryTextTooLong(exactText)) {
       throw new Error(
-        `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
+        `Memory text is too long (${exactText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
       );
     }
-    const { embedding, embeddingModel } = await embedForMemoryUpdate(sanitizedText);
+    const { embedding, embeddingModel } = await embedForMemoryUpdate(exactText);
     textUpdate = {
-      text: sanitizedText,
-      textHash: hashMemoryText(sanitizedText),
+      text: exactText,
+      textHash: hashMemoryText(exactText),
       embedding,
       embeddingModel,
       updateEmbedding: true,
@@ -7807,6 +7934,7 @@ export async function updateKnowledgeMemory(
         id: schema.knowledgeMemories.id,
         status: schema.knowledgeMemories.status,
         text: schema.knowledgeMemories.text,
+        textCodecVersion: schema.knowledgeMemories.textCodecVersion,
         textHash: schema.knowledgeMemories.textHash,
         embedding: schema.knowledgeMemories.embedding,
       })
@@ -7821,6 +7949,7 @@ export async function updateKnowledgeMemory(
     if (!existing) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
     }
+    const existingText = fromPostgresLosslessText(existing.text, existing.textCodecVersion);
     const nextStatus = (input.status ?? existing.status) as KnowledgeMemoryStatus;
     const wasVisible = agentVisibleMemoryStatuses.includes(
       existing.status as (typeof agentVisibleMemoryStatuses)[number],
@@ -7848,24 +7977,24 @@ export async function updateKnowledgeMemory(
       }
     }
     if (!wasVisible && willBeVisible && textUpdate === undefined) {
-      const { text: sanitizedText } = sanitizeMemoryText(existing.text);
-      if (sanitizedText.length === 0) {
-        throw new Error("Memory text is empty after sanitization; nothing to save.");
+      const exactText = memoryTextForStorage(existingText);
+      if (exactText.length === 0) {
+        throw new Error("Memory text is empty; nothing to save.");
       }
-      if (isMemoryTextTooLong(sanitizedText)) {
+      if (isMemoryTextTooLong(exactText)) {
         throw new Error(
-          `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
+          `Memory text is too long (${exactText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
         );
       }
-      const textChanged = sanitizedText !== existing.text;
+      const textChanged = exactText !== existingText;
       const missingEmbedding = existing.embedding == null;
       const { embedding, embeddingModel } =
         textChanged || missingEmbedding
-          ? await embedForMemoryUpdate(sanitizedText)
+          ? await embedForMemoryUpdate(exactText)
           : { embedding: null, embeddingModel: null };
       textUpdate = {
-        text: sanitizedText,
-        textHash: hashMemoryText(sanitizedText),
+        text: exactText,
+        textHash: hashMemoryText(exactText),
         embedding,
         embeddingModel,
         updateEmbedding: textChanged || missingEmbedding,
@@ -7896,6 +8025,7 @@ export async function updateKnowledgeMemory(
               ...(textUpdate !== undefined
                 ? {
                     text: textUpdate.text,
+                    textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
                     textHash: textUpdate.textHash,
                     ...(textUpdate.updateEmbedding
                       ? {
@@ -8075,7 +8205,6 @@ export type SaveWorkspaceMemoryResult = {
   // true when `replacesId` matched the same row and the row was updated in place
   // instead of being superseded by a new/existing row.
   updated: boolean;
-  redactionCount: number;
   embedded: boolean;
 };
 
@@ -8266,16 +8395,16 @@ export async function saveWorkspaceMemory(
   input: SaveWorkspaceMemoryInput,
   embedder?: MemoryEmbedder,
 ): Promise<SaveWorkspaceMemoryResult> {
-  const { text: sanitizedText, redactionCount } = sanitizeMemoryText(input.text);
-  if (sanitizedText.length === 0) {
-    throw new Error("Memory text is empty after sanitization; nothing to save.");
+  const exactText = memoryTextForStorage(input.text);
+  if (exactText.length === 0) {
+    throw new Error("Memory text is empty; nothing to save.");
   }
-  if (isMemoryTextTooLong(sanitizedText)) {
+  if (isMemoryTextTooLong(exactText)) {
     throw new Error(
-      `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`,
+      `Memory text is too long (${exactText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`,
     );
   }
-  const textHash = hashMemoryText(sanitizedText);
+  const textHash = hashMemoryText(exactText);
   const kind: KnowledgeMemoryKind = input.kind ?? "semantic";
 
   // Embed fail-soft, OUTSIDE the transaction: a provider error must never block a
@@ -8284,15 +8413,16 @@ export async function saveWorkspaceMemory(
   let embeddingModel: string | null = null;
   if (embedder) {
     try {
-      const [vector] = await embedder.embedMany([sanitizedText]);
+      const [vector] = await embedder.embedMany([exactText]);
       if (vector && vector.length > 0) {
         embedding = vector;
         embeddingModel = embedder.model;
       }
-    } catch (error) {
+    } catch {
       console.warn("workspace memory save: embedding failed; saving keyword-only", {
-        workspaceId: input.workspaceId,
-        error: error instanceof Error ? error.message : String(error),
+        errorClass: "MemoryEmbeddingOperationError",
+        errorCode: "memory_save_embedding_failed",
+        origin: "db",
       });
     }
   }
@@ -8340,33 +8470,41 @@ export async function saveWorkspaceMemory(
       // row live and update its text/vector metadata so the call still has an
       // observable effect.
       const normalizedTextChanged = replacesRow
-        ? hashMemoryText(replacesRow.text) !== textHash
+        ? hashMemoryText(
+            fromPostgresLosslessText(replacesRow.text, replacesRow.textCodecVersion),
+          ) !== textHash
         : true;
       const metadata = replacesRow
         ? inPlaceSaveMemoryMetadata(replacesRow.metadata, input)
         : undefined;
       const [updated] = await scopedDb
         .update(schema.knowledgeMemories)
-        .set({
-          text: sanitizedText,
-          textHash,
-          ...(normalizedTextChanged
-            ? {
-                // New text with no fresh vector must clear the old vector. Keeping a
-                // stale vector would make vector search return this row for the old
-                // text's meaning; keyword search still covers the new text.
-                embedding,
-                embeddingModel,
-              }
-            : {}),
-          ...(input.kind !== undefined ? { kind } : {}),
-          ...(input.confidence !== undefined
-            ? { confidence: confidenceToStorage(input.confidence) }
-            : {}),
-          ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-          ...(metadata !== undefined ? { metadata } : {}),
-          updatedAt: new Date(),
-        })
+        .set(
+          withLosslessContentWriteVersion(
+            {
+              text: exactText,
+              textHash,
+              ...(normalizedTextChanged
+                ? {
+                    // New text with no fresh vector must clear the old vector. Keeping a
+                    // stale vector would make vector search return this row for the old
+                    // text's meaning; keyword search still covers the new text.
+                    embedding,
+                    embeddingModel,
+                  }
+                : {}),
+              ...(input.kind !== undefined ? { kind } : {}),
+              ...(input.confidence !== undefined
+                ? { confidence: confidenceToStorage(input.confidence) }
+                : {}),
+              ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+              ...(metadata !== undefined ? { metadata } : {}),
+              updatedAt: new Date(),
+            },
+            "text",
+            "textCodecVersion",
+          ),
+        )
         .where(
           and(
             eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
@@ -8386,7 +8524,6 @@ export async function saveWorkspaceMemory(
         superseded: null,
         supersededId: null,
         updated: true,
-        redactionCount,
         embedded: embedding !== null,
       };
     };
@@ -8429,7 +8566,6 @@ export async function saveWorkspaceMemory(
         superseded,
         supersededId: superseded?.id ?? null,
         updated: false,
-        redactionCount,
         embedded: embedding !== null,
       };
     };
@@ -8533,22 +8669,28 @@ export async function saveWorkspaceMemory(
         async (tx) =>
           await tx
             .insert(schema.knowledgeMemories)
-            .values({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              status: "active",
-              kind,
-              scope: "workspace",
-              text: sanitizedText,
-              textHash,
-              sourceRefs,
-              confidence: confidenceToStorage(input.confidence ?? 0.5),
-              pinned: input.pinned ?? false,
-              metadata: saveMemoryMetadata(input),
-              createdBySessionId: input.sessionId ?? null,
-              supersedesId: replacesFullId,
-              ...(embedding ? { embedding, embeddingModel } : {}),
-            })
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  status: "active",
+                  kind,
+                  scope: "workspace",
+                  text: exactText,
+                  textHash,
+                  sourceRefs,
+                  confidence: confidenceToStorage(input.confidence ?? 0.5),
+                  pinned: input.pinned ?? false,
+                  metadata: saveMemoryMetadata(input),
+                  createdBySessionId: input.sessionId ?? null,
+                  supersedesId: replacesFullId,
+                  ...(embedding ? { embedding, embeddingModel } : {}),
+                },
+                "text",
+                "textCodecVersion",
+              ),
+            )
             .returning(),
       );
       inserted = rows[0];
@@ -8593,7 +8735,6 @@ export async function saveWorkspaceMemory(
       superseded,
       supersededId: superseded?.id ?? null,
       updated: false,
-      redactionCount,
       embedded: embedding !== null,
     };
   });
@@ -8763,8 +8904,9 @@ export async function searchWorkspaceMemories(
         console.warn(
           "workspace memory hybrid search vector component failed; falling back to keyword",
           {
-            workspaceId,
-            error: error instanceof Error ? error.message : String(error),
+            errorClass: "MemorySearchOperationError",
+            errorCode: "memory_hybrid_vector_failed",
+            origin: "db",
           },
         );
       }
@@ -8892,6 +9034,7 @@ export async function resolveWorkspaceMemoryBlock(
           id: schema.knowledgeMemories.id,
           kind: schema.knowledgeMemories.kind,
           text: schema.knowledgeMemories.text,
+          textCodecVersion: schema.knowledgeMemories.textCodecVersion,
           pinned: schema.knowledgeMemories.pinned,
         })
         .from(schema.knowledgeMemories)
@@ -8911,7 +9054,7 @@ export async function resolveWorkspaceMemoryBlock(
   const blockRecords: MemoryBlockRecord[] = records.map((row) => ({
     id: row.id,
     kind: row.kind as KnowledgeMemoryKind,
-    text: row.text,
+    text: fromPostgresLosslessText(row.text, row.textCodecVersion),
     pinned: row.pinned,
   }));
   return renderWorkspaceMemoryBlock(blockRecords) ?? WORKSPACE_MEMORY_BLOCK_EMPTY;
@@ -9025,7 +9168,10 @@ export async function loadSocialConnectionCredential(
   workspaceId: string,
   connectionId: string,
   subjectId?: string | null,
-): Promise<{ connection: SocialConnection; credentialEncrypted: string | null } | null> {
+): Promise<{
+  connection: SocialConnection;
+  credentialEncrypted: string | null;
+} | null> {
   return await withSocialConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -9041,7 +9187,10 @@ export async function loadSocialConnectionCredential(
     if (!row) {
       return null;
     }
-    return { connection: mapSocialConnection(row), credentialEncrypted: row.credentialEncrypted };
+    return {
+      connection: mapSocialConnection(row),
+      credentialEncrypted: row.credentialEncrypted,
+    };
   });
 }
 
@@ -9241,7 +9390,10 @@ export async function recordSyncedSocialPosts(
           ],
         })
         .returning({ id: schema.socialPosts.id });
-      return { inserted: rows.length, skipped: input.posts.length - rows.length };
+      return {
+        inserted: rows.length,
+        skipped: input.posts.length - rows.length,
+      };
     },
   );
 }
@@ -9334,7 +9486,9 @@ export async function updateScheduledTask(
         ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         ...(input.personalConnectionDelegations !== undefined
-          ? { personalConnectionDelegations: input.personalConnectionDelegations }
+          ? {
+              personalConnectionDelegations: input.personalConnectionDelegations,
+            }
           : {}),
         ...(input.reusableSessionId !== undefined
           ? { reusableSessionId: input.reusableSessionId }
@@ -9385,7 +9539,9 @@ export async function getScheduledTaskPersonalConnectionDelegations(
 ): Promise<McpPersonalConnectionDelegation[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ delegations: schema.scheduledTasks.personalConnectionDelegations })
+      .select({
+        delegations: schema.scheduledTasks.personalConnectionDelegations,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -10053,15 +10209,17 @@ function mapRig(
 }
 
 function mapRigChange(row: typeof schema.rigChanges.$inferSelect): RigChange {
+  const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion);
+  const verification = fromPostgresLosslessJson(row.verification, row.verificationCodecVersion);
   return {
     id: row.id,
     rigId: row.rigId,
     baseVersionId: row.baseVersionId,
     kind: row.kind as RigChangeKind,
-    payload: RigChangeContract.shape.payload.parse(row.payload),
+    payload: RigChangeContract.shape.payload.parse(payload),
     status: row.status as RigChangeStatus,
     proposedBy: row.proposedBy,
-    verification: (row.verification ?? null) as RigChange["verification"],
+    verification: (verification ?? null) as RigChange["verification"],
     resultVersionId: row.resultVersionId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -10148,6 +10306,7 @@ async function loadRigHealthByActiveVersion(
     .select({
       resultVersionId: schema.rigChanges.resultVersionId,
       verification: schema.rigChanges.verification,
+      verificationCodecVersion: schema.rigChanges.verificationCodecVersion,
       updatedAt: schema.rigChanges.updatedAt,
     })
     .from(schema.rigChanges)
@@ -10161,7 +10320,10 @@ async function loadRigHealthByActiveVersion(
     if (!change.resultVersionId) {
       continue;
     }
-    const verification = (change.verification ?? null) as Record<string, unknown> | null;
+    const verification = fromPostgresLosslessJson(
+      change.verification,
+      change.verificationCodecVersion,
+    ) as Record<string, unknown> | null;
     if (verification?.passed === true) {
       pushCandidate({
         versionId: change.resultVersionId,
@@ -10181,6 +10343,7 @@ async function loadRigHealthByActiveVersion(
     .select({
       action: schema.auditEvents.action,
       metadata: schema.auditEvents.metadata,
+      metadataCodecVersion: schema.auditEvents.metadataCodecVersion,
       occurredAt: schema.auditEvents.occurredAt,
     })
     .from(schema.auditEvents)
@@ -10193,7 +10356,7 @@ async function loadRigHealthByActiveVersion(
       ),
     );
   for (const row of auditRows) {
-    const metadata = row.metadata ?? {};
+    const metadata = fromPostgresLosslessJson(row.metadata, row.metadataCodecVersion) ?? {};
     const versionId = typeof metadata.versionId === "string" ? metadata.versionId : null;
     if (!versionId || !healthByVersion.has(versionId)) {
       continue;
@@ -10936,16 +11099,22 @@ export async function createRigChange(
     async (scopedDb) => {
       const [row] = await scopedDb
         .insert(schema.rigChanges)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          rigId: input.rigId,
-          baseVersionId: input.baseVersionId ?? null,
-          kind: input.kind,
-          payload: input.payload,
-          status: "proposed",
-          proposedBy: input.proposedBy ?? null,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              rigId: input.rigId,
+              baseVersionId: input.baseVersionId ?? null,
+              kind: input.kind,
+              payload: input.payload,
+              status: "proposed",
+              proposedBy: input.proposedBy ?? null,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       if (!row) {
         throw new Error("Failed to create rig change");
@@ -11114,9 +11283,13 @@ export async function updateRigChangeStatus(
     if (terminal) {
       throw new RigChangeTransitionError(changeId, current.status, input.status);
     }
+    const currentVerification = fromPostgresLosslessJson(
+      current.verification,
+      current.verificationCodecVersion,
+    );
     const mergedVerification = input.verification
       ? {
-          ...((current.verification as Record<string, unknown> | null) ?? {}),
+          ...((currentVerification as Record<string, unknown> | null) ?? {}),
           ...input.verification,
         }
       : undefined;
@@ -11124,7 +11297,12 @@ export async function updateRigChangeStatus(
       .update(schema.rigChanges)
       .set({
         status: input.status,
-        ...(mergedVerification !== undefined ? { verification: mergedVerification } : {}),
+        ...(mergedVerification !== undefined
+          ? {
+              verification: mergedVerification,
+              verificationCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
+            }
+          : {}),
         ...(input.resultVersionId !== undefined ? { resultVersionId: input.resultVersionId } : {}),
         updatedAt: new Date(),
       })
@@ -11169,24 +11347,34 @@ export async function beginRigChangeVerificationAttempt(
     if (current.status === "merged") {
       throw new RigChangeTransitionError(changeId, current.status, "verifying");
     }
-    const previousVerification = (current.verification as Record<string, unknown> | null) ?? {};
+    const previousVerification =
+      (fromPostgresLosslessJson(current.verification, current.verificationCodecVersion) as Record<
+        string,
+        unknown
+      > | null) ?? {};
     const previousAttempt =
       typeof previousVerification.attempt === "number" ? previousVerification.attempt : 0;
     const [row] = await scopedDb
       .update(schema.rigChanges)
-      .set({
-        status: "verifying",
-        verification: {
-          ...previousVerification,
-          attempt: previousAttempt + 1,
-          startedAt: input.startedAt,
-          checkResults: [],
-          finishedAt: null,
-          passed: null,
-          error: null,
-        },
-        updatedAt: new Date(),
-      })
+      .set(
+        withLosslessContentWriteVersion(
+          {
+            status: "verifying",
+            verification: {
+              ...previousVerification,
+              attempt: previousAttempt + 1,
+              startedAt: input.startedAt,
+              checkResults: [],
+              finishedAt: null,
+              passed: null,
+              error: null,
+            },
+            updatedAt: new Date(),
+          },
+          "verification",
+          "verificationCodecVersion",
+        ),
+      )
       .where(
         and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)),
       )
@@ -11739,15 +11927,21 @@ export async function designateCodexAppsCredential(
       if (!updated?.credentialId || !updated.designatedAt) {
         throw new Error("Codex Apps designation was not persisted");
       }
-      await scopedDb.insert(schema.auditEvents).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        action: "codex_apps.designated",
-        targetType: "codex_subscription_credential",
-        targetId: input.credentialId,
-        metadata: { version },
-      });
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            action: "codex_apps.designated",
+            targetType: "codex_subscription_credential",
+            targetId: input.credentialId,
+            metadata: { version },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
       return { kind: "updated", ...updated };
     },
   );
@@ -11780,7 +11974,11 @@ export async function clearCodexAppsCredential(
         .for("update")
         .limit(1);
       const current: CodexAppsSettings = row
-        ? { credentialId: row.credentialId, version: row.version, designatedAt: row.designatedAt }
+        ? {
+            credentialId: row.credentialId,
+            version: row.version,
+            designatedAt: row.designatedAt,
+          }
         : { credentialId: null, version: 0, designatedAt: null };
       const [membership] = await scopedDb
         .select({ permissions: schema.workspaceMemberships.permissions })
@@ -11817,15 +12015,21 @@ export async function clearCodexAppsCredential(
           designatedAt: schema.codexAppsSettings.designatedAt,
         });
       if (!updated) throw new Error("Codex Apps designation clear was not persisted");
-      await scopedDb.insert(schema.auditEvents).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        action: "codex_apps.cleared",
-        targetType: "codex_subscription_credential",
-        targetId: current.credentialId,
-        metadata: { version },
-      });
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            action: "codex_apps.cleared",
+            targetType: "codex_subscription_credential",
+            targetId: current.credentialId,
+            metadata: { version },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
       return { kind: "updated", ...updated };
     },
   );
@@ -12235,10 +12439,11 @@ export async function workspaceCodexSubscriptionActive(
   // Every attempt threw: this is a real, persistent read outage, not a one-off
   // blip. Surface the underlying error (truthful + retryable) instead of
   // silently denying an active subscription.
-  console.error(
-    `workspaceCodexSubscriptionActive: credential read failed for workspace ${workspaceId} after ${CODEX_ACTIVE_READ_ATTEMPTS} attempts`,
-    lastError,
-  );
+  console.error("workspace Codex subscription credential read failed after retries", {
+    errorClass: "CredentialReadOperationError",
+    errorCode: "codex_active_credential_read_failed",
+    origin: "db",
+  });
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
@@ -12355,7 +12560,7 @@ export type CodexCredentialLeasePolicyScopeResolver<TPolicyScope> = (
 export type CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic = never> = {
   /** Candidates from exactly one selected policy scope; never a union-ranked pool list. */
   accounts: readonly CodexLeaseAccountStatus[];
-  /** Downstream-owned, secret-safe diagnostics for rejected primary/fallback scopes. */
+  /** Downstream-owned, value-free metadata diagnostics for rejected primary/fallback scopes. */
   unavailableDiagnostics?: readonly TUnavailableDiagnostic[];
 };
 
@@ -13271,48 +13476,57 @@ export async function armCodexCapacityWait(
         sequence = closedTools.sequence;
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values([
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "codex.capacity.waiting",
-              payload: sanitizeEventPayload({
-                ...input.failurePayload,
-                recovery: "codex_capacity",
-                retryable: true,
-                rotated: true,
-                waiterId: waiterRow.id,
-                generation: waiterRow.generation,
-                goalId,
-                goalVersion,
-                blockedTurnGeneration: turn.executionGeneration,
-                policyHash,
-                resetKind: input.resetKind,
-                earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
-                nextCheckAt: nextCheckAt.toISOString(),
-              }),
-              turnId: input.turnId,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "session.status.changed",
-              payload: { status: "waiting_capacity", reason: "codex_capacity" },
-              turnId: input.turnId,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-          ])
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "codex.capacity.waiting",
+                  payload: {
+                    ...input.failurePayload,
+                    recovery: "codex_capacity",
+                    retryable: true,
+                    rotated: true,
+                    waiterId: waiterRow.id,
+                    generation: waiterRow.generation,
+                    goalId,
+                    goalVersion,
+                    blockedTurnGeneration: turn.executionGeneration,
+                    policyHash,
+                    resetKind: input.resetKind,
+                    earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
+                    nextCheckAt: nextCheckAt.toISOString(),
+                  },
+                  turnId: input.turnId,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "session.status.changed",
+                  payload: {
+                    status: "waiting_capacity",
+                    reason: "codex_capacity",
+                  },
+                  turnId: input.turnId,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         const [waitingTurn] = await tx
           .update(schema.sessionTurns)
@@ -13581,18 +13795,18 @@ async function supersedeCodexCapacityWaitInTransaction(
     : [];
   const nextSessionStatus =
     input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
-  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
+  const eventValues: SessionEventInsertWithPayload[] = [
     {
       accountId: input.session.accountId,
       workspaceId: input.session.workspaceId,
       sessionId: input.session.id,
       sequence: input.session.lastSequence + 1,
       type: "codex.capacity.superseded",
-      payload: sanitizeEventPayload({
+      payload: {
         waiterId: updated.id,
         generation: updated.generation,
         reason: input.reason,
-      }),
+      },
       turnId: updated.blockedTurnId,
       turnGeneration: input.blockedTurn.executionGeneration,
       ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
@@ -13613,7 +13827,10 @@ async function supersedeCodexCapacityWaitInTransaction(
       occurredAt: input.now,
     });
   }
-  const inserted = await tx.insert(schema.sessionEvents).values(eventValues).returning();
+  const inserted = await tx
+    .insert(schema.sessionEvents)
+    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .returning();
   const lastSequence = input.session.lastSequence + inserted.length;
   const [updatedSession] = await tx
     .update(schema.sessions)
@@ -13866,41 +14083,47 @@ export async function reconcileCodexCapacityWait<
 
         const events = await tx
           .insert(schema.sessionEvents)
-          .values([
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: session.lastSequence + 1,
-              type: "codex.capacity.resumed",
-              payload: sanitizeEventPayload({
-                waiterId: waiter.id,
-                generation: waiter.generation,
-                wakeRevision: waiter.wakeRevision,
-                goalId: waiter.goalId,
-                goalVersion: waiter.goalVersion,
-                blockedTurnGeneration: waiter.blockedTurnGeneration,
-                policyHash: waiter.policyHash,
-                diagnostic: decision.diagnostic ?? null,
-              }),
-              turnId: blockedTurn.id,
-              turnGeneration: blockedTurn.executionGeneration,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: session.lastSequence + 2,
-              type: "session.status.changed",
-              payload: { status: "recovering", reason: "codex_capacity" },
-              turnId: blockedTurn.id,
-              turnGeneration: blockedTurn.executionGeneration,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-          ])
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "codex.capacity.resumed",
+                  payload: {
+                    waiterId: waiter.id,
+                    generation: waiter.generation,
+                    wakeRevision: waiter.wakeRevision,
+                    goalId: waiter.goalId,
+                    goalVersion: waiter.goalVersion,
+                    blockedTurnGeneration: waiter.blockedTurnGeneration,
+                    policyHash: waiter.policyHash,
+                    diagnostic: decision.diagnostic ?? null,
+                  },
+                  turnId: blockedTurn.id,
+                  turnGeneration: blockedTurn.executionGeneration,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 2,
+                  type: "session.status.changed",
+                  payload: { status: "recovering", reason: "codex_capacity" },
+                  turnId: blockedTurn.id,
+                  turnGeneration: blockedTurn.executionGeneration,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         const [updatedWaiter] = await tx
           .update(schema.codexCapacityWaiters)
@@ -14297,18 +14520,24 @@ export async function updateCodexAllocatorEligibility(
       if (!updated) {
         throw new Error("Codex allocator row changed while locked");
       }
-      await tx.insert(schema.auditEvents).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        action: "codex.allocator.updated",
-        targetType: "codex_subscription_credential",
-        targetId: input.credentialId,
-        metadata: {
-          allocatorEnabled: updated.allocatorEnabled,
-          allocatorVersion: updated.allocatorVersion,
-        },
-      });
+      await tx.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            action: "codex.allocator.updated",
+            targetType: "codex_subscription_credential",
+            targetId: input.credentialId,
+            metadata: {
+              allocatorEnabled: updated.allocatorEnabled,
+              allocatorVersion: updated.allocatorVersion,
+            },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
       return {
         result: {
           kind: "updated",
@@ -15063,15 +15292,21 @@ export async function completeCodexResetRedemption(
             ),
           );
       }
-      await tx.insert(schema.auditEvents).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: current.subjectId,
-        action: "codex.reset_credit.redemption.completed",
-        targetType: "codex_reset_redemption_attempt",
-        targetId: input.attemptId,
-        metadata: { outcome: input.outcome },
-      });
+      await tx.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: current.subjectId,
+            action: "codex.reset_credit.redemption.completed",
+            targetType: "codex_reset_redemption_attempt",
+            targetId: input.attemptId,
+            metadata: { outcome: input.outcome },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
       return {
         result: mapCodexResetRedemptionAttempt(completed),
         // A successful/already-applied upstream reset can make durable waiters
@@ -15113,6 +15348,24 @@ export async function recordCodexAccountUsageWithWakeTargets(
     db,
     { workspaceId, reason: "codex_usage_refreshed" },
     async (tx) => {
+      const [previous] = await tx
+        .select({
+          primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
+          primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
+          secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
+          secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
+        })
+        .from(schema.codexSubscriptionCredentials)
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.id, credentialId),
+            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+          ),
+        )
+        .for("update");
+      if (!previous) {
+        return { result: false, changed: false };
+      }
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
         .set({
@@ -15142,8 +15395,17 @@ export async function recordCodexAccountUsageWithWakeTargets(
           ),
         )
         .returning({ id: schema.codexSubscriptionCredentials.id });
-      const changed = updated.length > 0;
-      return { result: changed, changed };
+      const rowUpdated = updated.length > 0;
+      const timestampChanged = (before: Date | null, after: Date | null): boolean =>
+        before?.getTime() !== after?.getTime();
+      const capacityChanged =
+        rowUpdated &&
+        snapshot.checkedAt !== undefined &&
+        (previous.primaryUsedPercent !== (snapshot.primaryUsedPercent ?? null) ||
+          timestampChanged(previous.primaryResetAt, snapshot.primaryResetAt ?? null) ||
+          previous.secondaryUsedPercent !== (snapshot.secondaryUsedPercent ?? null) ||
+          timestampChanged(previous.secondaryResetAt, snapshot.secondaryResetAt ?? null));
+      return { result: rowUpdated, changed: capacityChanged };
     },
   );
 }
@@ -15733,15 +15995,21 @@ export async function disconnectCodexAccount(
           updatedAt: new Date(),
         })
         .where(eq(schema.codexAppsSettings.id, appsSettings.id));
-      await scopedDb.insert(schema.auditEvents).values({
-        accountId: credential.accountId,
-        workspaceId,
-        subjectId: actorSubjectId,
-        action: "codex_apps.cleared_on_disconnect",
-        targetType: "codex_subscription_credential",
-        targetId: credentialId,
-        metadata: { version },
-      });
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: credential.accountId,
+            workspaceId,
+            subjectId: actorSubjectId,
+            action: "codex_apps.cleared_on_disconnect",
+            targetType: "codex_subscription_credential",
+            targetId: credentialId,
+            metadata: { version },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
     }
     const removedRows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
@@ -15845,15 +16113,21 @@ export async function disconnectAllCodexAccounts(
           updatedAt: new Date(),
         })
         .where(eq(schema.codexAppsSettings.id, appsSettings.id));
-      await scopedDb.insert(schema.auditEvents).values({
-        accountId: credentials[0]!.accountId,
-        workspaceId,
-        subjectId: actorSubjectId,
-        action: "codex_apps.cleared_on_disconnect",
-        targetType: "codex_subscription_credential",
-        targetId: appsSettings.credentialId,
-        metadata: { version },
-      });
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: credentials[0]!.accountId,
+            workspaceId,
+            subjectId: actorSubjectId,
+            action: "codex_apps.cleared_on_disconnect",
+            targetType: "codex_subscription_credential",
+            targetId: appsSettings.credentialId,
+            metadata: { version },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
     }
     const rows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
@@ -15881,15 +16155,21 @@ export async function recordAuditEvent(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
-      await scopedDb.insert(schema.auditEvents).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId ?? null,
-        subjectId: input.subjectId ?? null,
-        action: input.action,
-        targetType: input.targetType ?? null,
-        targetId: input.targetId ?? null,
-        metadata: input.metadata ?? {},
-      });
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId ?? null,
+            subjectId: input.subjectId ?? null,
+            action: input.action,
+            targetType: input.targetType ?? null,
+            targetId: input.targetId ?? null,
+            metadata: input.metadata ?? {},
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
     },
   );
 }
@@ -16397,7 +16677,12 @@ type ResolvedConnectorActionPolicy =
 /** Resolve one immutable attempt snapshot with exact-over-wildcard precedence. */
 export function resolveConnectorActionPolicy(
   snapshot: readonly ConnectorActionPolicySnapshotEntry[],
-  input: { connectionId: string; serverId: string; toolName: string; actionName: string },
+  input: {
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    actionName: string;
+  },
 ): ResolvedConnectorActionPolicy {
   const candidates = snapshot
     .filter(
@@ -16421,7 +16706,12 @@ export function resolveConnectorActionPolicy(
   const selected = candidates[0];
   if (!selected) return { managed: false };
   if (candidates[1]?.specificity === selected.specificity) {
-    return { managed: true, source: "ambiguous", entry: null, decision: "block" };
+    return {
+      managed: true,
+      source: "ambiguous",
+      entry: null,
+      decision: "block",
+    };
   }
   return { managed: true, source: "explicit", entry: selected.entry };
 }
@@ -16464,15 +16754,21 @@ async function insertConnectorActionAudit(
     extra?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await db.insert(schema.auditEvents).values({
-    accountId: input.row.accountId,
-    workspaceId: input.row.workspaceId,
-    subjectId: input.subjectId,
-    action: input.action,
-    targetType: "connector_action_request",
-    targetId: input.row.id,
-    metadata: connectorActionAuditMetadata(input.row, input.extra),
-  });
+  await db.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.row.accountId,
+        workspaceId: input.row.workspaceId,
+        subjectId: input.subjectId,
+        action: input.action,
+        targetType: "connector_action_request",
+        targetId: input.row.id,
+        metadata: connectorActionAuditMetadata(input.row, input.extra),
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
 }
 
 function normalizedConnectorActionInvocation(
@@ -16521,7 +16817,9 @@ function normalizedConnectorActionInvocation(
 
 function durableConnectorActionInvocation(
   identity: ConnectorActionAttemptIdentity,
-  invocation: ReturnType<typeof normalizedConnectorActionInvocation> & { connectionId: string },
+  invocation: ReturnType<typeof normalizedConnectorActionInvocation> & {
+    connectionId: string;
+  },
   resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
 ): {
   approvalId: string;
@@ -16654,7 +16952,10 @@ async function insertConnectorActionRequest(
     resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>;
     status: "pending" | "blocked" | "executing";
   },
-): Promise<{ row: typeof schema.connectorActionRequests.$inferSelect; inserted: boolean }> {
+): Promise<{
+  row: typeof schema.connectorActionRequests.$inferSelect;
+  inserted: boolean;
+}> {
   const entry = input.resolved.entry;
   const [inserted] = await db
     .insert(schema.connectorActionRequests)
@@ -16727,7 +17028,10 @@ export async function upsertConnectorActionPolicy(
     actionName: string;
     policy: ConnectorActionPolicyDecision;
   },
-): Promise<{ policy: typeof schema.connectorActionPolicies.$inferSelect; changed: boolean }> {
+): Promise<{
+  policy: typeof schema.connectorActionPolicies.$inferSelect;
+  changed: boolean;
+}> {
   const scope = {
     connectionId: boundedConnectorActionText(
       input.connectionId,
@@ -16796,24 +17100,30 @@ export async function upsertConnectorActionPolicy(
               })
               .returning();
         if (!row) throw new Error("Failed to persist connector action policy");
-        await tx.insert(schema.auditEvents).values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId,
-          action: "connector.action.policy_changed",
-          targetType: "connector_action_policy",
-          targetId: row.id,
-          metadata: {
-            connectionId: row.connectionId,
-            serverId: row.serverId,
-            toolName: row.toolName,
-            actionName: row.actionName,
-            policy: row.policy,
-            version: row.version,
-            previousPolicy: existing?.policy ?? null,
-            previousVersion: existing?.version ?? null,
-          },
-        });
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId,
+              action: "connector.action.policy_changed",
+              targetType: "connector_action_policy",
+              targetId: row.id,
+              metadata: {
+                connectionId: row.connectionId,
+                serverId: row.serverId,
+                toolName: row.toolName,
+                actionName: row.actionName,
+                policy: row.policy,
+                version: row.version,
+                previousPolicy: existing?.policy ?? null,
+                previousVersion: existing?.version ?? null,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
         return { policy: row, changed: true };
       }),
   );
@@ -17571,49 +17881,55 @@ async function createSessionInTransaction(
     : null;
   const [inserted] = await tx
     .insert(schema.sessions)
-    .values({
-      id,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      initialMessage: input.initialMessage,
-      initialTurnInstructions: input.initialTurnInstructions ?? null,
-      resources: input.resources,
-      skills: input.skills ?? [],
-      tools: input.tools ?? [],
-      toolPolicy: input.toolPolicy ?? {
-        mode: "explicit",
-        inheritedFromSessionId: input.parentSessionId ?? null,
-      },
-      metadata: input.metadata,
-      ...creatorColumns(frozenCreator),
-      model: input.model,
-      sandboxBackend: input.sandboxBackend,
-      sandboxOs: input.sandboxOs ?? "linux",
-      sandboxGroupId: input.sandboxGroupId ?? id,
-      variableSetId: input.variableSetId ?? null,
-      rigId: input.rigId ?? null,
-      rigVersionId: input.rigVersionId ?? null,
-      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-      initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
-      instructions: input.instructions ?? null,
-      policyRole: input.policyRole ?? null,
-      parentSessionId: input.parentSessionId ?? null,
-      parentTurnId,
-      createIdempotencyKey,
-      rootSessionId: decision.rootSessionId,
-      nestedAgentDepth: decision.nestedAgentDepth,
-      maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
-      effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
-      nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
-      nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
-      // Freeze once at create from the effective create model + workspace
-      // default. Later workspace setting changes never move existing sessions.
-      codexCompactionMode: isCodexBilledModel(input.model)
-        ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
-        : "portable",
-      status: "queued",
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          id,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          initialMessage: input.initialMessage,
+          initialTurnInstructions: input.initialTurnInstructions ?? null,
+          resources: input.resources,
+          skills: input.skills ?? [],
+          tools: input.tools ?? [],
+          toolPolicy: input.toolPolicy ?? {
+            mode: "explicit",
+            inheritedFromSessionId: input.parentSessionId ?? null,
+          },
+          metadata: input.metadata,
+          ...creatorColumns(frozenCreator),
+          model: input.model,
+          sandboxBackend: input.sandboxBackend,
+          sandboxOs: input.sandboxOs ?? "linux",
+          sandboxGroupId: input.sandboxGroupId ?? id,
+          variableSetId: input.variableSetId ?? null,
+          rigId: input.rigId ?? null,
+          rigVersionId: input.rigVersionId ?? null,
+          firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+          firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+          initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
+          instructions: input.instructions ?? null,
+          policyRole: input.policyRole ?? null,
+          parentSessionId: input.parentSessionId ?? null,
+          parentTurnId,
+          createIdempotencyKey,
+          rootSessionId: decision.rootSessionId,
+          nestedAgentDepth: decision.nestedAgentDepth,
+          maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
+          effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
+          nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
+          nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
+          // Freeze once at create from the effective create model + workspace
+          // default. Later workspace setting changes never move existing sessions.
+          codexCompactionMode: isCodexBilledModel(input.model)
+            ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
+            : "portable",
+          status: "queued",
+        },
+        "initialMessage",
+        "initialMessageCodecVersion",
+      ),
+    )
     .onConflictDoNothing()
     .returning();
   if (!inserted) {
@@ -19973,6 +20289,7 @@ type SessionEventProjectionRow = {
   sequence: number;
   type: string;
   payload: unknown;
+  payloadCodecVersion: number | null;
   occurredAt: Date;
   clientEventId: string | null;
   turnId: string | null;
@@ -19984,16 +20301,11 @@ type SessionEventProjectionRow = {
 };
 
 /**
- * Read one direction-aware session-event page without transferring legacy raw
- * payloads or malformed free-form envelope strings out of PostgreSQL.
- *
- * Migration 0067 deliberately leaves historical rows untouched. This query
- * invokes its immutable payload projector in SQL and mirrors the rolling
- * envelope guard in SQL, then accumulates small batches under one RLS
- * transaction. `bytes` is the exact UTF-8 size of `JSON.stringify(events)`;
- * `hasMore` is true whenever count or byte selection stopped before the durable
- * range ended. A nonempty durable range can therefore never become an empty,
- * non-advancing HTTP page.
+ * Read one direction-aware session-event page. Full mode selects the canonical
+ * row exactly; summary/none modes derive bounded monitoring projections in SQL
+ * without rewriting the retained source. `bytes` is the exact UTF-8 size of
+ * `JSON.stringify(events)`; `hasMore` is true whenever count or byte selection
+ * stopped before the durable range ended.
  */
 export async function listSessionEventPage(
   db: Database,
@@ -20207,44 +20519,49 @@ function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "fu
   end`;
   const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
   const selectedPayload =
-    payloadMode === "none"
-      ? sql<unknown>`jsonb_build_object(
+    payloadMode === "full"
+      ? schema.sessionEvents.payload
+      : payloadMode === "none"
+        ? sql<unknown>`jsonb_build_object(
           '_monitoring', jsonb_build_object(
             'payloadMode', 'none',
             'payloadOmitted', true,
             'projectedPayloadBytes', ${projectedPayloadBytes}
           )
         )`
-      : payloadMode === "summary"
-        ? sql<unknown>`case
-            when ${projectedPayloadBytes} <= 4096 then ${projectedPayload}
-            else jsonb_build_object(
-              '_monitoring', jsonb_build_object(
-                'payloadMode', 'summary',
-                'payloadTruncated', true,
-                'projectedPayloadBytes', ${projectedPayloadBytes},
-                'fullForensicPayload', 'request payloadMode=full explicitly'
-              ),
-              'preview', left((${projectedPayload})::text, 2048)
-            )
-          end`
-        : projectedPayload;
+        : sql<unknown>`case
+          when ${projectedPayloadBytes} <= 4096 then ${projectedPayload}
+          else jsonb_build_object(
+            '_monitoring', jsonb_build_object(
+              'payloadMode', 'summary',
+              'payloadTruncated', true,
+              'projectedPayloadBytes', ${projectedPayloadBytes},
+              'fullForensicPayload', 'request payloadMode=full explicitly'
+            ),
+            'preview', left((${projectedPayload})::text, 2048)
+          )
+        end`;
 
   return {
     id: schema.sessionEvents.id,
     workspaceId: schema.sessionEvents.workspaceId,
     sessionId: schema.sessionEvents.sessionId,
     sequence: schema.sessionEvents.sequence,
-    type: projectedType,
+    type: payloadMode === "full" ? schema.sessionEvents.type : projectedType,
     payload: selectedPayload,
+    payloadCodecVersion:
+      payloadMode === "full" ? schema.sessionEvents.payloadCodecVersion : sql<number | null>`null`,
     occurredAt: schema.sessionEvents.occurredAt,
-    clientEventId: projectedClientEventId,
+    clientEventId:
+      payloadMode === "full" ? schema.sessionEvents.clientEventId : projectedClientEventId,
     turnId: schema.sessionEvents.turnId,
     turnGeneration: schema.sessionEvents.turnGeneration,
     turnAttemptId: schema.sessionEvents.turnAttemptId,
-    turnAssociation: projectedTurnAssociation,
+    turnAssociation:
+      payloadMode === "full" ? schema.sessionEvents.turnAssociation : projectedTurnAssociation,
     duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
-    duplicateReason: projectedDuplicateReason,
+    duplicateReason:
+      payloadMode === "full" ? schema.sessionEvents.duplicateReason : projectedDuplicateReason,
   };
 }
 
@@ -20599,8 +20916,14 @@ export async function getLatestRunState(
       ? {
           id: row.id,
           turnId: row.turnId ?? null,
-          serializedRunState: row.serializedRunState,
-          pendingApprovals: row.pendingApprovals,
+          serializedRunState: fromPostgresLosslessText(
+            row.serializedRunState,
+            row.serializedRunStateCodecVersion,
+          ),
+          pendingApprovals: fromPostgresLosslessJson(
+            row.pendingApprovals,
+            row.pendingApprovalsCodecVersion,
+          ),
           providerArtifactInvalidatedAt: row.providerArtifactInvalidatedAt ?? null,
         }
       : null;
@@ -21035,19 +21358,25 @@ export async function acceptSessionHumanInputResponse(
         }
         const [event] = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            turnGeneration: turn.executionGeneration,
-            turnAssociation: "current",
-            sequence: session.lastSequence + 1,
-            type: "user.humanInputResponse",
-            payload: sanitizeEventPayload({ requestId: request.id, response }),
-            clientEventId: expired ? null : (input.clientEventId ?? null),
-            occurredAt: now,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAssociation: "current",
+                sequence: session.lastSequence + 1,
+                type: "user.humanInputResponse",
+                payload: { requestId: request.id, response },
+                clientEventId: expired ? null : (input.clientEventId ?? null),
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!event) throw new Error("Failed to append human-input response");
         await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
@@ -21380,19 +21709,21 @@ export async function appendSessionHistoryItems(
         await tx
           .insert(schema.sessionHistoryItems)
           .values(
-            input.items.map((entry) => ({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              position: entry.position,
-              // This is the canonical model-memory boundary. The pending-call
-              // ledger and audit event may retain their separate raw/preview
-              // forms, but conversation truth is always the bounded Codex form.
-              item: sanitizeModelPayload(
-                boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
-              ),
-            })),
+            withLosslessContentWriteVersion(
+              input.items.map((entry) => ({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                position: entry.position,
+                // This is the canonical model-memory boundary. The pending-call
+                // ledger and audit event may retain their separate raw/preview
+                // forms, but conversation truth is always the bounded Codex form.
+                item: boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
+              })),
+              "item",
+              "itemCodecVersion",
+            ),
           )
           .onConflictDoNothing({
             target: [
@@ -21434,8 +21765,8 @@ function assertPendingToolOutputPolicyMatches(
 
 /**
  * Durably capture the raw SDK call item at the exact attempt boundary. This is
- * model-facing truth, deliberately separate from the redacted session-event
- * projection. The receipt belongs to the logical turn so an approval resume can
+ * model-facing truth, deliberately separate from the session-event timeline.
+ * The receipt belongs to the logical turn so an approval resume can
  * settle it from a newer attempt. Duplicate SDK delivery converges on the
  * unique (turn, call) identity.
  */
@@ -21458,18 +21789,24 @@ export async function registerPendingSessionToolCall(
         if (!fence.allowed) return { accepted: false, registered: false };
         const inserted = await tx
           .insert(schema.sessionPendingToolCalls)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            executionGeneration: input.executionGeneration,
-            attemptId: input.attemptId,
-            callId: input.callId,
-            callType: input.callType,
-            callItem: sanitizeModelPayload(input.callItem),
-            modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                executionGeneration: input.executionGeneration,
+                attemptId: input.attemptId,
+                callId: input.callId,
+                callType: input.callType,
+                callItem: input.callItem,
+                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+              },
+              "callItem",
+              "callItemCodecVersion",
+            ),
+          )
           .onConflictDoNothing({
             target: [
               schema.sessionPendingToolCalls.workspaceId,
@@ -21626,10 +21963,16 @@ export async function recordPendingSessionToolCallResult(
         }
         const recorded = await tx
           .update(schema.sessionPendingToolCalls)
-          .set({
-            resultItem: sanitizeModelPayload(input.resultItem),
-            resultRecordedAt: new Date(),
-          })
+          .set(
+            withLosslessContentWriteVersion(
+              {
+                resultItem: input.resultItem,
+                resultRecordedAt: new Date(),
+              },
+              "resultItem",
+              "resultItemCodecVersion",
+            ),
+          )
           .where(
             and(
               eq(schema.sessionPendingToolCalls.id, pending.id),
@@ -21688,6 +22031,7 @@ export async function clearDurablePendingSessionToolCalls(
           .select({
             position: schema.sessionHistoryItems.position,
             item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
           })
           .from(schema.sessionHistoryItems)
           .where(
@@ -21697,17 +22041,21 @@ export async function clearDurablePendingSessionToolCalls(
               eq(schema.sessionHistoryItems.turnId, input.turnId),
             ),
           );
+        const decodedHistory = history.map((row) => ({
+          ...row,
+          item: fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+        }));
         const durableIds = pending
           .filter((call) => {
             const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
             if (!resultType) return false;
-            const durableCall = history.find(
+            const durableCall = decodedHistory.find(
               ({ item }) =>
                 historyItemType(item) === call.callType && historyCallId(item) === call.callId,
             );
             return Boolean(
               durableCall &&
-              history.some(
+              decodedHistory.some(
                 ({ item, position }) =>
                   position > durableCall.position &&
                   historyItemType(item) === resultType &&
@@ -21736,6 +22084,7 @@ export async function getSessionHistoryItems(
       .select({
         position: schema.sessionHistoryItems.position,
         item: schema.sessionHistoryItems.item,
+        itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
       })
       .from(schema.sessionHistoryItems)
       .where(
@@ -21745,7 +22094,10 @@ export async function getSessionHistoryItems(
         ),
       )
       .orderBy(schema.sessionHistoryItems.position);
-    return rows;
+    return rows.map(({ itemCodecVersion, ...row }) => ({
+      ...row,
+      item: fromPostgresLosslessJson(row.item, itemCodecVersion),
+    }));
   });
 }
 
@@ -21775,6 +22127,7 @@ export async function getActiveSessionHistoryItems(
         id: schema.sessionHistoryItems.id,
         position: schema.sessionHistoryItems.position,
         item: schema.sessionHistoryItems.item,
+        itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
         providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
       })
       .from(schema.sessionHistoryItems)
@@ -21786,7 +22139,10 @@ export async function getActiveSessionHistoryItems(
         ),
       )
       .orderBy(schema.sessionHistoryItems.position);
-    return rows;
+    return rows.map(({ itemCodecVersion, ...row }) => ({
+      ...row,
+      item: fromPostgresLosslessJson(row.item, itemCodecVersion),
+    }));
   });
 }
 
@@ -22012,46 +22368,62 @@ export async function applyContextCompaction(
           );
         if (input.replacementItems.length > 0) {
           await tx.insert(schema.sessionHistoryItems).values(
-            input.replacementItems.map((item, index) => ({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: null,
-              position: supersededFrom + index,
-              item: sanitizeModelPayload(item),
-              active: true,
-            })),
-          );
-        }
-        const summaryPosition = supersededFrom + input.replacementItems.length;
-        await tx.insert(schema.sessionHistoryItems).values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          position: summaryPosition,
-          item: sanitizeModelPayload(input.summaryItem),
-          active: true,
-        });
-        const insertedEvents = input.eventPayload
-          ? await tx
-              .insert(schema.sessionEvents)
-              .values({
+            withLosslessContentWriteVersion(
+              input.replacementItems.map((item, index) => ({
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: input.turnId,
-                turnGeneration: input.expectedExecutionGeneration,
-                turnAttemptId: input.expectedAttemptId,
-                turnAssociation: "current",
-                sequence: fence.session.lastSequence + 1,
-                type: "session.context.compacted",
-                payload: sanitizeEventPayload({
-                  ...input.eventPayload,
-                  summaryPosition,
-                }),
-                occurredAt: new Date(),
-              })
+                turnId: null,
+                position: supersededFrom + index,
+                item: item,
+                active: true,
+              })),
+              "item",
+              "itemCodecVersion",
+            ),
+          );
+        }
+        const summaryPosition = supersededFrom + input.replacementItems.length;
+        await tx.insert(schema.sessionHistoryItems).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              position: summaryPosition,
+              item: input.summaryItem,
+              active: true,
+            },
+            "item",
+            "itemCodecVersion",
+          ),
+        );
+        const insertedEvents = input.eventPayload
+          ? await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: input.turnId,
+                    turnGeneration: input.expectedExecutionGeneration,
+                    turnAttemptId: input.expectedAttemptId,
+                    turnAssociation: "current",
+                    sequence: fence.session.lastSequence + 1,
+                    type: "session.context.compacted",
+                    payload: {
+                      ...input.eventPayload,
+                      summaryPosition,
+                    },
+                    occurredAt: new Date(),
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
               .returning()
           : [];
         await tx
@@ -22123,25 +22495,31 @@ export async function recordStartedContextCompaction(
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            turnGeneration: input.expectedExecutionGeneration,
-            turnAttemptId: input.expectedAttemptId,
-            turnAssociation: "current",
-            sequence: fence.session.lastSequence + 1,
-            type: "session.context.compaction.started",
-            payload: sanitizeEventPayload({
-              trigger: input.trigger,
-              ...(input.implementation ? { implementation: input.implementation } : {}),
-              ...(typeof input.estimatedTokensBefore === "number"
-                ? { estimatedTokensBefore: input.estimatedTokensBefore }
-                : {}),
-            }),
-            occurredAt: new Date(),
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                turnGeneration: input.expectedExecutionGeneration,
+                turnAttemptId: input.expectedAttemptId,
+                turnAssociation: "current",
+                sequence: fence.session.lastSequence + 1,
+                type: "session.context.compaction.started",
+                payload: {
+                  trigger: input.trigger,
+                  ...(input.implementation ? { implementation: input.implementation } : {}),
+                  ...(typeof input.estimatedTokensBefore === "number"
+                    ? { estimatedTokensBefore: input.estimatedTokensBefore }
+                    : {}),
+                },
+                occurredAt: new Date(),
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         await tx
           .update(schema.sessions)
@@ -22219,19 +22597,25 @@ export async function recordSkippedContextCompaction(
         }
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            turnGeneration: input.expectedExecutionGeneration,
-            turnAttemptId: input.expectedAttemptId,
-            turnAssociation: "current",
-            sequence: fence.session.lastSequence + 1,
-            type: "session.context.compaction.skipped",
-            payload: sanitizeEventPayload({ reason: input.reason }),
-            occurredAt: new Date(),
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                turnGeneration: input.expectedExecutionGeneration,
+                turnAttemptId: input.expectedAttemptId,
+                turnAssociation: "current",
+                sequence: fence.session.lastSequence + 1,
+                type: "session.context.compaction.skipped",
+                payload: { reason: input.reason },
+                occurredAt: new Date(),
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         await tx
           .update(schema.sessions)
@@ -22427,15 +22811,21 @@ export async function clearSessionContext(
         const markerPosition = Number(maxPosition) + 1;
         await tx
           .insert(schema.sessionHistoryItems)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: null,
-            position: markerPosition,
-            item: sanitizeModelPayload(clearedContextMarkerItem()),
-            active: true,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: null,
+                position: markerPosition,
+                item: clearedContextMarkerItem(),
+                active: true,
+              },
+              "item",
+              "itemCodecVersion",
+            ),
+          )
           .onConflictDoNothing({
             target: [
               schema.sessionHistoryItems.workspaceId,
@@ -22557,18 +22947,28 @@ export async function upsertSandboxSessionEnvelope(
     async (scopedDb) => {
       await scopedDb
         .insert(schema.sandboxSessionEnvelopes)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          envelope: input.envelope,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              envelope: input.envelope,
+            },
+            "envelope",
+            "envelopeCodecVersion",
+          ),
+        )
         .onConflictDoUpdate({
           target: [
             schema.sandboxSessionEnvelopes.workspaceId,
             schema.sandboxSessionEnvelopes.sessionId,
           ],
-          set: { envelope: input.envelope, updatedAt: new Date() },
+          set: withLosslessContentWriteVersion(
+            { envelope: input.envelope, updatedAt: new Date() },
+            "envelope",
+            "envelopeCodecVersion",
+          ),
         });
     },
   );
@@ -22581,7 +22981,10 @@ export async function getSandboxSessionEnvelope(
 ): Promise<Record<string, unknown> | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ envelope: schema.sandboxSessionEnvelopes.envelope })
+      .select({
+        envelope: schema.sandboxSessionEnvelopes.envelope,
+        envelopeCodecVersion: schema.sandboxSessionEnvelopes.envelopeCodecVersion,
+      })
       .from(schema.sandboxSessionEnvelopes)
       .where(
         and(
@@ -22590,7 +22993,7 @@ export async function getSandboxSessionEnvelope(
         ),
       )
       .limit(1);
-    return row?.envelope ?? null;
+    return row ? fromPostgresLosslessJson(row.envelope, row.envelopeCodecVersion) : null;
   });
 }
 
@@ -22640,7 +23043,8 @@ function mapRecording(row: typeof schema.sessionRecordings.$inferSelect): Sessio
         : Number(row.durationSeconds),
     width: row.width,
     height: row.height,
-    reason: row.reason,
+    reason:
+      row.reason === null ? null : fromPostgresLosslessText(row.reason, row.reasonCodecVersion),
     createdAt: row.createdAt,
     finalizedAt: row.finalizedAt,
   };
@@ -22667,19 +23071,25 @@ export async function insertRecording(
     async (scopedDb) => {
       const [row] = await scopedDb
         .insert(schema.sessionRecordings)
-        .values({
-          id: input.id,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId ?? null,
-          state: "recording",
-          mode: input.mode,
-          codec: input.codec,
-          width: input.width,
-          height: input.height,
-          reason: input.reason ?? null,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              id: input.id,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId ?? null,
+              state: "recording",
+              mode: input.mode,
+              codec: input.codec,
+              width: input.width,
+              height: input.height,
+              reason: input.reason ?? null,
+            },
+            "reason",
+            "reasonCodecVersion",
+          ),
+        )
         .returning();
       return mapRecording(row!);
     },
@@ -22710,7 +23120,10 @@ export async function updateRecording(
       if (input.storageKey !== undefined) set.storageKey = input.storageKey;
       if (input.sizeBytes !== undefined) set.sizeBytes = input.sizeBytes;
       if (input.durationSeconds !== undefined) set.durationSeconds = input.durationSeconds;
-      if (input.reason !== undefined) set.reason = input.reason;
+      if (input.reason !== undefined) {
+        set.reason = input.reason;
+        set.reasonCodecVersion = LOSSLESS_CONTENT_CODEC_VERSION;
+      }
       if (input.finalized || input.state === "available" || input.state === "failed") {
         set.finalizedAt = new Date();
       }
@@ -22827,11 +23240,17 @@ export async function abandonRecordingForTurnAttempt(
         } else {
           await tx
             .update(schema.sessionRecordings)
-            .set({
-              state: "failed",
-              reason: input.reason.slice(0, 2_000),
-              finalizedAt: new Date(),
-            })
+            .set(
+              withLosslessContentWriteVersion(
+                {
+                  state: "failed",
+                  reason: input.reason.slice(0, 2_000),
+                  finalizedAt: new Date(),
+                },
+                "reason",
+                "reasonCodecVersion",
+              ),
+            )
             .where(eq(schema.sessionRecordings.id, recording.id));
         }
         return true;
@@ -29627,7 +30046,10 @@ export async function retainWorkspaceMutationProcess(
         // exact route and non-TTL holder even when the earlier authority check
         // found a stale route/turn, then report staleness after commit.
         if (authorityFailure) {
-          return { process: mapRetainedProcess(process!), failure: authorityFailure };
+          return {
+            process: mapRetainedProcess(process!),
+            failure: authorityFailure,
+          };
         }
         if (!authority) {
           throw new Error("Retained process promotion lost its locked authority");
@@ -32384,24 +32806,30 @@ async function commitWorkspaceCaptureRevision(
               };
         const [event] = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            sequence: session.lastSequence + 1,
-            type,
-            payload: sanitizeEventPayload(payload),
-            clientEventId: `opengeni:workspace-capture:${revision}`,
-            turnId: input.turnId,
-            turnGeneration: attempt.executionGeneration,
-            turnAttemptId: attempt.id,
-            turnAssociation: null,
-            duplicateOfEventId: null,
-            duplicateReason: null,
-            producerId: "workspace-capture",
-            producerSeq: revision,
-            occurredAt: capturedAt,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type,
+                payload: payload,
+                clientEventId: `opengeni:workspace-capture:${revision}`,
+                turnId: input.turnId,
+                turnGeneration: attempt.executionGeneration,
+                turnAttemptId: attempt.id,
+                turnAssociation: null,
+                duplicateOfEventId: null,
+                duplicateReason: null,
+                producerId: "workspace-capture",
+                producerSeq: revision,
+                occurredAt: capturedAt,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!event) throw new Error("Workspace capture announcement was not inserted");
         await tx
@@ -34252,11 +34680,12 @@ export async function readMachineMetricsSeries(
 }
 
 // ============================================================================
-// P3.2 — the un-redacted-pixel consent gate + viewer revocation.
+// P3.2 — the direct-pixel consent gate + viewer revocation.
 //
 // The desktop-stream path is gated behind an explicit acknowledgment that the
-// pixel plane is un-redacted (it can show cloud creds the agent cat's into a
-// terminal — strictly broader than the redacted Channel-A event log). For a
+// pixel plane exposes the desktop exactly (it can show credentials the agent
+// renders in a terminal — strictly broader than the structured Channel-A event
+// log). For a
 // SHARED box (the group has >1 session) the principal must additionally consent
 // to the shared-exposure disclosure: watching A's desktop also shows B's agent
 // on the one :0 framebuffer (addendum E.1 / stress g). Consent is per-PRINCIPAL
@@ -34270,7 +34699,7 @@ export interface StreamAcknowledgment {
   acknowledgedShared: boolean;
 }
 
-// Record (or upsert) a principal's acknowledgment of the group's un-redacted
+// Record (or upsert) a principal's acknowledgment of the group's direct
 // pixel plane (and, when shared, the shared-exposure disclosure). Keyed on
 // (workspace, group, subject); a re-ack (e.g. a solo→shared upgrade adding the
 // shared consent) is ON CONFLICT DO UPDATE, never a duplicate row.
@@ -34787,15 +35216,25 @@ export async function saveRunState(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
-        await tx.insert(schema.agentRunStates).values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          stateVersion: Number(maxVersion) + 1,
-          serializedRunState: input.serializedRunState,
-          pendingApprovals: input.pendingApprovals,
-        });
+        await tx.insert(schema.agentRunStates).values(
+          withLosslessContentWriteVersion(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                stateVersion: Number(maxVersion) + 1,
+                serializedRunState: input.serializedRunState,
+                pendingApprovals: input.pendingApprovals,
+              },
+              "serializedRunState",
+              "serializedRunStateCodecVersion",
+            ),
+            "pendingApprovals",
+            "pendingApprovalsCodecVersion",
+          ),
+        );
         return true;
       });
     },
@@ -35123,18 +35562,24 @@ export async function clearSessionGoal(
         const sequence = session.lastSequence + 1;
         const [event] = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId: session.workspaceId,
-            sessionId,
-            sequence,
-            type: "goal.cleared",
-            payload: sanitizeEventPayload({
-              goalId: existing.id,
-              text: existing.text,
-              version: existing.version,
-            }),
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: session.workspaceId,
+                sessionId,
+                sequence,
+                type: "goal.cleared",
+                payload: {
+                  goalId: existing.id,
+                  text: existing.text,
+                  version: existing.version,
+                },
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
         await tx
@@ -35256,24 +35701,30 @@ export async function upsertSessionGoalWithEvent(
         const now = new Date();
         const [event] = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            sequence: session.lastSequence + 1,
-            type: "goal.set",
-            payload: sanitizeEventPayload({
-              goalId: result.goal.id,
-              text: result.goal.text,
-              ...(result.goal.successCriteria
-                ? { successCriteria: result.goal.successCriteria }
-                : {}),
-              version: result.goal.version,
-              actor: input.actor,
-              replaced: result.replaced,
-            }),
-            occurredAt: now,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "goal.set",
+                payload: {
+                  goalId: result.goal.id,
+                  text: result.goal.text,
+                  ...(result.goal.successCriteria
+                    ? { successCriteria: result.goal.successCriteria }
+                    : {}),
+                  version: result.goal.version,
+                  actor: input.actor,
+                  replaced: result.replaced,
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!event) throw new Error("Failed to append goal.set event");
         await tx
@@ -35444,22 +35895,28 @@ export async function updateSessionGoalWithEvent(
       const now = new Date();
       const [event] = await tx
         .insert(schema.sessionEvents)
-        .values({
-          accountId: session.accountId,
-          workspaceId,
-          sessionId,
-          sequence: session.lastSequence + 1,
-          type: "goal.updated",
-          payload: sanitizeEventPayload({
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            ...(input.progressNote ? { progressNote: input.progressNote } : {}),
-            version: goal.version,
-            actor: input.actor,
-          }),
-          occurredAt: now,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              sequence: session.lastSequence + 1,
+              type: "goal.updated",
+              payload: {
+                goalId: goal.id,
+                text: goal.text,
+                ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+                ...(input.progressNote ? { progressNote: input.progressNote } : {}),
+                version: goal.version,
+                actor: input.actor,
+              },
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       if (!event) throw new Error("Failed to append goal.updated event");
       await tx
@@ -35731,15 +36188,21 @@ export async function setSessionGoalStatusWithEvent(
       const now = new Date();
       const [event] = await tx
         .insert(schema.sessionEvents)
-        .values({
-          accountId: session.accountId,
-          workspaceId,
-          sessionId,
-          sequence: session.lastSequence + 1,
-          type: input.event.type,
-          payload: sanitizeEventPayload(payload),
-          occurredAt: now,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              sequence: session.lastSequence + 1,
+              type: input.event.type,
+              payload: payload,
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       if (!event) throw new Error(`Failed to append ${input.event.type} event`);
       await tx
@@ -36211,6 +36674,7 @@ export async function materializeGoalContinuation(
             deliveredTurnId: null,
             deliveredAt: null,
             summary: "Malformed goal continuation quarantined: malformed_goal_version",
+            summaryCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
             payload: sql`
               (
                 case
@@ -36240,6 +36704,11 @@ export async function materializeGoalContinuation(
                 || jsonb_build_object('quarantine', ${malformedGoalVersionEvidence})
               )
             `,
+            // This is a partial SQL mutation of the stored JSON value, not a
+            // full decode/re-encode replacement. Preserve the row's existing
+            // payload codec truth: legacy NULL-version marker-shaped strings
+            // remain literal, while an already-versioned payload stays
+            // versioned because its untouched content is already encoded.
           })
           .where(
             and(
@@ -36381,22 +36850,28 @@ export async function materializeGoalContinuation(
         if (decision.decision === "paused") {
           const [event] = await tx
             .insert(schema.sessionEvents)
-            .values({
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: session.lastSequence + 1,
-              type: "goal.paused",
-              payload: sanitizeEventPayload({
-                goalId: decision.goal.id,
-                actor: "system",
-                reason: decision.reason,
-                ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
-                autoContinuations: decision.goal.autoContinuations,
-                noProgressStreak: decision.goal.noProgressStreak,
-              }),
-              occurredAt: now,
-            })
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "goal.paused",
+                  payload: {
+                    goalId: decision.goal.id,
+                    actor: "system",
+                    reason: decision.reason,
+                    ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
+                    autoContinuations: decision.goal.autoContinuations,
+                    noProgressStreak: decision.goal.noProgressStreak,
+                  },
+                  occurredAt: now,
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
             .returning();
           if (!event) throw new Error("Failed to append goal.paused event");
           await tx
@@ -36458,24 +36933,34 @@ export async function materializeGoalContinuation(
         }
         const [update] = await tx
           .insert(schema.sessionSystemUpdates)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            kind: "goal_continuation",
-            classification: "info",
-            sourceId: decision.goal.id,
-            dedupeKey: `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
-            summary: prompt,
-            payload,
-            lineage: {
-              goalId: decision.goal.id,
-              goalWakeRevision,
-              ...(causalTurn ? { causalTurnId: causalTurn.id } : {}),
-            },
-            personalConnectionDelegations,
-            state: "pending",
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  kind: "goal_continuation",
+                  classification: "info",
+                  sourceId: decision.goal.id,
+                  dedupeKey: `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
+                  summary: prompt,
+                  payload,
+                  lineage: {
+                    goalId: decision.goal.id,
+                    goalWakeRevision,
+                    ...(causalTurn ? { causalTurnId: causalTurn.id } : {}),
+                  },
+                  personalConnectionDelegations,
+                  state: "pending",
+                },
+                "summary",
+                "summaryCodecVersion",
+              ),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!update) throw new Error("Failed to create goal continuation update");
 
@@ -36497,40 +36982,46 @@ export async function materializeGoalContinuation(
         const eventPreview = internalUpdateEventMember(update);
         const insertedEvents = await tx
           .insert(schema.sessionEvents)
-          .values([
-            {
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: session.lastSequence + 1,
-              type: "system.update.pending",
-              payload: sanitizeEventPayload({
-                updateId: eventPreview.id,
-                kind: eventPreview.kind,
-                classification: eventPreview.classification,
-                sourceId: eventPreview.sourceId,
-                sourceIdTruncated: eventPreview.sourceIdTruncated,
-                summary: eventPreview.summary,
-                summaryTruncated: eventPreview.summaryTruncated,
-              }),
-              occurredAt: now,
-            },
-            {
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: session.lastSequence + 2,
-              type: "goal.continuation",
-              payload: sanitizeEventPayload({
-                goalId: decision.goal.id,
-                text: decision.goal.text,
-                version: decision.goal.version,
-                goalWakeRevision,
-                autoContinuation: decision.autoContinuation,
-              }),
-              occurredAt: now,
-            },
-          ])
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "system.update.pending",
+                  payload: {
+                    updateId: eventPreview.id,
+                    kind: eventPreview.kind,
+                    classification: eventPreview.classification,
+                    sourceId: eventPreview.sourceId,
+                    sourceIdTruncated: eventPreview.sourceIdTruncated,
+                    summary: eventPreview.summary,
+                    summaryTruncated: eventPreview.summaryTruncated,
+                  },
+                  occurredAt: now,
+                },
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 2,
+                  type: "goal.continuation",
+                  payload: {
+                    goalId: decision.goal.id,
+                    text: decision.goal.text,
+                    version: decision.goal.version,
+                    goalWakeRevision,
+                    autoContinuation: decision.autoContinuation,
+                  },
+                  occurredAt: now,
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (insertedEvents.length !== 2) {
           throw new Error("Failed to append goal continuation events");
@@ -36644,6 +37135,10 @@ export async function initializeSessionStartAtomically(
         });
         const session = locks.sessions[0];
         if (!locks.workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+        const canonicalInitialMessage = fromPostgresLosslessText(
+          session.initialMessage,
+          session.initialMessageCodecVersion,
+        );
         const creatorContext = session.createdByContext ?? {};
         const creator: FrozenTurnInitiator = {
           initiator: initiatorFromStorage(
@@ -36718,41 +37213,47 @@ export async function initializeSessionStartAtomically(
           if (!existingCreatedEvent) {
             insertedEvents = await tx
               .insert(schema.sessionEvents)
-              .values([
-                {
-                  accountId: session.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: session.id,
-                  sequence: ++sequence,
-                  type: "session.created",
-                  payload: sanitizeEventPayload({
-                    ...input.createdEventPayload,
-                    status: "idle",
-                    createdBy: creator.initiator,
-                  }),
-                },
-                ...(goal
-                  ? [
-                      {
-                        accountId: session.accountId,
-                        workspaceId: input.workspaceId,
-                        sessionId: session.id,
-                        sequence: ++sequence,
-                        type: "goal.set" as const,
-                        payload: sanitizeEventPayload({
-                          goalId: goal.id,
-                          text: goal.text,
-                          ...(goal.successCriteria
-                            ? { successCriteria: goal.successCriteria }
-                            : {}),
-                          version: goal.version,
-                          actor: "api",
-                          replaced: false,
-                        }),
+              .values(
+                withLosslessContentWriteVersion(
+                  [
+                    {
+                      accountId: session.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: session.id,
+                      sequence: ++sequence,
+                      type: "session.created",
+                      payload: {
+                        ...input.createdEventPayload,
+                        status: "idle",
+                        createdBy: creator.initiator,
                       },
-                    ]
-                  : []),
-              ])
+                    },
+                    ...(goal
+                      ? [
+                          {
+                            accountId: session.accountId,
+                            workspaceId: input.workspaceId,
+                            sessionId: session.id,
+                            sequence: ++sequence,
+                            type: "goal.set" as const,
+                            payload: {
+                              goalId: goal.id,
+                              text: goal.text,
+                              ...(goal.successCriteria
+                                ? { successCriteria: goal.successCriteria }
+                                : {}),
+                              version: goal.version,
+                              actor: "api",
+                              replaced: false,
+                            },
+                          },
+                        ]
+                      : []),
+                  ],
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
               .returning();
             initializedNow = true;
           }
@@ -36817,65 +37318,73 @@ export async function initializeSessionStartAtomically(
 
         if (!userEvent) {
           const initialPayload = {
-            text: session.initialMessage,
+            text: canonicalInitialMessage,
             ...(session.resources.length ? { resources: session.resources } : {}),
             ...(session.tools.length ? { tools: session.tools } : {}),
           };
           const rows = await tx
             .insert(schema.sessionEvents)
-            .values([
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: session.id,
-                sequence: ++sequence,
-                type: "session.created",
-                payload: sanitizeEventPayload({
-                  ...input.createdEventPayload,
-                  status: publicQueuedStatus,
-                  createdBy: creator.initiator,
-                }),
-              },
-              ...(goal
-                ? [
-                    {
-                      accountId: session.accountId,
-                      workspaceId: input.workspaceId,
-                      sessionId: session.id,
-                      sequence: ++sequence,
-                      type: "goal.set" as const,
-                      payload: sanitizeEventPayload({
-                        goalId: goal.id,
-                        text: goal.text,
-                        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-                        version: goal.version,
-                        actor: "api",
-                        replaced: false,
-                      }),
+            .values(
+              withLosslessContentWriteVersion(
+                [
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    sequence: ++sequence,
+                    type: "session.created",
+                    payload: {
+                      ...input.createdEventPayload,
+                      status: publicQueuedStatus,
+                      createdBy: creator.initiator,
                     },
-                  ]
-                : []),
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: session.id,
-                sequence: ++sequence,
-                type: "user.message",
-                payload: sanitizeEventPayload({
-                  ...initialPayload,
-                  initiator: creator.initiator,
-                }),
-                clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
-              },
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: session.id,
-                sequence: ++sequence,
-                type: "session.status.changed",
-                payload: sanitizeEventPayload({ status: publicQueuedStatus }),
-              },
-            ])
+                  },
+                  ...(goal
+                    ? [
+                        {
+                          accountId: session.accountId,
+                          workspaceId: input.workspaceId,
+                          sessionId: session.id,
+                          sequence: ++sequence,
+                          type: "goal.set" as const,
+                          payload: {
+                            goalId: goal.id,
+                            text: goal.text,
+                            ...(goal.successCriteria
+                              ? { successCriteria: goal.successCriteria }
+                              : {}),
+                            version: goal.version,
+                            actor: "api",
+                            replaced: false,
+                          },
+                        },
+                      ]
+                    : []),
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    sequence: ++sequence,
+                    type: "user.message",
+                    payload: {
+                      ...initialPayload,
+                      initiator: creator.initiator,
+                    },
+                    clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
+                  },
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    sequence: ++sequence,
+                    type: "session.status.changed",
+                    payload: { status: publicQueuedStatus },
+                  },
+                ],
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
             .returning();
           insertedEvents.push(...rows);
           userEvent = rows.find((event) => event.type === "user.message");
@@ -36902,44 +37411,50 @@ export async function initializeSessionStartAtomically(
           const acceptedAt = new Date();
           [turn] = await tx
             .insert(schema.sessionTurns)
-            .values({
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: session.id,
-              triggerEventId: userEvent.id,
-              temporalWorkflowId,
-              status: "queued",
-              source: "user",
-              position: queueTailPosition,
-              prompt: session.initialMessage,
-              turnInstructions: session.initialTurnInstructions ?? null,
-              resources: session.resources,
-              tools: session.tools,
-              toolsProvided: session.toolPolicy?.mode === "explicit",
-              model: session.model,
-              reasoningEffort: reasoningEffortForMetadata(
-                session.metadata,
-                input.reasoningEffortFallback,
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  triggerEventId: userEvent.id,
+                  temporalWorkflowId,
+                  status: "queued",
+                  source: "user",
+                  position: queueTailPosition,
+                  prompt: canonicalInitialMessage,
+                  turnInstructions: session.initialTurnInstructions ?? null,
+                  resources: session.resources,
+                  tools: session.tools,
+                  toolsProvided: session.toolPolicy?.mode === "explicit",
+                  model: session.model,
+                  reasoningEffort: reasoningEffortForMetadata(
+                    session.metadata,
+                    input.reasoningEffortFallback,
+                  ),
+                  latencyMode:
+                    input.turnExecutionPolicy?.latencyMode ??
+                    latencyModeForMetadata(session.metadata, "standard"),
+                  sandboxBackend: session.sandboxBackend,
+                  sandboxOs: session.sandboxOs,
+                  metadata: input.turnExecutionPolicy
+                    ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
+                    : {},
+                  lineage: {},
+                  ...initiatorColumns(creator),
+                  initiatingHumanSubjectId:
+                    creator.initiator.kind === "subject" ? creator.initiator.subjectId : null,
+                  personalConnectionDelegations: parsedPersonalConnectionDelegations(
+                    session.initialPersonalConnectionDelegations,
+                    `sessions:${session.workspaceId}:${session.id}:initial`,
+                  ),
+                  createdAt: acceptedAt,
+                  updatedAt: acceptedAt,
+                },
+                "prompt",
+                "promptCodecVersion",
               ),
-              latencyMode:
-                input.turnExecutionPolicy?.latencyMode ??
-                latencyModeForMetadata(session.metadata, "standard"),
-              sandboxBackend: session.sandboxBackend,
-              sandboxOs: session.sandboxOs,
-              metadata: input.turnExecutionPolicy
-                ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
-                : {},
-              lineage: {},
-              ...initiatorColumns(creator),
-              initiatingHumanSubjectId:
-                creator.initiator.kind === "subject" ? creator.initiator.subjectId : null,
-              personalConnectionDelegations: parsedPersonalConnectionDelegations(
-                session.initialPersonalConnectionDelegations,
-                `sessions:${session.workspaceId}:${session.id}:initial`,
-              ),
-              createdAt: acceptedAt,
-              updatedAt: acceptedAt,
-            })
+            )
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
           insertedTurn = true;
@@ -36966,20 +37481,26 @@ export async function initializeSessionStartAtomically(
         if (!queuedEvent) {
           const [event] = await tx
             .insert(schema.sessionEvents)
-            .values({
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: session.id,
-              turnId: turn.id,
-              sequence: ++sequence,
-              type: "turn.queued",
-              payload: sanitizeEventPayload({
-                turnId: turn.id,
-                triggerEventId: userEvent.id,
-                source: turn.source,
-                initiator: creator.initiator,
-              }),
-            })
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  turnId: turn.id,
+                  sequence: ++sequence,
+                  type: "turn.queued",
+                  payload: {
+                    turnId: turn.id,
+                    triggerEventId: userEvent.id,
+                    source: turn.source,
+                    initiator: creator.initiator,
+                  },
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
             .returning();
           if (!event) throw new Error("Failed to create initial turn event");
           insertedEvents.push(event);
@@ -37089,37 +37610,43 @@ export async function enqueueSessionTurn(
         const acceptedAt = new Date();
         const [row] = await tx
           .insert(schema.sessionTurns)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            triggerEventId: input.triggerEventId,
-            temporalWorkflowId: input.temporalWorkflowId,
-            status: "queued",
-            source: input.source,
-            position,
-            prompt: input.prompt,
-            turnInstructions: input.turnInstructions ?? null,
-            resources: input.resources,
-            tools: input.tools,
-            toolsProvided: input.toolsProvided ?? false,
-            model: input.model,
-            reasoningEffort: input.reasoningEffort,
-            latencyMode: input.latencyMode ?? "standard",
-            sandboxBackend: input.sandboxBackend,
-            sandboxOs: input.sandboxOs ?? null,
-            metadata: input.metadata,
-            lineage: input.lineage ?? {},
-            ...initiatorColumns({
-              initiator: input.initiator,
-              context: input.initiatorContext ?? {},
-            }),
-            initiatingHumanSubjectId:
-              input.initiator.kind === "subject" ? input.initiator.subjectId : null,
-            personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-            createdAt: acceptedAt,
-            updatedAt: acceptedAt,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                triggerEventId: input.triggerEventId,
+                temporalWorkflowId: input.temporalWorkflowId,
+                status: "queued",
+                source: input.source,
+                position,
+                prompt: input.prompt,
+                turnInstructions: input.turnInstructions ?? null,
+                resources: input.resources,
+                tools: input.tools,
+                toolsProvided: input.toolsProvided ?? false,
+                model: input.model,
+                reasoningEffort: input.reasoningEffort,
+                latencyMode: input.latencyMode ?? "standard",
+                sandboxBackend: input.sandboxBackend,
+                sandboxOs: input.sandboxOs ?? null,
+                metadata: input.metadata,
+                lineage: input.lineage ?? {},
+                ...initiatorColumns({
+                  initiator: input.initiator,
+                  context: input.initiatorContext ?? {},
+                }),
+                initiatingHumanSubjectId:
+                  input.initiator.kind === "subject" ? input.initiator.subjectId : null,
+                personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+                createdAt: acceptedAt,
+                updatedAt: acceptedAt,
+              },
+              "prompt",
+              "promptCodecVersion",
+            ),
+          )
           .returning();
         if (!row) {
           throw new Error("Failed to enqueue session turn");
@@ -37283,8 +37810,8 @@ export async function claimSessionWorkForAttempt(
           historyItemId: string | null;
           historyItem: Record<string, unknown> | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
-          events: Array<typeof schema.sessionEvents.$inferInsert>;
-          event: typeof schema.sessionEvents.$inferInsert | null;
+          events: SessionEventInsertWithPayload[];
+          event: SessionEventInsertWithPayload | null;
         }> => {
           const [agentSteer] = await tx
             .select()
@@ -37395,11 +37922,11 @@ export async function claimSessionWorkForAttempt(
                     turnAssociation: null,
                     sequence: nextSequence,
                     type: "system.update.cancelled" as const,
-                    payload: sanitizeEventPayload({
+                    payload: {
                       updateIds: cancelledUpdateIds,
                       count: cancelledUpdateIds.length,
                       reason: "stale_goal_continuation",
-                    }),
+                    },
                     occurredAt,
                   }
                 : null;
@@ -37447,7 +37974,7 @@ export async function claimSessionWorkForAttempt(
             );
           const eventId = triggerEventId ?? crypto.randomUUID();
           let sequence = nextSequence - 1;
-          const events: Array<typeof schema.sessionEvents.$inferInsert> = [];
+          const events: SessionEventInsertWithPayload[] = [];
           if (cancelledUpdateIds.length > 0) {
             events.push({
               accountId,
@@ -37459,15 +37986,15 @@ export async function claimSessionWorkForAttempt(
               turnAssociation: "current",
               sequence: ++sequence,
               type: "system.update.cancelled",
-              payload: sanitizeEventPayload({
+              payload: {
                 updateIds: cancelledUpdateIds,
                 count: cancelledUpdateIds.length,
                 reason: "stale_goal_continuation",
-              }),
+              },
               occurredAt,
             });
           }
-          const event: typeof schema.sessionEvents.$inferInsert = {
+          const event: SessionEventInsertWithPayload = {
             id: eventId,
             accountId,
             workspaceId,
@@ -37478,13 +38005,13 @@ export async function claimSessionWorkForAttempt(
             turnAssociation: "current",
             sequence: ++sequence,
             type: "system.update.delivered",
-            payload: sanitizeEventPayload({
+            payload: {
               updateIds: deliverable.map((update) => update.id),
               historyItemId,
               count: deliverable.length,
               classifications: [...new Set(deliverable.map((update) => update.classification))],
               members: modelOrdered.map(internalUpdateEventMember),
-            }),
+            },
             occurredAt,
           };
           events.push(event);
@@ -37522,15 +38049,21 @@ export async function claimSessionWorkForAttempt(
                 eq(schema.sessionHistoryItems.sessionId, sessionId),
               ),
             );
-          await tx.insert(schema.sessionHistoryItems).values({
-            id: delivered.historyItemId,
-            accountId,
-            workspaceId,
-            sessionId,
-            turnId,
-            position: Number(position),
-            item: sanitizeModelPayload(delivered.historyItem),
-          });
+          await tx.insert(schema.sessionHistoryItems).values(
+            withLosslessContentWriteVersion(
+              {
+                id: delivered.historyItemId,
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId,
+                position: Number(position),
+                item: delivered.historyItem,
+              },
+              "item",
+              "itemCodecVersion",
+            ),
+          );
         };
 
         // Capacity settlement and resume use session -> turn after their
@@ -38085,73 +38618,85 @@ export async function claimSessionWorkForAttempt(
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const [compactionTurn] = await tx
               .insert(schema.sessionTurns)
-              .values({
-                id: turnId,
-                accountId: session.accountId,
-                workspaceId,
-                sessionId,
-                triggerEventId,
-                temporalWorkflowId: workflowId,
-                status: "running",
-                executionGeneration: 1,
-                activeAttemptId: input.attemptId,
-                source: "compaction",
-                position: Number(position),
-                prompt: "",
-                resources: [],
-                tools: [],
-                model: latestStarted?.model ?? session.model,
-                reasoningEffort: reasoningEffortForMetadata(
-                  { reasoningEffort: latestStarted?.reasoningEffort },
-                  reasoningEffortForMetadata(session.metadata, "medium"),
-                ),
-                latencyMode: latencyModeForMetadata(
-                  { latencyMode: latestStarted?.latencyMode },
-                  latencyModeForMetadata(session.metadata, "standard"),
-                ),
-                sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
-                sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
-                metadata: metadataWithTurnDispatchAttempt(
-                  { executionKind: "context_compaction" },
+              .values(
+                withLosslessContentWriteVersion(
                   {
-                    id: input.dispatchId,
-                    generation: dispatchGeneration,
+                    id: turnId,
+                    accountId: session.accountId,
+                    workspaceId,
+                    sessionId,
                     triggerEventId,
+                    temporalWorkflowId: workflowId,
+                    status: "running",
+                    executionGeneration: 1,
+                    activeAttemptId: input.attemptId,
+                    source: "compaction",
+                    position: Number(position),
+                    prompt: "",
+                    resources: [],
+                    tools: [],
+                    model: latestStarted?.model ?? session.model,
+                    reasoningEffort: reasoningEffortForMetadata(
+                      { reasoningEffort: latestStarted?.reasoningEffort },
+                      reasoningEffortForMetadata(session.metadata, "medium"),
+                    ),
+                    latencyMode: latencyModeForMetadata(
+                      { latencyMode: latestStarted?.latencyMode },
+                      latencyModeForMetadata(session.metadata, "standard"),
+                    ),
+                    sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
+                    sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
+                    metadata: metadataWithTurnDispatchAttempt(
+                      { executionKind: "context_compaction" },
+                      {
+                        id: input.dispatchId,
+                        generation: dispatchGeneration,
+                        triggerEventId,
+                      },
+                    ),
+                    ...initiatorColumns(compactionInitiator),
+                    initiatingHumanSubjectId:
+                      latestStarted?.initiatingHumanSubjectId ??
+                      (latestStarted?.initiatorKind === "subject"
+                        ? latestStarted.initiatorSubjectId
+                        : null),
+                    personalConnectionDelegations: [],
+                    startedAt: now,
+                    createdAt: now,
+                    updatedAt: now,
                   },
+                  "prompt",
+                  "promptCodecVersion",
                 ),
-                ...initiatorColumns(compactionInitiator),
-                initiatingHumanSubjectId:
-                  latestStarted?.initiatingHumanSubjectId ??
-                  (latestStarted?.initiatorKind === "subject"
-                    ? latestStarted.initiatorSubjectId
-                    : null),
-                personalConnectionDelegations: [],
-                startedAt: now,
-                createdAt: now,
-                updatedAt: now,
-              })
+              )
               .returning();
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
             await registerAttempt(compactionTurn);
             const [requestedEvent] = await tx
               .insert(schema.sessionEvents)
-              .values({
-                id: triggerEventId,
-                accountId: session.accountId,
-                workspaceId,
-                sessionId,
-                turnId,
-                turnGeneration: compactionTurn.executionGeneration,
-                turnAttemptId: input.attemptId,
-                turnAssociation: "current",
-                sequence: session.lastSequence + 1,
-                type: "session.context.compaction.requested",
-                payload: {
-                  trigger: "operator",
-                  initiator: compactionInitiator.initiator,
-                },
-                occurredAt: now,
-              })
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    id: triggerEventId,
+                    accountId: session.accountId,
+                    workspaceId,
+                    sessionId,
+                    turnId,
+                    turnGeneration: compactionTurn.executionGeneration,
+                    turnAttemptId: input.attemptId,
+                    turnAssociation: "current",
+                    sequence: session.lastSequence + 1,
+                    type: "session.context.compaction.requested",
+                    payload: {
+                      trigger: "operator",
+                      initiator: compactionInitiator.initiator,
+                    },
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
               .returning();
             if (!requestedEvent) {
               throw new Error("Failed to create context compaction trigger event");
@@ -38231,7 +38776,15 @@ export async function claimSessionWorkForAttempt(
           );
           if (delivered.count === 0) {
             if (delivered.events.length > 0) {
-              await tx.insert(schema.sessionEvents).values(delivered.events);
+              await tx
+                .insert(schema.sessionEvents)
+                .values(
+                  withLosslessContentWriteVersion(
+                    delivered.events,
+                    "payload",
+                    "payloadCodecVersion",
+                  ),
+                );
               await tx
                 .update(schema.sessions)
                 .set({
@@ -38359,10 +38912,10 @@ export async function claimSessionWorkForAttempt(
             internalInitiator = internalUpdateInitiator();
           }
           if (delivered.event) {
-            delivered.event.payload = sanitizeEventPayload({
+            delivered.event.payload = {
               ...(delivered.event.payload as Record<string, unknown>),
               initiator: internalInitiator.initiator,
-            });
+            };
           }
           const goalPolicy =
             routingGoalUpdate?.payload.policy &&
@@ -38450,46 +39003,56 @@ export async function claimSessionWorkForAttempt(
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
             .insert(schema.sessionTurns)
-            .values({
-              id: turnId,
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              triggerEventId,
-              temporalWorkflowId: workflowId,
-              status: "running",
-              executionGeneration: 1,
-              activeAttemptId: input.attemptId,
-              source: routingGoalUpdate ? "goal" : "system",
-              position: Number(position),
-              prompt: "Process the delivered internal session updates.",
-              resources: [],
-              tools,
-              model,
-              reasoningEffort,
-              latencyMode,
-              sandboxBackend,
-              sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
-              metadata: metadataWithTurnDispatchAttempt(
+            .values(
+              withLosslessContentWriteVersion(
                 {
-                  internalUpdateCount: delivered.count,
-                  ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
+                  id: turnId,
+                  accountId: session.accountId,
+                  workspaceId,
+                  sessionId,
+                  triggerEventId,
+                  temporalWorkflowId: workflowId,
+                  status: "running",
+                  executionGeneration: 1,
+                  activeAttemptId: input.attemptId,
+                  source: routingGoalUpdate ? "goal" : "system",
+                  position: Number(position),
+                  prompt: "Process the delivered internal session updates.",
+                  resources: [],
+                  tools,
+                  model,
+                  reasoningEffort,
+                  latencyMode,
+                  sandboxBackend,
+                  sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
+                  metadata: metadataWithTurnDispatchAttempt(
+                    {
+                      internalUpdateCount: delivered.count,
+                      ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
+                    },
+                    { id: input.dispatchId, generation: 1, triggerEventId },
+                  ),
+                  ...initiatorColumns(internalInitiator),
+                  initiatingHumanSubjectId,
+                  personalConnectionDelegations: internalPersonalConnectionDelegations,
+                  startedAt: now,
+                  createdAt: now,
+                  updatedAt: now,
                 },
-                { id: input.dispatchId, generation: 1, triggerEventId },
+                "prompt",
+                "promptCodecVersion",
               ),
-              ...initiatorColumns(internalInitiator),
-              initiatingHumanSubjectId,
-              personalConnectionDelegations: internalPersonalConnectionDelegations,
-              startedAt: now,
-              createdAt: now,
-              updatedAt: now,
-            })
+            )
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
           await persistDeliveredUpdateBatch(delivered, session.accountId, internalTurn.id);
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
-          await tx.insert(schema.sessionEvents).values(delivered.events);
+          await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(delivered.events, "payload", "payloadCodecVersion"),
+            );
           if (goalUpdate && typeof goalUpdate.payload.goalId === "string") {
             await tx
               .update(schema.sessionGoals)
@@ -38567,17 +39130,23 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionHistoryItems.sessionId, sessionId),
             ),
           );
-        await tx.insert(schema.sessionHistoryItems).values({
-          accountId: session.accountId,
-          workspaceId,
-          sessionId,
-          turnId: row.id,
-          position: Number(historyPosition),
-          item: durableUserHistoryItem(
-            row.prompt,
-            Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
+        await tx.insert(schema.sessionHistoryItems).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: row.id,
+              position: Number(historyPosition),
+              item: durableUserHistoryItem(
+                fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
+                Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
+              ),
+            },
+            "item",
+            "itemCodecVersion",
           ),
-        });
+        );
         const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
         // Cross-session updates are already projected through
         // delegation.context.append. Keep them pending instead of consuming
@@ -38590,7 +39159,7 @@ export async function claimSessionWorkForAttempt(
               historyItemId: null,
               historyItem: null,
               updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
-              events: [] as Array<typeof schema.sessionEvents.$inferInsert>,
+              events: [] as SessionEventInsertWithPayload[],
               event: null,
             }
           : await deliverPendingUpdates(
@@ -38602,7 +39171,11 @@ export async function claimSessionWorkForAttempt(
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
         if (delivered.events.length > 0) {
-          await tx.insert(schema.sessionEvents).values(delivered.events);
+          await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(delivered.events, "payload", "payloadCodecVersion"),
+            );
         }
         await tx
           .update(schema.sessions)
@@ -38837,20 +39410,26 @@ export async function markSessionAttemptQuiesced(
       if (!parked) return { events, effectiveControl };
       const [statusEvent] = await scopedDb
         .insert(schema.sessionEvents)
-        .values({
-          accountId: session.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          sequence,
-          type: "session.status.changed",
-          payload: sanitizeEventPayload({ status: "idle", reason: "paused_recovery_settled" }),
-          clientEventId,
-          turnId: turn.id,
-          turnGeneration: attempt.executionGeneration,
-          turnAttemptId: attempt.id,
-          turnAssociation: null,
-          occurredAt: now,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence,
+              type: "session.status.changed",
+              payload: { status: "idle", reason: "paused_recovery_settled" },
+              clientEventId,
+              turnId: turn.id,
+              turnGeneration: attempt.executionGeneration,
+              turnAttemptId: attempt.id,
+              turnAssociation: null,
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       if (!statusEvent) throw new Error("Paused recovery status event was not inserted");
       return { events: [...events, mapEvent(statusEvent)], effectiveControl };
@@ -38900,24 +39479,30 @@ export async function markSessionAttemptQuiesced(
     }
     const [event] = await scopedDb
       .insert(schema.sessionEvents)
-      .values({
-        accountId: session.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        sequence: session.lastSequence + 1,
-        type: "session.queue.changed",
-        payload: sanitizeEventPayload({
-          operation: "attempt_quiesced",
-          attemptId: input.attemptId,
-          queueVersion,
-        }),
-        clientEventId,
-        turnId: attempt.turnId,
-        turnGeneration: attempt.executionGeneration,
-        turnAttemptId: attempt.id,
-        turnAssociation: null,
-        occurredAt: now,
-      })
+      .values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "session.queue.changed",
+            payload: {
+              operation: "attempt_quiesced",
+              attemptId: input.attemptId,
+              queueVersion,
+            },
+            clientEventId,
+            turnId: attempt.turnId,
+            turnGeneration: attempt.executionGeneration,
+            turnAttemptId: attempt.id,
+            turnAssociation: null,
+            occurredAt: now,
+          },
+          "payload",
+          "payloadCodecVersion",
+        ),
+      )
       .returning();
     if (!event) throw new Error("Attempt-quiesced queue event was not inserted");
     await scopedDb
@@ -39342,7 +39927,7 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = terminalCancel
+      const eventValues: SessionEventInsertWithPayload[] = terminalCancel
         ? [
             {
               accountId: session.accountId,
@@ -39354,7 +39939,7 @@ export async function settleSessionAttemptInterruptions(
               turnGeneration: turn.executionGeneration,
               turnAttemptId: attemptId,
               turnAssociation: "current",
-              payload: sanitizeEventPayload({ reason }),
+              payload: { reason },
               occurredAt: now,
             },
           ]
@@ -39370,7 +39955,7 @@ export async function settleSessionAttemptInterruptions(
                 turnGeneration: turn.executionGeneration,
                 turnAttemptId: attemptId,
                 turnAssociation: "current",
-                payload: sanitizeEventPayload({ reason: "steer" }),
+                payload: { reason: "steer" },
                 occurredAt: now,
               },
               {
@@ -39379,7 +39964,7 @@ export async function settleSessionAttemptInterruptions(
                 sessionId,
                 sequence: ++sequence,
                 type: "session.status.changed",
-                payload: sanitizeEventPayload({ status: "queued" }),
+                payload: { status: "queued" },
                 occurredAt: now,
               },
             ]
@@ -39394,7 +39979,7 @@ export async function settleSessionAttemptInterruptions(
                 turnGeneration: turn.executionGeneration,
                 turnAttemptId: attemptId,
                 turnAssociation: "current",
-                payload: sanitizeEventPayload({ reason }),
+                payload: { reason },
                 occurredAt: now,
               },
               {
@@ -39407,11 +39992,14 @@ export async function settleSessionAttemptInterruptions(
                 turnGeneration: turn.executionGeneration,
                 turnAttemptId: attemptId,
                 turnAssociation: "current",
-                payload: sanitizeEventPayload({ status: "recovering" }),
+                payload: { status: "recovering" },
                 occurredAt: now,
               },
             ];
-      const eventRows = await tx.insert(schema.sessionEvents).values(eventValues).returning();
+      const eventRows = await tx
+        .insert(schema.sessionEvents)
+        .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+        .returning();
       await tx
         .update(schema.sessionTurns)
         .set(
@@ -40095,15 +40683,21 @@ export async function settleSessionIdleWithParentOutbox(
       if (session.status === "queued" || session.status === "running") {
         const [event] = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId,
-            sessionId,
-            sequence: ++sequence,
-            type: "session.status.changed",
-            payload: sanitizeEventPayload({ status: "idle" }),
-            occurredAt: now,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                payload: { status: "idle" },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (event) events.push(mapEvent(event));
         await tx
@@ -40141,28 +40735,38 @@ export async function settleSessionIdleWithParentOutbox(
         : [];
       await tx
         .insert(schema.sessionSystemUpdateOutbox)
-        .values({
-          accountId: session.accountId,
-          workspaceId,
-          sourceSessionId: session.id,
-          targetSessionId: session.parentSessionId,
-          dedupeKey,
-          kind: "child_terminal_result",
-          classification: "success",
-          sourceId: session.id,
-          summary: "Child session reached a terminal idle boundary.",
-          payload: {
-            type: "child_terminal_result",
-            childSessionId: session.id,
-            status: "idle",
-          },
-          lineage: {
-            childSessionId: session.id,
-            parentSessionId: session.parentSessionId,
-            ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-          },
-          personalConnectionDelegations,
-        })
+        .values(
+          withLosslessContentWriteVersion(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sourceSessionId: session.id,
+                targetSessionId: session.parentSessionId,
+                dedupeKey,
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: session.id,
+                summary: "Child session reached a terminal idle boundary.",
+                payload: {
+                  type: "child_terminal_result",
+                  childSessionId: session.id,
+                  status: "idle",
+                },
+                lineage: {
+                  childSessionId: session.id,
+                  parentSessionId: session.parentSessionId,
+                  ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
+                },
+                personalConnectionDelegations,
+              },
+              "summary",
+              "summaryCodecVersion",
+            ),
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .onConflictDoNothing({
           target: [
             schema.sessionSystemUpdateOutbox.workspaceId,
@@ -40493,9 +41097,13 @@ function isTerminalSessionTurnStatus(
   return ["completed", "failed", "cancelled", "superseded"].includes(status);
 }
 
-function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> {
-  return payload && typeof payload === "object" && !Array.isArray(payload)
-    ? (payload as Record<string, unknown>)
+function sessionEventPayloadRecord(
+  payload: unknown,
+  payloadCodecVersion: number | null,
+): Record<string, unknown> {
+  const logicalPayload = fromPostgresLosslessJson(payload, payloadCodecVersion);
+  return logicalPayload && typeof logicalPayload === "object" && !Array.isArray(logicalPayload)
+    ? (logicalPayload as Record<string, unknown>)
     : {};
 }
 
@@ -40629,15 +41237,25 @@ export async function applySessionTurnSettlement(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
-        await tx.insert(schema.agentRunStates).values({
-          accountId: session.accountId,
-          workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          stateVersion: Number(maxVersion) + 1,
-          serializedRunState: input.runState.serializedRunState,
-          pendingApprovals: input.runState.pendingApprovals,
-        });
+        await tx.insert(schema.agentRunStates).values(
+          withLosslessContentWriteVersion(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                stateVersion: Number(maxVersion) + 1,
+                serializedRunState: input.runState.serializedRunState,
+                pendingApprovals: input.runState.pendingApprovals,
+              },
+              "serializedRunState",
+              "serializedRunStateCodecVersion",
+            ),
+            "pendingApprovals",
+            "pendingApprovalsCodecVersion",
+          ),
+        );
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
             const [persistedRequest] = await tx
@@ -40716,14 +41334,20 @@ export async function applySessionTurnSettlement(
           } else if (recordingInput.action === "available") {
             await tx
               .update(schema.sessionRecordings)
-              .set({
-                state: "available",
-                storageKey: recordingInput.storageKey,
-                sizeBytes: recordingInput.sizeBytes,
-                durationSeconds: recordingInput.durationSeconds,
-                reason: null,
-                finalizedAt: new Date(),
-              })
+              .set(
+                withLosslessContentWriteVersion(
+                  {
+                    state: "available",
+                    storageKey: recordingInput.storageKey,
+                    sizeBytes: recordingInput.sizeBytes,
+                    durationSeconds: recordingInput.durationSeconds,
+                    reason: null,
+                    finalizedAt: new Date(),
+                  },
+                  "reason",
+                  "reasonCodecVersion",
+                ),
+              )
               .where(eq(schema.sessionRecordings.id, recording.id));
             recordingEvent = {
               type: "recording.available",
@@ -40748,11 +41372,17 @@ export async function applySessionTurnSettlement(
           } else {
             await tx
               .update(schema.sessionRecordings)
-              .set({
-                state: "failed",
-                reason: recordingInput.detail,
-                finalizedAt: new Date(),
-              })
+              .set(
+                withLosslessContentWriteVersion(
+                  {
+                    state: "failed",
+                    reason: recordingInput.detail,
+                    finalizedAt: new Date(),
+                  },
+                  "reason",
+                  "reasonCodecVersion",
+                ),
+              )
               .where(eq(schema.sessionRecordings.id, recording.id));
             recordingEvent = {
               type: "recording.failed",
@@ -40920,14 +41550,12 @@ export async function applySessionTurnSettlement(
           sessionId: input.sessionId,
           sequence: ++sequence,
           type: event.type,
-          payload: sanitizeEventPayload(
+          payload:
             event.type === "session.status.changed" &&
-              payload.status === input.sessionStatus &&
-              effectiveSessionStatus !== input.sessionStatus
+            payload.status === input.sessionStatus &&
+            effectiveSessionStatus !== input.sessionStatus
               ? { ...payload, status: effectiveSessionStatus }
               : payload,
-            { fullEvidence: event.retainedOutputEvidence },
-          ),
           clientEventId: event.clientEventId ?? null,
           turnId: input.turnId,
           turnGeneration: turn.executionGeneration,
@@ -40939,14 +41567,22 @@ export async function applySessionTurnSettlement(
         };
       });
       const inserted =
-        values.length > 0 ? await tx.insert(schema.sessionEvents).values(values).returning() : [];
+        values.length > 0
+          ? await tx
+              .insert(schema.sessionEvents)
+              .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+              .returning()
+          : [];
       const requestedEvents = inserted.filter(
         (event) => event.type === "session.humanInput.requested",
       );
       if (requestedEvents.length > 0) {
         const requestedIds = new Set(
           requestedEvents.flatMap((event) => {
-            const request = sessionEventPayloadRecord(event.payload).request;
+            const request = sessionEventPayloadRecord(
+              event.payload,
+              event.payloadCodecVersion,
+            ).request;
             if (!request || typeof request !== "object" || Array.isArray(request)) return [];
             const id = (request as Record<string, unknown>).id;
             return typeof id === "string" ? [id] : [];
@@ -40978,7 +41614,7 @@ export async function applySessionTurnSettlement(
       );
       for (const event of inserted) {
         if (event.type !== "user.humanInputResponse") continue;
-        const payload = sessionEventPayloadRecord(event.payload);
+        const payload = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion);
         const requestId = typeof payload.requestId === "string" ? payload.requestId : null;
         const request = requestId ? terminalHumanInputById.get(requestId) : null;
         if (!request) continue;
@@ -41006,7 +41642,13 @@ export async function applySessionTurnSettlement(
       const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       if (isTerminalSessionTurnStatus(input.turnStatus)) {
         const terminalType = terminalSessionTurnEventType(input.turnStatus);
-        const persistedTerminal = inserted.find((event) => event.type === terminalType);
+        const terminalEventIndex = settlementEvents.findIndex(
+          (event) => event.type === terminalType,
+        );
+        const persistedTerminal =
+          terminalEventIndex >= 0 ? inserted[terminalEventIndex] : undefined;
+        const terminalInput =
+          terminalEventIndex >= 0 ? settlementEvents[terminalEventIndex] : undefined;
         const projection = await projectSessionRealtimeDelegationTerminalInTransaction(
           tx as unknown as Database,
           {
@@ -41016,14 +41658,19 @@ export async function applySessionTurnSettlement(
             turnId: input.turnId,
             turnStatus: input.turnStatus,
             terminalEvent: {
+              id: persistedTerminal?.id ?? null,
               type: terminalType,
               payload: persistedTerminal
-                ? sessionEventPayloadRecord(persistedTerminal.payload)
+                ? sessionEventPayloadRecord(
+                    persistedTerminal.payload,
+                    persistedTerminal.payloadCodecVersion,
+                  )
                 : {
                     code: "delegation_terminal_event_missing",
                     error: `Delegated turn reached ${input.turnStatus} without its canonical terminal event.`,
                   },
             },
+            retainedOutputEvidence: terminalInput?.retainedOutputEvidence,
             now,
           },
         );
@@ -41258,65 +41905,77 @@ export async function settleCodexCredentialLeaseLoss(
         const inserted = input.checkpointDurable
           ? await tx
               .insert(schema.sessionEvents)
-              .values([
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "turn.recovery.requested",
-                  payload: sanitizeEventPayload(input.recoveryPayload),
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "session.status.changed",
-                  payload: { status: "recovering" },
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-              ])
+              .values(
+                withLosslessContentWriteVersion(
+                  [
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      sequence: ++sequence,
+                      type: "turn.recovery.requested",
+                      payload: input.recoveryPayload,
+                      turnId: input.turnId,
+                      turnGeneration: turn.executionGeneration,
+                      turnAttemptId: input.attemptId,
+                      turnAssociation: "current",
+                      occurredAt: now,
+                    },
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      sequence: ++sequence,
+                      type: "session.status.changed",
+                      payload: { status: "recovering" },
+                      turnId: input.turnId,
+                      turnGeneration: turn.executionGeneration,
+                      turnAttemptId: input.attemptId,
+                      turnAssociation: "current",
+                      occurredAt: now,
+                    },
+                  ],
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
               .returning()
           : await tx
               .insert(schema.sessionEvents)
-              .values([
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "turn.failed",
-                  payload: sanitizeEventPayload(input.failedPayload),
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "session.status.changed",
-                  payload: { status: "failed" },
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-              ])
+              .values(
+                withLosslessContentWriteVersion(
+                  [
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      sequence: ++sequence,
+                      type: "turn.failed",
+                      payload: input.failedPayload,
+                      turnId: input.turnId,
+                      turnGeneration: turn.executionGeneration,
+                      turnAttemptId: input.attemptId,
+                      turnAssociation: "current",
+                      occurredAt: now,
+                    },
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      sequence: ++sequence,
+                      type: "session.status.changed",
+                      payload: { status: "failed" },
+                      turnId: input.turnId,
+                      turnGeneration: turn.executionGeneration,
+                      turnAttemptId: input.attemptId,
+                      turnAssociation: "current",
+                      occurredAt: now,
+                    },
+                  ],
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
               .returning();
         const settlementEvent = inserted[0];
         if (!settlementEvent) {
@@ -41330,8 +41989,12 @@ export async function settleCodexCredentialLeaseLoss(
             turnId: input.turnId,
             turnStatus: "failed",
             terminalEvent: {
+              id: settlementEvent.id,
               type: "turn.failed",
-              payload: sessionEventPayloadRecord(settlementEvent.payload),
+              payload: sessionEventPayloadRecord(
+                settlementEvent.payload,
+                settlementEvent.payloadCodecVersion,
+              ),
             },
             now,
           });
@@ -41525,37 +42188,43 @@ export async function settleCodexCredentialFailover(
         sequence = closedTools.sequence;
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values([
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "turn.recovery.requested",
-              payload: sanitizeEventPayload({
-                ...input.recoveryPayload,
-                failoverCount,
-              }),
-              turnId: input.turnId,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "session.status.changed",
-              payload: { status: "recovering" },
-              turnId: input.turnId,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-          ])
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "turn.recovery.requested",
+                  payload: {
+                    ...input.recoveryPayload,
+                    failoverCount,
+                  },
+                  turnId: input.turnId,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "session.status.changed",
+                  payload: { status: "recovering" },
+                  turnId: input.turnId,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!inserted[0]) {
           throw new Error("Codex failover did not persist its checkpoint event");
@@ -41821,39 +42490,45 @@ export async function requestSessionTurnRecovery(
       sequence = closedTools.sequence;
       const inserted = await tx
         .insert(schema.sessionEvents)
-        .values([
-          {
-            accountId: session.accountId,
-            workspaceId,
-            sessionId: input.sessionId,
-            sequence: ++sequence,
-            type: "turn.recovery.requested",
-            turnId: input.turnId,
-            turnGeneration: turn.executionGeneration,
-            turnAttemptId: turn.activeAttemptId,
-            turnAssociation: "current",
-            payload: sanitizeEventPayload({
-              ...(input.detail ?? {}),
-              triggerEventId: input.triggerEventId,
-              reason: input.reason,
-              ...(providerArtifactsInvalidated > 0 ? { providerArtifactsInvalidated } : {}),
-            }),
-            occurredAt: now,
-          },
-          {
-            accountId: session.accountId,
-            workspaceId,
-            sessionId: input.sessionId,
-            sequence: ++sequence,
-            type: "session.status.changed",
-            turnId: input.turnId,
-            turnGeneration: turn.executionGeneration,
-            turnAttemptId: turn.activeAttemptId,
-            turnAssociation: "current",
-            payload: sanitizeEventPayload({ status: "recovering" }),
-            occurredAt: now,
-          },
-        ])
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: ++sequence,
+                type: "turn.recovery.requested",
+                turnId: input.turnId,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: turn.activeAttemptId,
+                turnAssociation: "current",
+                payload: {
+                  ...(input.detail ?? {}),
+                  triggerEventId: input.triggerEventId,
+                  reason: input.reason,
+                  ...(providerArtifactsInvalidated > 0 ? { providerArtifactsInvalidated } : {}),
+                },
+                occurredAt: now,
+              },
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                turnId: input.turnId,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: turn.activeAttemptId,
+                turnAssociation: "current",
+                payload: { status: "recovering" },
+                occurredAt: now,
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       const [updatedTurn] = await tx
         .update(schema.sessionTurns)
@@ -42065,39 +42740,45 @@ export async function recoverSessionDispatch(
       if (redispatches > input.maxRedispatches) {
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values([
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "turn.failed",
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              payload: sanitizeEventPayload({
-                triggerEventId: turn.triggerEventId,
-                code: "worker_death_redispatch_exhausted",
-                error: `Worker died ${redispatches} times while running this turn (heartbeat timeout); giving up after ${input.maxRedispatches} re-dispatches.`,
-                redispatches: input.maxRedispatches,
-              }),
-              occurredAt: now,
-            },
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "session.status.changed",
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              payload: sanitizeEventPayload({ status: "failed" }),
-              occurredAt: now,
-            },
-          ])
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "turn.failed",
+                  turnId: turn.id,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  payload: {
+                    triggerEventId: turn.triggerEventId,
+                    code: "worker_death_redispatch_exhausted",
+                    error: `Worker died ${redispatches} times while running this turn (heartbeat timeout); giving up after ${input.maxRedispatches} re-dispatches.`,
+                    redispatches: input.maxRedispatches,
+                  },
+                  occurredAt: now,
+                },
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "session.status.changed",
+                  turnId: turn.id,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  payload: { status: "failed" },
+                  occurredAt: now,
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         const failedEvent = inserted.find((event) => event.type === "turn.failed");
         if (!failedEvent) {
@@ -42110,8 +42791,12 @@ export async function recoverSessionDispatch(
           turnId: turn.id,
           turnStatus: "failed",
           terminalEvent: {
+            id: failedEvent.id,
             type: "turn.failed",
-            payload: sessionEventPayloadRecord(failedEvent.payload),
+            payload: sessionEventPayloadRecord(
+              failedEvent.payload,
+              failedEvent.payloadCodecVersion,
+            ),
           },
           now,
         });
@@ -42163,38 +42848,44 @@ export async function recoverSessionDispatch(
 
       const inserted = await tx
         .insert(schema.sessionEvents)
-        .values([
-          {
-            accountId: session.accountId,
-            workspaceId,
-            sessionId: input.sessionId,
-            sequence: ++sequence,
-            type: "turn.recovery.requested",
-            turnId: turn.id,
-            turnGeneration: turn.executionGeneration,
-            turnAttemptId: input.attemptId,
-            turnAssociation: "current",
-            payload: sanitizeEventPayload({
-              triggerEventId: turn.triggerEventId,
-              reason: "worker_death",
-              redispatches,
-            }),
-            occurredAt: now,
-          },
-          {
-            accountId: session.accountId,
-            workspaceId,
-            sessionId: input.sessionId,
-            sequence: ++sequence,
-            type: "session.status.changed",
-            turnId: turn.id,
-            turnGeneration: turn.executionGeneration,
-            turnAttemptId: input.attemptId,
-            turnAssociation: "current",
-            payload: sanitizeEventPayload({ status: "recovering" }),
-            occurredAt: now,
-          },
-        ])
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: ++sequence,
+                type: "turn.recovery.requested",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: input.attemptId,
+                turnAssociation: "current",
+                payload: {
+                  triggerEventId: turn.triggerEventId,
+                  reason: "worker_death",
+                  redispatches,
+                },
+                occurredAt: now,
+              },
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: input.attemptId,
+                turnAssociation: "current",
+                payload: { status: "recovering" },
+                occurredAt: now,
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       const requeuedMetadata = metadataWithoutTurnDispatchAttempt(metadata);
       await tx
@@ -42571,30 +43262,40 @@ async function enqueueFailedChildOutboxForTurnTx(
     : [];
   await tx
     .insert(schema.sessionSystemUpdateOutbox)
-    .values({
-      accountId: turn.accountId,
-      workspaceId,
-      sourceSessionId: turn.sessionId,
-      targetSessionId: session.parentSessionId,
-      dedupeKey,
-      kind: "child_terminal_result",
-      classification: "failure",
-      sourceId: turn.sessionId,
-      summary: "Child session failed; inspect the durable child timeline.",
-      payload: {
-        type: "child_terminal_result",
-        childSessionId: turn.sessionId,
-        status: "failed",
-        turnId: turn.id,
-      },
-      lineage: {
-        childSessionId: turn.sessionId,
-        parentSessionId: session.parentSessionId,
-        ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-        turnId: turn.id,
-      },
-      personalConnectionDelegations,
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        withLosslessContentWriteVersion(
+          {
+            accountId: turn.accountId,
+            workspaceId,
+            sourceSessionId: turn.sessionId,
+            targetSessionId: session.parentSessionId,
+            dedupeKey,
+            kind: "child_terminal_result",
+            classification: "failure",
+            sourceId: turn.sessionId,
+            summary: "Child session failed; inspect the durable child timeline.",
+            payload: {
+              type: "child_terminal_result",
+              childSessionId: turn.sessionId,
+              status: "failed",
+              turnId: turn.id,
+            },
+            lineage: {
+              childSessionId: turn.sessionId,
+              parentSessionId: session.parentSessionId,
+              ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
+              turnId: turn.id,
+            },
+            personalConnectionDelegations,
+          },
+          "summary",
+          "summaryCodecVersion",
+        ),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .onConflictDoNothing({
       target: [
         schema.sessionSystemUpdateOutbox.workspaceId,
@@ -42644,7 +43345,9 @@ function mapSystemUpdateOutboxRow(row: {
   classification: string;
   source_id: string;
   summary: string;
+  summary_codec_version: number | null;
   payload: Record<string, unknown>;
+  payload_codec_version: number | null;
   lineage: Record<string, unknown>;
   personal_connection_delegations: unknown;
 }): SessionSystemUpdateOutboxDelivery {
@@ -42662,8 +43365,10 @@ function mapSystemUpdateOutboxRow(row: {
     kind: "child_terminal_result",
     classification: row.classification as SystemUpdateClassification,
     sourceId: row.source_id,
-    summary: row.summary,
-    payload: parseChildTerminalResultPayload(row.payload),
+    summary: fromPostgresLosslessText(row.summary, row.summary_codec_version),
+    payload: parseChildTerminalResultPayload(
+      fromPostgresLosslessJson(row.payload, row.payload_codec_version),
+    ),
     lineage: row.lineage,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personal_connection_delegations,
@@ -42710,8 +43415,10 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         kind: "child_terminal_result",
         classification: row.classification as SystemUpdateClassification,
         sourceId: row.sourceId,
-        summary: row.summary,
-        payload: parseChildTerminalResultPayload(row.payload),
+        summary: fromPostgresLosslessText(row.summary, row.summaryCodecVersion),
+        payload: parseChildTerminalResultPayload(
+          fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+        ),
         lineage: row.lineage,
         personalConnectionDelegations: parsedPersonalConnectionDelegations(
           row.personalConnectionDelegations,
@@ -42737,7 +43444,9 @@ export async function claimPendingSessionSystemUpdateOutbox(
     classification: string;
     source_id: string;
     summary: string;
+    summary_codec_version: number | null;
     payload: Record<string, unknown>;
+    payload_codec_version: number | null;
     lineage: Record<string, unknown>;
     personal_connection_delegations: unknown;
   }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox(${limit})`);
@@ -43091,34 +43800,52 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     }
     const [row] = await scopedDb
       .insert(schema.sessionSystemUpdateOutbox)
-      .values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sourceSessionId: input.sourceSessionId,
-        targetSessionId: input.targetSessionId,
-        dedupeKey: input.dedupeKey,
-        kind: input.kind,
-        classification: input.classification,
-        sourceId: input.sourceId,
-        summary: input.summary,
-        payload: input.payload,
-        lineage: input.lineage,
-        personalConnectionDelegations: input.personalConnectionDelegations,
-      })
+      .values(
+        withLosslessContentWriteVersion(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sourceSessionId: input.sourceSessionId,
+              targetSessionId: input.targetSessionId,
+              dedupeKey: input.dedupeKey,
+              kind: input.kind,
+              classification: input.classification,
+              sourceId: input.sourceId,
+              summary: input.summary,
+              payload: input.payload,
+              lineage: input.lineage,
+              personalConnectionDelegations: input.personalConnectionDelegations,
+            },
+            "summary",
+            "summaryCodecVersion",
+          ),
+          "payload",
+          "payloadCodecVersion",
+        ),
+      )
       .onConflictDoUpdate({
         target: [
           schema.sessionSystemUpdateOutbox.workspaceId,
           schema.sessionSystemUpdateOutbox.dedupeKey,
         ],
-        set: {
-          kind: input.kind,
-          classification: input.classification,
-          sourceId: input.sourceId,
-          summary: input.summary,
-          payload: input.payload,
-          lineage: input.lineage,
-          updatedAt: new Date(),
-        },
+        set: withLosslessContentWriteVersion(
+          withLosslessContentWriteVersion(
+            {
+              kind: input.kind,
+              classification: input.classification,
+              sourceId: input.sourceId,
+              summary: input.summary,
+              payload: input.payload,
+              lineage: input.lineage,
+              updatedAt: new Date(),
+            },
+            "summary",
+            "summaryCodecVersion",
+          ),
+          "payload",
+          "payloadCodecVersion",
+        ),
       })
       .returning();
     if (!row) throw new Error("Failed to persist system-update outbox row");
@@ -43133,8 +43860,10 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       kind: "child_terminal_result",
       classification: row.classification as SystemUpdateClassification,
       sourceId: row.sourceId,
-      summary: row.summary,
-      payload: parseChildTerminalResultPayload(row.payload),
+      summary: fromPostgresLosslessText(row.summary, row.summaryCodecVersion),
+      payload: parseChildTerminalResultPayload(
+        fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+      ),
       lineage: row.lineage,
       personalConnectionDelegations: parsedPersonalConnectionDelegations(
         row.personalConnectionDelegations,
@@ -43287,20 +44016,30 @@ export async function addSessionSystemUpdateWithSourceMutation(
 
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            kind: input.kind,
-            classification: input.classification,
-            sourceId: input.sourceId,
-            dedupeKey: input.dedupeKey,
-            summary: input.summary,
-            payload: input.payload,
-            lineage: input.lineage ?? {},
-            personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-            state: "pending",
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  kind: input.kind,
+                  classification: input.classification,
+                  sourceId: input.sourceId,
+                  dedupeKey: input.dedupeKey,
+                  summary: input.summary,
+                  payload: input.payload,
+                  lineage: input.lineage ?? {},
+                  personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+                  state: "pending",
+                },
+                "summary",
+                "summaryCodecVersion",
+              ),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .onConflictDoNothing({
             target: [
               schema.sessionSystemUpdates.workspaceId,
@@ -43352,23 +44091,29 @@ export async function addSessionSystemUpdateWithSourceMutation(
         const eventPreview = internalUpdateEventMember(inserted);
         const [event] = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            sequence: session.lastSequence + 1,
-            type: "system.update.pending",
-            payload: sanitizeEventPayload({
-              updateId: eventPreview.id,
-              kind: eventPreview.kind,
-              classification: eventPreview.classification,
-              sourceId: eventPreview.sourceId,
-              sourceIdTruncated: eventPreview.sourceIdTruncated,
-              summary: eventPreview.summary,
-              summaryTruncated: eventPreview.summaryTruncated,
-            }),
-            occurredAt: now,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "system.update.pending",
+                payload: {
+                  updateId: eventPreview.id,
+                  kind: eventPreview.kind,
+                  classification: eventPreview.classification,
+                  sourceId: eventPreview.sourceId,
+                  sourceIdTruncated: eventPreview.sourceIdTruncated,
+                  summary: eventPreview.summary,
+                  summaryTruncated: eventPreview.summaryTruncated,
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
         await mutateSource(tx as unknown as Database, event.id);
@@ -43473,8 +44218,10 @@ function mapSessionSystemUpdate(
     classification: row.classification as SystemUpdateClassification,
     sourceId: row.sourceId,
     dedupeKey: row.dedupeKey,
-    summary: row.summary,
-    payload: SessionSystemUpdatePayload.parse(row.payload),
+    summary: fromPostgresLosslessText(row.summary, row.summaryCodecVersion),
+    payload: SessionSystemUpdatePayload.parse(
+      fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+    ),
     lineage: row.lineage,
     state: row.state as SessionSystemUpdateState,
     deliveredTurnId: row.deliveredTurnId,
@@ -43548,9 +44295,7 @@ export async function appendSessionEvents(
         sessionId,
         sequence: ++sequence,
         type: input.type,
-        payload: sanitizeEventPayload(input.payload ?? {}, {
-          fullEvidence: input.retainedOutputEvidence,
-        }),
+        payload: input.payload ?? {},
         clientEventId: input.clientEventId ?? null,
         turnId: input.turnId ?? null,
         turnGeneration: input.turnGeneration ?? null,
@@ -43562,7 +44307,10 @@ export async function appendSessionEvents(
         producerSeq: input.producerSeq ?? null,
         occurredAt: input.occurredAt ?? new Date(),
       }));
-      const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+        .returning();
       await tx
         .update(schema.sessions)
         .set({
@@ -43699,6 +44447,7 @@ export async function acceptSessionApprovalDecision(
           .select({
             turnId: schema.agentRunStates.turnId,
             pendingApprovals: schema.agentRunStates.pendingApprovals,
+            pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
           })
           .from(schema.agentRunStates)
           .where(
@@ -43713,7 +44462,10 @@ export async function acceptSessionApprovalDecision(
         if (
           typeof approvalId !== "string" ||
           !runState ||
-          !runState.pendingApprovals.some((pending) => approvalIdentifier(pending) === approvalId)
+          !fromPostgresLosslessJson(
+            runState.pendingApprovals,
+            runState.pendingApprovalsCodecVersion,
+          ).some((pending) => approvalIdentifier(pending) === approvalId)
         ) {
           return {
             action: "conflict",
@@ -43722,18 +44474,24 @@ export async function acceptSessionApprovalDecision(
         }
         const [event] = await tx
           .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            turnGeneration: turn.executionGeneration,
-            turnAssociation: "current",
-            sequence: session.lastSequence + 1,
-            type: "user.approvalDecision",
-            payload: sanitizeEventPayload(input.payload),
-            clientEventId: input.clientEventId ?? null,
-          })
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAssociation: "current",
+                sequence: session.lastSequence + 1,
+                type: "user.approvalDecision",
+                payload: input.payload,
+                clientEventId: input.clientEventId ?? null,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         if (!event) throw new Error("Failed to append approval decision");
         const approvalDecision = input.payload.decision;
@@ -43891,7 +44649,7 @@ export async function appendSessionEventsForTurnAttempt(
               sessionId,
               sequence: ++sequence,
               type: "turn.event.rejected_late",
-              payload: sanitizeEventPayload({
+              payload: {
                 rejectedType: input.type,
                 rejectedPayload: input.payload ?? {},
                 reason: fence.reason,
@@ -43901,7 +44659,7 @@ export async function appendSessionEventsForTurnAttempt(
                 currentAttemptId: fence.turn?.activeAttemptId ?? null,
                 currentTurnStatus: fence.turn?.status ?? null,
                 currentActiveTurnId: session.activeTurnId,
-              }),
+              },
               clientEventId: input.clientEventId ?? null,
               turnId,
               turnGeneration: executionGeneration,
@@ -43926,9 +44684,7 @@ export async function appendSessionEventsForTurnAttempt(
             sessionId,
             sequence: ++sequence,
             type: input.type,
-            payload: sanitizeEventPayload(input.payload ?? {}, {
-              fullEvidence: input.retainedOutputEvidence,
-            }),
+            payload: input.payload ?? {},
             clientEventId: input.clientEventId ?? null,
             turnId,
             turnGeneration: executionGeneration,
@@ -43941,7 +44697,10 @@ export async function appendSessionEventsForTurnAttempt(
             occurredAt: input.occurredAt ?? now,
           };
         });
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .returning();
         if (fence.allowed) {
           await projectSessionRealtimeDelegationProgressInTransaction(tx as unknown as Database, {
             accountId: session.accountId,
@@ -44017,9 +44776,7 @@ export async function appendSessionEventToSandboxGroup(
           sessionId: row.id,
           sequence: row.lastSequence + 1,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}, {
-            fullEvidence: input.retainedOutputEvidence,
-          }),
+          payload: input.payload ?? {},
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -44027,7 +44784,10 @@ export async function appendSessionEventToSandboxGroup(
           producerSeq: input.producerSeq ?? null,
           occurredAt,
         }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .returning();
         const lockedSessionIds = rows.map((row) => row.id);
         const updated = await tx
           .update(schema.sessions)
@@ -44097,9 +44857,7 @@ export async function appendSessionEventsAndUpdateSession(
           sessionId,
           sequence: ++sequence,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}, {
-            fullEvidence: input.retainedOutputEvidence,
-          }),
+          payload: input.payload ?? {},
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -44107,7 +44865,10 @@ export async function appendSessionEventsAndUpdateSession(
           producerSeq: input.producerSeq ?? null,
           occurredAt: input.occurredAt ?? now,
         }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .returning();
         const advancesActivity =
           sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
         await tx
@@ -44272,9 +45033,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           sessionId,
           sequence: ++sequence,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}, {
-            fullEvidence: input.retainedOutputEvidence,
-          }),
+          payload: input.payload ?? {},
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -44282,7 +45041,10 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           producerSeq: input.producerSeq ?? null,
           occurredAt: input.occurredAt ?? now,
         }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .returning();
         const update = built.update ?? {};
         const advancesActivity =
           sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
@@ -44377,7 +45139,7 @@ function mapSession(
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     status: row.status as SessionStatus,
-    initialMessage: row.initialMessage,
+    initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: row.title ?? null,
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
@@ -44448,7 +45210,7 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
     sessionId: row.sessionId,
     sequence: row.sequence,
     type: row.type as SessionEventType,
-    payload: row.payload,
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
     occurredAt: row.occurredAt.toISOString(),
     clientEventId: row.clientEventId,
     turnId: row.turnId,
@@ -44467,7 +45229,7 @@ function mapProjectedEvent(row: SessionEventProjectionRow): SessionEvent {
     sessionId: row.sessionId,
     sequence: row.sequence,
     type: row.type as SessionEventType,
-    payload: row.payload,
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
     occurredAt:
       row.occurredAt instanceof Date
         ? row.occurredAt.toISOString()
@@ -44496,7 +45258,7 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     status: row.status as SessionTurnStatus,
     source: row.source as SessionTurnSource,
     position: row.position,
-    prompt: row.prompt,
+    prompt: fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
     toolsProvided: row.toolsProvided,
@@ -44883,7 +45645,7 @@ function mapCapabilityInstallation(
     capabilityId: row.capabilityId,
     kind: row.kind as CapabilityKind,
     status: row.status as CapabilityInstallationStatus,
-    config: redactInstallationConfig(row.config),
+    config: projectInstallationConfig(row.config),
     metadata: row.metadata,
     enabledAt: row.enabledAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -44896,7 +45658,7 @@ function mapCapabilityInstallation(
  * The runtime reads ciphertext through listEnabledMcpCapabilityServers and
  * the enable flow through getStoredCapabilityHeaderCiphertext.
  */
-function redactInstallationConfig(config: Record<string, unknown>): Record<string, unknown> {
+function projectInstallationConfig(config: Record<string, unknown>): Record<string, unknown> {
   const headersEncrypted = encryptedHeadersConfig(config.headersEncrypted);
   if (!headersEncrypted) {
     return config;
@@ -45012,7 +45774,7 @@ function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): 
     status: row.status as KnowledgeMemoryStatus,
     kind: row.kind as KnowledgeMemoryKind,
     scope: row.scope,
-    text: row.text,
+    text: fromPostgresLosslessText(row.text, row.textCodecVersion),
     sourceRefs: Array.isArray(row.sourceRefs) ? (row.sourceRefs as KnowledgeSourceRef[]) : [],
     confidence: confidenceFromStorage(row.confidence),
     metadata: row.metadata,

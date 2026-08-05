@@ -4,11 +4,21 @@ A workspace owns named **variable-sets**: sets of variables whose values are sec
 
 ## Invariants
 
-1. **Write-only values.** No API response, session event, log, span, or audit record ever contains a variable value. Reads return names and metadata (version, timestamps) only; there is no read-back even at create time. Rotation is `PUT` with a new value.
+1. **The current value API is write-only.** Generic workspace, session, event, capability, installation, and variable-set metadata responses remain value-free. Reads return names and metadata (version, timestamps) only; this emergency release does not yet expose a plaintext read route or tool.
 2. **No attachment, no injection.** A run whose session has `variableSetId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
-3. **Agents cannot self-attach.** The worker's **default** first-party MCP delegated token never carries `variable-sets:use`, and the MCP scheduled-task tools reject attachment changes (set **or** detach) and instruction edits to variable-set-attached tasks for grants without it. A session only holds a stronger first-party token when its creator explicitly granted one at creation (`firstPartyMcpPermissions`, capped by the creating grant) — agents can never escalate themselves.
+3. **Agents cannot change their own attachment or self-escalate.** The current worker default includes `variable-sets:use` and `variable-sets:manage`, so an agent can manage sets and attach one when it creates a child session, but the write-only API does not reveal stored values. A session only holds a different first-party permission set when its creator explicitly grants one at creation (`firstPartyMcpPermissions`, capped by the creating grant), and there is no attach-after-create operation.
 4. **Workspace isolation.** Both tables are protected by the same forced row-level-security policy as every other workspace table.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
+6. **No content rewriting.** If an authorized agent echoes a configured value into model history, events, tool results, errors, memory, or UI-visible OpenGeni data, that content remains exact. Public or third-party telemetry uses a sink-local, closed schema and never writes back over canonical OpenGeni data.
+
+## Emergency rollout
+
+This emergency release removes heuristic rewriting from internal content and
+retains the existing write-only variable-set API. The approved permissioned
+plaintext-read contract is recorded below as a target, not as a live feature;
+it will follow in small reviewed changes across the backend, SDK, MCP, and UI.
+Historical content already rewritten by an older release cannot be
+reconstructed.
 
 ## Deliberate v1 storage decision
 
@@ -32,13 +42,22 @@ openssl rand -base64 32   # generate OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
 | `variable-sets:use` | List/read variable-sets (names + metadata) and attach them to sessions, scheduled tasks, and pack installations. |
 | `variable-sets:manage` | Create/rename/delete variable-sets and set/rotate/delete variable values. |
 
-`workspace:admin` implies both. Reads are deliberately not folded under `workspace:read`: listing the names of secret sets is itself sensitive. A workspace API key holding only `variable-sets:use` can attach but can never read values — consistent with the write-only design. Editing the `agentConfig` of a scheduled task that has a variable set attached also requires `variable-sets:use`, because changing the instructions of a secret-bearing task is equivalent to attaching those secrets to new instructions. Changing or removing a task's attachment (including `variableSetId: null`) requires it for the same reason.
+`workspace:admin` implies both current permissions. The deprecated
+`environments:use` and `environments:manage` aliases retain the same behavior.
+Reads are deliberately not folded under `workspace:read`: listing the names of
+secret sets is itself sensitive. A workspace API key holding only
+`variable-sets:use` can attach but cannot read values, consistent with the
+current write-only design. Editing the `agentConfig` of a scheduled task that
+has a variable set attached also requires `variable-sets:use`, because changing
+the instructions of a secret-bearing task is equivalent to attaching those
+secrets to new instructions. Changing or removing an attachment requires it for
+the same reason.
 
 ## API
 
 | Method and path | Permission | Notes |
 |---|---|---|
-| `GET /v1/workspaces/:workspaceId/variable-sets` | `variable-sets:use` | Variable sets with variable metadata. |
+| `GET /v1/workspaces/:workspaceId/variable-sets` | `variable-sets:use` | Variable sets with variable metadata, never plaintext values. |
 | `POST /v1/workspaces/:workspaceId/variable-sets` | `variable-sets:manage` | Create with optional initial variables. 409 on duplicate name. Caps: 25 variable-sets/workspace, 100 variables/variable set. |
 | `GET /v1/workspaces/:workspaceId/variable-sets/:variableSetId` | `variable-sets:use` | Metadata only. |
 | `PATCH /v1/workspaces/:workspaceId/variable-sets/:variableSetId` | `variable-sets:manage` | Rename / description. |
@@ -90,23 +109,81 @@ Practically: attaching a variable set shapes what a managed sandbox sees; it doe
 
 `PUT .../variables/:name` is both set and rotate (the `version` counter increments). A rotated value takes effect on the **next turn**: resumed sandboxes refresh their manifest on resume where the sandbox client supports manifest application, and runs in flight keep the values they loaded at turn start.
 
-## Redaction and residual exposure
+## Exact content and exposure model
 
-Values never enter the events pipeline by construction — injection is server-side and the API is write-only. As defense-in-depth against an agent echoing values (for example running `env`), the worker replaces exact occurrences of every attached value (length >= 6) with `[redacted:<NAME>]` in all session events it publishes for that turn. Known residual exposure, stated honestly:
+OpenGeni does not replace an echoed value in model context, history, events,
+memory, tool calls/results, failures, diagnostics, transcription, or UI. These
+surfaces preserve accepted content exactly. This is deliberately separate from
+the configured-secret read boundary:
 
-- `agent_run_states.serialized_run_state` may contain echoed values inside tool transcripts. It is RLS-protected and never returned by any API route, and it must stay intact for session resume, so it is not redacted.
-- A sandboxed agent with network access can exfiltrate any secret it is given. Attaching a variable set **is** granting those secrets to that run. Attach the smallest variable set that does the job.
-- Worker telemetry carries ids only (`opengeni.variable_set_id` on the run span); heartbeats and logs never carry the value map.
+- a sandboxed agent with network access can exfiltrate any secret it is given;
+  attaching a variable set grants real plaintext authority inside that managed
+  sandbox, so attach the smallest set that does the job;
+- agents may deliberately persist injected plaintext in their own sandbox;
+- worker telemetry uses metadata only and never copies the configured value;
+- public or third-party telemetry uses reviewed structural fields only; that
+  projection never changes stored data, model context, tool results, or UI;
+- historical bytes already replaced or omitted by older versions are
+  irrecoverable.
 
 ## MCP surface
 
 The first-party MCP server exposes variable set tools, gated by the same permissions as the REST routes and **registered only for grants that hold them**:
 
 - `variable_set_list` (`variable-sets:use`) — variable-sets with variable names and metadata, never values.
-- `variable_set_set_variable` (`variable-sets:manage`) — set or rotate one variable, targeted by `variableSetId` or by `variableSetName` (created on first use). The value arrives in plain tool arguments by design: the calling agent (e.g. an orchestrating "manager" holding a grant with `variable-sets:manage`) is trusted with the secrets it persists. Responses stay write-only — metadata, never values.
+- `variable_set_set_variable` (`variable-sets:manage`) — set or rotate one variable, targeted by `variableSetId` or by `variableSetName` (created on first use). The value arrives in plain tool arguments by design; responses stay write-only and return metadata, never values.
 - `session_create` (`sessions:create`) accepts `variableSetId`; attachment requires `variable-sets:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
 
-The invariant that sandboxed agents cannot reach workspace secrets is unchanged: the worker's **default** first-party delegated token carries neither `variable-sets:use` nor `variable-sets:manage`, so none of these tools are registered for it. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `variableSetId` but reject any attachment change — set or detach — unless the calling grant holds `variable-sets:use`, which the sandboxed agent's default first-party token never does.
+The worker's current **default** first-party delegated token carries both
+`variable-sets:use` and `variable-sets:manage`, so these write-only tools are
+registered for it. It still cannot read a configured value or change its own
+creation-time attachment. A creator can narrow or otherwise customize a
+session's current permissions through explicit, creator-capped
+`firstPartyMcpPermissions`.
+
+## Approved permissioned-read target — not yet live
+
+The approved follow-up adds dedicated permissions without allowing a legacy
+scope to imply plaintext access:
+
+| Permission | Target grant |
+|---|---|
+| `variable-sets:list` | List variable-set containers and metadata. |
+| `variable-sets:read` | Read one variable-set container and metadata. |
+| `variable-sets:write` | Create, rename, or delete variable-set containers. |
+| `variable-sets:use` | Attach and inject variable sets; never reveal plaintext by itself. |
+| `secrets:list` | List configured secret names and versions. |
+| `secrets:read` | Retrieve one exact plaintext configured secret through a dedicated operation. |
+| `secrets:write` | Create, rotate, or delete configured secret values. |
+
+The target operations compose both resource and value scopes:
+
+| Target operation | Required permission(s) |
+|---|---|
+| List variable sets and variable metadata | `variable-sets:list` + `secrets:list` |
+| Get one variable set and variable metadata | `variable-sets:read` + `secrets:list` |
+| Create/update/delete a variable-set container | `variable-sets:write` |
+| Attach a variable set | `variable-sets:use` |
+| Read one exact value | `variable-sets:read` + literal `secrets:read` |
+| Set/rotate/delete one value | `variable-sets:write` + `secrets:write` |
+
+The dedicated REST read will be
+`GET /v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name`.
+The matching MCP tool will be `variable_set_get_variable`. An agent call must
+also present a live signed session claim for the exact workspace, session, turn,
+attempt, and execution generation and pass a new `session.secret.read`
+authorization operation. Cancellation, attempt replacement, generation
+advance, permission removal, membership revocation, and API-key revocation must
+deny the next read. The default first-party grant will not include
+`secrets:read`.
+
+Every list/read/write will commit a metadata-only access audit atomically with
+the operation. The audit records actor, target name/reference, action, version,
+timestamp, and session/turn/attempt/generation when present; it never stores the
+value, ciphertext, transformed value, or a digest standing in for the value. A
+plaintext read fails closed if that audit write cannot commit. REST, SDK, React,
+MCP, and UI reveal/copy/edit surfaces ship only after cross-tenant forced-RLS,
+revocation, stale-attempt, and exact round-trip tests pass.
 
 ### Manager sessions: per-session first-party MCP permissions
 

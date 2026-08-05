@@ -221,6 +221,14 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         from session_events where session_id = ${sessionId} and sequence = 7`;
       expect(historicalDuplicate?.reasonBytes).toBeGreaterThan(4096);
 
+      // The historical guard remains under test, while the current reader is
+      // exercised against the forward-compatible nullable sidecar shape that
+      // 0176 adds. Current full reads return the exact historical row instead
+      // of implicitly invoking the old bounded monitoring projection.
+      await admin.unsafe(
+        "alter table session_events add column if not exists payload_codec_version integer",
+      );
+
       const projectionClient = createDb(blank.databaseUrl, { max: 1 });
       try {
         const projectedPayloadPage = await listSessionEventPage(
@@ -234,14 +242,9 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         expect(projectedPayloadPage.bytes).toBe(
           Buffer.byteLength(JSON.stringify(projectedPayloadPage.events), "utf8"),
         );
-        expect(projectedPayloadPage.events[0]?.payload).toMatchObject({
-          truncation: {
-            truncated: true,
-            surface: "database_guard",
-            originalBytes: sizes!.historical,
-          },
-        });
-        expect(JSON.stringify(projectedPayloadPage.events)).not.toContain("HEAD-");
+        expect(projectedPayloadPage.events[0]?.payload).toEqual(historicalPayload);
+        expect(JSON.stringify(projectedPayloadPage.events)).toContain("HEAD-");
+        expect(JSON.stringify(projectedPayloadPage.events)).toContain("-TAIL");
 
         const projectedEnvelopePage = await listSessionEventPage(
           projectionClient.db,
@@ -251,22 +254,13 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         );
         expect(projectedEnvelopePage.events[0]).toMatchObject({
           sequence: 5,
-          type: "session.event.envelope_omitted",
-          payload: {
-            envelopeProjection: {
-              truncated: true,
-              surface: "database_read_projection",
-              fields: expect.arrayContaining([
-                expect.objectContaining({ field: "type" }),
-                expect.objectContaining({ field: "clientEventId" }),
-              ]),
-            },
-            fullEvidence: { available: false, reason: "not_retained" },
-          },
+          type: historicalType,
+          clientEventId: oversizedClientEventId,
+          payload: { id: "historical-envelope", output: "small" },
         });
         expect(
           Buffer.byteLength(projectedEnvelopePage.events[0]?.clientEventId ?? "", "utf8"),
-        ).toBeLessThanOrEqual(1024);
+        ).toBeGreaterThan(1024);
 
         const backwardPage = await listSessionEventPage(
           projectionClient.db,

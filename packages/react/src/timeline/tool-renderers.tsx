@@ -40,7 +40,6 @@ import {
   mediaPreviewFact,
   parseExecBannerSessionId,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -995,7 +994,7 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
         running
         preview={<RunningPreview>setting…</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1010,7 +1009,7 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
         failed
         preview={errorText ?? "variable write failed"}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
         {errorText ? (
           <PayloadBlock label="Error" value={errorText} failed />
         ) : (
@@ -1026,10 +1025,12 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
       iconTone="muted"
       title={`Set ${name}`}
       cancelled={item.status === "cancelled"}
-      preview="value write-only · never returned"
+      preview="exact value preserved"
     >
-      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
-      <BodyNote>the value is a secret — redacted in every view; the API never returns it.</BodyNote>
+      <PayloadBlock label="Arguments" value={args} />
+      <BodyNote>
+        The configured value is preserved exactly and available through authorized secret reads.
+      </BodyNote>
     </ActivityDisclosure>
   );
 }
@@ -1175,7 +1176,7 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
         }
       >
         {query ? <BodyNote>capability query: {query}</BodyNote> : null}
-        <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+        <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
       </ActivityDisclosure>
     );
   }
@@ -1191,7 +1192,7 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
         preview={truncatePreview(outText, 80) || queryPreview || "Lookup failed"}
       >
         {query ? <BodyNote>capability query: {query}</BodyNote> : null}
-        <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+        <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
         <PayloadBlock label="Error" value={outText} failed />
       </ActivityDisclosure>
     );
@@ -1226,7 +1227,7 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
       ) : tools && tools.length === 0 ? (
         <BodyNote>no deferred tools matched this capability query.</BodyNote>
       ) : null}
-      <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+      <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
       {tools == null && outText ? <PayloadBlock label="Result" value={outText} /> : null}
     </ActivityDisclosure>
   );
@@ -1249,7 +1250,7 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
         running
         preview={<RunningPreview>Searching…</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1264,7 +1265,7 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
         failed
         preview={truncatePreview(outText, 80) || "Search failed"}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
         <PayloadBlock label="Error" value={outText} failed />
       </ActivityDisclosure>
     );
@@ -1300,7 +1301,7 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
           ))}
         </ul>
       ) : null}
-      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      <PayloadBlock label="Arguments" value={args} />
       <PayloadBlock label="Result" value={outText} />
     </ActivityDisclosure>
   );
@@ -1330,7 +1331,7 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
           )
         }
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1345,7 +1346,7 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
         failed
         preview={truncatePreview(outText, 80) || "Rename failed"}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
         <PayloadBlock label="Error" value={outText} failed />
       </ActivityDisclosure>
     );
@@ -1371,7 +1372,7 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
       cancelled={item.status === "cancelled"}
       preview={item.status === "cancelled" ? undefined : settledTitle || undefined}
     >
-      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      <PayloadBlock label="Arguments" value={args} />
       {outText ? <PayloadBlock label="Result" value={outText} /> : null}
     </ActivityDisclosure>
   );
@@ -1431,7 +1432,7 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
         running
         preview={<RunningPreview>Proposing…</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1493,7 +1494,7 @@ function askToolPreview(args: unknown): string | null {
 }
 
 function AskRenderer({ item }: ToolRendererProps) {
-  const args = redactSecrets(parseToolArgs(item.arguments));
+  const args = parseToolArgs(item.arguments);
   const preview = askToolPreview(args);
   const icon = <MessageCircleQuestionIcon className={ICON_SIZE} />;
   const title = "Ask";
@@ -1583,7 +1584,7 @@ function runOnOpPreview(args: Record<string, unknown>): string | null {
 
 function RunOnRenderer({ item }: ToolRendererProps) {
   const parsedArgs = parseToolArgs(item.arguments);
-  const args = redactSecrets(parsedArgs);
+  const args = parsedArgs;
   const targetName = runOnTargetName(item.output);
   const title = targetName ? `Run on ${targetName}` : "Run on";
   const opPreview = runOnOpPreview(parsedArgs);
@@ -1648,7 +1649,7 @@ function RunOnRenderer({ item }: ToolRendererProps) {
  */
 function GenericRenderer({ item }: ToolRendererProps) {
   const running = item.status === "running";
-  const args = redactSecrets(parseToolArgs(item.arguments));
+  const args = parseToolArgs(item.arguments);
   const display = toolDisplayName(item.name);
   const icon = <GenericToolIcon name={item.name} />;
   // Goal tools: surface the objective text on the collapsed row so the in-cluster

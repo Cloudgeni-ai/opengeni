@@ -42,7 +42,8 @@ messages.
 The timeline is an audit projection over bounded lifecycle events. A delivered
 batch appears immediately at its receiving turn with stable member ids, source
 badges, typed labels, and bounded previews. Full model-facing content remains
-in canonical input/history storage, not the redacted event payload.
+in canonical input/history storage; the exact event payload is a separate
+timeline contract and never reconstructs history.
 
 ## Cache invariant
 

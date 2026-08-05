@@ -61,7 +61,6 @@ describe("host-owned run credential request", () => {
       files: [],
       fileEnvironment: {},
       expiresAt: null,
-      redactions: [],
       authNeeded: [
         {
           reason: "insufficient_scope",

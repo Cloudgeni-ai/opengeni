@@ -1,9 +1,18 @@
 import { createHash } from "node:crypto";
 
+import {
+  retainedOutputUnavailable,
+  validateRetainedOutputEvidence,
+  type RetainedOutputEvidence,
+} from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
-import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./database";
+import {
+  fromPostgresLosslessJson,
+  fromPostgresLosslessText,
+  LOSSLESS_CONTENT_CODEC_VERSION,
+} from "./lossless-json";
 import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 import * as schema from "./schema";
 
@@ -17,9 +26,11 @@ export type ProjectSessionRealtimeDelegationTerminalInput = {
   turnId: string;
   turnStatus: "completed" | "failed" | "cancelled" | "superseded";
   terminalEvent: {
+    id: string | null;
     type: "turn.completed" | "turn.failed" | "turn.cancelled" | "turn.superseded";
     payload: Record<string, unknown>;
   };
+  retainedOutputEvidence?: unknown;
   now?: Date;
 };
 
@@ -71,20 +82,48 @@ function deterministicTerminalOperationId(turnId: string): string {
 }
 
 function boundedPayload(input: Record<string, unknown> | undefined): Record<string, unknown> {
-  const payload = sanitizeEventPayload(input ?? {});
+  const payload = input ?? {};
   if (Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_PAYLOAD_BYTES) {
     throw new Error("Realtime payload exceeds the durable ledger limit");
   }
   return payload;
 }
 
-function assertBoundedText(value: string, label: string): void {
-  if (Buffer.byteLength(value, "utf8") > MAX_TEXT_BYTES) {
-    throw new Error(`${label} exceeds the durable realtime ledger limit`);
-  }
+function payloadBytes(value: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-function terminalProjection(input: ProjectSessionRealtimeDelegationTerminalInput): {
+function fitsRealtimePayload(value: Record<string, unknown>): boolean {
+  return payloadBytes(value) <= MAX_PAYLOAD_BYTES;
+}
+
+function retainedEvidence(value: unknown): RetainedOutputEvidence {
+  return validateRetainedOutputEvidence(value) ?? retainedOutputUnavailable();
+}
+
+function terminalReference(
+  input: ProjectSessionRealtimeDelegationTerminalInput,
+  terminal: Record<string, unknown>,
+): Record<string, unknown> {
+  const output = typeof terminal.output === "string" ? terminal.output : null;
+  return {
+    canonicalEvent: {
+      id: input.terminalEvent.id,
+      type: input.terminalEvent.type,
+    },
+    truncation: {
+      truncated: true,
+      reason: "realtime_ledger_limit",
+      originalBytes: payloadBytes(terminal),
+      outputBytes: output === null ? null : Buffer.byteLength(output, "utf8"),
+      fullEvidence: retainedEvidence(input.retainedOutputEvidence),
+    },
+  };
+}
+
+export function buildSessionRealtimeDelegationTerminalProjection(
+  input: ProjectSessionRealtimeDelegationTerminalInput,
+): {
   kind: "delegation_result" | "error";
   text: string;
   payload: Record<string, unknown>;
@@ -95,19 +134,33 @@ function terminalProjection(input: ProjectSessionRealtimeDelegationTerminalInput
       `Realtime delegation terminal event ${input.terminalEvent.type} does not match ${input.turnStatus}`,
     );
   }
-  const terminal = boundedPayload(input.terminalEvent.payload);
+  const terminal = input.terminalEvent.payload;
   if (input.turnStatus === "completed") {
     const output =
       typeof terminal.output === "string" ? terminal.output : "Delegated turn completed.";
-    assertBoundedText(output, "Delegation result");
+    const exactPayload = {
+      status: input.turnStatus,
+      turnId: input.turnId,
+      terminalEventId: input.terminalEvent.id,
+      terminalEventType: input.terminalEvent.type,
+      terminal,
+    };
+    if (Buffer.byteLength(output, "utf8") <= MAX_TEXT_BYTES && fitsRealtimePayload(exactPayload)) {
+      return {
+        kind: "delegation_result",
+        text: output,
+        payload: exactPayload,
+      };
+    }
     return {
       kind: "delegation_result",
-      text: output,
+      text: "Delegated turn completed. The full result remains in the canonical session event.",
       payload: boundedPayload({
         status: input.turnStatus,
         turnId: input.turnId,
+        terminalEventId: input.terminalEvent.id,
         terminalEventType: input.terminalEvent.type,
-        terminal,
+        terminal: terminalReference(input, terminal),
       }),
     };
   }
@@ -119,16 +172,31 @@ function terminalProjection(input: ProjectSessionRealtimeDelegationTerminalInput
     typeof terminal.error === "string" && terminal.error.length > 0
       ? terminal.error
       : `Delegated turn ${input.turnStatus}.`;
-  assertBoundedText(message, "Delegation error");
+  const exactPayload = {
+    code,
+    status: input.turnStatus,
+    turnId: input.turnId,
+    terminalEventId: input.terminalEvent.id,
+    terminalEventType: input.terminalEvent.type,
+    terminal,
+  };
+  if (Buffer.byteLength(message, "utf8") <= MAX_TEXT_BYTES && fitsRealtimePayload(exactPayload)) {
+    return {
+      kind: "error",
+      text: message,
+      payload: exactPayload,
+    };
+  }
   return {
     kind: "error",
-    text: message,
+    text: `Delegated turn ${input.turnStatus}. The full diagnostic remains in the canonical session event.`,
     payload: boundedPayload({
-      code,
+      ...(Buffer.byteLength(code, "utf8") <= 256 ? { code } : {}),
       status: input.turnStatus,
       turnId: input.turnId,
+      terminalEventId: input.terminalEvent.id,
       terminalEventType: input.terminalEvent.type,
-      terminal,
+      terminal: terminalReference(input, terminal),
     }),
   };
 }
@@ -150,8 +218,8 @@ function mapEntry(
     sourceUpdateId: row.sourceUpdateId,
     historyItemId: row.historyItemId,
     turnId: row.turnId,
-    text: row.text,
-    payload: row.payload,
+    text: row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion),
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
     clientAckedAt: row.clientAckedAt?.toISOString() ?? null,
     providerAckedAt: row.providerAckedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -187,7 +255,7 @@ export async function projectSessionRealtimeDelegationTerminalInTransaction(
   if (calls.length > 1) {
     throw new Error(`Delegation turn ${input.turnId} has multiple accepted realtime calls`);
   }
-  const projected = terminalProjection(input);
+  const projected = buildSessionRealtimeDelegationTerminalProjection(input);
   const now = input.now ?? new Date();
   const call = calls[0] ?? null;
   const [mode] = call
@@ -225,10 +293,8 @@ export async function projectSessionRealtimeDelegationTerminalInTransaction(
       channel: "speakable",
       text: projected.text,
       payload: {
+        ...projected.payload,
         route: "session_context",
-        status: input.turnStatus,
-        terminalEventType: input.terminalEvent.type,
-        terminal: boundedPayload(input.terminalEvent.payload),
         ...(call ? { priorRealtimeId: call.realtimeId } : {}),
       },
       now,
@@ -296,7 +362,9 @@ export async function projectSessionRealtimeDelegationTerminalInTransaction(
       delegationItemId: call.delegationItemId,
       turnId: input.turnId,
       text: projected.text,
+      textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       payload,
+      payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       createdAt: now,
       updatedAt: now,
     })

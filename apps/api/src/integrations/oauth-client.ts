@@ -282,8 +282,7 @@ export async function startMcpOAuth(
       error instanceof OAuthStartStageError
         ? error
         : new OAuthStartStageError("connection_lookup", oauthStartFailureReason(error), error);
-    const providerDomain = safeRequestedProviderDomain(context.payload);
-    logOAuthStartFailure(deps.observability, staged, providerDomain);
+    logOAuthStartFailure(deps.observability, staged);
     throw oauthStartApiError(staged);
   } finally {
     deadline.dispose();
@@ -1474,31 +1473,16 @@ function throwIfCallbackAborted(signal: AbortSignal, stage: OAuthCallbackStage):
 function logOAuthCallbackFailure(
   observability: Observability | undefined,
   error: OAuthCallbackStageError,
-  state: OAuthStatePayload | null,
+  _state: OAuthStatePayload | null,
 ): void {
-  observability?.error("MCP OAuth callback failed", {
-    "opengeni.oauth.stage": error.stage,
-    "opengeni.oauth.reason": error.reason,
-    "opengeni.oauth.provider_domain": state?.providerDomain,
-    "opengeni.oauth.resource_host": state ? safeHost(state.resource) : undefined,
-    "opengeni.oauth.authorization_server": state?.authorizationServer,
-    "opengeni.oauth.issuer": state?.issuer,
-    "opengeni.oauth.client_registration_method": state?.clientRegistrationMethod,
-    error: sanitizedError(error.cause),
-  });
+  observability?.error("MCP OAuth callback failed", oauthPublicErrorFields(error.cause));
 }
 
 function logOAuthStartFailure(
   observability: Observability | undefined,
   error: OAuthStartStageError,
-  providerDomain: string | undefined,
 ): void {
-  observability?.warn("MCP OAuth setup failed", {
-    "opengeni.oauth.stage": error.stage,
-    "opengeni.oauth.reason": error.reason,
-    "opengeni.oauth.provider_domain": providerDomain,
-    error: sanitizedError(error.cause),
-  });
+  observability?.warn("MCP OAuth setup failed", oauthPublicErrorFields(error.cause));
 }
 
 function oauthStartFailureReason(error: unknown): string {
@@ -1581,51 +1565,47 @@ function oauthStartStageLabel(stage: OAuthStartStage): string {
 function logOAuthVerificationWarning(
   observability: Observability | undefined,
   error: OAuthCallbackStageError,
-  state: OAuthStatePayload,
+  _state: OAuthStatePayload,
 ): void {
-  observability?.warn("MCP OAuth tools/list verification failed after token exchange", {
-    "opengeni.oauth.stage": error.stage,
-    "opengeni.oauth.reason": error.reason,
-    "opengeni.oauth.provider_domain": state.providerDomain,
-    "opengeni.oauth.resource_host": safeHost(state.resource),
-    "opengeni.oauth.mcp_host": safeHost(state.mcpUrl),
-    "opengeni.oauth.authorization_server": state.authorizationServer,
-    "opengeni.oauth.issuer": state.issuer,
-    "opengeni.oauth.client_registration_method": state.clientRegistrationMethod,
-    error: sanitizedError(error.cause),
-  });
+  observability?.warn(
+    "MCP OAuth tools/list verification failed after token exchange",
+    oauthPublicErrorFields(error.cause),
+  );
 }
 
-function sanitizedError(error: unknown): string {
-  if (error instanceof HTTPException) {
-    return `HTTPException ${error.status}: ${error.message}`;
+export type OAuthPublicErrorFields = {
+  errorClass: "OAuthOperationError";
+  errorCode: "oauth_operation_failed";
+  status?: number;
+  origin: "oauth";
+};
+
+/** Allowlisted projection for public telemetry; canonical OAuth errors stay exact. */
+export function oauthPublicErrorFields(error: unknown): OAuthPublicErrorFields {
+  const fields: OAuthPublicErrorFields = {
+    errorClass: "OAuthOperationError",
+    errorCode: "oauth_operation_failed",
+    origin: "oauth",
+  };
+  try {
+    const rawStatus =
+      error instanceof HTTPException
+        ? error.status
+        : error && typeof error === "object"
+          ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+            (error as { statusCode?: unknown }).statusCode)
+          : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public telemetry is best-effort. A hostile getter/proxy must never
+    // replace the exact OAuth failure with a projection failure.
   }
-  if (error instanceof Error) {
-    return `${error.name}: ${error.message}`;
-  }
-  return String(error);
+  return fields;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function safeHost(rawUrl: string): string | undefined {
-  try {
-    return new URL(rawUrl).host;
-  } catch {
-    return undefined;
-  }
-}
-
-function safeRequestedProviderDomain(payload: OAuthStartRequest): string | undefined {
-  try {
-    const resource = payload.mcpUrl ?? payload.resource;
-    if (!resource) return undefined;
-    return canonicalProviderDomain(payload.providerDomain ?? new URL(resource).hostname);
-  } catch {
-    return undefined;
-  }
 }
 
 async function oauthErrorFromResponse(

@@ -573,6 +573,7 @@ describe("API helpers", () => {
   });
 
   test("readyz reports a failing dependency", async () => {
+    const sentinel = "READYZ_PUBLIC_SENTINEL_9e3468";
     const app = createApp({
       settings: testSettings(),
       db: {} as never,
@@ -582,7 +583,7 @@ describe("API helpers", () => {
       readinessChecks: {
         db: async () => {},
         nats: () => {
-          throw new Error("nats down");
+          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
         },
         temporal: async () => {},
       },
@@ -596,7 +597,8 @@ describe("API helpers", () => {
     };
     expect(body.ok).toBe(false);
     expect(body.checks.nats.ok).toBe(false);
-    expect(body.checks.nats.error).toContain("nats down");
+    expect(body.checks.nats.error).toBe("dependency_unavailable");
+    expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
   test("traffic-readyz stays routable through a NATS or Temporal outage", async () => {
@@ -634,6 +636,7 @@ describe("API helpers", () => {
   });
 
   test("traffic-readyz stops routing when the durable database is unavailable", async () => {
+    const sentinel = "TRAFFIC_READYZ_PUBLIC_SENTINEL_4a10d2";
     const app = createApp({
       settings: testSettings(),
       db: {} as never,
@@ -642,7 +645,7 @@ describe("API helpers", () => {
       managedAuth: null,
       readinessChecks: {
         db: async () => {
-          throw new Error("database down");
+          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
         },
       },
     });
@@ -655,7 +658,8 @@ describe("API helpers", () => {
     };
     expect(body.ok).toBe(false);
     expect(body.checks.db.ok).toBe(false);
-    expect(body.checks.db.error).toContain("database down");
+    expect(body.checks.db.error).toBe("dependency_unavailable");
+    expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
   test("rejects oversized streamed request bodies before route parsing", async () => {

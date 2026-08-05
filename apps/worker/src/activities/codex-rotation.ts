@@ -694,13 +694,27 @@ export function selectCodexCredentialLeaseForTurn(args: {
 
   // A stale policy pin is intentionally ignored here and cleared by the caller
   // after the atomic selection. Rotation-off/unpinned behavior otherwise keeps
-  // the pre-lease pin > active-pointer contract.
+  // the pre-lease pin > active-pointer contract. The pointer is preference, not
+  // proof of capacity: rotation-off must wait on a capped pointer rather than
+  // falsely admitting it or silently failing over to another subscription.
   if (!rotationEnabled) {
-    const credentialId =
-      activeCredentialId && connectedIds.has(activeCredentialId) ? activeCredentialId : null;
+    const active = activeCredentialId
+      ? accounts.find((account) => account.id === activeCredentialId)
+      : undefined;
+    if (!active?.allocatorEnabled) {
+      return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
+    if (!isCodexCredentialHealthy(active, args.now)) {
+      return {
+        credentialId: null,
+        decision: { kind: "allCapped", earliestResetAt: availableAt(active, args.now) },
+        advanceActivePointer: false,
+      };
+    }
     return {
-      credentialId,
-      decision: credentialId ? { kind: "active", credentialId, moved: false } : { kind: "none" },
+      credentialId: active.id,
+      decision: { kind: "active", credentialId: active.id, moved: false },
+      advanceActivePointer: false,
     };
   }
 

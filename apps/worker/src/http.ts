@@ -72,7 +72,7 @@ export function createWorkerHttpHandler(
               checks: Object.fromEntries(
                 (Object.keys(checks) as ReadinessCheckName[]).map((name) => [
                   name,
-                  { ok: false, error: `worker is ${state}` },
+                  { ok: false, error: "worker_not_ready" },
                 ]),
               ) as ReadinessResult["checks"],
             }
@@ -101,11 +101,8 @@ export async function runReadinessChecks(
         try {
           await withTimeout(Promise.resolve().then(check), timeoutMs);
           return [name, { ok: true }] as const;
-        } catch (error) {
-          return [
-            name,
-            { ok: false, error: error instanceof Error ? error.message : String(error) },
-          ] as const;
+        } catch {
+          return [name, { ok: false, error: "dependency_unavailable" }] as const;
         }
       },
     ),
