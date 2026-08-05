@@ -129,6 +129,8 @@ export {
 } from "./providers/modal";
 export {
   selectBackend,
+  sdkBackendIdForSandboxBackend,
+  sandboxBackendForSdkBackendId,
   backendSupportsOs,
   desktopCapableBackend,
   negotiateCapabilities,

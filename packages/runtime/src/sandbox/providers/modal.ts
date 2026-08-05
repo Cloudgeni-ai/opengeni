@@ -309,6 +309,13 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
 }
 
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
+  readonly #snapshotFilesystemTimeoutMs: number | undefined;
+
+  constructor(...args: ConstructorParameters<typeof ModalSandboxClient>) {
+    super(...args);
+    this.#snapshotFilesystemTimeoutMs = args[0]?.snapshotFilesystemTimeoutMs;
+  }
+
   override async create(
     args?: Parameters<ModalSandboxClient["create"]>[0],
     manifestOptions?: Parameters<ModalSandboxClient["create"]>[1],
@@ -318,7 +325,21 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   }
 
   override async resume(state: ModalSandboxSessionState): Promise<ModalSandboxSession> {
-    const session = await super.resume(state);
+    // Snapshot timeout is an operator-controlled execution budget, not durable
+    // provider identity. Older resume envelopes legitimately retain the value
+    // that was current when the box was created; letting that stale value win
+    // makes a later production increase ineffective exactly when a large
+    // workspace needs it. Rebind only this operational field while preserving
+    // every provider-identity and filesystem field byte-for-byte.
+    const effectiveState =
+      this.#snapshotFilesystemTimeoutMs === undefined ||
+      state.snapshotFilesystemTimeoutMs === this.#snapshotFilesystemTimeoutMs
+        ? state
+        : {
+            ...state,
+            snapshotFilesystemTimeoutMs: this.#snapshotFilesystemTimeoutMs,
+          };
+    const session = await super.resume(effectiveState);
     return installOpenGeniModalSnapshotPolicy(session);
   }
 }
@@ -349,6 +370,10 @@ export const modalProvider: ProviderRegistration = {
       appName: settings.modalAppName,
       timeoutMs: settings.modalTimeoutSeconds * 1000,
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
+      // The Agents Extensions session persists this value in its provider
+      // state and passes it to persistWorkspace(). Keep it aligned with the
+      // same current setting that bounds OpenGeni's outer capture operation.
+      snapshotFilesystemTimeoutMs: settings.sandboxSnapshotTimeoutMs,
       exposedPorts,
       env: environment,
       // A registry image's own CMD is not a sandbox keepalive contract (for

@@ -95,6 +95,7 @@ import {
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
+  sandboxBackendForSdkBackendId,
   sandboxCommandExitCode,
   sandboxCommandStillRunning,
   sweepModalOrphanSandboxes,
@@ -1428,7 +1429,8 @@ async function probeDrainableProviderReadiness(
   if (!lease.instanceId || !lease.resumeState) {
     throw new Error("Expired workspace capture has no resumable provider identity");
   }
-  const backend = (lease.resumeBackendId ?? lease.backend) as string;
+  const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
+  const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
   let established: Awaited<ReturnType<typeof establishSandboxSessionFromEnvelope>>;
   try {
     established = await establishSandboxSessionFromEnvelope(settings, lease.resumeState, {
@@ -1811,7 +1813,8 @@ export async function terminateProviderBox(
   persistArchive: PersistArchiveFn,
   createClientForBackend: CreateSandboxClientForBackendFn = createSandboxClientForBackend,
 ): Promise<ProviderTerminationOutcome> {
-  const backend = (lease.resumeBackendId ?? lease.backend) as string;
+  const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
+  const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
   // 'none' / no backend -> nothing to terminate.
   if (!backend || backend === "none") {
     return { terminated: true, providerMissingBeforeCapture: false };
