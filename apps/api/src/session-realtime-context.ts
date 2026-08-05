@@ -15,6 +15,8 @@ export type SessionRealtimeContinuityEntry = {
 };
 
 const BYTES_PER_ESTIMATED_TOKEN = 4;
+const REALTIME_INITIAL_ITEMS_MAX_BYTES =
+  CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS * BYTES_PER_ESTIMATED_TOKEN;
 const HISTORY_TRUNCATION_MARKER = "…[earlier content truncated]\n";
 const REALTIME_CONTINUITY_PROMPT = `## Conversation continuity
 
@@ -52,23 +54,47 @@ export function projectSessionRealtimeInitialItems(
       text: REALTIME_CONTINUITY_PROMPT.replace("{{ recent_voice_transcript }}", transcript),
     });
   }
+  return limitSessionRealtimeInitialItems(messages);
+}
+
+/**
+ * Keep the newest complete initial-item tail within the provider's count,
+ * estimated-token, and UTF-8 byte limits. Callers may use this after a
+ * boundary transform (such as strict public redaction), because that transform
+ * can expand text after the private projection has already been bounded.
+ */
+export function limitSessionRealtimeInitialItems(
+  messages: readonly CodexRealtimeInitialItem[],
+): CodexRealtimeInitialItem[] {
   const selected: CodexRealtimeInitialItem[] = [];
   let remainingTokens = CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS;
+  let remainingBytes = REALTIME_INITIAL_ITEMS_MAX_BYTES;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (selected.length >= CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT || remainingTokens <= 0) break;
+    if (
+      selected.length >= CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT ||
+      remainingTokens <= 0 ||
+      remainingBytes <= 0
+    ) {
+      break;
+    }
     const message = messages[index]!;
+    const bytes = utf8ByteLength(message.text);
     const tokens = estimatedTokens(message.text);
-    if (tokens <= remainingTokens) {
+    if (tokens <= remainingTokens && bytes <= remainingBytes) {
       selected.push(message);
       remainingTokens -= tokens;
+      remainingBytes -= bytes;
       continue;
     }
     // If the newest message alone exceeds the entire provider budget, preserve
     // its newest UTF-8 tail with an explicit marker. Otherwise stop at the last
     // complete item rather than manufacturing a partial older utterance.
     if (selected.length === 0) {
-      const text = truncateTextTail(message.text, remainingTokens * BYTES_PER_ESTIMATED_TOKEN);
+      const text = truncateTextTail(
+        message.text,
+        Math.min(remainingBytes, remainingTokens * BYTES_PER_ESTIMATED_TOKEN),
+      );
       if (text) selected.push({ ...message, text });
     }
     break;

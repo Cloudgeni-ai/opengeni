@@ -17,7 +17,10 @@ import {
 } from "@opengeni/db";
 
 import { openGeniRealtimeInstructions } from "./codex-realtime";
-import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
+import {
+  limitSessionRealtimeInitialItems,
+  projectSessionRealtimeInitialItems,
+} from "./session-realtime-context";
 
 const redactGatewayRealtimePublicData = createSecretRedactor([]);
 
@@ -52,7 +55,8 @@ export type GatewayRealtimeConnectionSecret = {
 export function redactGatewayRealtimeInitialItems(
   initialItems: readonly GatewayRealtimeInitialItem[],
 ): GatewayRealtimeInitialItem[] {
-  return redactGatewayRealtimePublicData(initialItems) as GatewayRealtimeInitialItem[];
+  const redacted = redactGatewayRealtimePublicData(initialItems) as GatewayRealtimeInitialItem[];
+  return limitSessionRealtimeInitialItems(redacted);
 }
 
 export async function createGatewayRealtimeConnectionSecret(input: {

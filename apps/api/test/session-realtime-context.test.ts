@@ -142,6 +142,37 @@ describe("ordinary-session realtime context projection", () => {
     expect(browserItems[1]?.text).not.toContain(adjacentValue);
   });
 
+  test("re-bounds public initial history when strict redaction expands a private item", () => {
+    const secretKey = ["sec", "ret"].join("");
+    const assignment = `${secretKey}=x `;
+    const repeatedAssignments = assignment.repeat(3_000);
+    const privateText =
+      "p".repeat(32_768 - new TextEncoder().encode(repeatedAssignments).byteLength) +
+      repeatedAssignments;
+    const privateItems = projectSessionRealtimeInitialItems([
+      {
+        position: 0,
+        item: { type: "message", role: "assistant", content: privateText },
+      },
+    ]);
+
+    expect(privateItems).toEqual([{ role: "assistant", text: privateText }]);
+    expect(new TextEncoder().encode(privateItems[0]!.text).byteLength).toBe(32_768);
+
+    const browserItems = redactGatewayRealtimeInitialItems(privateItems);
+    const browserText = browserItems[0]?.text ?? "";
+    const browserBytes = new TextEncoder().encode(browserText).byteLength;
+
+    expect(browserItems).toHaveLength(1);
+    expect(browserBytes).toBeLessThanOrEqual(32_768);
+    expect(Math.ceil(browserBytes / 4)).toBeLessThanOrEqual(
+      CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS,
+    );
+    expect(browserText).toContain(`${secretKey}=[redacted]`);
+    expect(browserText).not.toContain(`${secretKey}=x`);
+    expect(JSON.parse(JSON.stringify(browserItems))).toEqual(browserItems);
+  });
+
   test("keeps the newest complete tail under exact upstream limits", () => {
     const rows = Array.from(
       { length: CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT + 10 },
