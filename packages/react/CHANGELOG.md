@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.47.0
+
+### Minor Changes
+
+- d8b9b71: Add opt-in container-responsive `ChatComposer` and `Composer.Root` layout, including source-container-aware portalled model and realtime menus while preserving viewport defaults.
+- d8b9b71: Ship a ready-to-use, Preflight-free compiled CSS entry scoped to OpenGeni React roots, while retaining the Tailwind v4 bridge and CSS-free session surface.
+
 ## 0.46.6
 
 ### Patch Changes
