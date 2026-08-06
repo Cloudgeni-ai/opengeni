@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   CreateScheduledTaskRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -58,6 +58,7 @@ import {
   listRigVersionMonitoringSummaries,
   listSocialPosts,
   recordAuditEvent,
+  removeEnrollment,
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
@@ -230,6 +231,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
   run_on: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
+  connected_machine_remove: { allOf: ["enrollments:manage"] },
   rig_list: { allOf: ["rigs:use"] },
   rig_get: { allOf: ["rigs:use"] },
   rig_propose_change: { allOf: ["rigs:use"] },
@@ -464,6 +466,9 @@ export function buildOpenGeniMcpServer(
   // pointer + swap are only meaningful when bring-your-own-compute is enabled.
   if (!toolspaceMode && sessionId !== null && deps.settings.sandboxSelfhostedEnabled) {
     registerFleetTools(server, deps, grant, sessionId, json);
+  }
+  if (!toolspaceMode && can("enrollments:manage") && deps.settings.sandboxSelfhostedEnabled) {
+    registerConnectedMachineTools(server, deps, grant, json);
   }
   if (!toolspaceMode) {
     registerRigTools(server, deps, grant, can, sessionId, json);
@@ -2286,6 +2291,45 @@ function registerFleetTools(
           ...(name ? { name } : {}),
         }),
       ),
+  );
+}
+
+// Workspace-admin/operator surface for removing a connected machine. This is
+// deliberately separate from the session-scoped fleet tools: a worker can list,
+// attach, or run on a machine only with session authority, while removal requires
+// the explicit high-trust enrollments:manage permission and never accepts a
+// sandbox id. A Modal record therefore cannot be removed through this operation.
+function registerConnectedMachineTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  json: JsonResult,
+): void {
+  server.registerTool(
+    "connected_machine_remove",
+    {
+      description:
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, session/route/lease/archive history is retained, and a fresh human-approved device-flow enrollment is required to reconnect. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Blocked outcomes include the exact active dependency and the action needed before retrying.",
+      inputSchema: {
+        enrollmentId: z4.string().uuid(),
+        expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),
+        idempotencyKey: z4.string().trim().min(1).max(200).optional(),
+      },
+    },
+    async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
+      const result = await removeEnrollment(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        enrollmentId,
+        operationKey: idempotencyKey?.trim() || randomUUID(),
+        ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+        subjectId: grant.subjectId,
+      });
+      if (!result) {
+        throw new Error("machine enrollment not found in this workspace");
+      }
+      return json({ revoked: result.removed, ...result });
+    },
   );
 }
 

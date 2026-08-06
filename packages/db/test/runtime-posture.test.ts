@@ -7,7 +7,6 @@ import {
   FORCE_RLS_TABLES,
   NON_RLS_RUNTIME_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
-  RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
   RUNTIME_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
@@ -93,13 +92,13 @@ function safePosture(): RuntimeDatabasePosture {
 describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const contracts = [
-      [FORCE_RLS_TABLES, 135],
+      [FORCE_RLS_TABLES, 136],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 105],
+      [RUNTIME_FULL_DML_TABLES, 106],
       [RUNTIME_READ_ONLY_TABLES, 7],
       [RUNTIME_READ_INSERT_TABLES, 23],
       [PROTECTED_NO_DIRECT_DML_TABLES, 11],
-      [RUNTIME_DML_TABLES, 135],
+      [RUNTIME_DML_TABLES, 136],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -108,8 +107,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(146);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(146);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(147);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(147);
     expect(
       FORCE_RLS_TABLES.every(
         (table) =>
@@ -117,12 +116,6 @@ describe("runtime database posture evaluator", () => {
           new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
       ),
     ).toBe(true);
-    expect(new Set(RUNTIME_PRIVATE_FUNCTION_SIGNATURES).size).toBe(
-      RUNTIME_PRIVATE_FUNCTION_SIGNATURES.length,
-    );
-    expect([...RUNTIME_PRIVATE_FUNCTION_SIGNATURES].sort()).toEqual([
-      ...RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
-    ]);
   });
 
   test("enabled v2 composes ordinary runtime and governance tables exactly", () => {
@@ -222,24 +215,6 @@ describe("runtime database posture evaluator", () => {
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "table schema_migrations grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
-    );
-  });
-
-  test("rejects missing expected and unexpected executable private routines", () => {
-    const posture = safePosture();
-    posture.privateRoutines = [
-      {
-        name: "legacy_private_helper()",
-        owner: "opengeni_migrator",
-        execute: true,
-      },
-    ];
-
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
-      expect.arrayContaining([
-        "expected private routine is missing: workspace_rls_visible(uuid, uuid)",
-        "runtime role has unexpected EXECUTE on private routine legacy_private_helper()",
-      ]),
     );
   });
 

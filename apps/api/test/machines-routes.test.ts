@@ -486,7 +486,9 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       enrollmentId: enrollments[3]!.id,
     });
 
-    const expectedOrder = (await listSandboxes(db, workspaceId)).map((sandbox) => sandbox.id);
+    const expectedOrder = (await listSandboxes(db, workspaceId))
+      .filter((sandbox) => sandbox.enrollmentId !== enrollments[3]!.id)
+      .map((sandbox) => sandbox.id);
     const bus = new SlowProbeBus(150);
     const app = appFor(bus);
     const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;

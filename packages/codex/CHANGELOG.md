@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.13
+
+### Patch Changes
+
+- 43d45c6: Keep saved voice recordings on their original retry deadline during live UI renders, and normalize connector tool results whose optional structured payload is null without changing tool routing.
+
 ## 0.2.12
 
 ### Patch Changes

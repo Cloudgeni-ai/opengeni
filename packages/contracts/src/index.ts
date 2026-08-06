@@ -741,6 +741,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sandbox_swap",
   "run_on",
   "sandbox_provision",
+  "connected_machine_remove",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -1865,6 +1866,11 @@ export const EnrollmentBearerPayload = z.object({
   workspaceId: z.string().uuid(),
   agentId: z.string().uuid(),
   enrollmentId: z.string().uuid(),
+  // Backward-compatible credential-family fence. Generationless bearers minted
+  // before migration 0061 parse ONLY as generation 1, matching the migration's
+  // default for existing rows. signEnrollmentBearer serializes the parsed output,
+  // so every newly signed bearer carries this claim explicitly.
+  credentialGeneration: z.number().int().positive().default(1),
   // The Account-scoped control-plane subject prefix the agent subscribes to.
   subjectPrefix: z.string().min(1),
   exp: z.number().int().positive(),
@@ -1899,7 +1905,13 @@ export async function verifyEnrollmentBearer(
   if (!constantTimeEqual(signature, expected)) {
     return null;
   }
-  const payload = EnrollmentBearerPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = EnrollmentBearerPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }
@@ -9613,8 +9625,25 @@ export type ListEnrollmentsResponse = z.infer<typeof ListEnrollmentsResponse>;
 
 export const RevokeEnrollmentResponse = z.object({
   revoked: z.boolean(),
+  outcome: z.enum(["removed", "already_removed", "blocked"]),
+  enrollmentId: z.string().uuid(),
+  machineName: z.string().nullable(),
+  lastSeenAt: z.string().datetime({ offset: true }).nullable(),
+  revokedAt: z.string().datetime({ offset: true }).nullable(),
+  code: z
+    .enum(["active_route", "active_commands", "active_lease", "recovery_pending", "not_selfhosted"])
+    .nullable(),
+  message: z.string(),
+  action: z.string(),
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
+
+/** POST /v1/workspaces/:workspaceId/enrollments/:id/revoke body. */
+export const RemoveEnrollmentRequest = z.object({
+  expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
+  idempotencyKey: z.string().trim().min(1).max(200).optional(),
+});
+export type RemoveEnrollmentRequest = z.infer<typeof RemoveEnrollmentRequest>;
 
 // =============================================================================
 // Enrollment UX (self-hosted enrollment UX, design 11): the click-Grant approve

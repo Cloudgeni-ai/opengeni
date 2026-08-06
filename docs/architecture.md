@@ -124,6 +124,14 @@ Reaching for the wrong store is the classic mistake.
 | `agent_run_states`      | **Requires-action resume only** — the serialized SDK `RunState` blob to resume a turn paused mid-flight for a human approval or structured-input tool call. | Never use as conversation memory. Canonical state remains exact; protocol compatibility repair is explicit and path-owned rather than content-shape inference. Historical non-record sandbox `exposedPorts` values receive one exact-path root + `sessionsByAgent[*]` repair before SDK validation; provider predeclared-port arrays remain provider state. |
 | `session_events`        | **Exact append-only human/audit timeline** — drives replay/SSE/UI.                                                                                         | Accepted payloads remain exact in canonical storage and replay. Separately named monitoring/public projections may be deterministically bounded without replacing the stored payload. **Must never be fed back to the model.** Per-session monotonic `sequence`.                                                                                   |
 
+SDK-origin in-flight call and result receipts in `session_pending_tool_calls`,
+approval snapshots in `agent_run_states`, and their durable `session_events`
+projections use the same protocol-JSON boundary as canonical history before
+strict lossless storage. JavaScript-only `undefined` object properties are
+omitted without mutating the SDK item; undefined array entries and every other
+non-JSON graph still fail with an exact path. The database codec remains strict
+and never silently repairs arbitrary callers.
+
 Sandbox recovery state is separate again. The group lease is authoritative for
 provider, archive, restore, workspace-readiness, liveness, and epoch truth;
 `sandbox_session_envelopes` retains the per-session provider/manifest descriptor

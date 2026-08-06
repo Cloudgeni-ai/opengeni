@@ -64,6 +64,7 @@ import {
   undiciFetch,
   type McpRequestReplayInfo,
 } from "./mcp-network";
+import { normalizeProtocolJsonValue } from "./protocol-json";
 import {
   Agent,
   AgentsError,
@@ -6517,6 +6518,9 @@ export function normalizeSdkEvent(
   options: NormalizeSdkEventOptions = {},
 ): NormalizedRuntimeEvent[] {
   const out: NormalizedRuntimeEvent[] = [];
+  const pushProtocolEvent = (normalized: NormalizedRuntimeEvent): void => {
+    out.push(normalizeProtocolJsonValue(normalized, '$["event"]'));
+  };
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "output_text_delta" && typeof data.delta === "string") {
@@ -6534,7 +6538,7 @@ export function normalizeSdkEvent(
     }
     const webSearch = hostedWebSearchToolCallFromResponsesEvent(raw);
     if (webSearch) {
-      out.push(webSearch);
+      pushProtocolEvent(webSearch);
     }
     return out;
   }
@@ -6554,7 +6558,7 @@ export function normalizeSdkEvent(
   }
   if (item.type === "tool_call_item") {
     const raw = item.rawItem ?? {};
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.created",
       payload: {
         id: raw.callId ?? raw.id ?? item.id ?? null,
@@ -6564,7 +6568,7 @@ export function normalizeSdkEvent(
       },
     });
   } else if (item.type === "tool_call_output_item") {
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
         id: item.rawItem?.callId ?? item.id ?? null,
@@ -6585,7 +6589,7 @@ export function normalizeSdkEvent(
     // the Codex CLI, which renders its searches). Arguments may be an object
     // (the live wire shape) or a string.
     const raw = item.rawItem ?? {};
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.created",
       payload: {
         id: raw.call_id ?? raw.callId ?? raw.id ?? item.id ?? null,
@@ -6601,7 +6605,7 @@ export function normalizeSdkEvent(
           .map((tool: { name?: unknown }) => (typeof tool?.name === "string" ? tool.name : ""))
           .filter(Boolean)
       : [];
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
         id: raw.call_id ?? raw.callId ?? item.id ?? null,
@@ -6871,7 +6875,7 @@ function requestUsageEntriesProp(
 }
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
-  return interruptions
+  const approvals = interruptions
     .filter((item) => interruptionToolName(item) !== HUMAN_INPUT_TOOL_NAME)
     .map((item: any) => {
       if (typeof item?.toJSON === "function") {
@@ -6884,6 +6888,7 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
         raw: item,
       };
     });
+  return normalizeProtocolJsonValue(approvals, '$["approvals"]');
 }
 
 export function serializeHumanInputRequests(

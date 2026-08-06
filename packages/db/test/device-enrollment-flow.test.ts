@@ -209,6 +209,7 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     expect((await listSandboxes(db, workspaceId)).length).toBe(1);
     expect(approved.enrollment!.allowScreenControl).toBe(true);
     expect(approved.enrollment!.hasDisplay).toBe(true);
+    expect(approved.enrollment!.credentialGeneration).toBe(1);
     expect(approved.sandbox!.kind).toBe("selfhosted");
     expect(approved.sandbox!.enrollmentId).toBe(approved.enrollment!.id);
 
@@ -234,6 +235,7 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     });
     expect(reApproved.approved).toBe(true);
     expect(reApproved.enrollment!.id).toBe(approved.enrollment!.id);
+    expect(reApproved.enrollment!.credentialGeneration).toBe(1);
     expect(reApproved.sandbox!.id).toBe(approved.sandbox!.id);
     expect((await listEnrollments(db, workspaceId)).length).toBe(1);
     expect((await listSandboxes(db, workspaceId)).length).toBe(1);

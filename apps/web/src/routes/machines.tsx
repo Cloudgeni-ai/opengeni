@@ -33,6 +33,7 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Notice } from "@/components/ui/notice";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
@@ -43,6 +44,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
+import type { MachineView } from "@opengeni/react/machines";
 
 /** Copy to the clipboard and toast the outcome — clipboard access can be denied
  *  (permissions, insecure context), so failures surface instead of vanishing. */
@@ -61,6 +63,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const machines = useMachines({ pollIntervalMs: 5000 });
   const pageLive = usePageLiveActivity();
   const [enrollOpen, setEnrollOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -215,6 +218,9 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onWindowChange={setDetailWindow}
             loadingSeries={detailLoading}
             onBack={() => setDetailId(null)}
+            {...(machines.canRemove
+              ? { onRemove: (machine: MachineView) => setRemoveTarget(machine) }
+              : {})}
             now={now}
           />
         ) : (
@@ -252,6 +258,54 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           {enrollOpen ? <EnrollDialogBody workspaceId={workspaceId} origin={origin} /> : null}
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+        title={removeTarget ? `Remove machine “${removeTarget.name}”?` : "Remove machine?"}
+        description="Access will be revoked immediately while the machine is offline. Its session, route, lease, archive, and audit history will be kept; reconnecting later requires a fresh human-approved enrollment."
+        confirmLabel="Remove machine"
+        onConfirm={async () => {
+          const target = removeTarget;
+          if (!target?.enrollmentId) return false;
+          const result = await machines.remove(target.enrollmentId);
+          if (!result) {
+            toast.error("Machine removal is unavailable", {
+              description: "Refresh the page and try again.",
+            });
+            return false;
+          }
+          if (result.outcome === "blocked") {
+            toast.error(result.message, { description: result.action });
+            return false;
+          }
+          toast.success(
+            result.outcome === "already_removed"
+              ? `${target.name} was already removed`
+              : `${target.name} removed`,
+            { description: "It will disappear from the active machine list." },
+          );
+          setRemoveTarget(null);
+          setDetailId(null);
+          return true;
+        }}
+      >
+        {removeTarget ? (
+          <div className="space-y-2 rounded-og-md border border-og-border bg-og-surface-2/40 px-3 py-2 text-og-sm text-og-fg-muted">
+            <p>
+              <span className="font-medium text-og-fg">Machine:</span> {removeTarget.name}
+            </p>
+            <p>
+              <span className="font-medium text-og-fg">Last seen:</span>{" "}
+              {removeTarget.lastSeenAt
+                ? new Date(removeTarget.lastSeenAt).toLocaleString()
+                : "Never connected"}
+            </p>
+          </div>
+        ) : null}
+      </ConfirmDialog>
     </div>
   );
 }

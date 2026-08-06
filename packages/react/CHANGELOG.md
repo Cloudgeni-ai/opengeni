@@ -1,5 +1,27 @@
 # @opengeni/react
 
+## 0.46.5
+
+### Patch Changes
+
+- 43d45c6: Keep saved voice recordings on their original retry deadline during live UI renders, and normalize connector tool results whose optional structured payload is null without changing tool routing.
+  - @opengeni/sdk@0.46.4
+
+## 0.46.4
+
+### Patch Changes
+
+- b783f12: Keep optional MCP setup authentication out of unrelated chat timelines while preserving actionable tool-call reconnect events.
+- 34c5cdb: Retain validated computer screenshots as authenticated, integrity-checked session artifacts with bounded event/history receipts, SDK range assembly, and React rendering while preserving historical inline-image compatibility.
+
+  Fence screenshot cleanup and quota accounting across parent deletion, duplicate settlement, expiry, compensation, and garbage-collection races so provider objects are deleted only after durable lifecycle ownership and quota is released exactly once.
+
+- 252095e: Keep durable composer voice recordings in automatic bounded recovery after transient failures, while requiring explicit insertion for every delayed or reload-recovered transcript.
+- 4fd349d: Revoke attachment preview URLs on unmount even when React has not committed their attachment state yet.
+- Updated dependencies [5d8bb99]
+- Updated dependencies [34c5cdb]
+  - @opengeni/sdk@0.46.4
+
 ## 0.46.3
 
 ### Patch Changes
