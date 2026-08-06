@@ -21,10 +21,13 @@
 //!    `<service>/cgroup.subtree_control`. Per-op cgroups are then
 //!    `<service>/op-<n>` siblings of `supervisor`, each with its own memory
 //!    accounting.
-//! 2. **Per-exec placement** ([`OpCgroups::place_op`]). After a child is spawned,
-//!    its PID and the #344 process-group anchor's PID are written into a fresh
-//!    `op-<n>` leaf (optionally capped by [`OpCgroupConfig`]). A memory blow-up in
-//!    that leaf is contained to the leaf; the supervisor in its own leaf survives.
+//! 2. **Per-exec placement** ([`OpCgroups::place_stopped_group`]). After a child is
+//!    spawned, the caller stops its process group, then every current group member
+//!    plus the #344 process-group anchor is written into a fresh `op-<n>` leaf
+//!    (optionally capped by [`OpCgroupConfig`]) before the group resumes. Stopping
+//!    closes the fork-before-placement race: ordinary descendants cannot remain
+//!    billed to the supervisor leaf. A memory blow-up in the op leaf is contained
+//!    to that leaf; the supervisor in its own leaf survives.
 //! 3. **Teardown** ([`OpCgroupHandle`]). The op leaf is `rmdir`'d after the op's
 //!    process tree is reaped, tolerating a transient `EBUSY` with a bounded retry.
 //!
@@ -128,6 +131,55 @@ pub struct OpCgroups {
 }
 
 impl OpCgroups {
+    /// Expands a stopped exec process group to every member still inherited in the
+    /// supervisor leaf, then places that complete set in one op cgroup.
+    ///
+    /// The caller MUST stop `pgid` before calling and resume it afterwards. While
+    /// stopped, no ordinary descendant can fork between enumeration and placement.
+    /// `direct_pids` (the command + anchor) remain the fallback if the supervisor
+    /// membership read is unavailable; placement is deliberately best-effort.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn place_stopped_group(
+        &self,
+        pgid: i32,
+        direct_pids: &[u32],
+    ) -> Option<OpCgroupHandle> {
+        let mut pids = direct_pids.to_vec();
+        let supervisor_procs = self.service_dir.join(SUPERVISOR_LEAF).join("cgroup.procs");
+
+        match std::fs::read_to_string(&supervisor_procs) {
+            Ok(contents) => {
+                for raw in contents.split_whitespace() {
+                    let Ok(pid) = raw.parse::<u32>() else {
+                        continue;
+                    };
+                    let Ok(raw_pid) = i32::try_from(pid) else {
+                        continue;
+                    };
+                    if nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(raw_pid)))
+                        .is_ok_and(|member_pgid| member_pgid.as_raw() == pgid)
+                    {
+                        pids.push(pid);
+                    }
+                }
+            }
+            Err(error) => self.note_fallback(format_args!(
+                "cannot enumerate stopped process group {pgid} from {}: {error}",
+                supervisor_procs.display()
+            )),
+        }
+
+        pids.sort_unstable();
+        pids.dedup();
+        // A descendant may have forked before the direct child received its
+        // oom_score_adj bias. Re-stamp every stopped member; future descendants
+        // inherit from these corrected parents after the group resumes.
+        for pid in &pids {
+            raise_exec_oom_score_adj(*pid);
+        }
+        self.place_op(&pids)
+    }
+
     /// Places one exec's processes into a fresh `op-<n>` memory leaf and returns a
     /// teardown handle. `pids` is the requested child plus the #344 group anchor —
     /// both are moved so the whole op shares one memory fate.

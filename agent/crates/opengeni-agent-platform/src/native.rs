@@ -262,11 +262,27 @@ impl ExecProcessGroup {
             crate::cgroup::raise_exec_oom_score_adj(child_pid);
         }
 
-        // Place the requested child AND the group anchor into a per-op memory leaf
-        // so they share one OOM fate, isolated from the control supervisor. The tiny
-        // window between spawn and this move is the accepted post-spawn billing
-        // window — pre_exec placement is async-signal-unsafe and deliberately not
-        // used. A no-op when `cgroups` is `None` (isolation unavailable / off Linux).
+        // Place the COMPLETE ordinary process group in one per-op memory leaf. A
+        // shell can fork between Command::spawn returning and post-spawn placement;
+        // moving only the direct child would leave that fast descendant billed to
+        // the supervisor. Stop the group first, enumerate + move every member, then
+        // resume it. A stopped member cannot extend the fork race while placement
+        // runs. This is a no-op when isolation is unavailable / off Linux.
+        #[cfg(target_os = "linux")]
+        let op_cgroup = if let Some(cg) = cgroups {
+            stop_unix_process_group(pgid)?;
+            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            let handle = cg.place_stopped_group(pgid, &pids);
+            if let Err(error) = continue_unix_process_group(pgid) {
+                let _ = terminate_unix_process_group(pgid);
+                let _ = anchor.start_kill();
+                return Err(error);
+            }
+            handle
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
         let op_cgroup = cgroups.and_then(|cg| {
             let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
             cg.place_op(&pids)
@@ -374,6 +390,28 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
             );
             Ok(())
         }
+        Err(error) => Err(std::io::Error::from(error)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stop_unix_process_group(pgid: i32) -> std::io::Result<()> {
+    signal_unix_process_group(pgid, nix::sys::signal::Signal::SIGSTOP)
+}
+
+#[cfg(target_os = "linux")]
+fn continue_unix_process_group(pgid: i32) -> std::io::Result<()> {
+    signal_unix_process_group(pgid, nix::sys::signal::Signal::SIGCONT)
+}
+
+#[cfg(target_os = "linux")]
+fn signal_unix_process_group(pgid: i32, signal: nix::sys::signal::Signal) -> std::io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(pgid), signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(error) => Err(std::io::Error::from(error)),
     }
 }

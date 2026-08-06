@@ -152,9 +152,12 @@ sit above normal workloads (including 100 concurrent command requests). Linux
 puts the supervisor and each operation in separate cgroup-v2 leaves for fate
 isolation and accounting. The generated systemd unit enables accounting without
 a parent `MemoryHigh`, and the default operation leaf has no memory maximum or
-throttle. Commands therefore have the same machine resources and authority as
-commands launched by an unrestricted local agent; the OS scheduler owns
-contention, while a pathological breaker trip is loud and typed.
+throttle. At spawn, the agent briefly stops the command's process group, moves
+the command, its already-forked ordinary descendants, and the group anchor into
+one operation leaf, then resumes it. This closes the post-spawn fork race.
+Commands therefore have the same machine resources and authority as commands
+launched by an unrestricted local agent; the OS scheduler owns contention,
+while a pathological breaker trip is loud and typed.
 
 Operators can opt into local per-operation limits with
 `OPENGENI_AGENT_OP_MEMORY_MAX` and `OPENGENI_AGENT_OP_MEMORY_HIGH`; unset is the
