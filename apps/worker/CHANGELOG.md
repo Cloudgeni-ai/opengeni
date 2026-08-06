@@ -1,5 +1,23 @@
 # @opengeni/worker-bundle
 
+## 0.16.24
+
+### Patch Changes
+
+- 5d8bb99: Allow scheduled tasks to target and durably wake one authorized existing session without creating a helper session or replacing its goal.
+- Updated dependencies [5d8bb99]
+- Updated dependencies [af24281]
+  - @opengeni/contracts@0.39.3
+  - @opengeni/core@0.21.5
+  - @opengeni/db@0.28.4
+  - @opengeni/config@0.11.3
+  - @opengeni/runtime@0.18.20
+  - @opengeni/documents@0.5.13
+  - @opengeni/events@0.3.83
+  - @opengeni/github@0.4.34
+  - @opengeni/observability@0.5.3
+  - @opengeni/storage@0.2.71
+
 ## 0.16.23
 
 ### Patch Changes

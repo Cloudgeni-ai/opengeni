@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.46.4
+
+### Patch Changes
+
+- 5d8bb99: Allow scheduled tasks to target and durably wake one authorized existing session without creating a helper session or replacing its goal.
+
 ## 0.46.3
 
 ### Patch Changes
