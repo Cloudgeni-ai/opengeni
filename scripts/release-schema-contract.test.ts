@@ -193,12 +193,17 @@ describe("release schema contract", () => {
         (migrations.has("0175_resumable_transcription_provider_deadline.sql") ? 1 : 0) +
         (migrations.has("0176_lossless_canonical_json.sql") ? 1 : 0) +
         (migrations.has("0177_session_events_workspace_turn_type_index.sql") ? 1 : 0) +
-        (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0),
+        (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0) +
+        (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "6f3d39a558775e4afd0621751f275c46db59448c6dffff7531c6bfa6e43a1786",
+      "7c309fe6dfc82a2806760e12c9f22d584da8302c6db0094887d2ae33bfb4c1ce",
     );
-    expect(contract.latestMigration).toBe("0178_permissioned_secret_reads.sql");
+    expect(contract.latestMigration).toBe("0179_slack_private_shortcut_delivery_gate.sql");
+    expect(migrations.get("0179_slack_private_shortcut_delivery_gate.sql")).toMatchObject({
+      sha256: "eabb9498659f0fe7a9aa080568f4a6963bc4e51bb9b7df897c0a9f7060671824",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0178_permissioned_secret_reads.sql")).toMatchObject({
       sha256: "a671934c8c969fe14edc322fd64c1423605620977d98660efc942b955673357b",
       deploymentMode: "rolling",
