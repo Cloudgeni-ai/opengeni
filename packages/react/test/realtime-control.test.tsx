@@ -206,6 +206,8 @@ describe("ordinary session Codex realtime control", () => {
       'button[aria-label="Start voice with Codex Live"]',
     );
     expect(region).not.toBeNull();
+    expect(region?.classList.contains("og-realtime-control")).toBe(true);
+    expect(region?.getAttribute("data-model-menu")).toBe("split");
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Start voice");
     // Idle primary control is a ghost icon (no border/surface box).
     expect(start?.className).not.toMatch(/(?:^|\s)border(?:\s|$)/);
@@ -220,6 +222,7 @@ describe("ordinary session Codex realtime control", () => {
     expect(voiceOptions?.classList.contains("sm:w-6")).toBe(true);
     expect(voiceOptions?.classList.contains("hidden")).toBe(false);
     expect(voiceOptions?.classList.contains("inline-flex")).toBe(true);
+    expect(voiceOptions?.classList.contains("og-realtime-model-trigger")).toBe(true);
     expect(container.textContent).not.toContain("Realtime diagnostics");
     expect(start?.disabled).toBe(false);
     await act(async () => start?.click());
@@ -337,6 +340,7 @@ describe("ordinary session Codex realtime control", () => {
           eventsReady={true}
           codexConnected={true}
           controllerFactory={factory}
+          modelMenu="split-desktop"
           onVoiceActiveChange={(active) => {
             activeUpdates.push(active);
           }}
@@ -348,6 +352,9 @@ describe("ordinary session Codex realtime control", () => {
       if (activeUpdates.includes(true)) break;
     }
     expect(activeUpdates.includes(true)).toBe(true);
+    expect(container.querySelector('[role="group"]')?.getAttribute("data-model-menu")).toBe(
+      "split-desktop",
+    );
     expect(container.querySelector('[data-testid="realtime-mute-controls"]')).not.toBeNull();
     expect(
       container.querySelector('[data-testid="realtime-mute-controls"]')?.className,

@@ -1,0 +1,196 @@
+/* Composer responsiveness is viewport-based unless the public Root opts into
+   its own inline-size container. The semantic hooks below intentionally keep
+   information density separate from pointer target sizing. */
+.og-composer[data-og-responsive-basis="container"] {
+  container: og-composer / inline-size;
+  --_og-c-input-x: 1rem;
+  --_og-c-input-size: var(--og-font-size-composer-wide);
+  --_og-c-input-leading: var(--og-line-height-composer-wide);
+  --_og-c-gap: 0.375rem;
+  --_og-c-footer-x: 0.625rem;
+  --_og-c-footer-b: 0.625rem;
+  --_og-c-controls-wrap: wrap;
+  --_og-c-hint-display: inline;
+  --_og-c-model-max: 16rem;
+  --_og-c-model-x: 0.625rem;
+  --_og-c-native-max: 180px;
+  --_og-c-recovered-max: 11rem;
+  --_og-c-error-max: 10rem;
+  --og-model-policy-label-full-display: inline;
+  --og-model-policy-label-short-display: none;
+  --og-model-policy-effort-display: inline;
+}
+
+[data-og-responsive-basis="container"] .og-composer-input {
+  padding-inline: var(--_og-c-input-x);
+  font-size: var(--_og-c-input-size);
+  line-height: var(--_og-c-input-leading);
+}
+
+[data-og-responsive-basis="container"] .og-composer-footer {
+  gap: var(--_og-c-gap);
+  padding-inline: var(--_og-c-footer-x);
+  padding-bottom: var(--_og-c-footer-b);
+}
+
+[data-og-responsive-basis="container"] .og-composer-footer[data-og-stack-actions] {
+  flex-wrap: wrap;
+}
+
+[data-og-responsive-basis="container"] .og-composer-controls {
+  flex-wrap: var(--_og-c-controls-wrap);
+}
+
+[data-og-responsive-basis="container"]
+  :is(.og-composer-controls, .og-composer-actions) {
+  gap: var(--_og-c-gap);
+}
+
+[data-og-responsive-basis="container"]
+  :is(.og-composer-hint, .og-command-description) {
+  display: var(--_og-c-hint-display);
+}
+
+[data-og-responsive-basis="container"] .og-model-policy-trigger {
+  height: var(--og-model-picker-trigger-height);
+  max-width: var(--_og-c-model-max);
+  padding-inline: var(--_og-c-model-x);
+}
+
+[data-og-responsive-basis="container"] .og-model-policy-label-full {
+  display: var(--og-model-policy-label-full-display);
+}
+
+[data-og-responsive-basis="container"] .og-model-policy-label-short {
+  display: var(--og-model-policy-label-short-display);
+}
+
+[data-og-responsive-basis="container"] .og-model-policy-effort {
+  display: var(--og-model-policy-effort-display);
+}
+
+[data-og-responsive-basis="container"] .og-model-picker-native {
+  max-width: var(--_og-c-native-max);
+}
+
+[data-og-responsive-basis="container"] .og-transcription-recovered-label {
+  max-width: var(--_og-c-recovered-max);
+}
+
+[data-og-responsive-basis="container"] .og-transcription-error-label {
+  max-width: var(--_og-c-error-max);
+}
+
+[data-og-responsive-basis="container"]
+  :is(.og-realtime-primary, .og-realtime-model-trigger) {
+  height: 2rem;
+}
+
+[data-og-responsive-basis="container"] .og-realtime-primary {
+  width: 2rem;
+}
+
+[data-og-responsive-basis="container"] .og-realtime-model-trigger {
+  display: inline-flex;
+  width: 1.5rem;
+}
+
+[data-og-responsive-basis="container"]
+  .og-realtime-control[data-model-menu="split-desktop"]
+  .og-realtime-primary {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+@container og-composer (max-width: 47.999rem) {
+  [data-og-responsive-basis="container"] :where(*) {
+    --_og-c-input-x: 0.875rem;
+    --_og-c-input-size: var(--og-font-size-composer);
+    --_og-c-input-leading: var(--og-line-height-composer);
+  }
+}
+
+@container og-composer (max-width: 39.999rem) {
+  [data-og-responsive-basis="container"] :where(*) {
+    --_og-c-gap: 0.25rem;
+    --_og-c-footer-x: 0.5rem;
+    --_og-c-footer-b: 0.5rem;
+    --_og-c-controls-wrap: nowrap;
+    --_og-c-hint-display: none;
+    --_og-c-model-max: 7.5rem;
+    --_og-c-model-x: 0.5rem;
+    --_og-c-native-max: 7.5rem;
+    --_og-c-recovered-max: 7rem;
+    --_og-c-error-max: 6rem;
+    --og-model-policy-label-full-display: none;
+    --og-model-policy-label-short-display: inline;
+    --og-model-policy-effort-display: none;
+  }
+
+  [data-og-responsive-basis="container"] .og-composer-footer {
+    flex-wrap: nowrap;
+    align-items: center;
+  }
+
+  [data-og-responsive-basis="container"] .og-composer-actions {
+    flex-wrap: nowrap;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-realtime-control[data-model-menu="split-desktop"]
+    .og-realtime-primary {
+    border-radius: var(--og-radius-md);
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-realtime-control[data-model-menu="split-desktop"]
+    .og-realtime-model-trigger {
+    display: none;
+  }
+}
+
+@container og-composer (max-width: 24.999rem) {
+  .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-long {
+    display: none;
+  }
+
+  .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-short {
+    display: inline;
+  }
+}
+
+@media (pointer: coarse) {
+  [data-og-responsive-basis="container"] .og-model-policy-trigger,
+  [data-og-responsive-basis="container"] .og-realtime-primary,
+  [data-og-responsive-basis="container"] .og-realtime-model-trigger {
+    height: 2.75rem;
+  }
+
+  [data-og-responsive-basis="container"] .og-realtime-primary,
+  [data-og-responsive-basis="container"] .og-realtime-model-trigger {
+    width: 2.75rem;
+  }
+}
+
+/* Portalled menus retain theme/density tokens from their trigger and, in
+   container mode, the live composer width supplied by ResizeObserver. */
+.og-model-policy-menu {
+  box-sizing: border-box;
+  width: min(
+    var(--og-model-picker-menu-width),
+    calc(var(--og-portal-source-inline-size, 100vw) - 1rem),
+    var(--radix-dropdown-menu-content-available-width, 100vw)
+  );
+  max-width: calc(100vw - 1rem);
+}
+
+.og-realtime-menu {
+  box-sizing: border-box;
+  width: min(
+    var(--og-realtime-menu-width),
+    calc(var(--og-portal-source-inline-size, 100vw) - 1rem),
+    var(--radix-dropdown-menu-content-available-width, 100vw)
+  );
+  max-width: calc(100vw - 1rem);
+}
+

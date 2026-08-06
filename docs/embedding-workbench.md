@@ -69,16 +69,34 @@ transport, any object with the same method surface works. See
 
 ## 3. Styles
 
-Import the stylesheet once in your Tailwind entry CSS, and add the `@source` line
-so Tailwind compiles the utility classes used inside the components:
+For the styled workbench, import the ready-to-use stylesheet once from the host
+application entry. The host does not need Tailwind or a package source scan:
+
+```tsx
+import "@opengeni/react/compiled.css";
+```
+
+The artifact omits Preflight, scopes every utility to `.og-root`, and does not
+register Tailwind's global `--tw-*` properties. Independent token defaults
+inherit without replacing host `--og-*` values; derived defaults use scoped
+effective values, so accent, radius, motion, and surface relationships remain
+live. Portalled components copy the trigger's effective tokens onto their
+standalone roots.
+
+Tailwind v4 hosts may instead keep the additive source bridge:
 
 ```css
+@import "tailwindcss";
 @import "@opengeni/react/styles.css";
+@import "@opengeni/react/responsive.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
-Not using Tailwind? Import `@opengeni/react/tokens.css` instead and the
-components still render — they only need the `--og-*` CSS variables to be present.
+The small `responsive.css` layer is needed only when the source-bridge host uses
+`responsiveBasis="container"`; `compiled.css` already contains it. Import one
+styling path, not both. Hosts consuming only
+`@opengeni/react/session` need no CSS; that headless subpath remains CSS-free.
+For token-only use, import `@opengeni/react/tokens.css` directly.
 
 ## 4. Mount `<SandboxWorkspace>`
 
@@ -164,8 +182,9 @@ whole workbench. The high-value tokens:
 | `--og-font-sans` / `--og-font-mono` | UI vs. code/terminal typography. |
 | `--og-font-size-xs` … `--og-font-size-md` | the compact SDK text ramp. Matching `--og-line-height-*` tokens control rhythm. |
 | `--og-font-size-control` / `--og-font-size-menu` | compact chrome vs. dropdown/menu labels. |
-| `--og-font-size-composer` / `--og-font-size-composer-wide` | composer text on narrow and wide viewports. |
+| `--og-font-size-composer` / `--og-font-size-composer-wide` | composer text on the narrow and wide responsive basis. |
 | `--og-model-picker-*` | picker trigger height, menu width/padding, row padding, and effort-row height. |
+| `--og-realtime-menu-width` | realtime model menu width before viewport/container collision bounds. |
 | `--og-radius-sm` … `--og-radius-xl` | corner rounding across the dock. |
 
 Light mode is a first-class opt-in: set `data-og-theme="light"` on any ancestor.
@@ -175,3 +194,14 @@ sidebar preset. The defaults stay render-compatible with the web app's
 current type sizes and control geometry. Portalled SDK surfaces copy all
 effective `--og-*` values from their trigger, so locally scoped theme and
 density overrides remain intact outside the ancestor DOM subtree.
+
+Composer layout remains viewport-responsive by default for same-major render
+compatibility. In a sidebar, split pane, or resizable card inside a wider page,
+pass `responsiveBasis="container"` to `ChatComposer` or `Composer.Root`. The
+root becomes an inline-size query container; nested model, realtime,
+transcription, paused, and command controls follow its actual width. Portalled
+model/realtime menus observe that same root and are bounded to it while retaining
+the copied theme/density tokens. Pointer modality remains independent: container
+width chooses information density, while coarse pointers choose 44px targets.
+Source-bridge hosts import `@opengeni/react/responsive.css`; the compiled entry
+already contains this layout layer.

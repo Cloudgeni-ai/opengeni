@@ -101,7 +101,7 @@ export function CommandPalette({
                         {dangerLabel}
                       </span>
                     ) : null}
-                    <span className="truncate text-[12px] text-og-fg-subtle max-sm:hidden">
+                    <span className="og-command-description truncate text-[12px] text-og-fg-subtle max-sm:hidden">
                       {command.description}
                     </span>
                   </span>

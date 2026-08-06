@@ -28,7 +28,7 @@ import {
 import { type ClientOverride, useOpenGeni } from "../provider";
 import { cn } from "../lib/cn";
 import { xtermThemeFromTokens } from "../lib/xterm-theme";
-import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useSessionCapabilities } from "../hooks/use-session-capabilities";
 import { useSandboxFiles } from "../hooks/use-sandbox-files";
 import { useSandboxGit, type UseSandboxGitResult } from "../hooks/use-sandbox-git";
@@ -735,7 +735,7 @@ export type SandboxWorkspaceProps = ClientOverride & {
  * The whole session workspace, ready to mount: `<SandboxWorkspace>` assembles the
  * capability-gated tabs, pins the machine-state chip in the dock header, and
  * renders the resizable `<WorkspaceDock>`. Wrap the tree in `<OpenGeniProvider>`
- * (client + workspaceId) and import `@opengeni/react/styles.css`; that is the
+ * (client + workspaceId) and import `@opengeni/react/compiled.css`; that is the
  * entire integration (see `docs/embedding-workbench.md`).
  */
 export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
@@ -886,16 +886,16 @@ function MachineStateChip({
   error: Error | null;
   onRetry: () => void;
 }) {
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const portalStyle = usePortalTokenStyle(triggerRef);
+  const trigger = usePortalTokenSource<HTMLButtonElement>();
+  const portalStyle = usePortalTokenStyle(trigger.source);
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
         <button
-          ref={triggerRef}
+          ref={trigger.ref}
           type="button"
           aria-label={`Machine: ${chip.label}`}
-          className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"
+          className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"
         >
           <span
             className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
@@ -911,7 +911,7 @@ function MachineStateChip({
           align="end"
           sideOffset={6}
           collisionPadding={8}
-          className="og-root z-50 w-64 max-w-[calc(100vw-1rem)] rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-none"
+          className="og-root z-50 w-64 max-w-[calc(100vw-1rem)] rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-hidden"
           style={portalStyle}
         >
           <div className="flex min-w-0 items-center gap-1.5">
@@ -965,7 +965,7 @@ function DockActionButton({ onClick, children }: { onClick: () => void; children
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"
+      className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       {children}
     </button>
@@ -1025,7 +1025,7 @@ function ChangesTabBody({
               type="button"
               onClick={() => void git.refresh()}
               disabled={git.loading}
-              className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+              className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
             >
               <RefreshCwIcon
                 className={cn("size-3", git.loading && "animate-spin motion-reduce:animate-none")}

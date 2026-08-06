@@ -145,6 +145,8 @@
   --animate-og-blink: og-blink 1s steps(2, start) infinite;
   --animate-og-shimmer: og-shimmer 2.2s linear infinite;
   --animate-og-spin: og-spin 0.9s linear infinite;
+  --animate-spin: og-spin 1s linear infinite;
+  --animate-pulse: og-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   --animate-og-waveform: og-waveform 1.15s var(--og-ease-in-out) infinite;
   /* Manual disclose — snappy. Auto settle-collapse is the slow path below. */
   --animate-og-expand: og-expand var(--og-duration-disclose) var(--og-ease-in-out);

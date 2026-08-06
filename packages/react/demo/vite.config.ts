@@ -30,6 +30,7 @@ export default defineConfig({
         terminal: resolve(__dirname, "terminal.html"),
         transcription: resolve(__dirname, "transcription.html"),
         realtime: resolve(__dirname, "realtime.html"),
+        composerResponsive: resolve(__dirname, "composer-responsive.html"),
       },
     },
   },

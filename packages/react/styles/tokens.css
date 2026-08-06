@@ -50,6 +50,7 @@
   --og-model-picker-row-padding-x: 0.625rem;
   --og-model-picker-row-padding-y: 0.5rem;
   --og-model-picker-effort-height: 2rem;
+  --og-realtime-menu-width: 18rem;
 
   /* Radius ----------------------------------------------------------------- */
   --og-radius-xs: 4px;
@@ -178,6 +179,7 @@
   --og-model-picker-row-padding-x: 0.5rem;
   --og-model-picker-row-padding-y: 0.375rem;
   --og-model-picker-effort-height: 1.75rem;
+  --og-realtime-menu-width: 15rem;
 }
 
 /* Light theme — explicit opt-in, themable per subtree ----------------------- */

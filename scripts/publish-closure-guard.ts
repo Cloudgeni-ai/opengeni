@@ -181,14 +181,14 @@ if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
 // unable to type a side-effect import unless every consumer adds its own
 // wildcard declaration.
 const reactExports = (reactPkg as PackageJson & { exports?: Record<string, unknown> }).exports;
-for (const subpath of ["./styles.css", "./tokens.css"]) {
+for (const subpath of ["./styles.css", "./compiled.css", "./responsive.css", "./tokens.css"]) {
   const entry = reactExports?.[subpath];
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
     failures.push(`@opengeni/react ${subpath} must provide typed conditional exports.`);
     continue;
   }
-  const conditions = entry as { types?: unknown; default?: unknown };
-  for (const condition of ["types", "default"] as const) {
+  const conditions = entry as { types?: unknown; style?: unknown; default?: unknown };
+  for (const condition of ["types", "style", "default"] as const) {
     const target = conditions[condition];
     if (typeof target !== "string" || !target.startsWith("./")) {
       failures.push(`@opengeni/react ${subpath} is missing a local ${condition} export target.`);

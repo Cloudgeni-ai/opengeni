@@ -560,18 +560,18 @@ export function SessionChrome({
             "transition-[background-color,border-color,box-shadow] motion-reduce:transition-none",
           )}
           style={{
-            borderRadius: "var(--og-session-chrome-radius)",
+            borderRadius: "var(--_og-session-chrome-radius)",
             background: open
-              ? "var(--og-session-chrome-surface-open)"
-              : "var(--og-session-chrome-surface)",
+              ? "var(--_og-session-chrome-surface-open)"
+              : "var(--_og-session-chrome-surface)",
             borderColor: open
-              ? "var(--og-session-chrome-border-open)"
-              : "var(--og-session-chrome-border)",
+              ? "var(--_og-session-chrome-border-open)"
+              : "var(--_og-session-chrome-border)",
             boxShadow: open
               ? "var(--og-session-chrome-shadow-open)"
               : "var(--og-session-chrome-shadow)",
             transitionDuration: "var(--og-session-chrome-duration)",
-            transitionTimingFunction: "var(--og-session-chrome-ease)",
+            transitionTimingFunction: "var(--_og-session-chrome-ease)",
           }}
         >
           <div
@@ -594,8 +594,8 @@ export function SessionChrome({
                 aria-hidden
                 className="pointer-events-none absolute left-0 top-0 rounded-og-md"
                 style={{
-                  background: "var(--og-session-chrome-highlight)",
-                  boxShadow: "inset 0 0 0 1px var(--og-session-chrome-highlight-ring)",
+                  background: "var(--_og-session-chrome-highlight)",
+                  boxShadow: "inset 0 0 0 1px var(--_og-session-chrome-highlight-ring)",
                 }}
                 initial={false}
                 animate={{
@@ -623,7 +623,7 @@ export function SessionChrome({
                     data-og-session-chrome-signal={signal.id}
                     onClick={() => setActive(selected ? null : signal.id)}
                     className={cn(
-                      "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-none",
+                      "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-hidden",
                       // Coarse pointers keep a 44px target (session-pins acceptance).
                       "pointer-coarse:min-h-11",
                       "transition-colors duration-150 motion-reduce:transition-none",
@@ -731,7 +731,7 @@ function IncomingPanel({
       {inputs.map((input) => (
         <li
           key={input.id}
-          className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--og-session-chrome-row-hover)]"
+          className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
         >
           <span
             className={cn(
@@ -830,7 +830,7 @@ function QueuePanel({
           <li
             key={turn.id}
             data-queue-turn-id={turn.id}
-            className="group flex flex-col gap-1 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--og-session-chrome-row-hover)]"
+            className="group flex flex-col gap-1 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
           >
             <div className="flex items-start gap-1.5">
               {voice ? (
@@ -1003,7 +1003,7 @@ function GoalPanel({
                     ? goal.resume()
                     : goal.pause("Paused from session chrome"))
                 }
-                className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-none transition-colors hover:bg-og-surface-3/70 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+                className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden transition-colors hover:bg-og-surface-3/70 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
               >
                 {goal.updating ? (
                   <Loader2Icon className="size-3 animate-og-spin" />
@@ -1019,7 +1019,7 @@ function GoalPanel({
               type="button"
               disabled={goal.updating}
               onClick={() => void goal.deleteGoal()}
-              className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-subtle outline-none transition-colors hover:bg-og-surface-3/70 hover:text-og-danger focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+              className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-subtle outline-hidden transition-colors hover:bg-og-surface-3/70 hover:text-og-danger focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
             >
               <Trash2Icon className="size-3" />
               Clear
@@ -1064,7 +1064,7 @@ function IconAction({
           disabled={disabled}
           onClick={onClick}
           className={cn(
-            "inline-flex size-6 items-center justify-center rounded-og-sm text-og-fg-subtle outline-none transition-colors",
+            "inline-flex size-6 items-center justify-center rounded-og-sm text-og-fg-subtle outline-hidden transition-colors",
             "hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40",
             "disabled:pointer-events-none disabled:opacity-40 pointer-coarse:size-9",
             danger && "hover:text-og-danger",

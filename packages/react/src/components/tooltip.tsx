@@ -8,19 +8,17 @@
  * tips and look like a blank white bubble.
  */
 import { Tooltip as TooltipPrimitive } from "radix-ui";
-import {
-  createContext,
-  useContext,
-  useRef,
-  type ComponentProps,
-  type CSSProperties,
-  type RefObject,
-} from "react";
+import { createContext, useContext, type ComponentProps, type CSSProperties } from "react";
 
 import { cn } from "../lib/cn";
-import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 
-const TooltipSourceContext = createContext<RefObject<HTMLElement | null> | null>(null);
+type TooltipSourceContextValue = {
+  source: HTMLElement | null;
+  ref: (node: HTMLElement | null) => void;
+};
+
+const TooltipSourceContext = createContext<TooltipSourceContextValue | null>(null);
 
 function TooltipProvider({
   delayDuration = 300,
@@ -30,9 +28,9 @@ function TooltipProvider({
 }
 
 function Tooltip({ children, ...props }: ComponentProps<typeof TooltipPrimitive.Root>) {
-  const sourceRef = useRef<HTMLElement | null>(null);
+  const source = usePortalTokenSource<HTMLElement>();
   return (
-    <TooltipSourceContext.Provider value={sourceRef}>
+    <TooltipSourceContext.Provider value={source}>
       <TooltipPrimitive.Root data-slot="tooltip" {...props}>
         {children}
       </TooltipPrimitive.Root>
@@ -50,7 +48,7 @@ function TooltipTrigger({
       data-slot="tooltip-trigger"
       asChild={asChild}
       ref={(node) => {
-        if (sourceRef) sourceRef.current = node;
+        sourceRef?.ref(node);
       }}
       {...props}
     />
@@ -69,9 +67,8 @@ function TooltipContent({
   style,
   ...props
 }: ComponentProps<typeof TooltipPrimitive.Content>) {
-  const sourceRef = useContext(TooltipSourceContext);
-  const fallbackRef = useRef<HTMLElement | null>(null);
-  const portalStyle = usePortalTokenStyle(sourceRef ?? fallbackRef);
+  const source = useContext(TooltipSourceContext);
+  const portalStyle = usePortalTokenStyle(source?.source ?? null);
 
   return (
     <TooltipPrimitive.Portal>

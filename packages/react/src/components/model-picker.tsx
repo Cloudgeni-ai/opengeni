@@ -100,10 +100,10 @@ export function ModelPicker({
         disabled={disabled === true}
         aria-label={label}
         className={cn(
-          "h-8 max-w-[180px] cursor-pointer appearance-none truncate rounded-og-md bg-transparent pointer-coarse:h-11",
+          "og-model-picker-native h-8 max-w-[180px] cursor-pointer appearance-none truncate rounded-og-md bg-transparent pointer-coarse:h-11",
           "py-0 pl-2 pr-6 text-[13px] text-og-fg-muted",
           "transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-          "focus:outline-none focus-visible:outline-none",
+          "focus:outline-hidden focus-visible:outline-hidden",
           "disabled:cursor-not-allowed disabled:opacity-50",
         )}
       >

@@ -16,6 +16,20 @@ behavior is not appropriate. The proxy does not need billing, rigs, files,
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
+**OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+can import `@opengeni/react/compiled.css` once. That package-owned artifact is
+already compiled from the component source with Tailwind v4, contains no global
+Preflight or `--tw-*` property registrations, and scopes rules to the `.og-root`
+roots applied by the components. The host therefore needs no Tailwind compiler
+or source scan. Tailwind runtime variables are initialized only within those
+roots; independent defaults inherit without replacing host `--og-*` values,
+while scoped effective values keep derived tokens live. The additive
+`@opengeni/react/styles.css` bridge remains available when a Tailwind v4 host
+intentionally wants to compile the package utilities itself. Import one styling
+path, not both. Theme, density, and brand overrides remain runtime `--og-*`
+tokens; portalled surfaces copy the effective tokens from their trigger onto
+their own standalone `.og-root`.
+
 **V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sessionAuthorization`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes the worker's loopback MCP URL wrong, set `OPENGENI_MCP_URL` / `settings.opengeniMcpUrl`; `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` is the canonical rule.
 
 **V2: call core directly.** Import from `@opengeni/core` and call domain helpers without HTTP. The main session surface is:
