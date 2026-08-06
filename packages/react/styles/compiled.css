@@ -4847,15 +4847,21 @@
   gap: 0.375rem;
 }
 :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
+  --og-model-policy-label-full-display: inline;
+  --og-model-policy-label-short-display: none;
+  --og-model-policy-effort-display: inline;
   height: var(--og-model-picker-trigger-height);
   max-width: 16rem;
   padding-inline: 0.625rem;
 }
-:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
-  display: inline;
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full {
+  display: var(--og-model-policy-label-full-display);
 }
 :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short {
-  display: none;
+  display: var(--og-model-policy-label-short-display);
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-effort,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
+  display: var(--og-model-policy-effort-display);
 }
 :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-picker-native,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-picker-native {
   max-width: 180px;
@@ -4902,16 +4908,16 @@
     flex-wrap: nowrap;
     gap: 0.25rem;
   }
-  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-hint,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-hint,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-command-description,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-command-description,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-hint,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-hint,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-command-description,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-command-description {
     display: none;
-  }
-  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short {
-    display: inline;
   }
   :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-picker-native,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-picker-native {
     max-width: 7.5rem;
   }
   :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
+    --og-model-policy-label-full-display: none;
+    --og-model-policy-label-short-display: inline;
+    --og-model-policy-effort-display: none;
     padding-inline: 0.5rem;
   }
   :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label {

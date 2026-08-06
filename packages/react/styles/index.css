@@ -486,18 +486,24 @@
 }
 
 .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
+  --og-model-policy-label-full-display: inline;
+  --og-model-policy-label-short-display: none;
+  --og-model-policy-effort-display: inline;
   height: var(--og-model-picker-trigger-height);
   max-width: 16rem;
   padding-inline: 0.625rem;
 }
 
-.og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,
-.og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
-  display: inline;
+.og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full {
+  display: var(--og-model-policy-label-full-display);
 }
 
 .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short {
-  display: none;
+  display: var(--og-model-policy-label-short-display);
+}
+
+.og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
+  display: var(--og-model-policy-effort-display);
 }
 
 .og-composer[data-og-responsive-basis="container"] .og-model-picker-native {
@@ -561,14 +567,8 @@
   }
 
   .og-composer[data-og-responsive-basis="container"] .og-composer-hint,
-  .og-composer[data-og-responsive-basis="container"] .og-command-description,
-  .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,
-  .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
+  .og-composer[data-og-responsive-basis="container"] .og-command-description {
     display: none;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short {
-    display: inline;
   }
 
   .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,
@@ -577,6 +577,9 @@
   }
 
   .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
+    --og-model-policy-label-full-display: none;
+    --og-model-policy-label-short-display: inline;
+    --og-model-policy-effort-display: none;
     padding-inline: 0.5rem;
   }
 

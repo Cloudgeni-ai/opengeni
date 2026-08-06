@@ -51,6 +51,38 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
           style="border-radius: var(--_og-session-chrome-radius); background: var(--_og-session-chrome-surface)"
         ></div>
       </div>
+      <div
+        class="og-root og-composer"
+        data-og-responsive-basis="container"
+        id="compact-composer"
+        style="width: 395px"
+      >
+        <button class="og-root og-model-policy-trigger" id="compact-model-trigger">
+          <span class="og-model-policy-label-full">Full model label</span>
+          <span class="og-model-policy-label-short">Short label</span>
+          <span class="og-model-policy-effort">High</span>
+        </button>
+        <div class="og-realtime-control" data-model-menu="split-desktop">
+          <button class="og-realtime-primary rounded-og-md" id="compact-realtime-primary"></button>
+          <button class="og-realtime-model-trigger" id="compact-realtime-trigger"></button>
+        </div>
+      </div>
+      <div
+        class="og-root og-composer"
+        data-og-responsive-basis="container"
+        id="wide-composer"
+        style="width: 800px"
+      >
+        <button class="og-root og-model-policy-trigger" id="wide-model-trigger">
+          <span class="og-model-policy-label-full">Full model label</span>
+          <span class="og-model-policy-label-short">Short label</span>
+          <span class="og-model-policy-effort">High</span>
+        </button>
+        <div class="og-realtime-control" data-model-menu="split-desktop">
+          <button class="og-realtime-primary rounded-og-md" id="wide-realtime-primary"></button>
+          <button class="og-realtime-model-trigger" id="wide-realtime-trigger"></button>
+        </div>
+      </div>
       <div class="border blur shadow-lg" id="outside"></div>
     `);
   });
@@ -155,5 +187,44 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
     expect(after.radius).toBe("31px");
     expect(after.motion).toBe("0.36s");
     expect(after.surface).not.toBe(before.surface);
+  });
+
+  test("container-responsive model labels survive nested standalone roots", async () => {
+    const styles = await page.evaluate(() => {
+      const display = (rootId: string, selector: string) =>
+        getComputedStyle(document.querySelector(`#${rootId} ${selector}`)!).display;
+      return {
+        compactFull: display("compact-composer", ".og-model-policy-label-full"),
+        compactShort: display("compact-composer", ".og-model-policy-label-short"),
+        compactEffort: display("compact-composer", ".og-model-policy-effort"),
+        wideFull: display("wide-composer", ".og-model-policy-label-full"),
+        wideShort: display("wide-composer", ".og-model-policy-label-short"),
+        wideEffort: display("wide-composer", ".og-model-policy-effort"),
+      };
+    });
+
+    expect(styles.compactFull).toBe("none");
+    expect(styles.compactShort).not.toBe("none");
+    expect(styles.compactEffort).toBe("none");
+    expect(styles.wideFull).not.toBe("none");
+    expect(styles.wideShort).toBe("none");
+    expect(styles.wideEffort).not.toBe("none");
+  });
+
+  test("desktop-only realtime menus collapse with their composer container", async () => {
+    const styles = await page.evaluate(() => {
+      const computed = (id: string) => getComputedStyle(document.getElementById(id)!);
+      return {
+        compactTrigger: computed("compact-realtime-trigger").display,
+        compactPrimaryRightRadius: computed("compact-realtime-primary").borderTopRightRadius,
+        wideTrigger: computed("wide-realtime-trigger").display,
+        widePrimaryRightRadius: computed("wide-realtime-primary").borderTopRightRadius,
+      };
+    });
+
+    expect(styles.compactTrigger).toBe("none");
+    expect(styles.compactPrimaryRightRadius).not.toBe("0px");
+    expect(styles.wideTrigger).toBe("inline-flex");
+    expect(styles.widePrimaryRightRadius).toBe("0px");
   });
 });

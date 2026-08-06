@@ -297,6 +297,13 @@ export function SessionRealtimeControl(props: {
   onRealtimeAutostartConsumed?: (() => void) | undefined;
   /** Host hides dictate (and can choreograph layout) while realtime voice is live. */
   onVoiceActiveChange?: ((active: boolean) => void) | undefined;
+  /**
+   * `split` attaches the model chevron at every breakpoint (public default).
+   * `split-desktop` hides it below `sm` when the host owns mobile selection.
+   * Inside a container-responsive Composer.Root, `sm` follows that composer.
+   * `none` never attaches a model menu to the bar button.
+   */
+  modelMenu?: "split" | "split-desktop" | "none" | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -365,6 +372,7 @@ export function SessionRealtimeControl(props: {
       admissionBlocker={realtime.admissionBlocker}
       modelAvailable={selectedModel.available}
       menuSide="top"
+      modelMenu={props.modelMenu ?? "split"}
       audioRef={realtime.audioRef}
       selectedModel={selectedModel}
       models={selection.models}

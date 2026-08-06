@@ -340,6 +340,7 @@ describe("ordinary session Codex realtime control", () => {
           eventsReady={true}
           codexConnected={true}
           controllerFactory={factory}
+          modelMenu="split-desktop"
           onVoiceActiveChange={(active) => {
             activeUpdates.push(active);
           }}
@@ -351,6 +352,9 @@ describe("ordinary session Codex realtime control", () => {
       if (activeUpdates.includes(true)) break;
     }
     expect(activeUpdates.includes(true)).toBe(true);
+    expect(container.querySelector('[role="group"]')?.getAttribute("data-model-menu")).toBe(
+      "split-desktop",
+    );
     expect(container.querySelector('[data-testid="realtime-mute-controls"]')).not.toBeNull();
     expect(
       container.querySelector('[data-testid="realtime-mute-controls"]')?.className,
