@@ -58,7 +58,7 @@ beforeAll(async () => {
   accountId = grant.accountId;
   await shared.admin`
     update workspace_memberships
-    set permissions = '["workspace:read", "workspace:admin", "capabilities:read", "connections:write"]'::jsonb
+    set permissions = '["workspace:read", "workspace:admin", "connections:write"]'::jsonb
     where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
   app = new Hono();
   registerCapabilityRoutes(app, { db: client.db, settings } as ApiRouteDeps);
@@ -76,7 +76,7 @@ async function request(): Promise<Response> {
     workspaceId,
     subjectId,
     principalKind: "human_session",
-    permissions: ["workspace:read", "capabilities:read"],
+    permissions: ["workspace:read"],
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   return await app!.request(`http://x/v1/workspaces/${workspaceId}/capabilities`, {
