@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.46.6
+
+### Patch Changes
+
+- 70ced80: Add an offline-safe Connected Machine enrollment removal lifecycle with credential revocation, durable audit history, guarded route and lease handling, SDK/MCP support, and accessible active-list reconciliation.
+
 ## 0.46.4
 
 ### Patch Changes
