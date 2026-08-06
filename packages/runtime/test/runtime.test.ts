@@ -5538,6 +5538,54 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("codex_apps survives a parallel best-effort sibling connect failure", async () => {
+    const broken = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
+    const apps = startTestMcpServer({
+      requiredHeaders: {
+        authorization: "Bearer tok-123",
+        "chatgpt-account-id": "acct-9",
+      },
+    });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            CODEX_APPS_ENTRY(),
+            {
+              id: "slack",
+              name: "Slack",
+              url: broken.url,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "codex_apps", optional: true },
+          { kind: "mcp", id: "slack", optional: true },
+        ],
+        {
+          codexAppsAuth: makeCodexAppsAuth(),
+          mcpFetchImpl: codexAppsTestFetch(apps.url),
+        },
+      );
+      try {
+        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["codex_apps"]);
+        const tools = await prepared.mcpServers[0]!.listTools();
+        expect(tools.map((tool) => tool.name)).toContain("codex_apps__search_documents");
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      broken.close();
+      apps.close();
+    }
+  });
+
   test("explicitly-requested (non-optional) capability MCP whose connect fails still fails the turn", async () => {
     // The strict contract is unchanged: a tool the caller explicitly requested
     // (no `optional` flag) that cannot connect must fail the turn.

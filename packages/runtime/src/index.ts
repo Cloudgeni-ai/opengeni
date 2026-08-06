@@ -2586,7 +2586,16 @@ function maybeInstallCodexToolSearch(
     installCodexToolSearch(
       agent as unknown as Parameters<typeof installCodexToolSearch>[0],
       options.codexConnectorNamespaces ?? new Set<string>(),
-      new Set(mcpServers.map((server) => server.name)),
+      // Prepared MCP servers are wrapped with PrefixedMcpServer. Its SDK-facing
+      // `name` is the shared lifecycle label, not the registry identity stamped
+      // into tool names; passing it here makes every live tool_search query miss
+      // Codex Apps (and any other selected MCP). Preserve a name fallback for
+      // embedded/test MCP implementations that do not carry the wrapper.
+      new Set(
+        mcpServers.map((server) =>
+          server instanceof PrefixedMcpServer ? server.registryId : server.name,
+        ),
+      ),
     );
   }
 }
