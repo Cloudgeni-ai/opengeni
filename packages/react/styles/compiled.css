@@ -3651,6 +3651,14 @@
       }
     }
   }
+:where(.og-root).focus-visible\:ring-og-status-failed\/50,:where(.og-root) .focus-visible\:ring-og-status-failed\/50 {
+    &:focus-visible {
+      --tw-ring-color: var(--og-color-status-failed);
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, var(--og-color-status-failed) 50%, transparent);
+      }
+    }
+  }
 :where(.og-root).focus-visible\:ring-ring\/40,:where(.og-root) .focus-visible\:ring-ring\/40 {
     &:focus-visible {
       --tw-ring-color: var(--color-brand);
@@ -3684,6 +3692,12 @@
         outline: 2px solid transparent;
         outline-offset: 2px;
       }
+    }
+  }
+:where(.og-root).focus-visible\:outline-none,:where(.og-root) .focus-visible\:outline-none {
+    &:focus-visible {
+      --tw-outline-style: none;
+      outline-style: none;
     }
   }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {
