@@ -3129,6 +3129,7 @@ export type CreateScheduledTaskInput = {
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  targetSessionId?: string | null;
   variableSetId?: string | null;
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
@@ -3144,6 +3145,7 @@ export type UpdateScheduledTaskInput = Partial<{
   agentConfig: ScheduledTaskAgentConfig;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   reusableSessionId: string | null;
+  targetSessionId: string | null;
   variableSetId: string | null;
   rigId: string | null;
   metadata: Record<string, unknown>;
@@ -10173,6 +10175,7 @@ export async function createScheduledTask(
           agentConfig: input.agentConfig,
           ...creatorColumns(frozenCreator),
           personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+          reusableSessionId: input.targetSessionId ?? null,
           variableSetId: input.variableSetId ?? null,
           rigId: input.rigId ?? null,
           metadata: input.metadata,
@@ -10207,9 +10210,11 @@ export async function updateScheduledTask(
               personalConnectionDelegations: input.personalConnectionDelegations,
             }
           : {}),
-        ...(input.reusableSessionId !== undefined
-          ? { reusableSessionId: input.reusableSessionId }
-          : {}),
+        ...(input.targetSessionId !== undefined
+          ? { reusableSessionId: input.targetSessionId }
+          : input.reusableSessionId !== undefined
+            ? { reusableSessionId: input.reusableSessionId }
+            : {}),
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
@@ -10286,6 +10291,50 @@ export async function requireScheduledTask(
     throw new Error(`Scheduled task not found: ${taskId}`);
   }
   return task;
+}
+
+export class ScheduledTaskTargetConflictError extends Error {
+  constructor() {
+    super("scheduled task target changed during dispatch");
+    this.name = "ScheduledTaskTargetConflictError";
+  }
+}
+
+/**
+ * DB-only delivery fence used inside the system-update source transaction.
+ * The task row is locked after the target session row, so a concurrent retarget
+ * linearizes before or after the complete scheduled occurrence instead of
+ * delivering one fire to a stale session snapshot.
+ */
+export async function requireScheduledTaskTargetInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    targetSessionId: string;
+  },
+): Promise<void> {
+  const [row] = await tx
+    .select({
+      runMode: schema.scheduledTasks.runMode,
+      reusableSessionId: schema.scheduledTasks.reusableSessionId,
+    })
+    .from(schema.scheduledTasks)
+    .where(
+      and(
+        eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+        eq(schema.scheduledTasks.id, input.taskId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (
+    !row ||
+    row.runMode !== "existing_session" ||
+    row.reusableSessionId !== input.targetSessionId
+  ) {
+    throw new ScheduledTaskTargetConflictError();
+  }
 }
 
 export async function listScheduledTasks(
@@ -46353,6 +46402,7 @@ function mapRetainedScreenshotArtifact(
 }
 
 function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): ScheduledTask {
+  const existingSessionTarget = row.runMode === "existing_session";
   return {
     id: row.id,
     accountId: row.accountId,
@@ -46374,7 +46424,8 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
       row.personalConnectionDelegations,
       `scheduled_tasks:${row.workspaceId}:${row.id}`,
     ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
-    reusableSessionId: row.reusableSessionId,
+    reusableSessionId: existingSessionTarget ? null : row.reusableSessionId,
+    targetSessionId: existingSessionTarget ? row.reusableSessionId : null,
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
     rigId: row.rigId ?? null,

@@ -1875,7 +1875,7 @@ export type SessionStructuredCapabilities = {
 
 export type ScheduledTaskStatus = "active" | "paused";
 
-export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session";
+export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session" | "existing_session";
 
 export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
 
@@ -1931,6 +1931,7 @@ export type ScheduledTask = {
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  targetSessionId: string | null;
   reusableSessionId: string | null;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
@@ -3186,6 +3187,7 @@ export type CreateScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
   runMode?: ScheduledTaskRunMode | undefined;
+  targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -3201,6 +3203,7 @@ export type UpdateScheduledTaskRequest = {
   name?: string | undefined;
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
+  targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;

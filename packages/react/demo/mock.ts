@@ -2259,6 +2259,7 @@ function scheduledTask(
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
+    targetSessionId: null,
     reusableSessionId: null,
     variableSetId: null,
     environmentId: null,

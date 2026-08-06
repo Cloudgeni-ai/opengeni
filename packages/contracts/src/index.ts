@@ -5373,7 +5373,11 @@ export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 export const ScheduledTaskRunStatus = z.enum(["queued", "dispatched", "failed"]);
 export type ScheduledTaskRunStatus = z.infer<typeof ScheduledTaskRunStatus>;
 
-export const ScheduledTaskRunMode = z.enum(["new_session_per_run", "reusable_session"]);
+export const ScheduledTaskRunMode = z.enum([
+  "new_session_per_run",
+  "reusable_session",
+  "existing_session",
+]);
 export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 
 export const ScheduledTaskOverlapPolicy = z.enum(["allow_concurrent", "skip", "buffer_one"]);
@@ -5444,6 +5448,7 @@ export const ScheduledTask = z.object({
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
   reusableSessionId: z.string().uuid().nullable(),
+  targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
@@ -5479,6 +5484,7 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
   schedule: ScheduledTaskScheduleSpec,
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
+  targetSessionId: z.string().uuid().nullable().optional(),
   agentConfig: ScheduledTaskAgentConfig,
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
@@ -5486,6 +5492,28 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
   // The rig each run binds to (M3); its active version is resolved per fire.
   rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+}).superRefine((value, context) => {
+  if (value.runMode === "existing_session" && !value.targetSessionId) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId is required when runMode=existing_session",
+    });
+  }
+  if (value.runMode !== "existing_session" && value.targetSessionId) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=existing_session",
+    });
+  }
+  if (value.runMode === "existing_session" && value.agentConfig.goal) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with an existing-session target",
+    });
+  }
 });
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
@@ -5494,6 +5522,7 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
   schedule: ScheduledTaskScheduleSpec.optional(),
   runMode: ScheduledTaskRunMode.optional(),
   overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+  targetSessionId: z.string().uuid().nullable().optional(),
   agentConfig: ScheduledTaskAgentConfig.optional(),
   status: ScheduledTaskStatus.optional(),
   variableSetId: z.string().uuid().nullable().optional(),
@@ -5502,6 +5531,31 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
   // resolved per fire, so an update takes effect on the next dispatch.
   rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+}).superRefine((value, context) => {
+  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=existing_session",
+    });
+  }
+  if (value.runMode === "existing_session" && value.targetSessionId === null) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId cannot be null when runMode=existing_session",
+    });
+  }
+  if (
+    value.agentConfig?.goal &&
+    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with an existing-session target",
+    });
+  }
 });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
