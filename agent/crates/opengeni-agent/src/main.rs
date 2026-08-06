@@ -11,7 +11,7 @@
 //!
 //! * [`enrollment`] — the device-flow client; **the single module owning the
 //!   enrollment HTTP wire shape** (the M5 reconciliation seam).
-//! * [`config`] — the config dir + persisted credentials (`0600`) + resume token.
+//! * [`config`] — deployment-aware owner-only connection documents + migration.
 //! * [`dispatch`] — the `ControlRequest` → [`Platform`](opengeni_agent_platform::Platform)
 //!   → `ControlResponse` table; a handler error is a typed `AgentError`, never a
 //!   panic.
@@ -21,7 +21,8 @@
 //! * [`metrics`] — the heartbeat metrics sample (deepened in M10).
 //! * [`supervisor`] — dial → serve → reconnect, forever, with heartbeats + the
 //!   clean going-offline.
-//! * [`cli`] — the `run` / `enroll` / `service` / `update` / `uninstall` surface.
+//! * [`cli`] — the `run` / `connect` / `connections` / `disconnect` / `service` /
+//!   `update` / `uninstall` surface.
 //! * [`service`] — the opt-in always-on service install/uninstall/status glue.
 //! * [`update`] — the `update` subcommand wiring the self-update crate.
 //! * [`uninstall`] — the `uninstall` subcommand (remove binary/creds/enrollment).
@@ -59,14 +60,18 @@ use opengeni_agent_stream::{RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use cli::{Cli, Command, EnrollArgs, RunArgs};
-use config::StoredCredentials;
+use cli::{Cli, Command, DisconnectArgs, EnrollArgs, RunArgs};
+use config::{StoredConnection, StoredCredentials};
 use enrollment::{EnrollmentOffer, EnrollmentRequest, InstallIdentity};
-use supervisor::Supervisor;
+use supervisor::{Supervisor, SupervisorLink};
 
 /// The default control-plane API base URL when neither `--api-url` nor
 /// `$OPENGENI_API_URL` is set.
 const DEFAULT_API_URL: &str = "https://api.opengeni.ai";
+
+/// Local connection-file reconciliation cadence. This is a responsiveness
+/// setpoint, not a network or operation timeout.
+const CONNECTION_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Process entry point. Parses the CLI, initializes tracing, and dispatches to
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
@@ -127,7 +132,11 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
     };
     match command {
         Command::Run(args) => run(args, &api_url).await,
-        Command::Enroll(args) => enroll_command(args, &api_url).await.map(|_| ()),
+        Command::Connect(args) | Command::Enroll(args) => {
+            enroll_command(args, &api_url).await.map(|_| ())
+        }
+        Command::Connections => list_connections(&api_url),
+        Command::Disconnect(args) => disconnect(&args, &api_url),
         Command::Service(args) => service::run(&args).map_err(string_err),
         Command::Update(args) => {
             // The updater is synchronous (download → verify → swap); run it on a
@@ -151,23 +160,82 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
 ///     promptly, rather than dropping into an invisible device-flow enroll that
 ///     needs a workspace id + a visible TTY and would otherwise appear to hang.
 async fn run_default(api_url: &str) -> anyhow_lite::Result {
-    if let Ok(Some(_)) = config::load_credentials() {
-        run(RunArgs::default(), api_url).await
-    } else {
+    if config::load_connections(api_url)
+        .map_err(to_boxed)?
+        .is_empty()
+    {
         // Not enrolled (or creds unreadable): show how to get started and exit
         // cleanly. Help goes to stderr so a `opengeni-agent | …` pipe is unchanged.
         eprintln!("{}", Cli::command().render_help());
         eprintln!(
-            "This machine is not enrolled yet. Run `opengeni-agent enroll` (see the \
+            "This machine is not connected yet. Run `opengeni-agent connect` (see the \
              Machines page for the one-liner), then `opengeni-agent run`."
         );
         Ok(())
+    } else {
+        run(RunArgs::default(), api_url).await
     }
 }
 
 /// Wraps a human-facing error string into the boxed handler error.
 fn string_err(message: String) -> anyhow_lite::BoxError {
     Box::<dyn std::error::Error + Send + Sync>::from(message)
+}
+
+/// Prints the non-secret local connection inventory.
+fn list_connections(api_url: &str) -> anyhow_lite::Result {
+    let connections = config::load_connections(api_url).map_err(to_boxed)?;
+    if connections.is_empty() {
+        println!("No OpenGeni connections configured. Run `opengeni-agent connect`.");
+        return Ok(());
+    }
+    println!("Configured OpenGeni connections ({}):", connections.len());
+    for connection in connections {
+        let origin_note = if connection.legacy_origin {
+            " (legacy origin unverified; reconnect once to confirm)"
+        } else {
+            ""
+        };
+        println!(
+            "  {}  {}{}  workspace={}  agent={}",
+            connection.connection_id,
+            connection.api_url,
+            origin_note,
+            connection.credentials.workspace_id,
+            connection.credentials.agent_id
+        );
+    }
+    Ok(())
+}
+
+/// Removes one local connection. The running process watches the connection
+/// directory and cleanly takes only this link offline; all others keep serving.
+fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
+    let connections = config::load_connections(api_url).map_err(to_boxed)?;
+    let matches: Vec<_> = connections
+        .iter()
+        .filter(|connection| connection.connection_id.starts_with(&args.connection))
+        .collect();
+    match matches.as_slice() {
+        [] => Err(string_err(format!(
+            "no connection matches {:?}; run `opengeni-agent connections`",
+            args.connection
+        ))),
+        [connection] => {
+            let id = connection.connection_id.clone();
+            let api_url = connection.api_url.clone();
+            config::remove_connection(&id, api_url.as_str()).map_err(to_boxed)?;
+            println!("Disconnected {id} from {api_url}.");
+            println!(
+                "The local link stops automatically; remove the offline machine in that workspace if you also want to revoke its enrollment."
+            );
+            Ok(())
+        }
+        _ => Err(string_err(format!(
+            "connection prefix {:?} is ambiguous; use a longer id from `opengeni-agent connections`",
+            args.connection
+        ))),
+    }
 }
 
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
@@ -206,12 +274,10 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // and never blocks the serve loop. No-op on every non-macOS / feature-off build.
     ensure_macos_desktop_grants();
 
-    // Enroll if we have no persisted credentials yet ("enroll-if-needed").
-    let creds = if let Some(creds) = config::load_credentials().map_err(to_boxed)? {
-        info!(agent_id = %creds.agent_id, "loaded existing enrollment");
-        creds
-    } else {
-        info!("no enrollment found; starting device-flow enrollment");
+    // Connect if we have no persisted connection yet ("connect-if-needed").
+    let existing_connections = config::load_connections(api_url).map_err(to_boxed)?;
+    let connections = if existing_connections.is_empty() {
+        info!("no connection found; starting device-flow connection");
         let enroll_args = EnrollArgs {
             channel: args.channel.clone(),
             workspace_id: args.workspace_id.clone(),
@@ -222,7 +288,14 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             token: std::env::var("OPENGENI_ENROLL_TOKEN").ok(),
             non_interactive: false,
         };
-        enroll_command(enroll_args, api_url).await?
+        vec![enroll_command(enroll_args, api_url).await?]
+    } else {
+        let connections = existing_connections;
+        info!(
+            count = connections.len(),
+            "loaded configured OpenGeni connections"
+        );
+        connections
     };
 
     // Establish per-op OOM cgroup isolation (issue #345) BEFORE spawning any
@@ -239,30 +312,22 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // lifetime; dropping it (on stop) tears the virtual display down. Linux-only.
     let _virtual_desktop = maybe_spawn_virtual_desktop(&args);
 
-    // Wire the relay stream hub so pty/desktop ops serve over the relay. The hub
-    // presents the agent's enrollment-scoped relay token on channel registration.
-    let hub = RelayHub::new(RelayHubConfig {
-        workspace_id: creds.workspace_id.clone(),
-        agent_id: creds.agent_id.clone(),
-        relay_url: creds.relay_url.clone(),
-        agent_token: creds.relay_token.clone(),
-        allow_screen_control: creds.consented_screen_control,
-    });
-    // Build the platform with the relay registrar wired; its desktop backend is
-    // (re)resolved against the now-present $DISPLAY (a real screen or the Xvfb one).
-    // Wire the per-op cgroup manager in when the startup dance established one.
-    let mut platform = NativePlatform::new().with_stream_registry(Arc::new(hub));
+    // Build the shared host platform after Xvfb is present. Every connection gets
+    // a cheap clone wired to its OWN relay credentials; the desktop backend and
+    // OOM-isolation manager remain shared Arcs underneath.
+    let mut platform = NativePlatform::new();
     if let Some(cgroups) = op_cgroups {
         platform = platform.with_oom_isolation(cgroups);
     }
-    let platform = Arc::new(platform);
+    let links = supervisor_links(&connections, &platform);
+    let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
     let supervisor = match config::config_dir() {
-        Ok(dir) => Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION"))
+        Ok(dir) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION"))
             .with_spool_root(dir.join("spool")),
-        Err(_) => Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION")),
+        Err(_) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
     let shutdown = supervisor.shutdown_handle();
 
@@ -270,10 +335,64 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // immediately (§23.0) rather than waiting on heartbeat dead-detect.
     spawn_signal_handler(shutdown);
 
+    // Enrollment commands intentionally do not contend on the process-wide run
+    // lock. Reconcile their independent credential files live so adding/removing
+    // a workspace never requires restarting this agent or interrupts other links.
+    let watcher_api_url = api_url.to_string();
+    let watcher_platform = platform.clone();
+    let watcher = tokio::spawn(async move {
+        let mut current = connections;
+        loop {
+            tokio::select! {
+                () = updates_tx.closed() => return,
+                () = tokio::time::sleep(CONNECTION_RELOAD_INTERVAL) => {}
+            }
+            match config::load_connections(&watcher_api_url) {
+                Ok(next) if next != current => {
+                    let next_links = supervisor_links(&next, &watcher_platform);
+                    if updates_tx.send(next_links).is_err() {
+                        return;
+                    }
+                    info!(count = next.len(), "reconciled local OpenGeni connections");
+                    current = next;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(%error, "could not reload OpenGeni connections; keeping active links");
+                }
+            }
+        }
+    });
+
     info!("agent online — press Ctrl-C to stop (the machine goes offline cleanly)");
-    supervisor.run().await.map_err(to_boxed)?;
+    supervisor
+        .run_with_updates(updates_rx)
+        .await
+        .map_err(to_boxed)?;
+    watcher.abort();
     info!("agent stopped");
     Ok(())
+}
+
+fn supervisor_links(
+    connections: &[StoredConnection],
+    platform: &NativePlatform,
+) -> Vec<SupervisorLink<NativePlatform>> {
+    connections
+        .iter()
+        .map(|connection| {
+            let credentials = connection.credentials.clone();
+            let hub = RelayHub::new(RelayHubConfig {
+                workspace_id: credentials.workspace_id.clone(),
+                agent_id: credentials.agent_id.clone(),
+                relay_url: credentials.relay_url.clone(),
+                agent_token: credentials.relay_token.clone(),
+                allow_screen_control: credentials.consented_screen_control,
+            });
+            let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
+            SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
+        })
+        .collect()
 }
 
 /// Spawns an Xvfb virtual framebuffer when `--virtual-desktop` is set on Linux,
@@ -386,17 +505,31 @@ fn ensure_macos_desktop_grants() {
 #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
 fn ensure_macos_desktop_grants() {}
 
-/// The `enroll` command: drive the device flow, persist the credentials, and
+/// The `connect` command: drive the device flow, persist the credentials, and
 /// return them (so `run` can chain straight into serving).
 async fn enroll_command(
     args: EnrollArgs,
     api_url: &str,
-) -> anyhow_lite::ResultOf<StoredCredentials> {
-    // If already enrolled and not forced, reuse the existing credentials.
-    if !args.force {
-        if let Some(existing) = config::load_credentials().map_err(to_boxed)? {
-            info!(agent_id = %existing.agent_id, "already enrolled; reusing credentials (pass --force to re-enroll)");
-            return Ok(existing);
+) -> anyhow_lite::ResultOf<StoredConnection> {
+    // A device-flow request names its workspace up front, so reuse only the exact
+    // deployment/workspace connection. A token's workspace is encoded and unknown
+    // until exchange, so that path always consumes the explicit one-time token.
+    if !args.force && args.token.is_none() {
+        if let Some(workspace_id) = args.workspace_id.as_deref() {
+            if let Some(existing) =
+                config::find_connection(api_url, workspace_id).map_err(to_boxed)?
+            {
+                info!(
+                    connection_id = %existing.connection_id,
+                    agent_id = %existing.credentials.agent_id,
+                    "already connected; reusing this deployment/workspace connection"
+                );
+                println!(
+                    "Already connected to {} (connection {}).",
+                    existing.api_url, existing.connection_id
+                );
+                return Ok(existing);
+            }
         }
     }
 
@@ -472,10 +605,20 @@ async fn enroll_command(
     .await
     .map_err(to_boxed)?;
 
-    let stored = StoredCredentials::from_proto(creds_proto, args.channel);
-    let path = config::save_credentials(&stored).map_err(to_boxed)?;
-    info!(agent_id = %stored.agent_id, path = %path.display(), "enrollment complete; credentials persisted");
-    println!("Enrolled. This machine is now registered with OpenGeni.");
+    let credentials = StoredCredentials::from_proto(creds_proto, args.channel);
+    let stored = StoredConnection::new(api_url, credentials);
+    let path = config::save_connection(&stored).map_err(to_boxed)?;
+    info!(
+        connection_id = %stored.connection_id,
+        agent_id = %stored.credentials.agent_id,
+        path = %path.display(),
+        "connection complete; credentials persisted"
+    );
+    println!(
+        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        stored.api_url, stored.connection_id
+    );
+    println!("A running agent notices this connection automatically within a few seconds.");
     Ok(stored)
 }
 
@@ -484,13 +627,13 @@ async fn enroll_command(
 /// human approve step — so this exchanges it directly at the control plane's
 /// `POST /v1/enrollments/token/exchange` for the SAME credentials the device flow
 /// receives, then persists them `0600` exactly like the device path
-/// ([`config::save_credentials`]). The workspace is encoded in the token, so none
+/// ([`config::save_connection`]). The workspace is encoded in the token, so none
 /// is required on the CLI here.
 async fn enroll_with_token(
     args: &EnrollArgs,
     api_url: &str,
     token: &str,
-) -> anyhow_lite::ResultOf<StoredCredentials> {
+) -> anyhow_lite::ResultOf<StoredConnection> {
     let platform = NativePlatform::new();
     let identity = platform.host_identity();
     let machine_name = args
@@ -529,10 +672,20 @@ async fn enroll_with_token(
         .await
         .map_err(to_boxed)?;
 
-    let stored = StoredCredentials::from_proto(creds_proto, args.channel.clone());
-    let path = config::save_credentials(&stored).map_err(to_boxed)?;
-    info!(agent_id = %stored.agent_id, path = %path.display(), "enrollment complete; credentials persisted");
-    println!("Enrolled. This machine is now registered with OpenGeni.");
+    let credentials = StoredCredentials::from_proto(creds_proto, args.channel.clone());
+    let stored = StoredConnection::new(api_url, credentials);
+    let path = config::save_connection(&stored).map_err(to_boxed)?;
+    info!(
+        connection_id = %stored.connection_id,
+        agent_id = %stored.credentials.agent_id,
+        path = %path.display(),
+        "connection complete; credentials persisted"
+    );
+    println!(
+        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        stored.api_url, stored.connection_id
+    );
+    println!("A running agent notices this connection automatically within a few seconds.");
     Ok(stored)
 }
 

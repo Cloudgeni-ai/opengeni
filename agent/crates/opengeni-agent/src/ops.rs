@@ -36,7 +36,7 @@ use opengeni_agent_proto::v1::{
 use prost::Message as _;
 use tracing::{debug, warn};
 
-use crate::engine::{Engine, OpHandles, StartOutcome};
+use crate::engine::{scoped_op_id, scoped_origin, Engine, OpHandles, StartOutcome};
 use crate::job::{ChannelStats, JobCommand, JobExit, JobFailure, JobOutcome};
 
 /// A publish sink already bound to one op's frame subject. Fire-and-forget:
@@ -51,9 +51,23 @@ const DEFAULT_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 /// Serves `OpStart`: admission (fair ordering + breakers), idempotent begin,
 /// contained spawn, pump launch with the frame-publishing hook, and the
 /// runner-side initial attachment. Replies `OpStarted{accepted, status}`.
+#[cfg(test)]
 pub async fn serve_op_start<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
+    publish: FrameSink,
+    request_id: String,
+    start: v1::OpStart,
+) -> ControlResponse {
+    serve_op_start_scoped(engine, platform, "default", publish, request_id, start).await
+}
+
+/// Multi-connection form of [`serve_op_start`]. `scope` is local-only and never
+/// changes the wire op id or frame subject.
+pub async fn serve_op_start_scoped<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &Arc<P>,
+    scope: &str,
     publish: FrameSink,
     request_id: String,
     start: v1::OpStart,
@@ -76,13 +90,14 @@ pub async fn serve_op_start<P: Platform>(
             false,
         );
     }
-    let op_id = OpId::new(request_id.clone());
+    let op_id = scoped_op_id(scope, &request_id);
     let origin = if start.origin_id.is_empty() {
         "unknown"
     } else {
         &start.origin_id
     };
-    let ticket = match engine.admit(&op_id, JobClass::Heavy, origin).await {
+    let origin = scoped_origin(scope, origin);
+    let ticket = match engine.admit(&op_id, JobClass::Heavy, &origin).await {
         Ok(ticket) => ticket,
         Err(reason) => return crate::dispatch::breaker_reply_error(request_id, "op_start", reason),
     };
@@ -203,37 +218,70 @@ fn cancelled_status(op_id: &str) -> v1::OpStatus {
 /// Serves `OpCancel`: registry flag/tombstone + kill delivery. Idempotent;
 /// replies the op's current status (the terminal frame follows on the op
 /// subject for a running op).
+#[cfg(test)]
 pub fn serve_op_cancel(
     engine: &Arc<Engine>,
     request_id: String,
     cancel: &v1::OpCancel,
 ) -> ControlResponse {
-    let op_id = OpId::new(cancel.op_id.clone());
+    serve_op_cancel_scoped(engine, "default", request_id, cancel)
+}
+
+/// Multi-connection form of [`serve_op_cancel`].
+pub fn serve_op_cancel_scoped(
+    engine: &Arc<Engine>,
+    scope: &str,
+    request_id: String,
+    cancel: &v1::OpCancel,
+) -> ControlResponse {
+    let op_id = scoped_op_id(scope, &cancel.op_id);
     let outcome = engine.cancel(&op_id);
     debug!(op = %op_id, ?outcome, "op cancel");
-    status_reply(engine, request_id, &op_id)
+    status_reply(engine, request_id, &op_id, &cancel.op_id)
 }
 
 /// Serves `OpQuery`: the op's phase, watermark, and terminal record.
+#[cfg(test)]
 pub fn serve_op_query(
     engine: &Arc<Engine>,
     request_id: String,
     query: &v1::OpQuery,
 ) -> ControlResponse {
-    let op_id = OpId::new(query.op_id.clone());
-    status_reply(engine, request_id, &op_id)
+    serve_op_query_scoped(engine, "default", request_id, query)
+}
+
+/// Multi-connection form of [`serve_op_query`].
+pub fn serve_op_query_scoped(
+    engine: &Arc<Engine>,
+    scope: &str,
+    request_id: String,
+    query: &v1::OpQuery,
+) -> ControlResponse {
+    let op_id = scoped_op_id(scope, &query.op_id);
+    status_reply(engine, request_id, &op_id, &query.op_id)
 }
 
 /// Serves `OpAttach`: routes the (generation-fenced, pump-side) attach +
 /// replay trigger, and replies the current status so the consumer can gap-
 /// check its floor against `next_seq`. An attach with `window_bytes: 0`
 /// resumes under the window granted at OpStart.
+#[cfg(test)]
 pub fn serve_op_attach(
     engine: &Arc<Engine>,
     request_id: String,
     attach: &v1::OpAttach,
 ) -> ControlResponse {
-    let op_id = OpId::new(attach.op_id.clone());
+    serve_op_attach_scoped(engine, "default", request_id, attach)
+}
+
+/// Multi-connection form of [`serve_op_attach`].
+pub fn serve_op_attach_scoped(
+    engine: &Arc<Engine>,
+    scope: &str,
+    request_id: String,
+    attach: &v1::OpAttach,
+) -> ControlResponse {
+    let op_id = scoped_op_id(scope, &attach.op_id);
     let window = if attach.window_bytes > 0 {
         attach.window_bytes
     } else {
@@ -252,14 +300,20 @@ pub fn serve_op_attach(
     if !routed {
         debug!(op = %op_id, "attach for an op with no live pump (lost/gone); status answers");
     }
-    status_reply(engine, request_id, &op_id)
+    status_reply(engine, request_id, &op_id, &attach.op_id)
 }
 
 /// Sinks one `OpAck` from the ack subject into the op's pump. The pump owns
 /// generation fencing AND final-ack acceptance (the registry flips final-acked
 /// only when the pump ends `FinalAcked`), so this is pure routing.
+#[cfg(test)]
 pub fn handle_op_ack(engine: &Arc<Engine>, ack: &v1::OpAck) {
-    let op_id = OpId::new(ack.op_id.clone());
+    handle_op_ack_scoped(engine, "default", ack);
+}
+
+/// Multi-connection form of [`handle_op_ack`].
+pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) {
+    let op_id = scoped_op_id(scope, &ack.op_id);
     let routed = engine.route_command(
         &op_id,
         JobCommand::Ack {
@@ -489,14 +543,19 @@ fn op_status(op_id: &str, answer: QueryAnswer, handles: Option<&OpHandles>) -> v
 }
 
 /// A status-carrying reply for cancel/query/attach.
-fn status_reply(engine: &Arc<Engine>, request_id: String, op_id: &OpId) -> ControlResponse {
-    let answer = engine.query(op_id);
-    let handles = engine.handles(op_id);
+fn status_reply(
+    engine: &Arc<Engine>,
+    request_id: String,
+    internal_op_id: &OpId,
+    wire_op_id: &str,
+) -> ControlResponse {
+    let answer = engine.query(internal_op_id);
+    let handles = engine.handles(internal_op_id);
     ControlResponse {
         request_id,
         error: None,
         result: Some(RespResult::OpStatus(op_status(
-            op_id.as_str(),
+            wire_op_id,
             answer,
             handles.as_ref(),
         ))),
@@ -621,6 +680,32 @@ mod tests {
             .await
         }
 
+        async fn start_exec_scoped(
+            &self,
+            scope: &str,
+            op_id: &str,
+            script: &str,
+        ) -> ControlResponse {
+            serve_op_start_scoped(
+                &self.engine,
+                &self.platform,
+                scope,
+                self.sink(),
+                op_id.to_string(),
+                v1::OpStart {
+                    op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                        command: vec![script.to_string()],
+                        shell: true,
+                        ..Default::default()
+                    })),
+                    window_bytes: 1 << 20,
+                    deadline_ms: 0,
+                    origin_id: "session-1".to_string(),
+                },
+            )
+            .await
+        }
+
         async fn wait_for_exit_frame(&self) -> v1::OpExit {
             for _ in 0..500 {
                 if let Some(exit) =
@@ -658,6 +743,55 @@ mod tests {
             chunks.sort_by_key(|(seq, _)| *seq);
             chunks.dedup_by_key(|(seq, _)| *seq);
             chunks.into_iter().flat_map(|(_, b)| b).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn same_wire_op_id_runs_independently_for_two_connections() {
+        let rig = rig();
+        let first = rig
+            .start_exec_scoped("deployment-a", "same-op", "sleep 30")
+            .await;
+        let second = rig
+            .start_exec_scoped("deployment-b", "same-op", "sleep 30")
+            .await;
+        assert!(started_status(&first).0);
+        assert!(started_status(&second).0);
+        assert_eq!(rig.engine.live_ops(), 2);
+
+        for scope in ["deployment-a", "deployment-b"] {
+            let response = serve_op_cancel_scoped(
+                &rig.engine,
+                scope,
+                format!("cancel-{scope}"),
+                &v1::OpCancel {
+                    op_id: "same-op".to_string(),
+                },
+            );
+            assert!(response.error.is_none());
+            match response.result {
+                Some(RespResult::OpStatus(status)) => {
+                    assert_eq!(status.op_id, "same-op", "scope must remain local-only");
+                }
+                other => panic!("expected OpStatus, got {other:?}"),
+            }
+        }
+        for scope in ["deployment-a", "deployment-b"] {
+            let internal = scoped_op_id(scope, "same-op");
+            let mut cancelled = false;
+            for _ in 0..500 {
+                if rig.engine.handles(&internal).is_some_and(|handles| {
+                    handles
+                        .exit
+                        .get()
+                        .is_some_and(|exit| exit.outcome == JobOutcome::Cancelled)
+                }) {
+                    cancelled = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(cancelled, "scoped child {scope} stopped independently");
         }
     }
 
@@ -827,7 +961,7 @@ mod tests {
                 attach_generation: 2,
             },
         );
-        let op = OpId::from("op-replay");
+        let op = scoped_op_id("default", "op-replay");
         for _ in 0..500 {
             if !rig.engine.route_command(&op, JobCommand::Detach) {
                 break;

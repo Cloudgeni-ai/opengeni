@@ -5,8 +5,8 @@
 //! * [`Command::Run`] — the DEFAULT, FOREGROUND run model: enroll-if-needed, then
 //!   dial the control plane and serve until stopped. The machine is online while
 //!   this runs and offline when it stops.
-//! * [`Command::Enroll`] — the device-flow enrollment only (print a user-code +
-//!   URL, poll to completion, persist credentials `0600`), then exit.
+//! * [`Command::Connect`] — add this machine to another OpenGeni workspace or
+//!   deployment without replacing any existing connection.
 //! * [`Command::Service`] — the opt-in always-on daemon path (systemd-user /
 //!   LaunchAgent / Windows Service). The default supported model is FOREGROUND
 //!   `run`; this is the explicit opt-in for a dedicated machine.
@@ -38,8 +38,16 @@ pub enum Command {
     /// Enroll if needed, then dial the control plane and serve in the foreground
     /// (the default). The machine is online while this process runs.
     Run(RunArgs),
-    /// Run the device-flow enrollment only and persist credentials, then exit.
+    /// Connect this machine to an OpenGeni workspace. Repeat for as many
+    /// workspaces or deployments as you need; existing connections are retained.
+    Connect(EnrollArgs),
+    /// Backward-compatible spelling of `connect`.
+    #[command(hide = true)]
     Enroll(EnrollArgs),
+    /// List every workspace/deployment this machine is configured to serve.
+    Connections,
+    /// Stop serving and forget one local workspace/deployment connection.
+    Disconnect(DisconnectArgs),
     /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status).
     ///
     /// The default, supported run model is FOREGROUND `opengeni-agent run`. A
@@ -110,7 +118,8 @@ pub struct EnrollArgs {
     #[arg(long)]
     pub machine_name: Option<String>,
 
-    /// Re-enroll even if credentials already exist on disk.
+    /// Refresh this exact deployment/workspace connection even if it already
+    /// exists. Other connections are never replaced.
     #[arg(long)]
     pub force: bool,
 
@@ -122,6 +131,13 @@ pub struct EnrollArgs {
     /// Do not prompt or print a device-flow code; fail if a token is not provided.
     #[arg(long)]
     pub non_interactive: bool,
+}
+
+/// Arguments for `disconnect`.
+#[derive(Debug, clap::Args)]
+pub struct DisconnectArgs {
+    /// The connection id (or an unambiguous prefix) shown by `connections`.
+    pub connection: String,
 }
 
 /// Arguments for the `service` subcommand (the opt-in always-on daemon).
@@ -287,6 +303,28 @@ mod tests {
                 assert!(args.non_interactive);
             }
             other => panic!("expected enroll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_is_the_primary_multi_connection_command() {
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "connect",
+            "--workspace-id",
+            "33333333-3333-3333-3333-333333333333",
+        ]);
+        assert!(matches!(cli.command, Some(Command::Connect(_))));
+    }
+
+    #[test]
+    fn connections_and_disconnect_parse() {
+        let list = Cli::parse_from(["opengeni-agent", "connections"]);
+        assert!(matches!(list.command, Some(Command::Connections)));
+        let remove = Cli::parse_from(["opengeni-agent", "disconnect", "abc123"]);
+        match remove.command {
+            Some(Command::Disconnect(args)) => assert_eq!(args.connection, "abc123"),
+            other => panic!("expected disconnect, got {other:?}"),
         }
     }
 

@@ -1,11 +1,11 @@
 //! The `uninstall` subcommand — stop any service, remove credentials (with
-//! `--purge`), and deactivate the enrollment.
+//! `--purge`), and deactivate the enrollments.
 //!
 //! The binary-level uninstall complements the `uninstall.sh` script: the script
 //! calls `opengeni-agent service uninstall` + `opengeni-agent uninstall --purge`.
 //! Here we tear down the service (best-effort) and, only with `--purge`, delete the
-//! persisted credentials so a re-install reconnects by default (no forced
-//! re-enroll). Deactivating the enrollment with the control plane is the M5
+//! persisted connections so a re-install reconnects by default. Deactivating
+//! enrollments with their control planes is the M5
 //! enrollment seam; until that round-trip is wired we delete the local creds and
 //! log the intent so the dashboard reconciler removes the ghost on its next sweep.
 
@@ -36,7 +36,7 @@ pub fn run(args: &UninstallArgs) -> Result<(), String> {
                         .map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
                     println!("removed credentials at {}.", dir.display());
                 }
-                info!("purge requested: the enrollment will be deactivated on the next control-plane reconcile");
+                info!("purge requested: enrollments will be deactivated on their next control-plane reconcile");
             }
             Err(e) => return Err(format!("could not resolve the config dir: {e}")),
         }
