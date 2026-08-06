@@ -263,6 +263,10 @@ The universal Machines-page one-liner installs or updates the binary and runs
 service agent detects the new owner-only connection file automatically. When the
 command upgrades an older running process, restart that process once; subsequent
 connections load live.
+
+Because the binary is shared, the current installer refuses to replace a newer
+installed agent with an older verified release from a lagging deployment. Set
+`OPENGENI_ALLOW_DOWNGRADE=1` only for an intentional rollback.
 Operators can inspect or remove local links with:
 
 ```sh

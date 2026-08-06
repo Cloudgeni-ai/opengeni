@@ -28,6 +28,9 @@
 #                              which resolves the immutable per-version path the
 #                              edge advertises. The direct GitHub-Releases asset
 #                              URL is the documented fallback (see below).
+#   OPENGENI_ALLOW_DOWNGRADE=1 Explicitly allow an older verified agent to replace
+#                              a newer installed one. By default, installers from
+#                              lagging deployments cannot downgrade a shared agent.
 #   OPENGENI_INSTALL_DIR       Install dir. Default: ~/.local/bin (no sudo).
 #   OPENGENI_SYSTEM=1          Install to /usr/local/bin (needs sudo/root).
 #   OPENGENI_ENROLL_TOKEN      Non-interactive connection token (CI/automation/fleet):
@@ -125,6 +128,52 @@ OPENGENI_APP_BUNDLE_ASSET="OpenGeni-Agent.app.zip"
 log()  { printf '%s\n' "opengeni-install: $*" >&2; }
 err()  { printf '%s\n' "opengeni-install: ERROR: $*" >&2; }
 die()  { err "$2"; exit "$1"; }
+
+# Read the strict release version reported by one agent binary. Unknown/custom
+# binaries are deliberately not ordered: the installer preserves its historical
+# replace behavior when either side does not report `opengeni-agent X.Y.Z`.
+agent_release_version() {
+  _policy_bin="$1"
+  [ -x "$_policy_bin" ] || return 1
+  "$_policy_bin" --version 2>/dev/null | awk '
+    NR == 1 && $1 == "opengeni-agent" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/ {
+      print $2
+      found = 1
+    }
+    END { if (!found) exit 1 }
+  '
+}
+
+# Success means $1 is a strictly newer X.Y.Z than $2.
+release_version_gt() {
+  awk -v installed="$1" -v candidate="$2" 'BEGIN {
+    if (installed !~ /^[0-9]+\.[0-9]+\.[0-9]+$/ || candidate !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) exit 2
+    split(installed, a, ".")
+    split(candidate, b, ".")
+    for (i = 1; i <= 3; i++) {
+      if ((a[i] + 0) > (b[i] + 0)) exit 0
+      if ((a[i] + 0) < (b[i] + 0)) exit 1
+    }
+    exit 1
+  }'
+}
+
+# Protect the single shared install path when a user connects through a deployment
+# that has not promoted as far as another deployment on the same machine. The
+# verified candidate is still used when it is equal/newer, when ordering is
+# unknown, or when the operator explicitly opts into a downgrade.
+should_keep_newer_agent() {
+  _policy_installed="$1"
+  _policy_candidate="$2"
+  [ "${OPENGENI_ALLOW_DOWNGRADE:-0}" != "1" ] || return 1
+  _policy_installed_version="$(agent_release_version "$_policy_installed")" || return 1
+  _policy_candidate_version="$(agent_release_version "$_policy_candidate")" || return 1
+  if release_version_gt "$_policy_installed_version" "$_policy_candidate_version"; then
+    log "keeping installed opengeni-agent $_policy_installed_version; verified candidate $_policy_candidate_version is older (set OPENGENI_ALLOW_DOWNGRADE=1 to override)"
+    return 0
+  fi
+  return 1
+}
 
 # A temp dir we always clean up, so a failed/partial download never lingers.
 TMPDIR_OG=""
@@ -484,6 +533,12 @@ macos_swap_bundle_into_place() {
 install_macos_local_bundle() {
   _bin="$1"; _install_dir="$2"
   _app="$HOME/Applications/$OPENGENI_APP_NAME.app"
+  _existing_bin="$_app/Contents/MacOS/opengeni-agent"
+
+  if should_keep_newer_agent "$_existing_bin" "$_bin"; then
+    link_macos_cli "$_app" "$_install_dir"
+    return 0
+  fi
 
   # Preserve a real-Apple-signed bundle unless explicitly told to replace it.
   if macos_bundle_is_signed_nonadhoc "$_app"; then
@@ -582,9 +637,13 @@ install_macos_prebuilt_bundle() {
       codesign --verify --strict "$_staged_app" >/dev/null 2>&1 \
         || die 2 "codesign --verify --strict FAILED for the prebuilt bundle; not installing"
     fi
-    mkdir -p "$_apps" || die 2 "cannot create $_apps"
-    macos_swap_bundle_into_place "$_staged_app" "$_app"
-    log "installed notarized app bundle at $_app"
+    if should_keep_newer_agent "$_app/Contents/MacOS/opengeni-agent" "$_staged_app/Contents/MacOS/opengeni-agent"; then
+      log "kept the newer installed notarized app bundle"
+    else
+      mkdir -p "$_apps" || die 2 "cannot create $_apps"
+      macos_swap_bundle_into_place "$_staged_app" "$_app"
+      log "installed notarized app bundle at $_app"
+    fi
   fi
   link_macos_cli "$_app" "$_install_dir"
 }
@@ -632,6 +691,7 @@ main() {
 
   # GATE 2: minisign signature against the pinned key (fail-closed, no skip).
   verify_signature "$bin_tmp" "$sig_tmp"
+  chmod 0755 "$bin_tmp"
 
   install_dir="$(resolve_install_dir)"
   if [ "$os" = "Darwin" ]; then
@@ -644,9 +704,12 @@ main() {
     # leaves a half-written binary on PATH.
     mkdir -p "$install_dir" 2>/dev/null || die 2 "cannot create install dir $install_dir"
     dest="$install_dir/opengeni-agent"
-    chmod 0755 "$bin_tmp"
-    mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
-    log "installed verified binary to $dest"
+    if should_keep_newer_agent "$dest" "$bin_tmp"; then
+      rm -f "$bin_tmp"
+    else
+      mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
+      log "installed verified binary to $dest"
+    fi
   fi
 
   path_hint "$install_dir"
