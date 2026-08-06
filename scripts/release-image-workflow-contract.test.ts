@@ -326,6 +326,9 @@ describe("release image workflow contract", () => {
     expect(release).toContain("CANDIDATE_ARTIFACT_DIGEST:");
     expect(release).toContain("CANDIDATE_SOURCE_TREE_SHA:");
     expect(release).toContain("bun scripts/release-candidate.ts");
+    expect(release).toContain('if [ -n "$EXPECTED_PACKAGES" ]; then');
+    expect(release).toContain('candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")');
+    expect(release).toContain('bun scripts/release-candidate.ts "${candidate_verify_args[@]}"');
     expect(release).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
     expect(release).not.toContain('map(select(.name == "@opengeni/sdk"))');
     expect(release).toContain("bun run test:runtime-embedding-consumer");

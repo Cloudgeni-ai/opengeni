@@ -152,10 +152,14 @@ jobs:
             --slurpfile producer evidence/candidate-provenance.json \
             '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .producer == $producer[0].producer' \
             evidence/release-candidate.json >/dev/null
-          bun scripts/release-candidate.ts \
-            --verify evidence/release-candidate.json \
-            --source-sha "$SOURCE_SHA" \
-            --expected-packages "$EXPECTED_PACKAGES"
+          candidate_verify_args=(
+            --verify evidence/release-candidate.json
+            --source-sha "$SOURCE_SHA"
+          )
+          if [ -n "$EXPECTED_PACKAGES" ]; then
+            candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")
+          fi
+          bun scripts/release-candidate.ts "${candidate_verify_args[@]}"
           release_version="$(jq -er '.releaseVersion' evidence/release-candidate.json)"
           [ "$release_version" = "$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)" ] || {
             echo "candidate release version differs from the source-controlled chart version" >&2
