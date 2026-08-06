@@ -319,6 +319,8 @@ describe("release image workflow contract", () => {
       "Compare an existing immutable distribution before image mutation",
     );
     const imagePromotion = release.indexOf("Promote exact candidate manifests");
+    const packageProvenance = release.indexOf("Resolve trusted package publication provenance");
+    const packagePublication = release.indexOf("Publish source-bound packages");
 
     expect(release).toContain("candidate_run_id:");
     expect(release).toContain("package_source_sha:");
@@ -331,6 +333,7 @@ describe("release image workflow contract", () => {
     expect(release).toContain("PACKAGE_ARTIFACT_ID:");
     expect(release).toContain("PACKAGE_ARTIFACT_DIGEST:");
     expect(release).toContain("evidence/package-publication-verified.json");
+    expect(release).toContain("evidence/package-provenance.json");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT:");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA:");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT:");
@@ -370,6 +373,8 @@ describe("release image workflow contract", () => {
     expect(release).toContain("evidence/release-bom.json");
     expect(release).toContain('docker logout "$REGISTRY"');
     expect(registryReconcile).toBeGreaterThan(-1);
+    expect(packageProvenance).toBeGreaterThan(-1);
+    expect(packagePublication).toBeGreaterThan(packageProvenance);
     expect(existingReleasePreflight).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(existingReleasePreflight);

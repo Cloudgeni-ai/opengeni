@@ -19,10 +19,16 @@ type GitHubRun = {
   event?: unknown;
   status?: unknown;
   conclusion?: unknown;
+  head_branch?: unknown;
   head_sha?: unknown;
   repository?: { full_name?: unknown };
   head_repository?: { full_name?: unknown };
   html_url?: unknown;
+};
+
+type GitHubComparison = {
+  status?: unknown;
+  merge_base_commit?: { sha?: unknown };
 };
 
 type GitHubCommit = {
@@ -42,6 +48,10 @@ type GitHubArtifact = {
 const sourceShaPattern = /^[0-9a-f]{40}$/;
 
 export type VerifiedReleaseProvenance = {
+  controller: {
+    headBranch: "main";
+    headSha: string;
+  };
   producer: ReleaseProducerMetadata;
   artifact: TrustedReleaseArtifact;
 };
@@ -72,12 +82,24 @@ export async function verifyReleaseProvenance(input: {
   if (headRepository !== RELEASE_REPOSITORY) {
     throw new Error("release producer head repository is not the trusted repository");
   }
+  if (run.head_branch !== "main") {
+    throw new Error("release producer workflow must run from main");
+  }
   const runHeadSha = string(run.head_sha, "workflow run head SHA");
   if (!sourceShaPattern.test(runHeadSha)) {
     throw new Error("workflow run head SHA must be a full lowercase SHA");
   }
   if (input.kind !== "package" && runHeadSha !== input.sourceSha) {
     throw new Error(`release producer source SHA ${runHeadSha} does not match ${input.sourceSha}`);
+  }
+  const comparison = asRecord<GitHubComparison>(
+    await input.api.get(`/repos/${RELEASE_REPOSITORY}/compare/${runHeadSha}...main`),
+  );
+  if (
+    (comparison.status !== "ahead" && comparison.status !== "identical") ||
+    comparison.merge_base_commit?.sha !== runHeadSha
+  ) {
+    throw new Error("release producer workflow head is no longer an ancestor of main");
   }
   const sourceCommit = asRecord<GitHubCommit>(
     await input.api.get(`/repos/${RELEASE_REPOSITORY}/commits/${input.sourceSha}`),
@@ -129,6 +151,10 @@ export async function verifyReleaseProvenance(input: {
     throw new Error("release artifact is not owned by the selected workflow run");
   }
   return {
+    controller: {
+      headBranch: "main",
+      headSha: runHeadSha,
+    },
     producer,
     artifact: buildTrustedReleaseArtifact({
       kind: input.kind,
@@ -166,6 +192,8 @@ async function main(): Promise<void> {
     await appendFile(
       process.env.GITHUB_OUTPUT,
       [
+        `${prefix}controller_head_branch=${verified.controller.headBranch}`,
+        `${prefix}controller_head_sha=${verified.controller.headSha}`,
         `${prefix}run_id=${verified.producer.runId}`,
         `${prefix}run_attempt=${verified.producer.runAttempt}`,
         `${prefix}source_tree_sha=${verified.producer.sourceTreeSha}`,
