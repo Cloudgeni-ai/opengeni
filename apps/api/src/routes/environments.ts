@@ -9,17 +9,19 @@ import {
   countScheduledTasksUsingVariableSet,
   countVariableSets,
   createVariableSet,
+  decryptVariableSetValue,
   deleteVariableSet,
   deleteVariableSetVariable,
   encryptVariableSetValue,
   getVariableSetByName,
   listVariableSets,
+  readVariableSetSecretAtomically,
   setVariableSetVariable,
   updateVariableSet,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, requireLiteralPermission, requirePermission } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   assertAllowedVariableSetVariableName,
@@ -40,15 +42,21 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
   for (const prefix of prefixes) {
     app.get(`${prefix}`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      await requireAccessGrant(c, deps, workspaceId, "variable-sets:use");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requirePermission(grant, "variable-sets:list");
+      requirePermission(grant, "secrets:list");
       return c.json(await listVariableSets(db, workspaceId));
     });
 
     app.post(`${prefix}`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requirePermission(grant, "variable-sets:write");
       const key = requireVariableSetEncryption(settings);
       const payload = CreateVariableSetRequest.parse(await c.req.json());
+      if (payload.variables.length > 0) {
+        requirePermission(grant, "secrets:write");
+      }
       const name = trimmedVariableSetName(payload.name);
       if (payload.variables.length > MAX_VARIABLES_PER_ENVIRONMENT) {
         throw new HTTPException(422, {
@@ -71,7 +79,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       if (await getVariableSetByName(db, workspaceId, name)) {
-        throw new HTTPException(409, { message: `variable set name is already in use: ${name}` });
+        throw new HTTPException(409, {
+          message: `variable set name is already in use: ${name}`,
+        });
       }
       // Values are encrypted up front and the variableSet plus all initial
       // variables are written in one transaction: a failure leaves nothing.
@@ -95,13 +105,42 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.get(`${prefix}/:variableSetId`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      await requireAccessGrant(c, deps, workspaceId, "variable-sets:use");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requirePermission(grant, "variable-sets:read");
+      requirePermission(grant, "secrets:list");
       return c.json(await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")!));
     });
 
+    if (prefix.endsWith("/variable-sets")) {
+      app.get(`${prefix}/:variableSetId/variables/:name`, async (c) => {
+        const workspaceId = c.req.param("workspaceId")!;
+        const grant = await requireAccessGrant(c, deps, workspaceId);
+        requirePermission(grant, "variable-sets:read");
+        requireLiteralPermission(grant, "secrets:read");
+        const key = requireVariableSetEncryption(settings);
+        const name = parseVariableName(c.req.param("name")!);
+        const secret = await readVariableSetSecretAtomically(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          variableSetId: c.req.param("variableSetId")!,
+          name,
+          actor: { kind: "subject" },
+          decrypt: (valueEncrypted) => decryptVariableSetValue(key, valueEncrypted),
+        });
+        if (!secret) {
+          throw new HTTPException(404, {
+            message: "variable set variable not found",
+          });
+        }
+        return c.json(secret);
+      });
+    }
+
     app.patch(`${prefix}/:variableSetId`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requirePermission(grant, "variable-sets:write");
       const variableSet = await requireVariableSetForApi(
         db,
         workspaceId,
@@ -112,7 +151,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (name !== undefined && name !== variableSet.name) {
         const existing = await getVariableSetByName(db, workspaceId, name);
         if (existing && existing.id !== variableSet.id) {
-          throw new HTTPException(409, { message: `variable set name is already in use: ${name}` });
+          throw new HTTPException(409, {
+            message: `variable set name is already in use: ${name}`,
+          });
         }
       }
       const updated = await updateVariableSet(db, workspaceId, variableSet.id, {
@@ -129,7 +170,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.delete(`${prefix}/:variableSetId`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requirePermission(grant, "variable-sets:write");
+      requirePermission(grant, "secrets:write");
       const variableSet = await requireVariableSetForApi(
         db,
         workspaceId,
@@ -166,7 +209,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.put(`${prefix}/:variableSetId/variables/:name`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requirePermission(grant, "variable-sets:write");
+      requirePermission(grant, "secrets:write");
       const key = requireVariableSetEncryption(settings);
       const name = parseVariableName(c.req.param("name")!);
       const variableSet = await requireVariableSetForApi(
@@ -199,7 +244,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.delete(`${prefix}/:variableSetId/variables/:name`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requirePermission(grant, "variable-sets:write");
+      requirePermission(grant, "secrets:write");
       const name = parseVariableName(c.req.param("name")!);
       const variableSet = await requireVariableSetForApi(
         db,
@@ -208,7 +255,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
       const deleted = await deleteVariableSetVariable(db, workspaceId, variableSet.id, name);
       if (!deleted) {
-        throw new HTTPException(404, { message: "variable set variable not found" });
+        throw new HTTPException(404, {
+          message: "variable set variable not found",
+        });
       }
       await recordVariableSetAuditEvent(db, {
         grant,

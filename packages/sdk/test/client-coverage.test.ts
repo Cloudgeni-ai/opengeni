@@ -345,9 +345,17 @@ describe("OpenGeniClient scheduled tasks", () => {
 });
 
 describe("OpenGeniClient variable sets", () => {
-  test("variable set CRUD + write-only variable PUT/DELETE", async () => {
-    const { client, requests } = makeClient(() =>
-      jsonResponse({ id: ENVIRONMENT_ID, variables: [] }),
+  test("variable set CRUD + dedicated value read/PUT/DELETE", async () => {
+    const exactValue = `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`;
+    const { client, requests } = makeClient((request) =>
+      new URL(request.url).pathname.endsWith("/variables/EXAMPLE_TOKEN") && request.method === "GET"
+        ? jsonResponse({
+            variableSetId: ENVIRONMENT_ID,
+            name: "EXAMPLE_TOKEN",
+            value: exactValue,
+            version: 2,
+          })
+        : jsonResponse({ id: ENVIRONMENT_ID, variables: [] }),
     );
     await client.listVariableSets(WORKSPACE_ID);
     await client.createVariableSet(WORKSPACE_ID, {
@@ -355,6 +363,14 @@ describe("OpenGeniClient variable sets", () => {
       variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
     });
     await client.getVariableSet(WORKSPACE_ID, ENVIRONMENT_ID);
+    expect(
+      await client.getVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN"),
+    ).toEqual({
+      variableSetId: ENVIRONMENT_ID,
+      name: "EXAMPLE_TOKEN",
+      value: exactValue,
+      version: 2,
+    });
     await client.updateVariableSet(WORKSPACE_ID, ENVIRONMENT_ID, { description: "staging vars" });
     await client.setVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN", "v2");
     await client.deleteVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN");
@@ -364,6 +380,7 @@ describe("OpenGeniClient variable sets", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
         `POST /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
         `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
         `PUT /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
@@ -371,7 +388,7 @@ describe("OpenGeniClient variable sets", () => {
       ],
     );
     // The variable PUT sends only the value; nothing else carries the secret.
-    expect(JSON.parse(requests[4]!.body!)).toEqual({ value: "v2" });
+    expect(JSON.parse(requests[5]!.body!)).toEqual({ value: "v2" });
   });
 
   test("deprecated environment method names delegate to the canonical variable-set paths", async () => {
@@ -715,6 +732,66 @@ describe("OpenGeniClient files", () => {
       "exceeds the SDK byte limit",
     );
     expect(cancelReason).toBe("invalid retained artifact content-length");
+  });
+
+  test("assembles a retained screenshot across authenticated ranges with bounded retry and SHA", async () => {
+    const bytes = new Uint8Array(RETAINED_OUTPUT_MAX_PAGE_BYTES + 17);
+    for (let index = 0; index < bytes.byteLength; index += 1) bytes[index] = index % 251;
+    const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+    const sha256 = [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    const metadata = {
+      available: true as const,
+      artifactId: FILE_ID,
+      kind: "computer_screenshot" as const,
+      contentType: "image/png",
+      originalBytes: bytes.byteLength,
+      sha256,
+      retainedAt: "2026-07-31T00:00:00.000Z",
+      dimensions: { width: 1024, height: 768 },
+      retention: {
+        policy: "session_screenshot" as const,
+        expiresAt: "2026-08-30T00:00:00.000Z",
+      },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      },
+    };
+    let retried = false;
+    const { client, requests } = makeClient((request) => {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith(`/artifacts/${FILE_ID}`)) return jsonResponse(metadata);
+      const match = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range ?? "");
+      if (!match) throw new Error("missing exact screenshot range");
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      if (start === RETAINED_OUTPUT_MAX_PAGE_BYTES && !retried) {
+        retried = true;
+        return jsonResponse({ message: "temporary" }, 503);
+      }
+      const page = bytes.slice(start, end + 1);
+      return new Response(page, {
+        status: 206,
+        headers: {
+          "Accept-Ranges": "bytes",
+          "Content-Length": String(page.byteLength),
+          "Content-Range": `bytes ${start}-${end}/${bytes.byteLength}`,
+          "Content-Type": "image/png",
+        },
+      });
+    });
+
+    const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
+    expect(downloaded.metadata).toEqual(metadata);
+    expect(downloaded.bytes).toEqual(bytes);
+    expect(requests.filter((request) => request.headers.range)).toHaveLength(3);
+    expect(
+      requests.every((request) => request.headers.authorization === "Bearer og_test_key"),
+    ).toBe(true);
   });
 });
 

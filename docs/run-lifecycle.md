@@ -205,8 +205,8 @@ model memory.
 
 Immediately after claim, the exact owning attempt installs or reads the
 logical turn's accepted execution policy before credit admission, credential
-allocation, compaction, or provider work. That secret-safe policy freezes the
-public product model id, provider id, upstream deployment id, credential-source
+allocation, compaction, or provider work. That value-free metadata policy
+freezes the public product model id, provider id, upstream deployment id, credential-source
 class, billing attribution, wire API, and definition version. The public id is
 not necessarily the provider request id: `codex/gpt-5.6-sol`, for example,
 routes upstream as `gpt-5.6-sol`. Billing and Codex allocator eligibility are
@@ -248,12 +248,18 @@ the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
 Recoverable conditions preserve context instead of failing the session, so a
-long run survives them. Retryable provider connectivity, 5xx failures, and
-secret-safely classified required-MCP connectivity failures resume the same
-accepted turn after a pacing delay. The MCP classifier retains only an
-allowlisted timeout/connectivity marker; raw transport messages, URLs, response
-bodies, and unknown provider codes never cross the runtime boundary. HTTP client
-failures remain authoritative and terminal. Hitting an explicitly configured
+long run survives them. Retryable provider connectivity, 5xx failures, and typed
+required-MCP connectivity failures resume the same accepted turn after a pacing
+delay. Required first-party connect/tools-list also treats a rolling API
+replacement's temporary `404` or statusless plain transport `Error` as
+recovery-safe. That narrow exception does not apply to external MCP servers,
+tool invocation, explicit non-404 client responses, or typed
+protocol/programming failures. The retry classifier records typed out-of-band
+category metadata without rewriting the exact source diagnostic retained by
+OpenGeni. Only genuinely public SDK/console diagnostics receive a fixed
+structural projection; raw transport messages, URLs, and response bodies remain
+exact on internal data paths. Other HTTP client failures and unknown provider
+codes remain authoritative and terminal. Hitting an explicitly configured
 model-call cap and budget/credit exhaustion ends the current turn gracefully;
 an active goal may create a later continuation, while an otherwise idle session
 waits for the next user message. For an MCP timeout that escapes after a
@@ -292,7 +298,7 @@ effective admission gate. An active goal adds an optional id/version fence; it
 does not own the waiter or the turn.
 
 The workflow waits for the earliest authoritative provider reset or a bounded
-secret-safe metadata refresh. Capacity-affecting writes increment a
+value-free metadata refresh. Capacity-affecting writes increment a
 same-transaction wake revision before a best-effort Temporal signal.
 Duplicate/lost signals are harmless: row-locked re-evaluation is the sole
 resume writer, and unobserved revisions repair commit-to-signal loss after
@@ -359,8 +365,9 @@ history-only replacement reporting. See
 Outside the explicit durable compaction transition, model-visible history is
 append-only. Given an unchanged canonical prefix and runtime settings, every
 later provider request must reproduce that serialized filtered prefix exactly.
-Request-time filters may normalize computer calls, redact provider identities,
-or bound tool output deterministically; they may not remove or reorder an
+Request-time filters may normalize computer calls, normalize provider item
+identities, or bound tool output deterministically; they may not classify or
+rewrite arbitrary textual content and may not remove or reorder an
 earlier `view_image` call/result pair. Computer-use tools are likewise exposed
 only when the caller supplies a proven visual transport: responses routes
 use hosted computer tools, Codex subscription routes return structured image
@@ -382,9 +389,12 @@ Before a personal MCP is attached, the worker/Toolspace boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise
 invalid row is never replaced with another subject's connection. Only that MCP
-is omitted, `tool.auth_needed` reports `personal_authority_unavailable`, and the
-turn receives a bounded visible instruction explaining that the source was not
-available and must not be claimed as used; unrelated tools and work continue.
+is omitted and the turn receives a bounded visible instruction explaining that
+the source was not available and must not be claimed as used; unrelated tools
+and work continue. Optional-server `initialize`/`tools/list` credential misses
+do not create conversational `tool.auth_needed` cards. If the model makes a
+concrete `tools/call` and authentication fails, the event includes that tool
+name and remains actionable.
 
 Session creation persists skill selection but never starts a sandbox. At turn
 execution, bundled, curated, pack, and inline session skills remain SDK-lazy:
@@ -789,39 +799,72 @@ A session's content lives in three places. Keep them straight; reaching for the
 wrong one is the classic mistake.
 
 1. **`session_history_items` — conversation truth (the model-facing store).**
-   Ordered, protocol-preserving SDK `AgentInputItem` JSON, secret-redacted and
-   RLS-scoped. Known runtime credential provenance and recognized
-   credential-bearing shapes are redacted before model calls, persistence, and
-   replay; this is a safety boundary, not general-purpose DLP. A new turn's
+   Ordered, protocol-preserving SDK `AgentInputItem` JSON, exact for accepted
+   content and RLS-scoped. Token-shaped strings, headers, assignments, URLs,
+   PEM-looking text, and configured-secret-shaped strings are never classified
+   or rewritten. A new turn's
    input is built from this store. It is dual-written as the agent streams
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
-   second conversation-memory read path. Historical inline image and screenshot
-   items remain backward-compatible model history; `computer_screenshot` does
-   not yet create a retained artifact receipt or browser-rendering lifecycle.
+   second conversation-memory read path. At this persistence boundary only,
+   JavaScript SDK object properties whose value is `undefined` are treated as
+   absent, matching their JSON wire meaning; arrays and every other non-JSON
+   graph fail closed with the exact offending path. Historical inline image and
+   screenshot items remain backward-compatible model history. New
+   `computer_screenshot` typed PNG bytes are validated and retained before
+   persistence; every new history copy receives the deterministic bounded
+   artifact receipt (or an explicit unavailable fact), never the provider object
+   key or re-encoded base64 source.
 2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval or
    structured-input tool call (`requires_action`); neither a half-finished tool
    approval nor an unanswered tool call can be represented as plain history
-   items. The blob is written only for those cases.
+   items. Before the blob is written, every copy of a retained screenshot tool
+   result inside the RunState is compacted to the same retry-stable receipt.
+   The blob is written only for those cases.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and
    every unrelated RunState field remain intact. Provider predeclared-port arrays
    stay in provider state and are never emitted as SDK endpoint records.
    Do not use it as conversation memory.
-3. **`session_events` — the redacted human/audit timeline.** Append-only,
-   per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
-   and lossy** (reasoning items and several item types are dropped), and each
-   payload is capped at 64 KiB with explicit surface/byte/token/non-retention
-   metadata. Large text keeps deterministic head/tail facts; inline media is a
-   compact `media_preview` and its bytes are not retained by this generic path.
-   It is correct for human progress/audit previews and must never be used to
-   reconstruct the target session's model conversation or advertised as a
-   full-output evidence store. A manager can inspect an independently bounded
-   cross-session monitoring projection as ordinary tool output; that does not
-   turn audit events into conversation truth.
+3. **`session_events` — the exact human/audit timeline for accepted payloads.**
+   Append-only, per-session sequence numbers, drives replay/SSE/UI. Event content
+   is never secret-scanned or rewritten. The event, SSE, monitoring, and browser
+   contracts still apply deterministic count/byte/media bounds; those bounds are
+   content-agnostic protocol limits with explicit omission metadata, not secret
+   classification. Inline media is represented by a compact `media_preview`; its
+   bytes are not retained by that generic bounded path.
+   A newly retained `computer_screenshot` event instead carries only its closed
+   session artifact receipt after settlement succeeds, or a typed unavailable
+   reason if validation, quota, or storage could not establish that receipt.
+   Events remain a separate timeline and must never be used to
+   reconstruct the target session's model conversation. A manager can inspect an
+   independently bounded cross-session monitoring projection as ordinary tool
+   output; that does not turn audit events into conversation truth.
+
+Retained screenshots have a separate database/object lifecycle, not a fourth
+conversation store. Preparation creates a deterministic pending file/artifact
+pair and reserves exact workspace bytes. Verified provider settlement moves
+`quota_state` from `reserved` to `ready` once; duplicate settlement replays the
+same ready row. Session, turn, and attempt deletion use nullable `SET NULL`
+references plus `cleanup_queued`, preserving the object, file row, and charged
+quota until maintenance owns cleanup. Generic file deletion is restricted while
+the lifecycle row exists.
+
+The global bounded reaper claims stale pending, expired ready, and queued
+cleanup rows with an exact UUID. A reconcile observation that is missing or
+mismatched must first atomically promote that exact claim to `cleanup_pending`;
+only then may it issue the idempotent provider delete. If a concurrent writer
+settles the artifact ready, settlement clears the claim, promotion fails, and
+the reaper cannot delete the live key. Terminal completion releases the
+artifact's explicit reserved/ready quota bucket idempotently. Detached-session
+cleanup removes the lifecycle and file rows only after provider deletion; a
+late PUT racing parent deletion is compensated by deleting the now-unowned key.
+Authenticated session artifact routes expose sanitized metadata and one bounded
+range at a time, and the SDK verifies assembled length and SHA before React
+renders an object URL.
 
 Structured human input adds a durable control checkpoint, not a fourth memory
 store. When the built-in `request_human_input` tool interrupts a run, the same

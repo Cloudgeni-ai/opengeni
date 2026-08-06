@@ -99,20 +99,17 @@ describe("session tool policy resolution", () => {
   });
 
   test("drops unavailable optional history without hiding it from policy truth", () => {
+    const retiredSlackId = "cap-integrations-sh-slack-com-5a15dccc0dc0-17qniox";
     const result = resolve({
       toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
-      sessionTools: [mcp("retired-capability", true)],
+      sessionTools: [mcp(retiredSlackId, true)],
       availableMcpServerIds: ["opengeni", "cap-docs"],
       defaultMcpServerIds: ["cap-docs"],
     });
 
     expect(result.toolRefs).toEqual([mcp("cap-docs", true), mcp("opengeni")]);
-    expect(result.effectivePolicy.effectiveIds).toEqual([
-      "cap-docs",
-      "opengeni",
-      "retired-capability",
-    ]);
-    expect(result.effectivePolicy.droppedIds).toEqual(["retired-capability"]);
+    expect(result.effectivePolicy.effectiveIds).toEqual(["cap-docs", retiredSlackId, "opengeni"]);
+    expect(result.effectivePolicy.droppedIds).toEqual([retiredSlackId]);
     // Persisted optional refs are a materialized workspace-default snapshot,
     // not a user-pinned selection. The current default and unavailable history
     // stay visible through effective/deferred/dropped truth instead.

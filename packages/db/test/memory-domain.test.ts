@@ -7,7 +7,7 @@ import {
   MEMORY_TEXT_MAX_CHARS,
   normalizeMemoryText,
   renderWorkspaceMemoryBlock,
-  sanitizeMemoryText,
+  memoryTextForStorage,
   shortMemoryId,
   WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED,
   WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET,
@@ -57,41 +57,30 @@ describe("hashMemoryText", () => {
   });
 });
 
-describe("sanitizeMemoryText", () => {
-  test("strips control characters and collapses to a single line", () => {
-    const { text } = sanitizeMemoryText("line one\u0000\u0007\nline two\ttabbed");
-    expect(text).toBe("line one line two tabbed");
+describe("memoryTextForStorage", () => {
+  test("preserves control characters, whitespace, and newlines exactly", () => {
+    const input = "line one\u0000\u0007\nline two\ttabbed";
+    expect(memoryTextForStorage(input)).toBe(input);
   });
 
-  test("redacts common secret shapes and counts them", () => {
-    const cases: Array<[string, string]> = [
-      ["key is AKIAIOSFODNN7EXAMPLE done", "AKIAIOSFODNN7EXAMPLE"],
-      ["token sk-abcdefghijklmnopqrstuvwx", "sk-abcdefghijklmnopqrstuvwx"],
-      ["gho_16charsatleastxxxxxxxxxx here", "gho_16charsatleastxxxxxxxxxx"],
-      ["password=hunter2secret trailing", "hunter2secret"],
-    ];
-    for (const [input, secret] of cases) {
-      const { text, redactionCount } = sanitizeMemoryText(input);
-      expect(text).not.toContain(secret);
-      expect(text).toContain("[REDACTED]");
-      expect(redactionCount).toBeGreaterThanOrEqual(1);
-    }
+  test("preserves token-shaped strings, headers, assignments, URLs, and PEM-looking text", () => {
+    const token = ["sk", "live", "synthetic", "123456"].join("_");
+    const header = ["Author", "ization: Bearer ", token].join("");
+    const assignment = ["api", "_key=", token].join("");
+    const url = `https://example.invalid/path?credential=${token}`;
+    const pem = [
+      "-----BEGIN PRIVATE KEY-----",
+      "synthetic-body-123456",
+      "-----END PRIVATE KEY-----",
+    ].join("\n");
+    const input = [header, assignment, url, pem].join("\n");
+
+    expect(memoryTextForStorage(input)).toBe(input);
   });
 
-  test("redacts a PEM private key block", () => {
-    const pem =
-      "note -----BEGIN RSA PRIVATE KEY-----\nMIIabc123\n-----END RSA PRIVATE KEY----- end";
-    const { text, redactionCount } = sanitizeMemoryText(pem);
-    expect(text).not.toContain("MIIabc123");
-    expect(redactionCount).toBe(1);
-  });
-
-  test("leaves clean text unchanged with zero redactions", () => {
-    const { text, redactionCount } = sanitizeMemoryText(
-      "Prefer Terraform over Pulumi for new infra.",
-    );
-    expect(text).toBe("Prefer Terraform over Pulumi for new infra.");
-    expect(redactionCount).toBe(0);
+  test("leaves ordinary text unchanged", () => {
+    const input = "Prefer Terraform over Pulumi for new infra.";
+    expect(memoryTextForStorage(input)).toBe(input);
   });
 });
 

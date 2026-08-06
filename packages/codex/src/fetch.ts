@@ -510,17 +510,12 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         authenticationAttempt === 0 ? requestId : `${requestId}:auth-${authenticationAttempt}`,
       );
       if (process.env.CODEX_DEBUG) {
-        let keys: string[] = [];
-        if (typeof nextInit.body === "string") {
-          try {
-            keys = Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>);
-          } catch {
-            /* an unparseable body is already passed through unchanged above */
-          }
-        }
-        console.error(
-          `[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`,
-        );
+        console.error("[codex-debug] request dispatched", {
+          method: "POST",
+          origin: "codex-subscription",
+          route: "codex_responses",
+          stream: callerWantsStream,
+        });
       }
       let res: Response;
       transportAttempt += 1;
@@ -587,12 +582,13 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         ctx.onUsageHeaders?.(usage);
       }
       if (process.env.CODEX_DEBUG && !res.ok) {
-        // Never log provider bodies: they can contain request-derived content or
-        // account details. Status + request id is sufficient to correlate with
-        // the structured worker failure telemetry.
-        console.error(
-          `[codex-debug] <- ${res.status} requestId=${res.headers.get("x-request-id") ?? "unknown"}`,
-        );
+        // Never log provider bodies, identifiers, or headers: they can contain
+        // request-derived or account content. A bounded status is sufficient.
+        console.error("[codex-debug] request failed", {
+          origin: "codex-subscription",
+          route: "codex_responses",
+          status: res.status,
+        });
       }
       // The codex backend leaves the terminal event's response.output empty and
       // delivers the assistant items via output_item.done events instead. The
@@ -1016,9 +1012,9 @@ function codexSseFailureProjection(
  * A provider terminal carried inside an accepted HTTP-200 stream. The OpenAI
  * SDK cannot turn that late terminal into a non-2xx APIError because headers
  * have already been accepted, so the body transform throws this equivalent
- * bounded shape. Provider-supplied message/param text is intentionally absent:
- * the worker may persist Error.message, while identifiers/classifications are
- * sufficient for retry, compaction, and incident diagnostics.
+ * bounded shape. Provider-supplied message/param text remains exact within the
+ * explicit terminal-field byte contract; retry classification is additive and
+ * never substitutes for the source diagnostic.
  */
 export class CodexStreamingTerminalError extends Error {
   readonly status: number;
@@ -1030,8 +1026,8 @@ export class CodexStreamingTerminalError extends Error {
   readonly headers: Headers;
   readonly error: Record<string, unknown>;
 
-  constructor(projection: CodexSseFailureProjection, publicMessage: string) {
-    super(publicMessage);
+  constructor(projection: CodexSseFailureProjection) {
+    super(projection.error.message);
     this.name = "CodexStreamingTerminalError";
     this.status = projection.status;
     this.code = projection.error.code;
@@ -1049,6 +1045,8 @@ export class CodexStreamingTerminalError extends Error {
     this.error = {
       type: projection.error.type,
       code: projection.error.code,
+      message: projection.error.message,
+      ...(projection.error.param ? { param: projection.error.param } : {}),
       ...(projection.error.event_type ? { event_type: projection.error.event_type } : {}),
       ...(projection.error.response_id ? { response_id: projection.error.response_id } : {}),
       ...(projection.error.response_status
@@ -1072,7 +1070,6 @@ function codexSseFailureError(
 ): CodexStreamingTerminalError {
   return new CodexStreamingTerminalError(
     codexSseFailureProjection(source, rawError, fallbackCode, publicMessage, metadata),
-    publicMessage,
   );
 }
 

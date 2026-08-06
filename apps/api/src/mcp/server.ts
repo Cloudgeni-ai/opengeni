@@ -34,6 +34,7 @@ import {
   countVariableSets,
   beginRigChangeVerificationAttempt,
   createVariableSet,
+  decryptVariableSetValue,
   deleteScheduledTask,
   encryptVariableSetValue,
   getSession,
@@ -58,6 +59,7 @@ import {
   listSocialPosts,
   recordAuditEvent,
   removeEnrollment,
+  readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
   MEMORY_CORRECT_TOOL_DESCRIPTION,
@@ -97,8 +99,10 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import * as z4 from "zod/v4";
 import {
+  hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
+  requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   type ResolvedSessionAuthorization,
@@ -134,11 +138,14 @@ import {
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
+  scheduledTaskForGrant,
+  scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
   ScheduledTaskSyncError,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
+  validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
@@ -214,7 +221,10 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
   memory_save: { sessionRequired: true, allOf: ["documents:search"] },
   memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
-  preference_registry_summary: { sessionRequired: true, allOf: ["workspace:read"] },
+  preference_registry_summary: {
+    sessionRequired: true,
+    allOf: ["workspace:read"],
+  },
   preference_registry_get: { sessionRequired: true, allOf: ["workspace:read"] },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -236,10 +246,16 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   session_resume: { allOf: ["sessions:control"] },
   session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
   set_other_session_title: { allOf: ["sessions:control"] },
-  variable_set_list: { allOf: ["variable-sets:use"] },
-  environment_list: { allOf: ["variable-sets:use"] },
-  variable_set_set_variable: { allOf: ["variable-sets:manage"] },
-  environment_set_variable: { allOf: ["variable-sets:manage"] },
+  variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
+  environment_list: { allOf: ["variable-sets:list", "secrets:list"] },
+  variable_set_get_variable: {
+    sessionRequired: true,
+    allOf: ["variable-sets:read", "secrets:read"],
+  },
+  variable_set_set_variable: {
+    allOf: ["variable-sets:write", "secrets:write"],
+  },
+  environment_set_variable: { allOf: ["variable-sets:write", "secrets:write"] },
   github_connect_link: { allOf: ["github:use"] },
   github_repositories_list: { allOf: ["github:use"] },
   social_connections_list: { allOf: ["connections:read"] },
@@ -254,15 +270,21 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // Publishes under the user's identity: connections:write keeps it out of the
   // default agent permission set, unlike the read-only social tools above.
   social_post_reply: { allOf: ["connections:write"] },
-  scheduled_tasks_list: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
-  scheduled_tasks_get: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
+  scheduled_tasks_list: {
+    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  },
+  scheduled_tasks_get: {
+    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  },
   scheduled_tasks_create: { allOf: ["scheduled_tasks:manage"] },
   scheduled_tasks_update: { allOf: ["scheduled_tasks:manage"] },
   scheduled_tasks_pause: { allOf: ["scheduled_tasks:manage"] },
   scheduled_tasks_resume: { allOf: ["scheduled_tasks:manage"] },
   scheduled_tasks_trigger: { allOf: ["scheduled_tasks:run"] },
   scheduled_tasks_delete: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_task_runs_list: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
+  scheduled_task_runs_list: {
+    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  },
   slack_bot_list_channels: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
   slack_bot_thread_replies: { allOf: ["connections:read"] },
@@ -465,7 +487,7 @@ export function buildOpenGeniMcpServer(
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
-  registerVariableSetTools(server, deps, grant, can, json);
+  registerVariableSetTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
   }
@@ -633,10 +655,17 @@ export function buildOpenGeniMcpServer(
         const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialSearchLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          {
+            workspaceId: grant.workspaceId,
+            connectionId,
+            subjectId: authority.subjectId,
+          },
           { query, subreddit, limit },
         );
-        return json({ provider: result.connection.provider, posts: result.posts });
+        return json({
+          provider: result.connection.provider,
+          posts: result.posts,
+        });
       },
     );
 
@@ -655,10 +684,17 @@ export function buildOpenGeniMcpServer(
         const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialMentionsLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          {
+            workspaceId: grant.workspaceId,
+            connectionId,
+            subjectId: authority.subjectId,
+          },
           { sinceId, limit },
         );
-        return json({ provider: result.connection.provider, posts: result.posts });
+        return json({
+          provider: result.connection.provider,
+          posts: result.posts,
+        });
       },
     );
 
@@ -677,10 +713,17 @@ export function buildOpenGeniMcpServer(
         const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialThreadLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          {
+            workspaceId: grant.workspaceId,
+            connectionId,
+            subjectId: authority.subjectId,
+          },
           { id, limit },
         );
-        return json({ provider: result.connection.provider, posts: result.posts });
+        return json({
+          provider: result.connection.provider,
+          posts: result.posts,
+        });
       },
     );
   }
@@ -703,7 +746,11 @@ export function buildOpenGeniMcpServer(
         const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialOwnPostsLive(
           deps,
-          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          {
+            workspaceId: grant.workspaceId,
+            connectionId,
+            subjectId: authority.subjectId,
+          },
           { limit },
         );
         // A post without a provider timestamp is skipped rather than recorded
@@ -749,7 +796,11 @@ export function buildOpenGeniMcpServer(
         const authority = await requireAuthorizedSocialConnection(connectionId);
         const result = await socialPostReply(
           deps,
-          { workspaceId: grant.workspaceId, connectionId, subjectId: authority.subjectId },
+          {
+            workspaceId: grant.workspaceId,
+            connectionId,
+            subjectId: authority.subjectId,
+          },
           { inReplyToId, text },
         );
         // Outbound publishes leave a durable, secret-free receipt (house
@@ -795,7 +846,7 @@ export function buildOpenGeniMcpServer(
         const rows = await listScheduledTasks(deps.db, grant.workspaceId, limit + 1, offset);
         return json(
           boundScheduledTaskMcpPage({
-            tasks: rows.slice(0, limit),
+            tasks: rows.slice(0, limit).map((task) => scheduledTaskForGrant(task, grant)),
             limit,
             offset,
             sourceHasMore: rows.length > limit,
@@ -809,10 +860,16 @@ export function buildOpenGeniMcpServer(
       {
         description:
           "Get one scheduled task. The default is the same compact summary used by scheduled_tasks_list; pass includeEntity=true for a bounded projection with an 8 KiB prompt preview, bounded goal fields, resource/tool identity previews, and metadata keys without values.",
-        inputSchema: { id: z4.string().uuid(), includeEntity: z4.boolean().optional() },
+        inputSchema: {
+          id: z4.string().uuid(),
+          includeEntity: z4.boolean().optional(),
+        },
       },
       async ({ id, includeEntity }) => {
-        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const task = scheduledTaskForGrant(
+          await requireScheduledTask(deps.db, grant.workspaceId, id),
+          grant,
+        );
         return json(
           includeEntity ? boundScheduledTaskDetailMcp(task) : scheduledTaskMcpSummary(task),
         );
@@ -827,6 +884,7 @@ export function buildOpenGeniMcpServer(
           name: z4.string(),
           schedule: z4.unknown(),
           runMode: z4.string().optional(),
+          targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown(),
           status: z4.string().optional(),
@@ -855,6 +913,8 @@ export function buildOpenGeniMcpServer(
           grant,
           payload,
           toolsProvided: scheduledTaskToolsProvided(args),
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
         });
         try {
           await syncCreatedScheduledTask({
@@ -888,6 +948,7 @@ export function buildOpenGeniMcpServer(
           name: z4.string().optional(),
           schedule: z4.unknown().optional(),
           runMode: z4.string().optional(),
+          targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
           status: z4.string().optional(),
@@ -913,6 +974,8 @@ export function buildOpenGeniMcpServer(
           existing,
           payload,
           toolsProvided: scheduledTaskToolsProvided(raw),
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
         });
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
         await syncUpdatedScheduledTask({
@@ -921,7 +984,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -943,7 +1006,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -965,7 +1028,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -981,6 +1044,18 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, triggerId }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        await validateScheduledTaskTarget({
+          db: deps.db,
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
+          grant,
+          targetSessionId: task.targetSessionId,
+          runMode: task.runMode,
+          variableSetId: task.variableSetId,
+          rigId: task.rigId,
+          agentConfig: task.agentConfig,
+          missingTargetStatus: 404,
+        });
         await requireLimit(deps, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
@@ -1081,7 +1156,9 @@ export function buildOpenGeniMcpServer(
       },
       async ({ taskId, limit }) =>
         json({
-          runs: await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100),
+          runs: (await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100)).map(
+            (run) => scheduledTaskRunForGrant(run, grant),
+          ),
         }),
     );
   }
@@ -1717,7 +1794,11 @@ function registerWorkspaceArtifactTools(
       const actualHash = createHash("sha256").update(object.bytes).digest("hex");
       if (actualHash !== ref.version.contentSha256)
         throw new Error("Artifact content failed integrity verification");
-      return json({ detail, version: ref.version, html: new TextDecoder().decode(object.bytes) });
+      return json({
+        detail,
+        version: ref.version,
+        html: new TextDecoder().decode(object.bytes),
+      });
     },
   );
 
@@ -2015,19 +2096,13 @@ function registerMemoryTools(
             : undefined,
           timestamp: result.memory.updatedAt,
           idempotency: { status: "not_supported" },
-          warnings: [
-            ...(result.redactionCount > 0
-              ? [`Redacted ${result.redactionCount} sensitive value(s) before committing memory.`]
-              : []),
-            ...(!result.embedded
-              ? ["Memory committed without a vector embedding; keyword search remains available."]
-              : []),
-          ],
+          warnings: !result.embedded
+            ? ["Memory committed without a vector embedding; keyword search remains available."]
+            : [],
           facts: {
             deduped: result.deduped,
             dedupeReason: result.dedupeReason,
             updatedInPlace: result.updated,
-            redactionCount: result.redactionCount,
             embedded: result.embedded,
           },
         }),
@@ -2382,7 +2457,10 @@ function registerRigTools(
               relatedResources: [{ type: "rig", id: rig.id }],
               timestamp: verifying.updatedAt,
               idempotency: { status: "not_supported" },
-              partialFailure: { stage: "verification_workflow_start", retryable: true },
+              partialFailure: {
+                stage: "verification_workflow_start",
+                retryable: true,
+              },
               warnings: [
                 "The rig change and verifying transition committed, but verification workflow start failed.",
               ],
@@ -2455,7 +2533,10 @@ function registerRigTools(
                 relatedResources: [{ type: "rig", id: rig.id }],
                 timestamp: verifying.updatedAt,
                 idempotency: { status: "not_supported" },
-                partialFailure: { stage: "verification_workflow_start", retryable: true },
+                partialFailure: {
+                  stage: "verification_workflow_start",
+                  retryable: true,
+                },
                 warnings: [
                   "The verifying transition committed, but verification workflow start failed.",
                 ],
@@ -2479,7 +2560,10 @@ function registerRigTools(
               relatedResources: [{ type: "rig", id: rig.id }],
               timestamp: verifying.updatedAt,
               idempotency: { status: "not_supported" },
-              facts: { verificationStarted: true, verificationAttempt: attempt },
+              facts: {
+                verificationStarted: true,
+                verificationAttempt: attempt,
+              },
               nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
             }),
           );
@@ -2546,7 +2630,11 @@ function registerRigTools(
               state: "active",
             },
             relatedResources: [
-              { type: "rig_change", id: promoted.change.id, state: promoted.change.status },
+              {
+                type: "rig_change",
+                id: promoted.change.id,
+                state: promoted.change.status,
+              },
               { type: "rig", id: rig.id },
             ],
             timestamp: promoted.version.createdAt,
@@ -2772,7 +2860,10 @@ function registerWorkspaceOrchestrationTools(
                   compactSessionEventResult(
                     event,
                     latestClass!,
-                    dbPage.coveredSequence ?? { first: event.sequence, last: event.sequence },
+                    dbPage.coveredSequence ?? {
+                      first: event.sequence,
+                      last: event.sequence,
+                    },
                   ),
                 )
               : null,
@@ -2961,7 +3052,10 @@ function registerWorkspaceOrchestrationTools(
                 wakeRequested: result.wakeRevision !== null,
                 resumeRequired: result.effectiveState === "paused",
               },
-              nextAction: { tool: "session_get", arguments: { sessionId: targetSessionId } },
+              nextAction: {
+                tool: "session_get",
+                arguments: { sessionId: targetSessionId },
+              },
             }),
           );
         }
@@ -2998,7 +3092,10 @@ function registerWorkspaceOrchestrationTools(
             ],
             timestamp: accepted.occurredAt,
             idempotency: { status: replay ? "replayed" : "applied" },
-            nextAction: { tool: "session_get", arguments: { sessionId: targetSessionId } },
+            nextAction: {
+              tool: "session_get",
+              arguments: { sessionId: targetSessionId },
+            },
           }),
         );
       },
@@ -3177,15 +3274,16 @@ function registerWorkspaceOrchestrationTools(
   }
 }
 
-// VariableSet management for manager-style agents. v1 deliberately accepts
-// variable VALUES in plain tool arguments: the calling model is trusted with
-// the secrets it is persisting (see docs/variable-sets.md). Reads stay
-// write-only — responses carry names and metadata, never values.
+// Variable-set management for agents. Generic reads remain metadata-only.
+// Plaintext has one dedicated tool that additionally requires literal
+// secrets:read plus exact live attempt/session authorization.
 function registerVariableSetTools(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
   can: (permission: Permission) => boolean,
+  sessionId: string | null,
+  toolspaceMode: boolean,
   json: JsonResult,
 ): void {
   const registerListTool = (name: string, description: string): void => {
@@ -3325,25 +3423,94 @@ function registerVariableSetTools(
       setVariableHandler(name),
     );
   };
-  if (can("variable-sets:use")) {
+  if (can("variable-sets:list") && can("secrets:list")) {
     registerListTool(
       "variable_set_list",
-      "List variable sets with variable names and metadata (versions, timestamps). Values are write-only and never returned.",
+      "List variable sets with variable names and metadata (versions, timestamps). Plaintext values are never returned by list operations.",
     );
     registerListTool(
       "environment_list",
-      "(deprecated alias of variable_set_list) List variable sets with variable names and metadata (versions, timestamps). Values are write-only and never returned.",
+      "(deprecated alias of variable_set_list) List variable sets with variable names and metadata (versions, timestamps). Plaintext values are never returned by list operations.",
     );
   }
 
-  if (can("variable-sets:manage")) {
+  if (
+    !toolspaceMode &&
+    sessionId !== null &&
+    can("variable-sets:read") &&
+    hasLiteralPermission(grant.permissions, "secrets:read")
+  ) {
+    server.registerTool(
+      "variable_set_get_variable",
+      {
+        description:
+          "Retrieve one exact plaintext variable value. This is a dedicated high-trust read: use it only when the current task requires the configured value. The access is audited against this exact live attempt.",
+        inputSchema: {
+          variableSetId: z4.string().uuid().optional(),
+          variableSetName: z4.string().min(1).max(120).optional(),
+          name: z4.string().min(1),
+        },
+      },
+      async ({ variableSetId, variableSetName, name }) => {
+        let target: { variableSetId: string } | { variableSetName: string };
+        if (variableSetId !== undefined) {
+          if (variableSetName !== undefined) {
+            throw new Error("provide exactly one of variableSetId or variableSetName");
+          }
+          target = { variableSetId };
+        } else {
+          if (variableSetName === undefined) {
+            throw new Error("provide exactly one of variableSetId or variableSetName");
+          }
+          target = { variableSetName };
+        }
+        if (
+          ("variableSetId" in target && target.variableSetId.length === 0) ||
+          ("variableSetName" in target && target.variableSetName.trim().length === 0)
+        ) {
+          throw new Error("provide exactly one of variableSetId or variableSetName");
+        }
+        const parsedName = VariableSetVariableName.safeParse(name);
+        if (!parsedName.success) {
+          throw new Error("variable set variable names must match ^[A-Z][A-Z0-9_]*$");
+        }
+        assertAllowedVariableSetVariableName(parsedName.data);
+        const claims = preferenceAttemptClaims(grant);
+        if (!claims || claims.sessionId !== sessionId) {
+          throw new Error("Exact signed secret-read attempt authority is required.");
+        }
+        await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.secret.read");
+        const key = requireVariableSetEncryption(deps.settings);
+        const secret = await readVariableSetSecretAtomically(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: grant.subjectId,
+          ...target,
+          name: parsedName.data,
+          actor: {
+            kind: "agent_attempt",
+            sessionId: claims.sessionId,
+            turnId: claims.turnId,
+            attemptId: claims.attemptId,
+            executionGeneration: claims.executionGeneration,
+          },
+          decrypt: (valueEncrypted) => decryptVariableSetValue(key, valueEncrypted),
+        });
+        if (!secret) throw new Error("variable set variable not found");
+        return json(secret);
+      },
+    );
+  }
+
+  if (can("variable-sets:write") && can("secrets:write")) {
     registerSetTool(
       "variable_set_set_variable",
-      "Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to; it is never readable back through any API.",
+      "Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to. Reading it requires the dedicated permissioned secret-read operation.",
     );
     registerSetTool(
       "environment_set_variable",
-      "(deprecated alias of variable_set_set_variable) Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to; it is never readable back through any API.",
+      "(deprecated alias of variable_set_set_variable) Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to. Reading it requires the dedicated permissioned secret-read operation.",
     );
   }
 }

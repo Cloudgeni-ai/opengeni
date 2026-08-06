@@ -6,15 +6,15 @@
 
 OpenGeni gains a first-class integrations layer: users connect external services (one browser OAuth round-trip or a pasted key), agents use them through MCP, and credentials live behind a single broker that no model, sandbox, or workflow payload can see.
 
-Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) *client side* once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero OpenGeni-side provider registration. OpenGeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
+Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero OpenGeni-side provider registration. OpenGeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
 
 Three layers, kept distinct throughout this doc:
 
-| Layer | Question | Owner |
-|---|---|---|
-| Acquisition | How does a credential come to exist? | OAuth flows, manual entry, app installs |
-| Storage | Where does it live, who may read it? | `connections` table + AEAD envelope |
-| Use | How does a tool call get authenticated? | Token broker at MCP request time |
+| Layer       | Question                                | Owner                                   |
+| ----------- | --------------------------------------- | --------------------------------------- |
+| Acquisition | How does a credential come to exist?    | OAuth flows, manual entry, app installs |
+| Storage     | Where does it live, who may read it?    | `connections` table + AEAD envelope     |
+| Use         | How does a tool call get authenticated? | Token broker at MCP request time        |
 
 ## 2. The `connections` model
 
@@ -55,11 +55,17 @@ Decisions baked in:
 
 ## 3. Credential encryption
 
-Reuse the existing AES-256-GCM envelope as-is: `encryptEnvironmentValue`/`decryptEnvironmentValue` in `packages/db/src/environment-crypto.ts` (format `v1:<base64 iv>:<base64 ciphertext||tag>`), keyed by `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` via `environmentsEncryptionKeyBytes` in `packages/config/src/index.ts`. No new key. Unlike capability headers (per-header ciphertext map), `connections.credential_encrypted` stores **one JSON bundle**:
+Reuse the existing AES-256-GCM envelope: `encryptEnvironmentValue`/`decryptEnvironmentValue` in `packages/db/src/environment-crypto.ts` (current lossless format `v2:<base64 iv>:<base64 ciphertext||tag>`, with historical `v1` reads retained), keyed by `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` via `environmentsEncryptionKeyBytes` in `packages/config/src/index.ts`. No new key. Unlike capability headers (per-header ciphertext map), `connections.credential_encrypted` stores **one JSON bundle**:
 
 ```json
-{ "access_token": "…", "refresh_token": "…", "token_type": "Bearer",
-  "expires_at": "…", "resource": "https://…", "scope": "read write" }
+{
+  "access_token": "…",
+  "refresh_token": "…",
+  "token_type": "Bearer",
+  "expires_at": "…",
+  "resource": "https://…",
+  "scope": "read write"
+}
 ```
 
 Fail closed when the key is missing: API credential writes return 503 (capability-enable style); broker reads throw without echoing secret values. Decryption happens in exactly two places — the broker's decrypt-read helper and the connections domain's refresh/revoke internals. No decrypt helper is exported to app code; the SDK and React packages never see these types (publish-closure guard applies).
@@ -74,10 +80,24 @@ The single seam where a connection becomes request-auth material. Two halves:
 
 ```ts
 type ResolveConnectionCredentialResult =
-  | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
-  | { status: "auth_needed";
-      reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
-      providerDomain: string; scopes?: string[]; resource?: string; authorizationUrl?: string }
+  | {
+      status: "ok";
+      headers: Record<string, string>;
+      connectionId: string;
+      expiresAt?: Date | null;
+    }
+  | {
+      status: "auth_needed";
+      reason:
+        | "missing_connection"
+        | "expired"
+        | "insufficient_scope"
+        | "refresh_failed";
+      providerDomain: string;
+      scopes?: string[];
+      resource?: string;
+      authorizationUrl?: string;
+    };
 ```
 
 `PrepareToolsOptions` gains `resolveCredential` and `onAuthNeeded`; `prepareAgentTools` composes a broker fetch for servers carrying a `connectionRef`: resolve → inject headers → on 401 force-refresh once and retry → on 403 `insufficient_scope` emit `auth_needed` (§6). Wired from the worker (`apps/worker/src/activities/agent-turn.ts`) alongside `onRuntimeEvent`.
@@ -90,7 +110,7 @@ Broker rules:
 - 403 step-up must NOT poison good credentials: `insufficient_scope` does not flip status to `needs_reauth`; only an unusable refresh grant does.
 - Settings carry only `connectionRef` (non-secret pointer); the `mcpServers` entry schema in `packages/config/src/index.ts` gains an optional `connectionRef { connectionId?, providerDomain, kind?, scopes?, resource?, subjectScope? }`.
 
-Tokens therefore never appear in: `session_turns.tools`, `session_events.payload`, `agent_run_states`, Temporal signals/activity inputs, sandbox env, model context, SDK/React client types, or logs. The event sanitizer (`packages/db/src/event-payload-sanitizer.ts`) already strips `mcpServers[].headers`/`headersEncrypted`; it gains guards for auth-flow fields.
+The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. OpenGeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
 
 ## 5. MCP OAuth client (spec rev 2025-11-25)
 
@@ -140,10 +160,14 @@ Some authorization servers advertise both CIMD and DCR but only issue MCP-accept
 Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 
 ```json
-{ "client_id": "<this document's exact URL>", "client_name": "OpenGeni",
+{
+  "client_id": "<this document's exact URL>",
+  "client_name": "OpenGeni",
   "redirect_uris": ["<publicBaseUrl>/v1/integrations/oauth/callback"],
   "token_endpoint_auth_method": "none",
-  "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"] }
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"]
+}
 ```
 
 `client_id` byte-matches its serving URL. Base URL is `settings.publicBaseUrl` (`OPENGENI_PUBLIC_BASE_URL`, already required in managed mode); HTTPS is enforced when integrations are enabled outside local dev. Per-deployment documents differ by construction, so staging/prod/embedded hosts each get their own client identity automatically.
@@ -193,7 +217,7 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 ## 9. UX surfaces (built in I3; contract fixed here)
 
 - **Integrations page** (workspace settings): catalog grid (search, verified/community badges), connected list with health (status, expiry, owner badge workspace/personal, last used), connect/disconnect, add-by-URL, add-by-domain (I4), paste-a-key rendering catalog credential facts (setup deep link + text).
-- **Connect flow:** click → confirmation modal showing the *domain* and requested scopes → browser OAuth → return with the connection live. Domain confirmation is mandatory for registry-sourced and agent-initiated connects.
+- **Connect flow:** click → confirmation modal showing the _domain_ and requested scopes → browser OAuth → return with the connection live. Domain confirmation is mandatory for registry-sourced and agent-initiated connects.
 - **In-session:** the `tool.auth_needed` chip folds into the turn per existing timeline fold rules.
 
 ## 10. Discovery & catalog (I4)
@@ -205,14 +229,14 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 
 ## 11. Legacy credential sites — convergence
 
-| Site | Plan |
-|---|---|
-| `capability_installations.config.headersEncrypted` | Kept for legacy/static header installs. New installs set `config.connectionRef` (validated against workspace + subject policy in `packages/core/src/domain/capabilities.ts`, stripped from untrusted caller config like the reserved header keys). `EnabledMcpCapabilityServer` + `listEnabledMcpCapabilityServers` + `settingsWithMcpCapabilityServers` in `packages/db/src/index.ts` pass the ref through without decrypting; an item with `authModel` satisfies its requirement with either headers or a ref. Backfill decided in I6 with reasons logged. |
-| `github_installations` + `github_installation_repositories` | The current workspace binding plus repository allowlist becomes `kind: 'app_install'` in I6; installation-token minting moves behind the broker. One GitHub installation may have independent bindings in multiple workspaces. Unchanged until then. |
-| `codex_subscription_credentials` | Stays separate (account-level rotation semantics, own resolver). Not a goal of this program. |
-| First-party delegated bearer | Unchanged — identity plumbing, not an external credential. |
-| `social_connections` | Superseded for future use; existing rows untouched until a consumer needs migration. |
-| `ConnectionCredentialsPort` | Its `mcpCredentials(request)` leg receives account/workspace/session, exact turn lineage, immutable initiator, server/tool, opaque connection ref, and forced-refresh intent. OpenGeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections). |
+| Site                                                        | Plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `capability_installations.config.headersEncrypted`          | Kept for legacy/static header installs. New installs set `config.connectionRef` (validated against workspace + subject policy in `packages/core/src/domain/capabilities.ts`, stripped from untrusted caller config like the reserved header keys). `EnabledMcpCapabilityServer` + `listEnabledMcpCapabilityServers` + `settingsWithMcpCapabilityServers` in `packages/db/src/index.ts` pass the ref through without decrypting; an item with `authModel` satisfies its requirement with either headers or a ref. Backfill decided in I6 with reasons logged. |
+| `github_installations` + `github_installation_repositories` | The current workspace binding plus repository allowlist becomes `kind: 'app_install'` in I6; installation-token minting moves behind the broker. One GitHub installation may have independent bindings in multiple workspaces. Unchanged until then.                                                                                                                                                                                                                                                                                                         |
+| `codex_subscription_credentials`                            | Stays separate (account-level rotation semantics, own resolver). Not a goal of this program.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| First-party delegated bearer                                | Unchanged — identity plumbing, not an external credential.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `social_connections`                                        | Superseded for future use; existing rows untouched until a consumer needs migration.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `ConnectionCredentialsPort`                                 | Its `mcpCredentials(request)` leg receives account/workspace/session, exact turn lineage, immutable initiator, server/tool, opaque connection ref, and forced-refresh intent. OpenGeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections).                                                                                                                                                                                                                                     |
 
 ## 12. Security invariants and phase acceptance
 

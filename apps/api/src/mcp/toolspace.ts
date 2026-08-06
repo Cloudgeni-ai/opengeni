@@ -51,7 +51,6 @@ import {
   type McpRequestReplayInfo,
 } from "@opengeni/runtime/mcp-network";
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
 
 export type ToolspaceCallResult = CallToolResult;
 
@@ -399,10 +398,10 @@ async function resolveToolListing(input: {
       turn: activeTurn,
       personalConnectionDelegations,
     }).catch((error) => {
-      deps.observability?.warn("toolspace upstream connection failed", {
-        serverId,
-        ...toolspaceErrorAttributes(error),
-      });
+      deps.observability?.warn(
+        "toolspace upstream connection failed",
+        toolspacePublicErrorFields(error),
+      );
       return null;
     });
     if (!connection) {
@@ -413,20 +412,20 @@ async function resolveToolListing(input: {
       const listed = await connection.client
         .listTools(undefined, toolspaceRequestOptions(config))
         .catch((error) => {
-          deps.observability?.warn("toolspace upstream tool list failed", {
-            serverId,
-            ...toolspaceErrorAttributes(error),
-          });
+          deps.observability?.warn(
+            "toolspace upstream tool list failed",
+            toolspacePublicErrorFields(error),
+          );
           return { tools: [] };
         });
       let boundedTools: readonly McpTool[];
       try {
         boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
       } catch (error) {
-        deps.observability?.warn("toolspace upstream tool list exceeded safety limit", {
-          serverId,
-          errorClass: error instanceof Error ? error.name : typeof error,
-        });
+        deps.observability?.warn(
+          "toolspace upstream tool list exceeded safety limit",
+          toolspacePublicErrorFields(error, "tool_list_too_large"),
+        );
         aggregateBudget.replace(serverId, []);
         return;
       }
@@ -629,17 +628,19 @@ function toolspaceToolFor(input: {
       if (mcpToolRequiresApproval(config.requireApproval, tool.name)) {
         return mcpError(APPROVAL_REQUIRED_MESSAGE);
       }
-      const connection = await connectToolspaceServer({
-        deps,
-        grant,
-        config,
-        sessionId,
-        rootSessionId,
-        turn: reservation.turn,
-        personalConnectionDelegations,
-      }).catch(() => null);
-      if (!connection) {
-        return mcpError(`upstream tool failed: ${name}`);
+      let connection: ConnectedToolspaceServer;
+      try {
+        connection = await connectToolspaceServer({
+          deps,
+          grant,
+          config,
+          sessionId,
+          rootSessionId,
+          turn: reservation.turn,
+          personalConnectionDelegations,
+        });
+      } catch (error) {
+        return mcpError(exactErrorMessage(error));
       }
       try {
         const callId = crypto.randomUUID();
@@ -659,7 +660,7 @@ function toolspaceToolFor(input: {
             type: "toolspace_call",
             id: callId,
             name,
-            arguments: toolspaceAuditSummary(args),
+            arguments: args,
             serverId,
             toolName: tool.name,
           },
@@ -718,7 +719,7 @@ function toolspaceToolFor(input: {
               producerId: grant.subjectId,
               payload: {
                 id: callId,
-                output: toolspaceAuditSummary(output),
+                output,
                 origin: "toolspace",
                 subjectId: grant.subjectId,
               },
@@ -755,11 +756,10 @@ async function callRemoteTool(
     return output;
   } catch (error) {
     if (error instanceof McpPayloadTooLargeError) {
-      deps.observability?.warn("toolspace upstream tool result exceeded safety limit", {
-        serverId: server.config.id,
-        toolName,
-        errorClass: error.name,
-      });
+      deps.observability?.warn(
+        "toolspace upstream tool result exceeded safety limit",
+        toolspacePublicErrorFields(error, "tool_result_too_large"),
+      );
       return mcpError("upstream tool result exceeded the safety limit");
     }
     if (isToolspaceAuthNeededError(error)) {
@@ -768,52 +768,56 @@ async function callRemoteTool(
     if (isToolspaceOutcomeUncertainError(error)) {
       return mcpError(TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message);
     }
-    // The raw upstream error can carry provider-specific detail; log it
-    // server-side and return only a generic result to the sandbox so no header
-    // or credential material can ride the message back out.
-    deps.observability?.warn("toolspace upstream tool call failed", {
-      serverId: server.config.id,
-      toolName,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return mcpError(`upstream tool failed: ${prefixedMcpToolName(server.config.id, toolName)}`);
+    const message = exactErrorMessage(error);
+    // The exact provider diagnostic remains the internal/model-facing tool
+    // result. Public observability receives only allowlisted metadata.
+    deps.observability?.warn(
+      "toolspace upstream tool call failed",
+      toolspacePublicErrorFields(error),
+    );
+    return mcpError(message);
   }
 }
 
-function toolspaceAuditSummary(value: unknown): {
-  redacted: true;
-  sizeBytes: number;
-  sha256: string;
-} {
-  let serialized: string;
+function exactErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export type ToolspacePublicErrorFields = {
+  errorClass: "ToolspaceOperationError";
+  errorCode: ToolspacePublicFailureCode;
+  status?: number;
+  origin: "toolspace";
+};
+
+type ToolspacePublicFailureCode =
+  | "toolspace_operation_failed"
+  | "tool_list_too_large"
+  | "tool_result_too_large";
+
+/** Allowlisted projection for public telemetry; product data stays exact. */
+export function toolspacePublicErrorFields(
+  error: unknown,
+  errorCode: ToolspacePublicFailureCode = "toolspace_operation_failed",
+): ToolspacePublicErrorFields {
+  const fields: ToolspacePublicErrorFields = {
+    errorClass: "ToolspaceOperationError",
+    errorCode,
+    origin: "toolspace",
+  };
   try {
-    serialized = JSON.stringify(value) ?? "null";
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
   } catch {
-    serialized = "[unserializable]";
+    // Public telemetry is best-effort. A hostile getter/proxy must never
+    // replace the exact Toolspace failure with a projection failure.
   }
-  return {
-    redacted: true,
-    sizeBytes: Buffer.byteLength(serialized),
-    sha256: createHash("sha256").update(serialized).digest("hex"),
-  };
-}
-
-function toolspaceErrorAttributes(error: unknown): {
-  errorClass: string;
-  errorCode?: string;
-  errorMessage?: string;
-} {
-  if (!(error instanceof Error)) {
-    return { errorClass: typeof error };
-  }
-  const code = (error as Error & { code?: unknown }).code;
-  return {
-    errorClass: error.name,
-    ...(typeof code === "string" ? { errorCode: code } : {}),
-    ...(error.message
-      ? { errorMessage: error.message.replaceAll(/[\r\n]+/gu, " ").slice(0, 512) }
-      : {}),
-  };
+  return fields;
 }
 
 type ToolspaceReservation =

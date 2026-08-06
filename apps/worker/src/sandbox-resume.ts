@@ -21,7 +21,6 @@
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
 import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
-import { redactSensitiveText } from "@opengeni/contracts";
 import { randomUUID } from "node:crypto";
 import {
   acquireLease,
@@ -236,15 +235,35 @@ class SnapshotTimeoutError extends Error {
   }
 }
 
-function safeSnapshotError(error: unknown): { name: string; message: string } {
-  const rawName = error instanceof Error ? error.name : "Error";
-  return {
-    name: /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error",
-    message: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(
-      0,
-      2_048,
-    ),
+export function safeSnapshotError(error: unknown): {
+  errorClass: "SnapshotOperationError";
+  errorCode: "snapshot_operation_failed";
+  status?: number;
+  origin: "sandbox-resume";
+} {
+  const fields: {
+    errorClass: "SnapshotOperationError";
+    errorCode: "snapshot_operation_failed";
+    status?: number;
+    origin: "sandbox-resume";
+  } = {
+    errorClass: "SnapshotOperationError",
+    errorCode: "snapshot_operation_failed",
+    origin: "sandbox-resume",
   };
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public diagnostics are best-effort and must never replace the exact
+    // internal snapshot failure.
+  }
+  return fields;
 }
 
 export async function waitForWarmSnapshot(

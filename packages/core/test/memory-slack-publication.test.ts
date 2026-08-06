@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { redactSensitiveText } from "@opengeni/contracts";
 import {
   DEFAULT_MEMORY_SLACK_PUBLICATION_POLICY,
   MEMORY_SLACK_PROJECTION_MAX_UTF8_BYTES,
@@ -84,7 +83,7 @@ describe("Memory Slack publication security contract", () => {
     ).toEqual({ eligible: false, reason: "disabled" });
   });
 
-  test("returns a redacted, UTF-8-bounded allowlist projection and ignores raw source fields", () => {
+  test("preserves token-shaped projection content while ignoring raw source fields", () => {
     const syntheticValue = "A".repeat(24);
     const input = candidate({
       memory: {
@@ -121,15 +120,12 @@ describe("Memory Slack publication security contract", () => {
 
     expect(decision.deliveryMode).toBe("auto");
     expect(decision.idempotencyKey).toMatch(/^memory-slack:v1:[0-9a-f]{64}$/);
-    expect(decision.projection.summary).toContain("[redacted]");
-    expect(decision.projection.summary).not.toContain(syntheticValue);
-    expect(decision.projection.summaryRedacted).toBe(true);
+    expect(decision.projection.summary).toContain(syntheticValue);
     expect(decision.projection.summaryTruncated).toBe(true);
     expect(new TextEncoder().encode(decision.projection.summary).byteLength).toBeLessThanOrEqual(
       MEMORY_SLACK_SUMMARY_MAX_UTF8_BYTES,
     );
-    expect(decision.projection.ownerLabel).toContain("[redacted]");
-    expect(decision.projection.ownerLabelRedacted).toBe(true);
+    expect(decision.projection.ownerLabel).toContain(syntheticValue);
     expect(decision.projection.labels).toEqual([
       "alpha",
       "beta",
@@ -143,7 +139,7 @@ describe("Memory Slack publication security contract", () => {
     expect(decision.projection.labelsTruncated).toBe(true);
 
     const serialized = JSON.stringify(decision.projection);
-    expect(serialized).not.toContain(syntheticValue);
+    expect(serialized).toContain(syntheticValue);
     expect(serialized).not.toContain("raw memory body");
     expect(serialized).not.toContain("hiddenPrompt");
     expect(serialized).not.toContain("raw-source");
@@ -164,11 +160,9 @@ describe("Memory Slack publication security contract", () => {
         "namespace",
         "occurredAt",
         "ownerLabel",
-        "ownerLabelRedacted",
         "ownerLabelTruncated",
         "relatedMemoryId",
         "summary",
-        "summaryRedacted",
         "summaryTruncated",
         "version",
         "workspaceId",
@@ -176,28 +170,16 @@ describe("Memory Slack publication security contract", () => {
     );
   });
 
-  test("fails closed when namespace or labels contain recognized credential material", () => {
-    const credential = `github_pat_${"a".repeat(32)}`;
-    const caseSensitiveCredential = ["AI", "za", "b".repeat(35)].join("");
-    expect(redactSensitiveText(credential)).toBe("[redacted]");
-    expect(redactSensitiveText(caseSensitiveCredential)).toBe("[redacted]");
+  test("does not classify token-shaped namespace or label text as secret material", () => {
+    const tokenShaped = ["sk", "live", "synthetic", "123456"].join("_");
+    const decision = evaluateMemorySlackPublication(
+      candidate({ memory: { namespace: tokenShaped, labels: ["architecture", tokenShaped] } }),
+    );
 
-    expect(
-      evaluateMemorySlackPublication(candidate({ memory: { namespace: credential } })),
-    ).toEqual({ eligible: false, reason: "invalid_input" });
-    expect(
-      evaluateMemorySlackPublication(candidate({ memory: { namespace: caseSensitiveCredential } })),
-    ).toEqual({ eligible: false, reason: "invalid_input" });
-    expect(
-      evaluateMemorySlackPublication(
-        candidate({ memory: { labels: ["architecture", credential] } }),
-      ),
-    ).toEqual({ eligible: false, reason: "invalid_input" });
-    expect(
-      evaluateMemorySlackPublication(
-        candidate({ memory: { labels: ["architecture", caseSensitiveCredential] } }),
-      ),
-    ).toEqual({ eligible: false, reason: "invalid_input" });
+    expect(decision.eligible).toBe(true);
+    if (!decision.eligible) return;
+    expect(decision.projection.namespace).toBe(tokenShaped);
+    expect(decision.projection.labels).toContain(tokenShaped);
   });
 
   test("fails closed across account and workspace boundaries", () => {

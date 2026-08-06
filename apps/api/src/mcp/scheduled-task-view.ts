@@ -308,6 +308,7 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     schedule: schedule.schedule,
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
+    targetSessionId: task.targetSessionId,
     reusableSessionId: task.reusableSessionId,
     variableSetId: task.variableSetId,
     rigId: task.rigId,

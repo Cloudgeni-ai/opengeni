@@ -61,16 +61,12 @@ import { createObservability } from "@opengeni/observability";
 import {
   createProductionAgentRuntime,
   MaxTurnsExceededError,
-  safeMcpTransportError,
+  mcpTransportErrorWithRetryMetadata,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  headerSecretRedactions,
-  PROVIDER_BACKPRESSURE_DELAY_MS,
-} from "../../apps/worker/src/activities/agent-turn";
-import { createSecretRedactor } from "../../apps/worker/src/activities/redaction";
+import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import {
   loadWorkspaceEnvironmentForRun,
   sandboxEnvironmentForRun,
@@ -232,7 +228,7 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("uses current encrypted MCP header names after a custom-header rotation", async () => {
+  test("uses current exact MCP headers after a custom-header rotation", async () => {
     const grant = await testGrant(dbClient.db);
     const encryptionKey = Buffer.alloc(32, 10);
     const oldValue = "synthetic-old-private-token-123456";
@@ -297,27 +293,9 @@ describe("worker activities integration", () => {
     const staleNames = staleProjection?.mcpServers.find(
       (server) => server.id === "crm",
     )?.headerNames;
-    const staleRedactions = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentServer?.headers,
-      staleNames,
-    );
-    const currentRedactions = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentServer?.headers,
-      resolvedHeaderNames,
-    );
-    const redactedCurrent = createSecretRedactor(currentRedactions)({ echoed: currentValue });
-
     expect(staleNames).toEqual(["Old-Private-Token"]);
     expect(resolvedHeaderNames).toEqual(["Private-Token"]);
     expect(currentServer?.headers).toEqual({ "Private-Token": currentValue });
-    expect(staleRedactions).toHaveLength(0);
-    expect(currentRedactions).toEqual([
-      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
-    ]);
-    expect(JSON.stringify(redactedCurrent)).not.toContain(currentValue);
-    expect(JSON.stringify(redactedCurrent)).toContain("[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]");
   });
 
   test("overlays host-backed session MCP refs without a local encryption key", async () => {
@@ -1468,7 +1446,7 @@ describe("worker activities integration", () => {
     );
   });
 
-  test("a sanitized required-MCP connection refusal recovers the same turn", async () => {
+  test("an exact required-MCP connection refusal recovers the same turn", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "continue after required MCP reconnects",
@@ -1493,7 +1471,7 @@ describe("worker activities integration", () => {
     const runtime: OpenGeniRuntime = {
       ...baseRuntime,
       runStream: async () => {
-        throw safeMcpTransportError(raw);
+        throw mcpTransportErrorWithRetryMetadata(raw);
       },
     };
     const activities = createWorkerActivities({
@@ -1531,8 +1509,7 @@ describe("worker activities integration", () => {
       },
     );
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(JSON.stringify(events)).not.toContain("private.example");
-    expect(JSON.stringify(events)).not.toContain("127.0.0.1");
+    expect(JSON.stringify(events)).toContain("private.example");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "recovering",
     );
@@ -1542,6 +1519,91 @@ describe("worker activities integration", () => {
       status: "recovering",
       activeAttemptId: null,
     });
+  });
+
+  test("a rolling-replacement first-party MCP 404 recovers the same goal turn before inference", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "continue after the first-party MCP route returns",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "finish the accepted turn without a synthetic continuation",
+      createdBy: "api",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      {
+        type: "user.message",
+        payload: { text: "continue after the first-party MCP route returns" },
+      },
+    ]);
+    const routeNotReady = Object.assign(new Error("temporary route response"), {
+      status: 404,
+    });
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () => {
+        throw safeMcpTransportError(routeNotReady, { recoverySafeSetup: true });
+      },
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-first-party-mcp-route-replacement",
+        workflowRunId: crypto.randomUUID(),
+      }),
+    ).resolves.toMatchObject({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        code: "mcp_transport_unavailable",
+        reason: "mcp_transport_unavailable",
+        retryable: true,
+        continueDelayMs: 2_000,
+      },
+    );
+    expect(events.some((event) => event.type === "agent.model.request")).toBe(false);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.some((event) => event.type === "goal.continuation")).toBe(false);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
   });
 
   test("records worker observability when setup fails before a turn starts", async () => {
@@ -3238,6 +3300,148 @@ describe("worker activities integration", () => {
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
   });
 
+  test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "existing scheduled target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "failed");
+    const goal = await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: target.id,
+      text: "Keep the original target goal",
+      successCriteria: "Do not replace this goal",
+      createdBy: "api",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-existing-session",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "existing_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "continue exactly here",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+    const workflowWakes: unknown[] = [];
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "ok" }]),
+      }),
+    });
+    const beforeSessions = await listSessions(dbClient.db, grant.workspaceId);
+    const producerKey = `existing-session-fire:${crypto.randomUUID()}`;
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    const retry = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+
+    expect(first).toMatchObject({ action: "signal", sessionId: target.id });
+    expect(retry).toMatchObject({
+      action: "signal",
+      sessionId: target.id,
+      triggerEventId: first.triggerEventId,
+    });
+    expect(await listSessions(dbClient.db, grant.workspaceId)).toHaveLength(beforeSessions.length);
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, target.id)).toMatchObject({
+      id: goal.id,
+      text: goal.text,
+      version: goal.version,
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, target.id),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "scheduled_occurrence",
+        summary: "continue exactly here",
+        payload: expect.objectContaining({
+          type: "scheduled_occurrence",
+          scheduledTaskId: task.id,
+        }),
+      }),
+    ]);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(1);
+    expect(workflowWakes).toHaveLength(1);
+  });
+
+  test("fails closed when an existing-session target is cancelled or deleted", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "terminal scheduled target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-terminal-existing-session",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "existing_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "must fail closed", resources: [], tools: [], metadata: {} },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "must not run" }]),
+      }),
+    });
+
+    await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "cancelled");
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("cannot be revived");
+
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, async (scopedDb) => {
+      await scopedDb.execute(dbSql`delete from sessions where id = ${target.id}`);
+    });
+    expect(
+      (await requireScheduledTask(dbClient.db, grant.workspaceId, task.id)).targetSessionId,
+    ).toBeNull();
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("scheduled task target session is unavailable");
+  });
+
   test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {
     const grant = await testGrant(dbClient.db);
     const settings = testSettings({
@@ -3315,7 +3519,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("redacts attached environment values echoed by the agent into session events", async () => {
+  test("preserves attached environment values echoed by the agent in session events", async () => {
     const secret = "echoed-workspace-secret-987654";
     const grant = await testGrant(dbClient.db);
     const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
@@ -3355,17 +3559,16 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       trigger: { kind: "next" },
-      workflowId: "workflow-environment-redaction",
+      workflowId: "workflow-environment-exact-content",
       workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
     const serialized = JSON.stringify(events);
-    expect(serialized).not.toContain(secret);
-    expect(serialized).toContain("[redacted:LEAKED_TOKEN]");
+    expect(serialized).toContain(secret);
     const completed = events.find((event) => event.type === "agent.message.completed");
     expect((completed?.payload as { text?: string } | undefined)?.text).toBe(
-      "the token is [redacted:LEAKED_TOKEN] end",
+      `the token is ${secret} end`,
     );
   });
 

@@ -794,6 +794,21 @@ full-source-SHA tags, and writes one source-bound package/image/chart BOM. It
 deliberately does not create or update `latest`, and its immutable distribution
 receipt makes no hosted Workbench, staging, production, or canary claim.
 
+An application-only embedded release additionally supplies the exact source SHA
+and successful run ID of the canonical `publish-packages.yml` workflow whose
+owned, unexpired `package-publication-verified-*` artifact defines the package
+overlay. OpenGeni verifies that run and provider artifact digest, requires the
+run to have executed from `main`, retains the exact controller branch and SHA in
+the new provenance evidence, and proves that controller SHA remains an ancestor
+of current `main` before any release mutation. The package source SHA remains a
+separate identity. OpenGeni then requires the receipt to cover the exact
+publishable package-name closure and re-reads every recorded version from npm to
+match its immutable `gitHead` and SHA-512 integrity before using the receipt's
+complete BOM. It publishes zero npm packages in this mode. This permits reviewed
+application/chart/image bytes to pair with a newer coherent package publication
+without floating to registry `latest`, inventing source ownership, or attempting
+to publish superseded package versions.
+
 After staging, production, and the 72-hour canary have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
@@ -829,9 +844,11 @@ from a ref pinned to the accepted source SHA. Evidence admission accepts the
 candidate and acceptance **run IDs**, not caller-controlled URLs, hashes,
 workflow paths, or repository identities. The provenance verifier queries the
 GitHub API and requires the canonical repository/workflow, a completed
-successful `workflow_dispatch` run, exact commit/tree SHA and run attempt, one
-owned unexpired Actions artifact with its provider digest, and the expected
-artifact name. URLs and archive digests are derived only after those checks. The
+successful `workflow_dispatch` run from `main`, exact source commit/tree SHA and
+run attempt, an exact retained controller branch/SHA whose SHA remains an
+ancestor of current `main`, one owned unexpired Actions artifact with its
+provider digest, and the expected artifact name. URLs and archive digests are
+derived only after those checks. The
 exact package set is carried from the immutable candidate receipt and
 re-derived from registry state immediately before publication; the dispatch
 caller cannot add or omit packages. An explicit zero-gap confirmation is still required. The product
@@ -1366,6 +1383,47 @@ Do not put provider credentials, model keys, storage keys, kubeconfigs, TLS priv
 
 OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
 
+### Out-of-band read-only health audit
+
+Run the frequent deployment audit from an operator host that has read-only
+`kubectl` access and can list the Helm release. It does not create Kubernetes
+resources, exec into pods, restart workloads, resume sessions, or run synthetic
+agent/storage checks. Internal API, worker, and relay endpoints are read through
+the Kubernetes Service proxy, so ClusterIP services do not need to be publicly
+exposed:
+
+```bash
+bun run deployment:health-audit -- \
+  --namespace opengeni \
+  --release opengeni \
+  --expected-revision "$DECLARED_SOURCE_REVISION" \
+  --upstream-revision "$OPTIONAL_CURRENT_MAIN"
+```
+
+The command always prints one bounded
+`opengeni.deployment-health-audit.v1` JSON document and uses stable exit codes:
+
+| Exit | Status | Meaning |
+| ---: | --- | --- |
+| `0` | `healthy` | Every requested read-only check passed. |
+| `1` | `degraded` | The deployment is serving, but recent restarts or warning events need observation. |
+| `2` | `incident` | A workload, endpoint, Helm release, PVC, or deployment-revision invariant failed. |
+| `3` | `audit_error` | The audit itself could not establish trustworthy evidence, for example because inventory JSON was unavailable or malformed. |
+
+`--upstream-revision` is context only. A coherent, intentionally pinned
+deployment behind upstream is healthy. `--expected-revision` is declarative
+authority: a mismatch between that value and the API/workers is an incident.
+Raw command stderr is never copied into the JSON result.
+
+Use `--verify-observability` only from the exact deployed OpenGeni source tree.
+It composes `scripts/verify-observability-stack.ts`, which compares canonical
+dashboard bytes and source annotations as well as live Prometheus/Grafana state.
+
+This read-only command is suitable for a frequent systemd timer, CI job, or
+external watchdog. Keep `deployment:conformance` on a slower cadence: that
+suite intentionally creates and cleans up temporary sessions, scheduled tasks,
+and storage objects, so it proves deeper behavior but is not a liveness probe.
+
 Service endpoints:
 
 - API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
@@ -1400,7 +1458,7 @@ Minimum production dashboards should cover:
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
-- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_operations_total{backend,op,outcome}`, `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
+- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue and billing: `opengeni_turns_queued`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, CPU/memory saturation, pod pending time, collector scrape/export errors, and OTLP export failures.

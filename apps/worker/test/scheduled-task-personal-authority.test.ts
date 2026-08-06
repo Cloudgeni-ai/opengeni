@@ -242,6 +242,7 @@ describe("scheduled task personal MCP authority", () => {
         metadata: { version: "changed" },
       },
       personalConnectionDelegations: changedDelegations,
+      targetSessionId: null,
       reusableSessionId: null,
       variableSetId: null,
       rigId: null,

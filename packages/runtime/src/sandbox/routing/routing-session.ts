@@ -30,7 +30,11 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
-import { isExecSessionLostBanner, stripExecBanner } from "../channel-a";
+import {
+  isDefinitePathNotFoundError,
+  isExecSessionLostBanner,
+  stripExecBanner,
+} from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -238,7 +242,7 @@ export interface RoutingSandboxSessionDeps {
 export type RoutingSandboxOperationObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "failed";
+  outcome: "ok" | "not_found" | "failed";
   durationMs: number;
 };
 
@@ -1041,7 +1045,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             retainedRecord
               ? `Mutating sandbox operation "${op}" yielded provider session ${retainedRecord.process.providerSessionId} but lost durable process promotion; exact-backend tracking remains and the operation was not replayed`
               : `Mutating sandbox operation "${op}" returned from the provider but lost its durable route settlement; its outcome is unknown and it was not replayed`,
-            { cause: error },
+            {
+              cause: error,
+              // Promotion is not yet durable, so the rejected provider output
+              // must not reach the caller. The locator is nevertheless bound
+              // to this proxy's exact backend and pending parent promotion.
+              // Hand it to turn finalization so process-control can retry that
+              // same promotion and drain the already-running process without
+              // replaying the workspace mutation.
+              ...(retainedRecord ? { retainedProcess: retainedRecord.process } : {}),
+            },
           );
         }
       }
@@ -1102,6 +1115,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       const result = await withSandboxProviderOperation(backend.session, fn);
       outcome = "ok";
       return result;
+    } catch (error) {
+      if (
+        (op === "readFile" || op === "listDir" || op === "pathExists" || op === "viewImage") &&
+        isDefinitePathNotFoundError(error)
+      ) {
+        outcome = "not_found";
+      }
+      throw error;
     } finally {
       try {
         this.deps.onOperation?.({

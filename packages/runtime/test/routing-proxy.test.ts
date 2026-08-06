@@ -19,6 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  ChannelANotFoundError,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
@@ -156,6 +157,36 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       { backend: "docker", op: "readFile", outcome: "failed" },
     ]);
     expect(observations.every(({ durationMs }) => durationMs >= 0)).toBe(true);
+  });
+
+  test("separates expected path misses from provider failures", async () => {
+    const observations: Array<{ op: string; outcome: string }> = [];
+    const missing = new ChannelANotFoundError("directory path not found: .agents/skills");
+    const unavailable = new Error("provider unavailable");
+    const backend: RoutableBackendSession = {
+      async listDir() {
+        throw missing;
+      },
+      async readFile() {
+        throw unavailable;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onOperation: ({ op, outcome }) => observations.push({ op, outcome }),
+    });
+
+    expect(await proxy.listDir({ path: "/workspace/.agents/skills" }).catch((error) => error)).toBe(
+      missing,
+    );
+    expect(await proxy.readFile({ path: "/workspace/a" }).catch((error) => error)).toBe(
+      unavailable,
+    );
+    expect(observations).toEqual([
+      { op: "listDir", outcome: "not_found" },
+      { op: "readFile", outcome: "failed" },
+    ]);
   });
 
   test("an observer failure cannot change a provider result", async () => {
@@ -648,9 +679,12 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       },
     });
 
-    await expect(proxy.execCommand({ cmd: "start" })).rejects.toBeInstanceOf(
-      RoutingMutationOutcomeUnknownError,
-    );
+    const error = await proxy.execCommand({ cmd: "start" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 76,
+    });
     expect(proxy.hasRetainedProcess(76)).toBe(true);
     ptr.swap("sbx-new");
 

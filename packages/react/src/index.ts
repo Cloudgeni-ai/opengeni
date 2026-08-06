@@ -80,7 +80,9 @@ export type {
   VoiceRecordingChunk,
   VoiceRecordingChunkUploadState,
   VoiceRecordingFinalizationState,
+  VoiceRecordingHandoffMode,
   VoiceRecordingManifest,
+  VoiceRecordingRecoveryMode,
   VoiceRecordingStore,
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,
@@ -365,7 +367,7 @@ export type {
   TurnSummaryProps,
 } from "./timeline";
 
-// Pure provider-shape parsers (exec banner, V4A diff, secret redaction, …)
+// Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)
 export {
   applyPatchOps,
   applyPatchOpsFromToolItem,
@@ -377,7 +379,6 @@ export {
   parseExecBannerSessionId,
   parseFreeformApplyPatch,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,

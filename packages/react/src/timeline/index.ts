@@ -56,6 +56,7 @@ export type {
 export { createToolRegistry, rawTypeOf } from "./registry";
 export type {
   CreateToolRegistryOptions,
+  RetainedScreenshotLoader,
   ToolRegistry,
   ToolRegistryEntry,
   ToolRenderer,
@@ -123,7 +124,6 @@ export {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,

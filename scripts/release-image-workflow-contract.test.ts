@@ -74,7 +74,7 @@ describe("release image workflow contract", () => {
       (command) => command.includes("/actions/artifacts/") && command.includes("/zip"),
     );
 
-    expect(artifactDownloads).toHaveLength(5);
+    expect(artifactDownloads).toHaveLength(6);
     for (const command of artifactDownloads) {
       expect(command).toMatch(/\/zip["']?\s*\\?\s*(?:\n\s*)?>\s*[^\s]+/);
     }
@@ -319,13 +319,29 @@ describe("release image workflow contract", () => {
       "Compare an existing immutable distribution before image mutation",
     );
     const imagePromotion = release.indexOf("Promote exact candidate manifests");
+    const packageProvenance = release.indexOf("Resolve trusted package publication provenance");
+    const packagePublication = release.indexOf("Publish source-bound packages");
 
     expect(release).toContain("candidate_run_id:");
-    expect(release).toContain("bun scripts/verify-release-provenance.ts");
+    expect(release).toContain("package_source_sha:");
+    expect(release).toContain("package_run_id:");
+    expect(release).toContain("bun .release/controller/scripts/verify-release-provenance.ts");
+    expect(release).toContain("--kind package");
     expect(release).toContain("CANDIDATE_ARTIFACT_ID:");
     expect(release).toContain("CANDIDATE_ARTIFACT_DIGEST:");
     expect(release).toContain("CANDIDATE_SOURCE_TREE_SHA:");
+    expect(release).toContain("PACKAGE_ARTIFACT_ID:");
+    expect(release).toContain("PACKAGE_ARTIFACT_DIGEST:");
+    expect(release).toContain("evidence/package-publication-verified.json");
+    expect(release).toContain("evidence/package-provenance.json");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT:");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA:");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT:");
+    expect(release).toContain("bun .release/controller/scripts/verify-release-packages.ts");
     expect(release).toContain("bun scripts/release-candidate.ts");
+    expect(release).toContain('if [ -n "$EXPECTED_PACKAGES" ]; then');
+    expect(release).toContain('candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")');
+    expect(release).toContain('bun scripts/release-candidate.ts "${candidate_verify_args[@]}"');
     expect(release).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
     expect(release).not.toContain('map(select(.name == "@opengeni/sdk"))');
     expect(release).toContain("bun run test:runtime-embedding-consumer");
@@ -357,6 +373,8 @@ describe("release image workflow contract", () => {
     expect(release).toContain("evidence/release-bom.json");
     expect(release).toContain('docker logout "$REGISTRY"');
     expect(registryReconcile).toBeGreaterThan(-1);
+    expect(packageProvenance).toBeGreaterThan(-1);
+    expect(packagePublication).toBeGreaterThan(packageProvenance);
     expect(existingReleasePreflight).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(existingReleasePreflight);

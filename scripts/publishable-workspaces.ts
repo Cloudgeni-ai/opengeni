@@ -44,15 +44,15 @@ function readPackage(path: string): PackageJson | null {
   }
 }
 
-export function changesetIgnoreSet(): Set<string> {
-  const config = readJson(join(repoRoot, ".changeset", "config.json")) as { ignore?: string[] };
+export function changesetIgnoreSet(root = repoRoot): Set<string> {
+  const config = readJson(join(root, ".changeset", "config.json")) as { ignore?: string[] };
   return new Set(config.ignore ?? []);
 }
 
-export function workspacePackages(): WorkspacePackage[] {
+export function workspacePackages(root = repoRoot): WorkspacePackage[] {
   const packages: WorkspacePackage[] = [];
   for (const group of ["apps", "packages"]) {
-    const groupDir = join(repoRoot, group);
+    const groupDir = join(root, group);
     let entries: string[];
     try {
       entries = readdirSync(groupDir);
@@ -66,7 +66,7 @@ export function workspacePackages(): WorkspacePackage[] {
         continue;
       }
       packages.push({
-        dir: relative(repoRoot, join(groupDir, entry)),
+        dir: relative(root, join(groupDir, entry)),
         packagePath,
         name: packageJson.name,
         version: packageJson.version,
@@ -85,9 +85,9 @@ export function workspaceVersionMap(): Map<string, string> {
   return new Map(workspacePackages().map((pkg) => [pkg.name, pkg.version]));
 }
 
-export function publishableWorkspacePackages(): WorkspacePackage[] {
-  const ignored = changesetIgnoreSet();
-  return workspacePackages().filter(
+export function publishableWorkspacePackages(root = repoRoot): WorkspacePackage[] {
+  const ignored = changesetIgnoreSet(root);
+  return workspacePackages(root).filter(
     (pkg) =>
       pkg.name.startsWith("@opengeni/") &&
       pkg.packageJson.private !== true &&

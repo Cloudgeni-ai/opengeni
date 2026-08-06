@@ -76,6 +76,7 @@ import type {
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceRegisteredPack,
   WorkspaceRealtimeModelCatalogResponse,
@@ -779,6 +780,24 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async listVariableSets(): Promise<VariableSet[]> {
     return await this.listEnvironments();
+  }
+
+  async getVariableSetVariable(
+    _workspaceId: string,
+    variableSetId: string,
+    name: string,
+  ): Promise<VariableSetSecret> {
+    const variableSet = this.environments.find((candidate) => candidate.id === variableSetId);
+    const variable = variableSet?.variables.find((candidate) => candidate.name === name);
+    if (!variableSet || !variable) {
+      throw new Error("variable set variable not found");
+    }
+    return {
+      variableSetId,
+      name,
+      version: variable.version,
+      value: "demo-secret-value",
+    };
   }
 
   async createEnvironment(
@@ -2240,6 +2259,7 @@ function scheduledTask(
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
+    targetSessionId: null,
     reusableSessionId: null,
     variableSetId: null,
     environmentId: null,

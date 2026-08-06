@@ -1183,6 +1183,31 @@ describe("credential allocator pin and rollout policy", () => {
     expect(selected.credentialId).toBe("a");
   });
 
+  test("rotation false waits on a capped active pointer without failing over", () => {
+    const resetAt = new Date(NOW.getTime() + HOUR);
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: {
+        ...context([
+          leasedAcct("a", { primaryUsedPercent: 100, primaryResetAt: resetAt }),
+          leasedAcct("b"),
+        ]),
+        rotationEnabled: false,
+        leaseRotationEnabled: false,
+      },
+      leasingEnabled: true,
+      sessionId: "session-test",
+      sessionPinSource: null,
+      sessionPinnedCredentialId: null,
+      sessionLastCredentialId: "b",
+      now: NOW,
+    });
+    expect(selected).toEqual({
+      credentialId: null,
+      decision: { kind: "allCapped", earliestResetAt: resetAt },
+      advanceActivePointer: false,
+    });
+  });
+
   test("sharded-rotation policy: stored round_robin behaves EXACTLY as sharded in the lease selector (sticky, never advancing)", () => {
     const args = (rotationStrategy: string) => ({
       context: {

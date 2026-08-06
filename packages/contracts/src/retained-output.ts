@@ -7,17 +7,30 @@ export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 /** Receipts are timeline references, never an extensible metadata bag. */
 export const RETAINED_OUTPUT_RECEIPT_MAX_BYTES = 2 * 1024;
 
+/** Screenshot bytes are accounted separately from the 10k-token text policy. */
+export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
+export const COMPUTER_SCREENSHOT_MAX_DIMENSION = 16_384;
+export const COMPUTER_SCREENSHOT_MAX_PIXELS = 67_108_864;
+/** Canonical ready-object retention window: 30 days from successful settlement. */
+export const COMPUTER_SCREENSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+/** Hard workspace reservation across pending + ready screenshot artifacts. */
+export const COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
+
 const encoder = new TextEncoder();
 const LOWERCASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const LOWERCASE_SHA256 = /^[0-9a-f]{64}$/;
 const CANONICAL_MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$/;
-const RETRIEVAL_PATH = /^\/v1\/workspaces\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)\/content$/;
+const WORKSPACE_RETRIEVAL_PATH =
+  /^\/v1\/workspaces\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)\/content$/;
+const SESSION_RETRIEVAL_PATH =
+  /^\/v1\/workspaces\/([0-9a-f-]+)\/sessions\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)\/content$/;
 
 export const RetainedOutputKind = z.enum([
   "tool_result",
   "assistant_completion",
   "internal_update",
   "event_media",
+  "computer_screenshot",
   "file",
 ]);
 export type RetainedOutputKind = z.infer<typeof RetainedOutputKind>;
@@ -30,6 +43,9 @@ export const RetainedOutputUnavailableReason = z.enum([
   "deleted",
   "missing_storage",
   "storage_write_failed",
+  "quota_exceeded",
+  "invalid_content",
+  "oversized",
   "unsupported",
 ]);
 export type RetainedOutputUnavailableReason = z.infer<typeof RetainedOutputUnavailableReason>;
@@ -50,12 +66,27 @@ export const RetainedArtifactReferenceSchema = z
     originalBytes: z.number().int().nonnegative().safe(),
     sha256: z.string().regex(LOWERCASE_SHA256),
     retainedAt: z.string().datetime({ offset: true }),
-    retention: z
+    dimensions: z
       .object({
-        policy: z.literal("workspace_file"),
-        expiresAt: z.null(),
+        width: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
+        height: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
       })
-      .strict(),
+      .strict()
+      .optional(),
+    retention: z.union([
+      z
+        .object({
+          policy: z.literal("workspace_file"),
+          expiresAt: z.null(),
+        })
+        .strict(),
+      z
+        .object({
+          policy: z.literal("session_screenshot"),
+          expiresAt: z.string().datetime({ offset: true }),
+        })
+        .strict(),
+    ]),
     retrieval: z
       .object({
         method: z.literal("GET"),
@@ -67,13 +98,39 @@ export const RetainedArtifactReferenceSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
-    const match = RETRIEVAL_PATH.exec(value.retrieval.path);
-    if (!match || !LOWERCASE_UUID.test(match[1] ?? "") || match[2] !== value.artifactId) {
+    const workspaceMatch = WORKSPACE_RETRIEVAL_PATH.exec(value.retrieval.path);
+    const sessionMatch = SESSION_RETRIEVAL_PATH.exec(value.retrieval.path);
+    const workspaceId = workspaceMatch?.[1] ?? sessionMatch?.[1];
+    const sessionId = sessionMatch?.[2];
+    const artifactId = workspaceMatch?.[2] ?? sessionMatch?.[3];
+    if (
+      !workspaceId ||
+      !LOWERCASE_UUID.test(workspaceId) ||
+      (sessionId !== undefined && !LOWERCASE_UUID.test(sessionId)) ||
+      artifactId !== value.artifactId
+    ) {
       ctx.addIssue({
         code: "custom",
         path: ["retrieval", "path"],
-        message: "retrieval path must be a workspace API content path for this artifact",
+        message: "retrieval path must be a workspace/session API content path for this artifact",
       });
+    }
+
+    if (value.kind === "computer_screenshot") {
+      if (!value.dimensions) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["dimensions"],
+          message: "computer screenshot receipts require exact dimensions",
+        });
+      }
+      if (value.retention.policy !== "session_screenshot" || !sessionMatch) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["retention"],
+          message: "computer screenshots require session-scoped expiring retrieval",
+        });
+      }
     }
 
     if (encoder.encode(JSON.stringify(value)).byteLength > RETAINED_OUTPUT_RECEIPT_MAX_BYTES) {
@@ -126,6 +183,13 @@ export type RetainedArtifactFileInput = {
   updatedAt: string;
 };
 
+export type RetainedScreenshotArtifactInput = RetainedArtifactFileInput & {
+  sessionId: string;
+  width: number;
+  height: number;
+  expiresAt: string;
+};
+
 /**
  * Convert a ready, integrity-addressed workspace file into the only available
  * retained-output receipt shape. Invalid, pending, or checksum-less files fail
@@ -151,6 +215,35 @@ export function retainedArtifactReferenceFromFile(
     retrieval: {
       method: "GET" as const,
       path: `/v1/workspaces/${file.workspaceId}/artifacts/${file.id}/content`,
+      acceptRanges: "bytes" as const,
+      maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+    },
+  };
+  const parsed = RetainedArtifactReferenceSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Build the closed, session-scoped receipt for one ready screenshot file. */
+export function retainedScreenshotReferenceFromFile(
+  file: RetainedScreenshotArtifactInput,
+): RetainedArtifactReference | null {
+  if (file.status !== "ready" || !file.sha256 || file.sizeBytes <= 0) return null;
+  const value = {
+    available: true as const,
+    artifactId: file.id,
+    kind: "computer_screenshot" as const,
+    contentType: canonicalRetainedContentType(file.contentType),
+    originalBytes: file.sizeBytes,
+    sha256: file.sha256,
+    retainedAt: file.updatedAt,
+    dimensions: { width: file.width, height: file.height },
+    retention: {
+      policy: "session_screenshot" as const,
+      expiresAt: file.expiresAt,
+    },
+    retrieval: {
+      method: "GET" as const,
+      path: `/v1/workspaces/${file.workspaceId}/sessions/${file.sessionId}/artifacts/${file.id}/content`,
       acceptRanges: "bytes" as const,
       maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
     },

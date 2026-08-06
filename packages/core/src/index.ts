@@ -35,6 +35,7 @@ export * from "./workflow-wake-contract";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
+export * from "./managed-session";
 export * from "./transcription";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`

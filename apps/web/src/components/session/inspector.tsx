@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { eventDisplayLabel, isTerminalSessionStatus, sanitizeEventForDisplay } from "@/lib/events";
+import { eventDisplayLabel, isTerminalSessionStatus } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { withOccurrenceKeys } from "@/lib/react-key";
 import { repositoryDisplayName } from "@/lib/session-tools";
@@ -44,9 +44,7 @@ export function SessionInspector(props: {
         ? "Checking…"
         : "Unavailable"
       : props.session.sandboxBackend;
-  const displayEvents = props.events.map((event) =>
-    sanitizeEventForDisplay(event, props.session.status),
-  );
+  const displayEvents = props.events;
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]
     .filter((event) => !event.type.endsWith(".delta"))
@@ -62,9 +60,7 @@ export function SessionInspector(props: {
             <div className="text-sm font-medium">
               {terminalSession ? "Archived debug" : "Debug"}
             </div>
-            <div className="truncate text-xs text-fg-subtle">
-              {props.events.length} events{terminalSession ? " · sanitized" : ""}
-            </div>
+            <div className="truncate text-xs text-fg-subtle">{props.events.length} events</div>
           </div>
         </div>
         <ConnectionPill state={props.connectionState} />

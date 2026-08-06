@@ -74,6 +74,7 @@ describe("provider MCP unavailable rendering", () => {
         events={[
           timelineEvent("tool.auth_needed", {
             serverId: "gitlab-hosted",
+            toolName: "search_projects",
             provider: "gitlab",
             providerDomain: "gitlab.com",
             connectionId: "host-gitlab-one",
@@ -492,6 +493,7 @@ describe("MessageTimeline — settled turn folding", () => {
         "tool.auth_needed",
         {
           serverId: "mcp-linear",
+          toolName: "create_issue",
           providerDomain: "linear.app",
           reason: "missing_connection",
         },
@@ -1667,7 +1669,7 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     await r.unmount();
   });
 
-  test("settled environment_set_variable shows write-only copy (regression guard)", async () => {
+  test("settled environment_set_variable confirms exact value preservation", async () => {
     const item = toolItem({
       name: "environment_set_variable",
       arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
@@ -1679,7 +1681,8 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     await flush();
 
     const text = r.container.textContent ?? "";
-    expect(text.toLowerCase()).toContain("write-only");
+    expect(text.toLowerCase()).toContain("exact value preserved");
+    expect(text.toLowerCase()).not.toContain("write-only");
 
     await r.unmount();
   });

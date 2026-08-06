@@ -164,10 +164,18 @@ export async function mcpRequestReplayInfo(
 
 export function mcpJsonRpcErrorPayloadForRequest(
   request: McpRequestReplayInfo,
-  error: { code: number; message: string },
+  error: { code: number; message: string; data?: unknown },
 ):
-  | { jsonrpc: "2.0"; id: McpJsonRpcId; error: { code: number; message: string } }
-  | Array<{ jsonrpc: "2.0"; id: McpJsonRpcId; error: { code: number; message: string } }> {
+  | {
+      jsonrpc: "2.0";
+      id: McpJsonRpcId;
+      error: { code: number; message: string; data?: unknown };
+    }
+  | Array<{
+      jsonrpc: "2.0";
+      id: McpJsonRpcId;
+      error: { code: number; message: string; data?: unknown };
+    }> {
   const payload = (id: McpJsonRpcId) => ({ jsonrpc: "2.0" as const, id, error });
   if (request.batch) {
     const ids = request.responseIds.length > 0 ? request.responseIds : [null];

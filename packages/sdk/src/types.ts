@@ -1875,7 +1875,7 @@ export type SessionStructuredCapabilities = {
 
 export type ScheduledTaskStatus = "active" | "paused";
 
-export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session";
+export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session" | "existing_session";
 
 export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
 
@@ -1931,6 +1931,7 @@ export type ScheduledTask = {
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  targetSessionId: string | null;
   reusableSessionId: string | null;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
@@ -2038,8 +2039,14 @@ export const KNOWN_PERMISSIONS = [
   "connections:write",
   "environments:manage",
   "environments:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
   "variable-sets:manage",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
   "mcp_servers:attach",
   "toolspace:call",
   "goals:manage",
@@ -2093,6 +2100,7 @@ export type FirstPartyMcpToolName =
   | "set_other_session_title"
   | "variable_set_list"
   | "environment_list"
+  | "variable_set_get_variable"
   | "variable_set_set_variable"
   | "environment_set_variable"
   | "github_connect_link"
@@ -3181,6 +3189,7 @@ export type CreateScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
   runMode?: ScheduledTaskRunMode | undefined;
+  targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -3196,6 +3205,7 @@ export type UpdateScheduledTaskRequest = {
   name?: string | undefined;
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
+  targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;
@@ -3229,16 +3239,20 @@ export type ScheduledTaskRun = {
 
 // --- VariableSets -------------------------------------------------------------
 
-/**
- * Variable values are write-only by design: the API never returns a value, so
- * reads expose name + version metadata only. Values are decrypted exclusively
- * inside the worker at sandbox materialization time.
- */
+/** Generic variable-set reads expose name + version metadata only. */
 export type VariableSetVariableMetadata = {
   name: string;
   version: number;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Dedicated permissioned plaintext response; never embedded in metadata reads. */
+export type VariableSetSecret = {
+  variableSetId: string;
+  name: string;
+  version: number;
+  value: string;
 };
 
 export type VariableSet = {
@@ -3414,12 +3428,14 @@ export type FileAsset = {
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
+export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
 
 export type RetainedOutputKind =
   | "tool_result"
   | "assistant_completion"
   | "internal_update"
   | "event_media"
+  | "computer_screenshot"
   | "file";
 
 export type RetainedOutputUnavailableReason =
@@ -3430,6 +3446,9 @@ export type RetainedOutputUnavailableReason =
   | "deleted"
   | "missing_storage"
   | "storage_write_failed"
+  | "quota_exceeded"
+  | "invalid_content"
+  | "oversized"
   | "unsupported";
 
 export type RetainedArtifactReference = {
@@ -3440,7 +3459,10 @@ export type RetainedArtifactReference = {
   originalBytes: number;
   sha256: string;
   retainedAt: string;
-  retention: { policy: "workspace_file"; expiresAt: null };
+  dimensions?: { width: number; height: number } | undefined;
+  retention:
+    | { policy: "workspace_file"; expiresAt: null }
+    | { policy: "session_screenshot"; expiresAt: string };
   retrieval: {
     method: "GET";
     path: string;
@@ -3470,6 +3492,18 @@ export type RetainedArtifactContent = {
   contentLength: number;
   contentRange: string | null;
   acceptRanges: "bytes";
+};
+
+export type RetainedScreenshotDownloadOptions = {
+  signal?: AbortSignal | undefined;
+  /** Retry transient range failures; bounded to 0..3, default 2. */
+  maxRetries?: number | undefined;
+};
+
+export type RetainedScreenshotDownload = {
+  metadata: RetainedArtifactMetadata;
+  /** Null when metadata truth says the screenshot is unavailable. */
+  bytes: Uint8Array | null;
 };
 
 export type CreateFileUploadRequest = {

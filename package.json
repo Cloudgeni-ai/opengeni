@@ -58,6 +58,7 @@
     "test:all": "bun run test:unit && bun run test:integration && bun run test:e2e",
     "deployment:profiles": "bun scripts/deployment-preflight.ts --list",
     "deployment:preflight": "bun scripts/deployment-preflight.ts",
+    "deployment:health-audit": "bun scripts/deployment-health-audit.ts",
     "deployment:stack": "bun scripts/deployment-stack.ts",
     "deployment:observability": "bun scripts/deployment-observability.ts",
     "deployment:observability-verify": "bun scripts/verify-observability-stack.ts",

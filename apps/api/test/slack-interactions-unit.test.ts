@@ -9,6 +9,7 @@ import { requireAccessKey } from "../src/http/auth";
 import {
   registerSlackInteractionRoutes,
   slackEventInboxEntry,
+  slackInteractionRoutePolicy,
   slackReactionInboxEntry,
   slackReactionTaskText,
   SLACK_DELIVERY_EVENT_TYPES,
@@ -219,6 +220,35 @@ describe("Slack event classification and safe projection", () => {
         bot,
       )?.triggerKind,
     ).toBe("thread_reply");
+  });
+
+  test("keeps human-DM shortcuts private and user-scoped before bot-DM rekey", () => {
+    const source = {
+      triggerKind: "message_shortcut" as const,
+      slackChannelId: "D_HUMAN_DM",
+      slackThreadTs: null,
+      slackMessageTs: "3.1",
+    };
+    const owner = slackInteractionRoutePolicy({ ...source, slackUserId: "U_OWNER" });
+    const other = slackInteractionRoutePolicy({ ...source, slackUserId: "U_OTHER" });
+    expect(owner).toMatchObject({
+      directMessageShortcut: true,
+      requiresChannelAccess: false,
+      visibility: "private",
+    });
+    expect(owner.initialRouteKey).not.toBe(other.initialRouteKey);
+    expect(
+      slackInteractionRoutePolicy({
+        ...source,
+        slackChannelId: "C_MEMBER_CHANNEL",
+        slackUserId: "U_OWNER",
+      }),
+    ).toMatchObject({
+      directMessageShortcut: false,
+      requiresChannelAccess: true,
+      visibility: "workspace",
+      initialRouteKey: "C_MEMBER_CHANNEL:3.1",
+    });
   });
 
   test("suppresses self, bot, subtype, unmatched, and malformed messages", () => {
