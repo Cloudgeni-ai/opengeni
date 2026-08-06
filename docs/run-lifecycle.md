@@ -385,6 +385,15 @@ event, model-history write, run-state write, compaction transition, tool receipt
 and terminal settlement must match that attempt. A typed schedule-to-start
 timeout is the only no-attempt recovery case because its activity never ran.
 
+Raw SDK tool call, result, and approval items are normalized to protocol JSON
+before they enter the attempt-fenced `session_pending_tool_calls` receipt
+ledger, the requires-action run-state snapshot, or a durable tool/approval event
+projection. This uses the same boundary as canonical history: own object
+properties with JavaScript `undefined` values are omitted as wire-absent
+without mutating the SDK object, while undefined array entries and every other
+non-JSON graph fail with the exact offending path. The lossless database codec
+stays strict rather than silently changing arbitrary input.
+
 Before a personal MCP is attached, the worker/Toolspace boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise
