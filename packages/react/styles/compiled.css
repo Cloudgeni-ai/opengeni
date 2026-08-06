@@ -4609,6 +4609,55 @@
   color-scheme: light;
   --_og-color-scheme: light;
 }
+:where(.og-root),:where( [data-og-density="compact"]):where(.og-root),:where( [data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact),:where( [data-og-theme="light"]):where(.og-root),:where( [data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
+  --_og-duration-fast: var(--og-duration-fast, calc(120ms * var(--og-motion-inspect-scale)));
+  --_og-duration-base: var(--og-duration-base, calc(180ms * var(--og-motion-inspect-scale)));
+  --_og-duration-slow: var(--og-duration-slow, calc(320ms * var(--og-motion-inspect-scale)));
+  --_og-duration-disclose: var(--og-duration-disclose, calc(120ms * var(--og-motion-inspect-scale)));
+  --_og-duration-disclose-settle: var(--og-duration-disclose-settle, calc(820ms * var(--og-motion-inspect-scale)));
+  --_og-duration-stream: var(--og-duration-stream, calc(420ms * var(--og-motion-inspect-scale)));
+  --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize, calc(480ms * var(--og-motion-inspect-scale)));
+  --_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
+  }
+  --_og-color-diff-add-bg: var(--og-color-diff-add-bg, var(--og-color-status-idle));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
+  }
+  --_og-color-diff-del-bg: var(--og-color-diff-del-bg, var(--og-color-status-failed));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
+  }
+  --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px var(--og-color-accent));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent));
+  }
+  --_og-session-chrome-surface: var(--og-session-chrome-surface, var(--og-color-surface-2));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
+  }
+  --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, var(--og-color-surface-2));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
+  }
+  --_og-session-chrome-border: var(--og-session-chrome-border, var(--og-color-border));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
+  }
+  --_og-session-chrome-border-open: var(--og-session-chrome-border-open, var(--og-color-border));
+  --_og-session-chrome-highlight: var(--og-session-chrome-highlight, var(--og-color-surface-3));
+  --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, var(--og-color-fg));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, color-mix(in oklch, var(--og-color-fg) 16%, transparent));
+  }
+  --_og-session-chrome-radius: var(--og-session-chrome-radius, var(--og-radius-lg));
+  --_og-session-chrome-ease: var(--og-session-chrome-ease, var(--og-ease-out));
+  --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, var(--og-color-surface-3));
+  @supports (color: color-mix(in lab, red, red)) {
+    --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, color-mix(in oklch, var(--og-color-surface-3) 55%, transparent));
+  }
+}
 @keyframes og-expand {
   from {
     height: 0;
@@ -4828,55 +4877,6 @@
   visibility: hidden !important;
   pointer-events: none !important;
   z-index: -1 !important;
-}
-:where(.og-root),:where( [data-og-density="compact"]):where(.og-root),:where( [data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact),:where( [data-og-theme="light"]):where(.og-root),:where( [data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
-  --_og-duration-fast: var(--og-duration-fast, calc(120ms * var(--og-motion-inspect-scale)));
-  --_og-duration-base: var(--og-duration-base, calc(180ms * var(--og-motion-inspect-scale)));
-  --_og-duration-slow: var(--og-duration-slow, calc(320ms * var(--og-motion-inspect-scale)));
-  --_og-duration-disclose: var(--og-duration-disclose, calc(120ms * var(--og-motion-inspect-scale)));
-  --_og-duration-disclose-settle: var(--og-duration-disclose-settle, calc(820ms * var(--og-motion-inspect-scale)));
-  --_og-duration-stream: var(--og-duration-stream, calc(420ms * var(--og-motion-inspect-scale)));
-  --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize, calc(480ms * var(--og-motion-inspect-scale)));
-  --_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
-  }
-  --_og-color-diff-add-bg: var(--og-color-diff-add-bg, var(--og-color-status-idle));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
-  }
-  --_og-color-diff-del-bg: var(--og-color-diff-del-bg, var(--og-color-status-failed));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
-  }
-  --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px var(--og-color-accent));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent));
-  }
-  --_og-session-chrome-surface: var(--og-session-chrome-surface, var(--og-color-surface-2));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
-  }
-  --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, var(--og-color-surface-2));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
-  }
-  --_og-session-chrome-border: var(--og-session-chrome-border, var(--og-color-border));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
-  }
-  --_og-session-chrome-border-open: var(--og-session-chrome-border-open, var(--og-color-border));
-  --_og-session-chrome-highlight: var(--og-session-chrome-highlight, var(--og-color-surface-3));
-  --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, var(--og-color-fg));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, color-mix(in oklch, var(--og-color-fg) 16%, transparent));
-  }
-  --_og-session-chrome-radius: var(--og-session-chrome-radius, var(--og-radius-lg));
-  --_og-session-chrome-ease: var(--og-session-chrome-ease, var(--og-ease-out));
-  --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, var(--og-color-surface-3));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, color-mix(in oklch, var(--og-color-surface-3) 55%, transparent));
-  }
 }
 :where(.og-root).og-composer[data-og-responsive-basis="container"],:where(.og-root) .og-composer[data-og-responsive-basis="container"] {
   container: og-composer / inline-size;
