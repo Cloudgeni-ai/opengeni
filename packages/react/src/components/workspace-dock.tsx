@@ -343,6 +343,11 @@ export function WorkspaceDock({
           className="fixed inset-0 z-40 flex flex-col bg-og-bg"
           hidden={collapsed}
           style={{
+            // Author utility classes can override the user-agent `[hidden]`
+            // rule (for example this surface's `flex` class). Keep an inline
+            // display guard so a collapsed mobile workspace is actually gone
+            // visually as well as from the accessibility tree.
+            display: collapsed ? "none" : undefined,
             paddingTop: "env(safe-area-inset-top)",
             paddingBottom: "env(safe-area-inset-bottom)",
           }}

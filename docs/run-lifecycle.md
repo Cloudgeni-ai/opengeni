@@ -389,9 +389,12 @@ Before a personal MCP is attached, the worker/Toolspace boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise
 invalid row is never replaced with another subject's connection. Only that MCP
-is omitted, `tool.auth_needed` reports `personal_authority_unavailable`, and the
-turn receives a bounded visible instruction explaining that the source was not
-available and must not be claimed as used; unrelated tools and work continue.
+is omitted and the turn receives a bounded visible instruction explaining that
+the source was not available and must not be claimed as used; unrelated tools
+and work continue. Optional-server `initialize`/`tools/list` credential misses
+do not create conversational `tool.auth_needed` cards. If the model makes a
+concrete `tools/call` and authentication fails, the event includes that tool
+name and remains actionable.
 
 Session creation persists skill selection but never starts a sandbox. At turn
 execution, bundled, curated, pack, and inline session skills remain SDK-lazy:

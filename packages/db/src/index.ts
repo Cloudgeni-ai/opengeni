@@ -6288,20 +6288,46 @@ export async function rekeySlackInteractionRoute(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
     routeKey: string;
+    slackChannelId?: string;
     slackThreadTs: string;
     ackSlackMessageTs: string;
+    repairUnacknowledgedPrivateShortcutDelivery?: boolean;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
+    const repairableDelivery = sql`(
+      ${schema.slackInteractions.ackSlackMessageTs} is null
+      and ${schema.slackInteractions.visibility} = 'private'
+      and ${schema.slackInteractions.triggeringProviderEventId} like 'shortcut:%'
+      and ${schema.slackInteractions.terminalDeliveryState} = 'failed'
+      and ${schema.slackInteractions.deliveryLastErrorCode} in ('channel_not_found', 'not_in_channel')
+    )`;
     const [row] = await scopedDb
       .update(schema.slackInteractions)
       .set({
         routeKey: input.routeKey,
+        ...(input.slackChannelId ? { slackChannelId: input.slackChannelId } : {}),
         slackThreadTs: input.slackThreadTs,
         ackSlackMessageTs: input.ackSlackMessageTs,
+        ...(input.repairUnacknowledgedPrivateShortcutDelivery
+          ? {
+              terminalDeliveryState: sql`case when ${repairableDelivery} then 'open' else ${schema.slackInteractions.terminalDeliveryState} end`,
+              deliveryClaimHolderId: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryClaimHolderId} end`,
+              deliveryClaimExpiresAt: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryClaimExpiresAt} end`,
+              deliveryAttemptCount: sql`case when ${repairableDelivery} then 0 else ${schema.slackInteractions.deliveryAttemptCount} end`,
+              deliveryRetryAt: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryRetryAt} end`,
+              deliveryLastErrorCode: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryLastErrorCode} end`,
+            }
+          : {}),
         updatedAt: sql`now()`,
       })
-      .where(eq(schema.slackInteractions.id, input.id))
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      )
       .returning();
     return row ? mapSlackInteraction(row) : null;
   });
@@ -30178,9 +30204,14 @@ export async function retainWorkspaceMutationProcess(
           routeTargetId: input.owner.routeTargetId,
           routeEpoch: input.owner.routeEpoch,
         };
-  const result = await withRlsContext(
+  const result = await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    {
+      stage: "sandbox_retained_process_promotion",
+      maxAttempts: 5,
+      correlationId: input.processId,
+    },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;

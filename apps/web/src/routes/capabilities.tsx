@@ -151,18 +151,26 @@ export function SlackBotInstallControls({
   busy: boolean;
   onInstall: (createNewConnection: boolean) => void;
 }) {
-  if (!canInstall) return null;
-
   if (hasConnection) {
     return (
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button type="button" variant="outline" disabled={busy} onClick={() => onInstall(false)}>
-          {busy ? <Loader2Icon className="animate-spin" /> : null}
-          Reinstall
-        </Button>
-        <Button type="button" variant="ghost" disabled={busy} onClick={() => onInstall(true)}>
-          Install in another workspace
-        </Button>
+      <div className="mt-3 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!canInstall || busy}
+            onClick={() => onInstall(false)}
+          >
+            {busy ? <Loader2Icon className="animate-spin" /> : null}
+            Reinstall
+          </Button>
+          {canInstall ? (
+            <Button type="button" variant="ghost" disabled={busy} onClick={() => onInstall(true)}>
+              Install in another workspace
+            </Button>
+          ) : null}
+        </div>
+        {!canInstall ? <SlackBotInstallPermissionNotice /> : null}
       </div>
     );
   }
@@ -175,7 +183,7 @@ export function SlackBotInstallControls({
         aria-label="Install OpenGeni in Slack"
         data-opengeni-slack-install
         className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
-        disabled={busy}
+        disabled={!canInstall || busy}
         onClick={() => onInstall(false)}
       >
         <img
@@ -193,7 +201,16 @@ export function SlackBotInstallControls({
           </span>
         ) : null}
       </button>
+      {!canInstall ? <SlackBotInstallPermissionNotice /> : null}
     </div>
+  );
+}
+
+function SlackBotInstallPermissionNotice() {
+  return (
+    <p className="mt-2 max-w-xl text-xs leading-5 text-fg-muted">
+      Ask a workspace administrator or connection manager to install the OpenGeni Slack bot.
+    </p>
   );
 }
 
@@ -1172,7 +1189,11 @@ export function CapabilitiesRoute({
                     </div>
                     <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
                       Install a separate bot principal for first-party Slack tools and explicitly
-                      bound scheduled tasks. It never uses a person's Slack OAuth grant.
+                      bound scheduled tasks. Linked users can mention @OpenGeni in a member channel,
+                      run /opengeni, DM the bot, or use the Open in OpenGeni message shortcut. A
+                      shortcut from a human DM creates a private task and continues in the invoking
+                      user's bot DM; it never joins or exposes workspace output in the source DM. It
+                      never uses a person's Slack OAuth grant.
                     </p>
                   </div>
                 </div>

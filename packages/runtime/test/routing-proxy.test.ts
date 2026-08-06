@@ -679,9 +679,12 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       },
     });
 
-    await expect(proxy.execCommand({ cmd: "start" })).rejects.toBeInstanceOf(
-      RoutingMutationOutcomeUnknownError,
-    );
+    const error = await proxy.execCommand({ cmd: "start" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 76,
+    });
     expect(proxy.hasRetainedProcess(76)).toBe(true);
     ptr.swap("sbx-new");
 

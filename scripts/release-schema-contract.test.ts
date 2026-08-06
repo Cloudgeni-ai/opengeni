@@ -128,12 +128,9 @@ describe("release schema contract", () => {
         "0116_nested_agent_depth_index.sql",
       ].filter((file) => migrations.has(file)),
     );
-    const organizationGovernanceMigration = "0109_organization_governance_recovery.sql";
-    expect(migrations.has(organizationGovernanceMigration)).toBe(true);
     expect(contract.fileCount).toBe(
       108 +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
-        (migrations.has(organizationGovernanceMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
         (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0) +
@@ -196,12 +193,17 @@ describe("release schema contract", () => {
         (migrations.has("0175_resumable_transcription_provider_deadline.sql") ? 1 : 0) +
         (migrations.has("0176_lossless_canonical_json.sql") ? 1 : 0) +
         (migrations.has("0177_session_events_workspace_turn_type_index.sql") ? 1 : 0) +
-        (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0),
+        (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0) +
+        (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "3c8bf82154c326c98b5da24d4a77de61475bb661b8b9a78fbe35f74efb9424d8",
+      "7c309fe6dfc82a2806760e12c9f22d584da8302c6db0094887d2ae33bfb4c1ce",
     );
-    expect(contract.latestMigration).toBe("0178_permissioned_secret_reads.sql");
+    expect(contract.latestMigration).toBe("0179_slack_private_shortcut_delivery_gate.sql");
+    expect(migrations.get("0179_slack_private_shortcut_delivery_gate.sql")).toMatchObject({
+      sha256: "eabb9498659f0fe7a9aa080568f4a6963bc4e51bb9b7df897c0a9f7060671824",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0178_permissioned_secret_reads.sql")).toMatchObject({
       sha256: "a671934c8c969fe14edc322fd64c1423605620977d98660efc942b955673357b",
       deploymentMode: "rolling",
@@ -374,9 +376,7 @@ describe("release schema contract", () => {
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
-      ...nestedDepthMigrations.slice(0, 1),
-      organizationGovernanceMigration,
-      ...nestedDepthMigrations.slice(1),
+      ...nestedDepthMigrations,
       "0117_sandbox_recovery_generations.sql",
       "0118_new_session_drafts.sql",
       "0119_pending_tool_output_policy.sql",
@@ -461,10 +461,6 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
-    expect(migrations.get("0109_organization_governance_recovery.sql")).toMatchObject({
-      sha256: "875cf475a72afffecb6130b034b38872308852f4b5e311e054329bf2ed1486a2",
-      deploymentMode: "rolling",
-    });
     expect(migrations.get("0117_sandbox_recovery_generations.sql")).toMatchObject({
       sha256: "365284a9ab495173780d54c4b1470824891b15a7290735bf09b72c2f5fdbc48b",
       deploymentMode: "maintenance",

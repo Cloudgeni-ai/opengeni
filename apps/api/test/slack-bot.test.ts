@@ -891,6 +891,27 @@ async function withFailingConnectionInsert<T>(
 }
 
 describe("OpenGeni Slack bot connection", () => {
+  test("requires connections:write before starting Slack OAuth", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+
+    const denied = await app(slack.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+
+    expect(denied.status).toBe(403);
+    expect(slack.calls).toEqual([]);
+  });
+
   test("requests the reaction-capable bot manifest and completes the callback", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -977,19 +998,6 @@ describe("OpenGeni Slack bot connection", () => {
       outcome: "succeeded",
     });
     expect(JSON.stringify(audit)).not.toContain(fixtureBotToken());
-
-    const denied = await app(slack.fetch).request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
-      {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({}),
-      },
-    );
-    expect(denied.status).toBe(403);
 
     const other = await freshWorkspace();
     const crossTenant = await app(slack.fetch).request(
