@@ -1,11 +1,15 @@
 import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
-import { ChatComposer, ModelPolicyPicker, type ComposerState } from "@opengeni/react";
+import {
+  ChatComposer,
+  ModelPolicyPicker,
+  type ComposerState,
+  type SlashCommand,
+} from "@opengeni/react";
 import { RealtimeVoiceControl, type RealtimeModelOption } from "@opengeni/react/realtime";
 import { createRoot } from "react-dom/client";
 import { useMemo, useRef, useState } from "react";
 
-import type { SlashCommand } from "../src/commands/types";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
 import "./styles.css";
 
