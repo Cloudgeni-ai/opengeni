@@ -2,6 +2,7 @@ import postgres from "postgres";
 import type { RlsStrategy } from "./database";
 import {
   RUNTIME_FULL_DML_TABLES,
+  RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_ONLY_TABLES,
 } from "./runtime-posture";
@@ -552,6 +553,7 @@ async function grantAppRoleIfSchemaExists(
 DO $$
 DECLARE
   owner_role text := current_user;
+  function_signature text;
   runtime_table text;
 BEGIN
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), ${literal(role)});
@@ -736,9 +738,34 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
-    -- Do not grant a moving schema-wide routine surface to the runtime role.
-    -- Migration-owned routines below are granted by exact signature in their
-    -- owning migration; this provisioner only converges the schema boundary.
+    -- Converge both stale direct grants from the historical schema-wide grant
+    -- and the exact owner-scoped default ACL that older provisioning runs may
+    -- have installed. Re-apply only the audited, exact runtime surface below.
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA opengeni_private FROM %I',
+      ${literal(role)}
+    );
+    REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private FROM PUBLIC;
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private REVOKE EXECUTE ON FUNCTIONS FROM %I',
+      owner_role,
+      ${literal(role)}
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC',
+      owner_role
+    );
+    FOREACH function_signature IN ARRAY ARRAY[
+      ${RUNTIME_PRIVATE_FUNCTION_SIGNATURES.map(literal).join(",\n      ")}
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || function_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION opengeni_private.%s TO %I',
+          function_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
   END IF;
 END $$;
 `);

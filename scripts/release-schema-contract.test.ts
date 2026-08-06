@@ -200,7 +200,7 @@ describe("release schema contract", () => {
         (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "3fc492ffc071c7661f5e959d18d4dd99dc2f624c65adc8c0b594d18dec80fbf8",
+      "787e459a8a643187376b3ae424daf624e51fd515fcb4a77af3fca3f027195c57",
     );
     expect(contract.latestMigration).toBe("0179_slack_private_shortcut_delivery_gate.sql");
     expect(migrations.get("0179_slack_private_shortcut_delivery_gate.sql")).toMatchObject({
@@ -467,7 +467,7 @@ describe("release schema contract", () => {
       });
     }
     expect(migrations.get(organizationGovernanceMigration)).toMatchObject({
-      sha256: "c444d383b934a2a2f806074f4a309901767e75f51684769ab1b4c8dba85c1239",
+      sha256: "01ca30df865defbe9f8ddee996685bab6d25db023df5fe01618075a24f461530",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0117_sandbox_recovery_generations.sql")).toMatchObject({

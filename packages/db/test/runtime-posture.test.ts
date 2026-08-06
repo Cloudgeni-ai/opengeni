@@ -4,6 +4,7 @@ import {
   FORCE_RLS_TABLES,
   NON_RLS_RUNTIME_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
   RUNTIME_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
@@ -22,6 +23,7 @@ const options: RuntimeDatabasePostureOptions = {
     tenant_rows: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   },
   protectedNoDirectDmlTables: [],
+  privateRoutineSignatures: ["workspace_rls_visible(uuid, uuid)"],
 };
 
 function safePosture(): RuntimeDatabasePosture {
@@ -112,6 +114,12 @@ describe("runtime database posture evaluator", () => {
           new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
       ),
     ).toBe(true);
+    expect(new Set(RUNTIME_PRIVATE_FUNCTION_SIGNATURES).size).toBe(
+      RUNTIME_PRIVATE_FUNCTION_SIGNATURES.length,
+    );
+    expect([...RUNTIME_PRIVATE_FUNCTION_SIGNATURES].sort()).toEqual([
+      ...RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
+    ]);
   });
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
@@ -178,6 +186,24 @@ describe("runtime database posture evaluator", () => {
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "table schema_migrations grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+    );
+  });
+
+  test("rejects missing expected and unexpected executable private routines", () => {
+    const posture = safePosture();
+    posture.privateRoutines = [
+      {
+        name: "legacy_private_helper()",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+    ];
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        "expected private routine is missing: workspace_rls_visible(uuid, uuid)",
+        "runtime role has unexpected EXECUTE on private routine legacy_private_helper()",
+      ]),
     );
   });
 

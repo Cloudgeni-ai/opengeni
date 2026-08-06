@@ -7,6 +7,71 @@ import {
 } from "./role-relationships";
 
 /**
+ * Exact `opengeni_private` routines callable by the ordinary runtime role.
+ *
+ * This is the single audited routine contract shared by provisioning and
+ * startup posture checks. Entries are either RLS policy helpers, direct
+ * runtime call sites, or explicit `opengeni_app` grants in migrations. Trigger
+ * handlers and governance-operator-only routines are intentionally absent:
+ * trigger execution does not require direct runtime EXECUTE, and operator
+ * authorization is a separate capability.
+ */
+export const RUNTIME_PRIVATE_FUNCTION_SIGNATURES = [
+  "account_rls_visible(uuid)",
+  "claim_due_transcription_recording_object_cleanup(bigint, bigint, integer)",
+  "claim_expired_file_upload_cleanup(bigint, bigint, integer)",
+  "claim_sandbox_checkpoint_artifacts(uuid, integer, bigint)",
+  "claim_session_system_update_outbox(integer)",
+  "claim_session_workflow_wakes(integer)",
+  "claim_slack_interaction_delivery(uuid, integer)",
+  "claim_slack_interaction_inbox(uuid, integer)",
+  "claim_terminal_retained_processes(uuid, integer, bigint)",
+  "count_active_retained_processes_by_owner_state()",
+  "count_expired_draining_sandbox_leases()",
+  "count_queued_turns()",
+  "count_sandbox_leases_by_liveness()",
+  "credit_balance_by_account()",
+  "current_account_id()",
+  "current_api_key_hash()",
+  "current_memory_actor_id()",
+  "current_memory_actor_kind()",
+  "current_memory_role_key()",
+  "current_memory_session_id()",
+  "current_subject_id()",
+  "current_workspace_id()",
+  "enforce_sandbox_recovery_protocol_v2()",
+  "list_continuable_sessions(uuid, uuid)",
+  "list_legacy_modal_checkpoint_slots(integer)",
+  "list_live_modal_sandbox_leases()",
+  "list_meterable_warm_leases()",
+  "list_sandbox_viewer_force_drain_workspaces()",
+  "memory_scope_authorized(text, text, text, uuid)",
+  "memory_scope_visible(text, text, text, uuid, timestamp with time zone, timestamp with time zone)",
+  "optional_workspace_rls_visible(uuid, uuid)",
+  "preference_registry_scope_visible(uuid, text, uuid, text)",
+  "project_session_event_payload(jsonb)",
+  "prune_deleted_sandbox_checkpoint_artifacts(bigint, integer)",
+  "purge_expired_transcription_recordings(bigint, integer)",
+  "reap_expired_session_list_snapshots(integer)",
+  "reap_sandbox_leases(bigint, bigint)",
+  "reap_sandbox_leases(bigint, bigint, bigint)",
+  "request_due_sandbox_rotations(bigint, integer)",
+  "resolve_device_enrollment_request(text)",
+  "resolve_document_index_authority(uuid, uuid, uuid)",
+  "resolve_pending_device_enrollment_by_user_code(text)",
+  "resolve_slack_installation(text)",
+  "sandbox_checkpoint_artifact_inventory()",
+  "sandbox_rotation_backlog()",
+  "scoped_knowledge_actor_authorized(text, text, text)",
+  "scoped_knowledge_actor_valid(text, text, text)",
+  "scoped_knowledge_scope_key(text, uuid, text)",
+  "scoped_knowledge_scope_valid(text, uuid, text)",
+  "scoped_knowledge_scope_visible(uuid, text, uuid, text)",
+  "settle_sandbox_checkpoint_artifact(uuid, uuid, boolean, text, bigint)",
+  "workspace_rls_visible(uuid, uuid)",
+] as const;
+
+/**
  * The complete standalone tenant-table contract. Adding or removing a
  * FORCE-RLS table is an architectural change: update this list in the same
  * commit as the migration so startup cannot silently accept an unreviewed gap.
@@ -388,6 +453,8 @@ export type RuntimeDatabasePostureOptions = {
   protectedTables?: readonly string[];
   tablePrivileges?: RuntimeTablePrivilegeContract;
   protectedNoDirectDmlTables?: readonly string[];
+  /** Override only for focused synthetic tests or an explicitly smaller host contract. */
+  privateRoutineSignatures?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -665,7 +732,15 @@ export async function inspectRuntimeDatabasePosture(
       }>(
         await tx.execute(sql`
           select
-            (p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')')::text as name,
+            (
+              p.proname || '(' || coalesce(
+                (
+                  select string_agg(format_type(argument.argtype, null), ', ' order by argument.ordinality)
+                  from unnest(p.proargtypes) with ordinality as argument(argtype, ordinality)
+                ),
+                ''
+              ) || ')'
+            )::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
             has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute
           from pg_proc p
@@ -859,12 +934,26 @@ export function evaluateRuntimeDatabasePosture(
   if (posture.privateRoutines.length === 0) {
     violations.push("opengeni_private has no helper routines");
   }
+  const expectedPrivateRoutines = new Set(
+    options.privateRoutineSignatures ?? RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
+  );
+  const actualPrivateRoutines = new Map(
+    posture.privateRoutines.map((routine) => [routine.name, routine]),
+  );
+  for (const expectedRoutine of expectedPrivateRoutines) {
+    if (!actualPrivateRoutines.has(expectedRoutine)) {
+      violations.push(`expected private routine is missing: ${expectedRoutine}`);
+    }
+  }
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    if (!routine.execute) {
+    if (expectedPrivateRoutines.has(routine.name) && !routine.execute) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
+    }
+    if (!expectedPrivateRoutines.has(routine.name) && routine.execute) {
+      violations.push(`runtime role has unexpected EXECUTE on private routine ${routine.name}`);
     }
   }
 

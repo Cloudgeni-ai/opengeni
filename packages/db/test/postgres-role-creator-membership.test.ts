@@ -140,6 +140,8 @@ afterAll(async () => {
   if (EXTERNAL_ROOT_URL && root) {
     try {
       await root.unsafe(`drop database if exists ${quoteIdentifier(DATABASE)} with (force)`);
+      await root.unsafe(`drop owned by ${quoteIdentifier(APP_ROLE)}`);
+      await root.unsafe(`drop owned by ${quoteIdentifier(ADMIN_ROLE)}`);
       await root.unsafe(`drop role if exists ${quoteIdentifier(APP_ROLE)}`);
       await root.unsafe(`drop role if exists ${quoteIdentifier(ADMIN_ROLE)}`);
     } catch {
