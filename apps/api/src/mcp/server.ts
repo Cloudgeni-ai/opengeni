@@ -137,11 +137,14 @@ import {
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
+  scheduledTaskForGrant,
+  scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
   ScheduledTaskSyncError,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
+  validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
@@ -838,7 +841,7 @@ export function buildOpenGeniMcpServer(
         const rows = await listScheduledTasks(deps.db, grant.workspaceId, limit + 1, offset);
         return json(
           boundScheduledTaskMcpPage({
-            tasks: rows.slice(0, limit),
+            tasks: rows.slice(0, limit).map((task) => scheduledTaskForGrant(task, grant)),
             limit,
             offset,
             sourceHasMore: rows.length > limit,
@@ -858,7 +861,10 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ id, includeEntity }) => {
-        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const task = scheduledTaskForGrant(
+          await requireScheduledTask(deps.db, grant.workspaceId, id),
+          grant,
+        );
         return json(
           includeEntity ? boundScheduledTaskDetailMcp(task) : scheduledTaskMcpSummary(task),
         );
@@ -873,6 +879,7 @@ export function buildOpenGeniMcpServer(
           name: z4.string(),
           schedule: z4.unknown(),
           runMode: z4.string().optional(),
+          targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown(),
           status: z4.string().optional(),
@@ -901,6 +908,8 @@ export function buildOpenGeniMcpServer(
           grant,
           payload,
           toolsProvided: scheduledTaskToolsProvided(args),
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
         });
         try {
           await syncCreatedScheduledTask({
@@ -934,6 +943,7 @@ export function buildOpenGeniMcpServer(
           name: z4.string().optional(),
           schedule: z4.unknown().optional(),
           runMode: z4.string().optional(),
+          targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
           status: z4.string().optional(),
@@ -959,6 +969,8 @@ export function buildOpenGeniMcpServer(
           existing,
           payload,
           toolsProvided: scheduledTaskToolsProvided(raw),
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
         });
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
         await syncUpdatedScheduledTask({
@@ -967,7 +979,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -989,7 +1001,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -1011,7 +1023,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -1027,6 +1039,18 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, triggerId }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        await validateScheduledTaskTarget({
+          db: deps.db,
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
+          grant,
+          targetSessionId: task.targetSessionId,
+          runMode: task.runMode,
+          variableSetId: task.variableSetId,
+          rigId: task.rigId,
+          agentConfig: task.agentConfig,
+          missingTargetStatus: 404,
+        });
         await requireLimit(deps, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
@@ -1127,7 +1151,9 @@ export function buildOpenGeniMcpServer(
       },
       async ({ taskId, limit }) =>
         json({
-          runs: await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100),
+          runs: (await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100)).map(
+            (run) => scheduledTaskRunForGrant(run, grant),
+          ),
         }),
     );
   }

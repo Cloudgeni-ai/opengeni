@@ -17,6 +17,7 @@ export type ScheduledTaskFormState = {
   calendarTime: string;
   timeZone: string;
   runMode: ScheduledTask["runMode"];
+  targetSessionId: string;
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
   slackBotConnectionId: string;
@@ -36,6 +37,7 @@ export function newScheduledTaskFormState(
     calendarTime: "09:00",
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     runMode: "new_session_per_run",
+    targetSessionId: "",
     overlapPolicy: "allow_concurrent",
     includeOpenGeniTool,
     slackBotConnectionId: "",
@@ -66,6 +68,7 @@ export function formStateFromScheduledTask(task: ScheduledTask): ScheduledTaskFo
     name: task.name,
     prompt: task.agentConfig.prompt,
     runMode: task.runMode,
+    targetSessionId: task.targetSessionId ?? "",
     overlapPolicy: task.overlapPolicy,
     slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
   };
