@@ -1,5 +1,23 @@
 # @opengeni/core
 
+## 0.21.7
+
+### Patch Changes
+
+- 43fa8f4: Expose authorized Codex Apps through the server-authoritative tool catalog and make setup recovery actionable without widening explicit session policies.
+- 70ced80: Add an offline-safe Connected Machine enrollment removal lifecycle with credential revocation, durable audit history, guarded route and lease handling, SDK/MCP support, and accessible active-list reconciliation.
+- Updated dependencies [43fa8f4]
+- Updated dependencies [70ced80]
+- Updated dependencies [2c83ce5]
+  - @opengeni/runtime@0.18.22
+  - @opengeni/contracts@0.39.4
+  - @opengeni/db@0.28.6
+  - @opengeni/config@0.11.5
+  - @opengeni/documents@0.5.15
+  - @opengeni/events@0.3.85
+  - @opengeni/observability@0.5.4
+  - @opengeni/storage@0.2.73
+
 ## 0.21.6
 
 ### Patch Changes

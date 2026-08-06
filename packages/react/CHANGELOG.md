@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.46.6
+
+### Patch Changes
+
+- 43fa8f4: Expose authorized Codex Apps through the server-authoritative tool catalog and make setup recovery actionable without widening explicit session policies.
+- 70ced80: Add an offline-safe Connected Machine enrollment removal lifecycle with credential revocation, durable audit history, guarded route and lease handling, SDK/MCP support, and accessible active-list reconciliation.
+- Updated dependencies [70ced80]
+  - @opengeni/sdk@0.46.6
+
 ## 0.46.5
 
 ### Patch Changes
