@@ -187,8 +187,8 @@ for (const subpath of ["./styles.css", "./compiled.css", "./tokens.css"]) {
     failures.push(`@opengeni/react ${subpath} must provide typed conditional exports.`);
     continue;
   }
-  const conditions = entry as { types?: unknown; default?: unknown };
-  for (const condition of ["types", "default"] as const) {
+  const conditions = entry as { types?: unknown; style?: unknown; default?: unknown };
+  for (const condition of ["types", "style", "default"] as const) {
     const target = conditions[condition];
     if (typeof target !== "string" || !target.startsWith("./")) {
       failures.push(`@opengeni/react ${subpath} is missing a local ${condition} export target.`);

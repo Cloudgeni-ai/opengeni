@@ -52,14 +52,17 @@
     },
     "./styles.css": {
       "types": "./styles/index.d.ts",
+      "style": "./styles/index.css",
       "default": "./styles/index.css"
     },
     "./compiled.css": {
       "types": "./styles/compiled.d.ts",
+      "style": "./styles/compiled.css",
       "default": "./styles/compiled.css"
     },
     "./tokens.css": {
       "types": "./styles/tokens.d.ts",
+      "style": "./styles/tokens.css",
       "default": "./styles/tokens.css"
     }
   },

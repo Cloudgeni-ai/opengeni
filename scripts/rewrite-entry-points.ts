@@ -45,7 +45,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { publishableWorkspacePackages, repoRoot, type PackageJson } from "./publishable-workspaces";
 
-type ExportsEntry = { types?: string; import?: string; default?: string } | string;
+type ExportsEntry = { types?: string; style?: string; import?: string; default?: string } | string;
 
 const restore = process.argv.includes("--restore");
 

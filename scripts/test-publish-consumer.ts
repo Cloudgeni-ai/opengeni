@@ -266,6 +266,7 @@ try {
           },
           include: [
             "browser.tsx",
+            "consumer.css",
             "presentation.tsx",
             "runtime-proof.ts",
             "sdk-types.ts",
@@ -293,8 +294,9 @@ try {
     ),
     writeFile(
       join(consumerRoot, "browser.tsx"),
-      'import "@opengeni/react/compiled.css";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main><p>Clean consumer browser proof</p><HostEmbeddedSurfaces /></main>} /></OpenGeniProvider></StrictMode>);\n',
+      'import "./consumer.css";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main><p>Clean consumer browser proof</p><HostEmbeddedSurfaces /></main>} /></OpenGeniProvider></StrictMode>);\n',
     ),
+    writeFile(join(consumerRoot, "consumer.css"), '@import "@opengeni/react/compiled.css";\n'),
     writeFile(
       join(consumerRoot, "presentation.tsx"),
       [
