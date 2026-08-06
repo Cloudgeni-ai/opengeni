@@ -724,22 +724,18 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  try {
-    for (;;) {
-      if (request.signal.aborted) {
-        throw new RecordingProcessingError("Chunk upload was cancelled", "cancelled", true);
-      }
-      const next = await reader.read();
-      if (next.done) break;
-      total += next.value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        throw new RecordingProcessingError("Chunk is too large", "too_large", false);
-      }
-      chunks.push(next.value);
+  for (;;) {
+    if (request.signal.aborted) {
+      throw new RecordingProcessingError("Chunk upload was cancelled", "cancelled", true);
     }
-  } finally {
-    reader.releaseLock();
+    const next = await reader.read();
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new RecordingProcessingError("Chunk is too large", "too_large", false);
+    }
+    chunks.push(next.value);
   }
   if (total === 0) {
     throw new RecordingProcessingError("Chunk is required", "invalid_audio", false);

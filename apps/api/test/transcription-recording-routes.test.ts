@@ -119,6 +119,98 @@ afterEach(() => {
 });
 
 describe("resumable transcription recording routes", () => {
+  test("accepts a chunk through Bun's native HTTP request body reader", async () => {
+    const chunkBytes = new Uint8Array([1, 2, 3]);
+    const chunkSha256 = createHash("sha256").update(chunkBytes).digest("hex");
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        throw new Error("not used");
+      },
+    };
+    const segmenter: TranscriptionSegmenter = {
+      available: () => true,
+      async *segment() {
+        yield* [];
+      },
+    };
+    const recording = response("uploading", {
+      nextChunkNumber: 0,
+      chunkCount: 0,
+      totalBytes: 0,
+      totalDurationMilliseconds: 0,
+    });
+    const chunk = {
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      subjectId: SUBJECT_ID,
+      recordingId: RECORDING_ID,
+      chunkNumber: 0,
+      byteLength: chunkBytes.byteLength,
+      sha256: chunkSha256,
+      startMilliseconds: 0,
+      durationMilliseconds: 1_000,
+      objectKey: "transcription-recordings/test/chunk-0.bin",
+      state: "complete" as const,
+      createdAt: new Date("2026-08-04T07:00:00.000Z"),
+      completedAt: new Date("2026-08-04T07:00:01.000Z"),
+    };
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    spyOn(dbModule, "getTranscriptionRecording").mockResolvedValue(recording);
+    spyOn(dbModule, "reserveTranscriptionRecordingChunk").mockResolvedValue({
+      recording,
+      chunk,
+      deduplicated: false,
+    });
+    spyOn(dbModule, "completeTranscriptionRecordingChunk").mockResolvedValue({
+      recording: response("uploading", {
+        nextChunkNumber: 1,
+        chunkCount: 1,
+        totalBytes: chunkBytes.byteLength,
+        totalDurationMilliseconds: 1_000,
+      }),
+      chunk,
+      deduplicated: false,
+    });
+
+    const api = app({ transcription, segmenter, objectStorage: storage() });
+    const server = Bun.serve({ port: 0, fetch: api.fetch });
+    try {
+      const result = await fetch(
+        new URL(
+          `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/chunks/0`,
+          server.url,
+        ),
+        {
+          method: "PUT",
+          headers: {
+            authorization: await bearer(),
+            "content-type": "audio/webm",
+            "x-opengeni-chunk-sha256": chunkSha256,
+            "x-opengeni-chunk-start-milliseconds": "0",
+            "x-opengeni-chunk-duration-milliseconds": "1000",
+          },
+          body: chunkBytes,
+        },
+      );
+
+      expect(result.status).toBe(200);
+      expect((await result.json()) as { chunk: { sha256: string } }).toEqual(
+        expect.objectContaining({
+          chunk: expect.objectContaining({ sha256: chunkSha256 }),
+        }),
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("retries an idempotent chunk reservation and exposes an observable retryable failure", async () => {
     const chunkBytes = new Uint8Array([1, 2, 3]);
     const chunkSha256 = createHash("sha256").update(chunkBytes).digest("hex");
