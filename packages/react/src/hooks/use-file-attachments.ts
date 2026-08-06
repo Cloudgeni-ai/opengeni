@@ -84,11 +84,24 @@ export function useFileAttachments(
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  const attachmentsRef = useRef<FileAttachment[]>([]);
-  attachmentsRef.current = attachments;
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
+  // Object URLs must be owned synchronously: React may discard an attachment
+  // state update when its component unmounts in the same batch that minted the
+  // preview. The registry remains available to cleanup even before a render.
+  const previewUrls = useRef<Map<string, string>>(new Map());
+  const revokePreview = useCallback((id: string) => {
+    const previewUrl = previewUrls.current.get(id);
+    if (!previewUrl) return;
+    previewUrls.current.delete(id);
+    URL.revokeObjectURL(previewUrl);
+  }, []);
+  const revokeAllPreviews = useCallback(() => {
+    const urls = [...previewUrls.current.values()];
+    previewUrls.current.clear();
+    for (const previewUrl of urls) URL.revokeObjectURL(previewUrl);
+  }, []);
   // Upload promises are not cancellable at this layer. Fence their settlements
   // when the hook changes client/workspace or unmounts so an old tenant/session
   // cannot mutate the next attachment queue (or an already-unmounted component).
@@ -101,24 +114,17 @@ export function useFileAttachments(
     previousScope.current = { client, workspaceId };
     scopeGeneration.current += 1;
     sources.current.clear();
-    setAttachments((current) => {
-      for (const attachment of current) {
-        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-      }
-      return [];
-    });
-  }, [client, workspaceId]);
+    revokeAllPreviews();
+    setAttachments([]);
+  }, [client, revokeAllPreviews, workspaceId]);
 
   useEffect(
     () => () => {
       scopeGeneration.current += 1;
       sources.current.clear();
-      for (const attachment of attachmentsRef.current) {
-        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-      }
-      attachmentsRef.current = [];
+      revokeAllPreviews();
     },
-    [],
+    [revokeAllPreviews],
   );
 
   // Run (or re-run) the upload for one already-tracked attachment id. Sets it
@@ -179,6 +185,7 @@ export function useFileAttachments(
         const id = crypto.randomUUID();
         sources.current.set(id, file);
         const previewUrl = isImage(file) ? URL.createObjectURL(file) : undefined;
+        if (previewUrl) previewUrls.current.set(id, previewUrl);
         setAttachments((current) => [
           ...current,
           {
@@ -270,7 +277,7 @@ export function useFileAttachments(
         });
         for (const [fileId, attachment] of existingReady) {
           if (!incoming.has(fileId) && attachment.previewUrl) {
-            URL.revokeObjectURL(attachment.previewUrl);
+            revokePreview(attachment.id);
           }
         }
         // A server restoration is authoritative for finalized assets, but an
@@ -279,49 +286,44 @@ export function useFileAttachments(
         return [...unresolved, ...restored];
       });
     },
-    [workspaceId],
+    [revokePreview, workspaceId],
   );
 
-  const remove = useCallback((id: string) => {
-    sources.current.delete(id);
-    setAttachments((current) => {
-      const removed = current.find((attachment) => attachment.id === id);
-      if (removed?.previewUrl) {
-        URL.revokeObjectURL(removed.previewUrl);
-      }
-      return current.filter((attachment) => attachment.id !== id);
-    });
-  }, []);
+  const remove = useCallback(
+    (id: string) => {
+      sources.current.delete(id);
+      revokePreview(id);
+      setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+    },
+    [revokePreview],
+  );
 
-  const removeReadyFiles = useCallback((fileIds: Iterable<string>) => {
-    const accepted = new Set(fileIds);
-    if (accepted.size === 0) return;
-    setAttachments((current) =>
-      current.filter((attachment) => {
-        const removeAccepted =
-          attachment.status === "ready" &&
-          attachment.file !== undefined &&
-          accepted.has(attachment.file.id);
-        if (removeAccepted) {
-          sources.current.delete(attachment.id);
-          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-        }
-        return !removeAccepted;
-      }),
-    );
-  }, []);
+  const removeReadyFiles = useCallback(
+    (fileIds: Iterable<string>) => {
+      const accepted = new Set(fileIds);
+      if (accepted.size === 0) return;
+      setAttachments((current) =>
+        current.filter((attachment) => {
+          const removeAccepted =
+            attachment.status === "ready" &&
+            attachment.file !== undefined &&
+            accepted.has(attachment.file.id);
+          if (removeAccepted) {
+            sources.current.delete(attachment.id);
+            revokePreview(attachment.id);
+          }
+          return !removeAccepted;
+        }),
+      );
+    },
+    [revokePreview],
+  );
 
   const clear = useCallback(() => {
     sources.current.clear();
-    setAttachments((current) => {
-      for (const attachment of current) {
-        if (attachment.previewUrl) {
-          URL.revokeObjectURL(attachment.previewUrl);
-        }
-      }
-      return [];
-    });
-  }, []);
+    revokeAllPreviews();
+    setAttachments([]);
+  }, [revokeAllPreviews]);
 
   return {
     attachments,

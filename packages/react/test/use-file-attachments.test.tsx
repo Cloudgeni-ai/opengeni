@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { FileAsset } from "@opengeni/sdk";
 import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { useFileAttachments } from "../src/hooks/use-file-attachments";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderHook } from "./render-hook";
@@ -122,6 +123,7 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.attachments).toHaveLength(0);
     expect(revoked).toContain(url);
     await hook.unmount();
+    expect(revoked.filter((candidate) => candidate === url)).toHaveLength(1);
   });
 
   test("clear() revokes every outstanding object-URL", async () => {
@@ -138,6 +140,32 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.attachments).toHaveLength(0);
     expect(revoked.sort()).toEqual(created.slice().sort());
     await hook.unmount();
+    expect(
+      created.every((url) => revoked.filter((candidate) => candidate === url).length === 1),
+    ).toBe(true);
+  });
+
+  test("same-batch addFiles plus unmount revokes a preview before state commits", async () => {
+    const client = fakeClient({ uploadFile: () => new Promise<FileAsset>(() => {}) });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let result!: ReturnType<typeof useFileAttachments>;
+
+    function Harness() {
+      result = useFileAttachments({ client, workspaceId: WORKSPACE_ID });
+      return null;
+    }
+
+    await act(async () => root.render(<Harness />));
+    await act(async () => {
+      result.addFiles([imageFile()]);
+      root.unmount();
+    });
+    container.remove();
+
+    expect(created).toHaveLength(1);
+    expect(revoked).toEqual(created);
   });
 
   test("unmount revokes outstanding previews and ignores a late upload settlement", async () => {
@@ -189,6 +217,7 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.attachments).toEqual([]);
     expect(hook.result.current.readyResources).toEqual([]);
     await hook.unmount();
+    expect(revoked.filter((url) => url === preview)).toHaveLength(1);
   });
 
   test("client changes clear attachments and fence the previous upload", async () => {
@@ -218,6 +247,7 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.attachments).toEqual([]);
     expect(hook.result.current.readyResources).toEqual([]);
     await hook.unmount();
+    expect(revoked.filter((url) => url === preview)).toHaveLength(1);
   });
 
   test("removeReadyFiles clears only the accepted snapshot and preserves later attachments", async () => {
