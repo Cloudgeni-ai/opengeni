@@ -1,5 +1,11 @@
 # @opengeni/storage
 
+## 0.2.72
+
+### Patch Changes
+
+- @opengeni/config@0.11.4
+
 ## 0.2.71
 
 ### Patch Changes

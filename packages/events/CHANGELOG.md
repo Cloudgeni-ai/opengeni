@@ -1,5 +1,11 @@
 # @opengeni/events
 
+## 0.3.84
+
+### Patch Changes
+
+- @opengeni/db@0.28.5
+
 ## 0.3.83
 
 ### Patch Changes

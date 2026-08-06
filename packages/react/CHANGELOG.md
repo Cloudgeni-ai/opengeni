@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.46.5
+
+### Patch Changes
+
+- 43d45c6: Keep saved voice recordings on their original retry deadline during live UI renders, and normalize connector tool results whose optional structured payload is null without changing tool routing.
+  - @opengeni/sdk@0.46.4
+
 ## 0.46.4
 
 ### Patch Changes

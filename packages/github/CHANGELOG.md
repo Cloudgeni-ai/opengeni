@@ -1,5 +1,11 @@
 # @opengeni/github
 
+## 0.4.35
+
+### Patch Changes
+
+- @opengeni/config@0.11.4
+
 ## 0.4.34
 
 ### Patch Changes
