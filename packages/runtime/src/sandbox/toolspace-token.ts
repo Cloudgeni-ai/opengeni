@@ -9,7 +9,6 @@ import type {
 } from "@openai/agents/sandbox";
 
 const MAX_TOOLSPACE_SESSION_ID_BYTES = 512;
-const HOME_RELATIVE_TOOLSPACE_PREFIX = "$HOME/";
 
 export class ToolspaceTokenPathError extends Error {
   constructor(message: string) {
@@ -34,34 +33,15 @@ function assertToolspaceSessionId(sessionId: string): string {
   return sessionId;
 }
 
-function isHomeRelativeToolspacePath(value: string): boolean {
-  if (!value.startsWith(HOME_RELATIVE_TOOLSPACE_PREFIX)) return false;
-  const relative = value.slice(HOME_RELATIVE_TOOLSPACE_PREFIX.length);
-  const segments = relative.split("/");
-  return (
-    relative.length > 0 &&
-    !relative.includes("\0") &&
-    segments.every(
-      (segment) => segment !== "." && segment !== ".." && /^[A-Za-z0-9._-]+$/.test(segment),
-    ) &&
-    posixPath.normalize(relative) === relative
-  );
-}
-
 function assertToolspaceFilePath(value: string, label: string): string {
-  if (
-    !value ||
-    value.includes("\0") ||
-    (!posixPath.isAbsolute(value) && !isHomeRelativeToolspacePath(value))
-  ) {
-    throw new ToolspaceTokenPathError(`${label} must be absolute or use the trusted $HOME/ prefix`);
+  if (!value || value.includes("\0") || !posixPath.isAbsolute(value)) {
+    throw new ToolspaceTokenPathError(`${label} must be absolute`);
   }
-  return posixPath.isAbsolute(value) ? posixPath.normalize(value) : value;
+  return posixPath.normalize(value);
 }
 
 export function shellToolspacePath(value: string): string {
-  const validated = assertToolspaceFilePath(value, "Toolspace token file");
-  return isHomeRelativeToolspacePath(validated) ? `"${validated}"` : shellQuote(validated);
+  return shellQuote(assertToolspaceFilePath(value, "Toolspace token file"));
 }
 
 /**
