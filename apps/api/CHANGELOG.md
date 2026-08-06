@@ -1,5 +1,24 @@
 # @opengeni/api-router
 
+## 0.22.7
+
+### Patch Changes
+
+- 70ced80: Add an offline-safe Connected Machine enrollment removal lifecycle with credential revocation, durable audit history, guarded route and lease handling, SDK/MCP support, and accessible active-list reconciliation.
+- e636c36: Accept resumable voice chunks through Bun's native HTTP body reader without assuming the reader exposes an optional stream-lock release method.
+- Updated dependencies [70ced80]
+- Updated dependencies [2c83ce5]
+  - @opengeni/contracts@0.39.4
+  - @opengeni/core@0.21.7
+  - @opengeni/db@0.28.6
+  - @opengeni/runtime@0.18.22
+  - @opengeni/config@0.11.5
+  - @opengeni/documents@0.5.15
+  - @opengeni/events@0.3.85
+  - @opengeni/github@0.4.36
+  - @opengeni/observability@0.5.4
+  - @opengeni/storage@0.2.73
+
 ## 0.22.6
 
 ### Patch Changes
