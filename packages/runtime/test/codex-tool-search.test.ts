@@ -395,6 +395,39 @@ describe("tool_search RunState replay", () => {
 });
 
 describe("tool_search tool wiring", () => {
+  test("wrapped OpenGeni stays eager while selected MCP schemas defer", async () => {
+    const makeServer = (registryId: string) =>
+      new PrefixedMcpServer(
+        {
+          name: `inner-${registryId}`,
+          cacheToolsList: false,
+          connect: async () => undefined,
+          close: async () => undefined,
+          listTools: async () =>
+            [
+              {
+                name: "search_documents",
+                description: "Search documents",
+                inputSchema: { type: "object", properties: {} },
+              },
+            ] as never,
+          callTool: async () => ({ content: [] }),
+          invalidateToolsCache: async () => undefined,
+        } as never,
+        registryId,
+      );
+    const opengeni = makeServer("opengeni");
+    const apps = makeServer("codex_apps");
+    const agent = buildOpenGeniAgent(testSettings({ codexToolSearchEnabled: true }), [], {
+      structuredToolTransport: false,
+      mcpServers: [opengeni, apps],
+    });
+
+    await agent.getAllTools(new RunContext());
+    expect(opengeni.modelToolSchemaTokens()).toBeGreaterThan(0);
+    expect(apps.modelToolSchemaTokens()).toBe(0);
+  });
+
   test("buildAgent passes prepared MCP registry ids to the live tool_search executor", async () => {
     const apps = new PrefixedMcpServer(
       {

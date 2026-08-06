@@ -57,6 +57,12 @@ inherited-fixed policies remain exact. A null designation means no Apps server
 and there is no active-credential, pinned-credential, allocator, or static-header
 fallback.
 
+When an Apps setup attempt fails, the runtime keeps the surface visible and
+emits an Apps-specific reconnect/retry state instead of silently presenting an
+empty tool-search pool. Statusless transport failures are marked retryable;
+provider response bodies, URLs, headers, and credentials remain outside the
+public diagnostic projection.
+
 Inference and Apps authority are deliberately unrelated. The designated Apps
 credential works with compatible Codex or non-Codex inference and remains usable
 when every inference subscription is quota-exhausted, cooled down, allocator-

@@ -2576,7 +2576,8 @@ function maybeInstallCodexToolSearch(
     // that same wire truth; otherwise a large deferred catalog can falsely trip
     // compaction before the first real model request. OpenGeni remains eager.
     for (const server of mcpServers) {
-      if (server.name === "opengeni") continue;
+      const registryId = server instanceof PrefixedMcpServer ? server.registryId : server.name;
+      if (registryId === "opengeni") continue;
       (
         server as MCPServer & {
           deferModelToolSchemaAccounting?: () => void;
@@ -3286,7 +3287,13 @@ export async function prepareAgentTools(
           // The upstream transport logger receives raw thrown errors, whose
           // messages may contain response bodies, URLs, headers, or echoed
           // credentials. Keep its diagnostic surface structural only.
-          logger: mcpTransportLogger(config.id),
+          logger: mcpTransportLogger(config.id, {
+            // Codex Apps setup is a read-only initialize/tools-list handshake.
+            // A statusless transport failure is safe to retry, while auth
+            // responses remain non-retryable and publish their specific
+            // reconnect reason through codexAppsAuthFetch.
+            recoverySafeSetup: isCodexAppsMcpServer(config),
+          }),
           // codex_apps returns connector tools with empty `outputSchema: {}` that the
           // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
           // sanitize the response on the wire before validation. The namespace Set
@@ -3319,9 +3326,10 @@ export async function prepareAgentTools(
   const bestEffortEntries = servers.filter((entry) => entry.bestEffort);
   const requiredServers = requiredEntries.map((entry) => entry.server);
   const bestEffortServers = bestEffortEntries.map((entry) => entry.server);
-  // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
-  // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
-  // ChatGPT plan is a normal, non-noteworthy state).
+  // Names of optional servers so a setup drop is surfaced with the registry
+  // identity and safe retry metadata. Codex Apps is intentionally included:
+  // its catalog entry told the user the surface was available, so an auth or
+  // transport failure must not collapse into a silent empty tool_search pool.
   const optionalServerIds = new Set(
     servers
       .filter((entry) => entry.optional)
@@ -3352,13 +3360,19 @@ export async function prepareAgentTools(
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
       }
-      if (!(failed instanceof PrefixedMcpServer) || !optionalServerIds.has(failed.registryId)) {
+      if (
+        !(failed instanceof PrefixedMcpServer) ||
+        (failed.registryId !== CODEX_APPS_MCP_SERVER_ID &&
+          !optionalServerIds.has(failed.registryId))
+      ) {
         continue;
       }
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
-        "[mcp] optional server failed to connect/list tools; skipping it for this turn",
-        mcpErrorFields(error, "mcp_connect_failed"),
+        failed.registryId === CODEX_APPS_MCP_SERVER_ID
+          ? "[mcp] Codex Apps setup failed; reconnect or retry before relying on its tools"
+          : "[mcp] optional server failed to connect/list tools; skipping it for this turn",
+        mcpErrorFields(error, "mcp_connect_failed", failed.registryId),
       );
     }
   }
@@ -3867,7 +3881,9 @@ function exactErrorMessage(error: unknown): string {
 type McpPublicErrorFields = {
   errorClass: "McpOperationError";
   errorCode: McpPublicFailureCode;
+  serverId?: string;
   status?: number;
+  retryable?: boolean;
   origin: "runtime";
 };
 
@@ -3878,13 +3894,25 @@ type McpPublicFailureCode =
   | "mcp_tools_list_failed"
   | "mcp_tool_call_failed";
 
+function safeMcpServerIdentity(serverId: string): string {
+  return serverId.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
+}
+
 /** Allowlisted projection for public SDK/console telemetry; internal errors stay exact. */
-function mcpErrorFields(error: unknown, errorCode: McpPublicFailureCode): McpPublicErrorFields {
+function mcpErrorFields(
+  error: unknown,
+  errorCode: McpPublicFailureCode,
+  serverId?: string,
+  options: McpTransportErrorOptions = {},
+): McpPublicErrorFields {
   const fields: McpPublicErrorFields = {
     errorClass: "McpOperationError",
     errorCode,
     origin: "runtime",
   };
+  if (serverId !== undefined) {
+    fields.serverId = safeMcpServerIdentity(serverId);
+  }
   try {
     const rawStatus =
       error && typeof error === "object"
@@ -3896,6 +3924,13 @@ function mcpErrorFields(error: unknown, errorCode: McpPublicFailureCode): McpPub
   } catch {
     // Public diagnostics are best-effort. Hostile getters/proxies must never
     // replace the exact internal failure with a logging projection failure.
+  }
+  if (
+    isMcpRequestTimeoutError(error) ||
+    isMcpTransportConnectivityError(error) ||
+    isRawMcpTransportConnectivityError(error, options)
+  ) {
+    fields.retryable = true;
   }
   return fields;
 }
@@ -4169,7 +4204,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
   return exactError;
 }
 
-function mcpTransportLogger(_serverId: string) {
+function mcpTransportLogger(serverId: string, options: McpTransportErrorOptions = {}) {
   const logFailure = (_message: string, ...args: unknown[]) => {
     let error: unknown;
     for (let index = args.length - 1; index >= 0; index -= 1) {
@@ -4178,7 +4213,10 @@ function mcpTransportLogger(_serverId: string) {
         break;
       }
     }
-    console.warn("[mcp] transport operation failed", mcpErrorFields(error, "mcp_transport_failed"));
+    console.warn(
+      "[mcp] transport operation failed",
+      mcpErrorFields(error, "mcp_transport_failed", serverId, options),
+    );
   };
   return {
     namespace: "opengeni:mcp-transport",
@@ -4322,33 +4360,33 @@ function codexAppsAuthFetch(
       await publishCodexAppsAuthNeeded(options, request, "missing_connection");
       throw new Error("Codex Apps has no explicit workspace designation");
     }
+    let token: { accessToken: string; chatgptAccountId: string | null };
     try {
-      return await auth.withAuthorization(async (token) => {
-        const headers: Record<string, string> = {
-          authorization: `Bearer ${token.accessToken}`,
-          originator: CODEX_ORIGINATOR,
-          "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
-          version: auth.clientVersion,
-        };
-        if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
-        if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
-        const response = await baseFetch(
-          fetchInputForAttempt(input),
-          withConnectionHeaders(input, init, headers),
-        );
-        if (response.status === 401 || response.status === 403) {
-          await publishCodexAppsAuthNeeded(
-            options,
-            request,
-            response.status === 403 ? "insufficient_scope" : "expired",
-          );
-        }
-        return response;
-      });
+      token = await auth.withAuthorization(async (snapshot) => snapshot);
     } catch (error) {
       await publishCodexAppsAuthNeeded(options, request, "refresh_failed");
       throw error;
     }
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token.accessToken}`,
+      originator: CODEX_ORIGINATOR,
+      "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
+      version: auth.clientVersion,
+    };
+    if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
+    if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
+    const response = await baseFetch(
+      fetchInputForAttempt(input),
+      withConnectionHeaders(input, init, headers),
+    );
+    if (response.status === 401 || response.status === 403) {
+      await publishCodexAppsAuthNeeded(
+        options,
+        request,
+        response.status === 403 ? "insufficient_scope" : "expired",
+      );
+    }
+    return response;
   };
 }
 
@@ -4478,17 +4516,26 @@ type McpLifecycleFailure = {
   exactError: Error;
 };
 
-function publicMcpLifecycleError(error: Error, phase: McpLifecyclePhase): Error {
+function publicMcpLifecycleError(
+  error: Error,
+  phase: McpLifecyclePhase,
+  serverId: string,
+  options: McpTransportErrorOptions = {},
+): Error {
   const errorCode = phase === "connect" ? "mcp_connect_failed" : "mcp_close_failed";
-  const fields = mcpErrorFields(error, errorCode);
+  const fields = mcpErrorFields(error, errorCode, serverId, options);
   const lifecycleError = new Error(`MCP lifecycle ${phase} failed`) as Error & {
     code?: string;
+    serverId?: string;
     status?: number;
+    retryable?: boolean;
     origin?: string;
   };
   lifecycleError.name = "McpLifecycleError";
   lifecycleError.code = fields.errorCode;
+  if (fields.serverId !== undefined) lifecycleError.serverId = fields.serverId;
   if (fields.status !== undefined) lifecycleError.status = fields.status;
+  if (fields.retryable !== undefined) lifecycleError.retryable = fields.retryable;
   lifecycleError.origin = fields.origin;
   return lifecycleError;
 }
@@ -4496,7 +4543,7 @@ function publicMcpLifecycleError(error: Error, phase: McpLifecyclePhase): Error 
 /** @internal Exported for exact SDK-boundary conformance tests. */
 export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
-  readonly name = MCP_SDK_LIFECYCLE_NAME;
+  readonly name: string;
   readonly prefix: string;
   readonly registryId: string;
   private readonly allowedTools: Set<string> | undefined;
@@ -4520,6 +4567,10 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly recoverySafeSetup = false,
   ) {
     this.registryId = registryId;
+    // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
+    // Keep it unique per prepared registry server while never including URLs,
+    // headers, provider bodies, or other credential-bearing data.
+    this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
     this.cacheToolsList = inner.cacheToolsList;
     this.allowedTools = allowedTools ? new Set(allowedTools) : undefined;
@@ -4536,7 +4587,9 @@ export class PrefixedMcpServer implements MCPServer {
       const exactError = exactMcpLifecycleError(error, {
         recoverySafeSetup: this.recoverySafeSetup,
       });
-      const publicError = publicMcpLifecycleError(exactError, "connect");
+      const publicError = publicMcpLifecycleError(exactError, "connect", this.registryId, {
+        recoverySafeSetup: this.recoverySafeSetup,
+      });
       this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
       throw publicError;
     }
@@ -4549,7 +4602,7 @@ export class PrefixedMcpServer implements MCPServer {
       delete this.lifecycleFailures.close;
     } catch (error) {
       const exactError = exactMcpLifecycleError(error);
-      const publicError = publicMcpLifecycleError(exactError, "close");
+      const publicError = publicMcpLifecycleError(exactError, "close", this.registryId);
       this.lifecycleFailures.close = { phase: "close", publicError, exactError };
       throw publicError;
     }
@@ -4601,7 +4654,7 @@ export class PrefixedMcpServer implements MCPServer {
         this.loggedListToolsFailure = true;
         console.warn(
           "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          mcpErrorFields(error, "mcp_tools_list_failed"),
+          mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
         );
       }
       this.releaseAggregateBudget();
@@ -4674,7 +4727,7 @@ export class PrefixedMcpServer implements MCPServer {
       if (this.bestEffort) {
         console.warn(
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
-          mcpErrorFields(error, "mcp_tool_call_failed"),
+          mcpErrorFields(error, "mcp_tool_call_failed", this.registryId),
         );
         return {
           isError: true,
