@@ -1045,7 +1045,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             retainedRecord
               ? `Mutating sandbox operation "${op}" yielded provider session ${retainedRecord.process.providerSessionId} but lost durable process promotion; exact-backend tracking remains and the operation was not replayed`
               : `Mutating sandbox operation "${op}" returned from the provider but lost its durable route settlement; its outcome is unknown and it was not replayed`,
-            { cause: error },
+            {
+              cause: error,
+              // Promotion is not yet durable, so the rejected provider output
+              // must not reach the caller. The locator is nevertheless bound
+              // to this proxy's exact backend and pending parent promotion.
+              // Hand it to turn finalization so process-control can retry that
+              // same promotion and drain the already-running process without
+              // replaying the workspace mutation.
+              ...(retainedRecord ? { retainedProcess: retainedRecord.process } : {}),
+            },
           );
         }
       }

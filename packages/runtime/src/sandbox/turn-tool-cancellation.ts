@@ -640,6 +640,36 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           correlationId,
           async () => await invokeExecNative(commandInput),
         );
+      } catch (error) {
+        const retainedProcess =
+          !useRemoteOpCancellation && error instanceof RoutingMutationOutcomeUnknownError
+            ? error.retainedProcess
+            : null;
+        const processSession =
+          retainedProcess === null
+            ? null
+            : retainedProcessSession(session, retainedProcess.providerSessionId);
+        if (retainedProcess && processSession) {
+          // The lifecycle/Channel-A entry point must preserve the same exact
+          // process handoff as the model-tool entry point below. A routing
+          // session can reject the provider output while its parent promotion
+          // is still pending; cancellation retries that promotion on the
+          // already-bound backend before draining the physical process.
+          this.shellSessions.set(retainedProcess.providerSessionId, {
+            sessionId: retainedProcess.providerSessionId,
+            markerPath,
+            token: markerPath.slice(markerPath.lastIndexOf("/") + 1),
+            interactive,
+            runContext: lifecycleRunContext,
+            execInvoke: invokeExec,
+            writeInvoke: invokeWrite,
+            processSession,
+            identity: null,
+            identityValidated: false,
+            cancellation: null,
+          });
+        }
+        throw error;
       } finally {
         remoteExec?.settle();
       }
@@ -815,9 +845,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   ? null
                   : retainedProcessSession(cancellationSession, retainedProcess.providerSessionId);
               if (retainedProcess && processSession) {
-                // The provider output remains rejected, but DB promotion is
-                // already durable. Preserve only the safe process locator and
-                // exact routing session so turn finalization can drain it; never
+                // The provider output remains rejected. DB promotion may be
+                // durable already or pending after an ambiguous persistence
+                // failure; the exact routing session owns that distinction and
+                // retries promotion before any process control. Preserve only
+                // its safe locator so turn finalization can drain it, and never
                 // invoke a helper through the mutable current route.
                 this.shellSessions.set(retainedProcess.providerSessionId, {
                   sessionId: retainedProcess.providerSessionId,

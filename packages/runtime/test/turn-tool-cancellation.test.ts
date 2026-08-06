@@ -9,7 +9,10 @@ import {
   cancellableShellCommand,
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
-import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
+import {
+  RoutingMutationOutcomeUnknownError,
+  RoutingSandboxSession,
+} from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 
@@ -427,6 +430,147 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(providerCalls).toBe(1);
     expect(controlPolls).toBe(1);
     expect(retained).toBe(false);
+  });
+
+  test("retries ambiguous process promotion on the exact route before finalization drains it", async () => {
+    const controller = createTurnToolCancellationController();
+    let providerCalls = 0;
+    let promotions = 0;
+    let controlPolls = 0;
+    let processAlive = true;
+    const retainedIds: string[] = [];
+    const backend = {
+      supportsPty: () => true,
+      execCommand: async (args: unknown) => {
+        const cmd =
+          args && typeof args === "object" && typeof (args as { cmd?: unknown }).cmd === "string"
+            ? ((args as { cmd: string }).cmd ?? "")
+            : "";
+        if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return exited(0, "6200 6200\n");
+        }
+        if (cmd.includes("command kill -TERM")) {
+          processAlive = false;
+          return exited(0);
+        }
+        if (cmd.includes("command kill -0")) {
+          return exited(processAlive ? 75 : 0);
+        }
+        providerCalls += 1;
+        return running(34, "started");
+      },
+      writeStdin: async () => {
+        controlPolls += 1;
+        processAlive = false;
+        return exited(143);
+      },
+    };
+    const session = new RoutingSandboxSession({
+      defaultResolved: {
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+        activeEpoch: 0,
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+      }),
+      beforeMutation: async () => "parent",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions += 1;
+        retainedIds.push(retainedProcess!.id);
+        if (promotions === 1) throw new Error("promotion transaction lost");
+      },
+    });
+    const exec = functionTool("exec_command", async (_runContext, input) => {
+      return await session.execCommand(JSON.parse(input) as Record<string, unknown>);
+    });
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const error = await wrappedExec!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 34,
+    });
+
+    controller.cancel(new Error("turn finalized"));
+    await controller.waitForQuiescence();
+
+    expect(providerCalls).toBe(1);
+    expect(promotions).toBe(2);
+    expect(new Set(retainedIds).size).toBe(1);
+    expect(controlPolls).toBe(1);
+    expect(session.hasRetainedProcess(34)).toBe(false);
+  });
+
+  test("lifecycle command finalization drains an exact process whose promotion was ambiguous", async () => {
+    const controller = createTurnToolCancellationController();
+    let providerMutationCalls = 0;
+    let promotions = 0;
+    let controlPolls = 0;
+    const retainedIds: string[] = [];
+    const backend = {
+      supportsPty: () => true,
+      execCommand: async (args: unknown) => {
+        const cmd =
+          args && typeof args === "object" && typeof (args as { cmd?: unknown }).cmd === "string"
+            ? ((args as { cmd: string }).cmd ?? "")
+            : "";
+        if (!cmd.includes("sleep 60")) return exited(0, "6200 6200\n");
+        providerMutationCalls += 1;
+        return running(35, "started");
+      },
+      writeStdin: async () => {
+        controlPolls += 1;
+        return exited(143);
+      },
+    };
+    const session = new RoutingSandboxSession({
+      defaultResolved: {
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+        activeEpoch: 0,
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+      }),
+      beforeMutation: async () => "parent",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions += 1;
+        retainedIds.push(retainedProcess!.id);
+        if (promotions === 1) throw new Error("promotion transaction lost");
+      },
+    });
+
+    const error = await controller
+      .runSandboxCommandStructured(session, { cmd: "sleep 60", yieldTimeMs: 100 })
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 35,
+    });
+
+    controller.cancel(new Error("lifecycle request finalized"));
+    await controller.waitForQuiescence();
+
+    expect(providerMutationCalls).toBe(1);
+    expect(promotions).toBe(2);
+    expect(new Set(retainedIds).size).toBe(1);
+    expect(controlPolls).toBe(1);
+    expect(session.hasRetainedProcess(35)).toBe(false);
   });
 
   test("retained-process terminal settlement failure keeps the cancellation fence closed", async () => {
