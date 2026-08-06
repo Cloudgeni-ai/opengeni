@@ -1,5 +1,35 @@
 # @opengeni/worker-bundle
 
+## 0.16.24
+
+### Patch Changes
+
+- ece124b: Normalize JavaScript-only undefined object fields from SDK history before durable JSON persistence while rejecting other non-JSON values with an exact path.
+- 7a84e1b: Retry transient retained-process promotion transactions and hand ambiguous yielded processes to exact-route turn finalization so they cannot strand sandbox leases.
+- 5d8bb99: Allow scheduled tasks to target and durably wake one authorized existing session without creating a helper session or replacing its goal.
+- 34c5cdb: Retain validated computer screenshots as authenticated, integrity-checked session artifacts with bounded event/history receipts, SDK range assembly, and React rendering while preserving historical inline-image compatibility.
+
+  Fence screenshot cleanup and quota accounting across parent deletion, duplicate settlement, expiry, compensation, and garbage-collection races so provider objects are deleted only after durable lifecycle ownership and quota is released exactly once.
+
+- Updated dependencies [b783f12]
+- Updated dependencies [fc7cc08]
+- Updated dependencies [ece124b]
+- Updated dependencies [7a84e1b]
+- Updated dependencies [5d8bb99]
+- Updated dependencies [238fb7e]
+- Updated dependencies [af24281]
+- Updated dependencies [34c5cdb]
+  - @opengeni/runtime@0.18.20
+  - @opengeni/core@0.21.5
+  - @opengeni/db@0.28.4
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+  - @opengeni/documents@0.5.13
+  - @opengeni/events@0.3.83
+  - @opengeni/github@0.4.34
+  - @opengeni/observability@0.5.3
+  - @opengeni/storage@0.2.71
+
 ## 0.16.23
 
 ### Patch Changes
