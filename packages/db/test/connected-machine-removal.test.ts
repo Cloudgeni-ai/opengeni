@@ -73,6 +73,18 @@ afterAll(async () => {
 }, 180_000);
 
 describe("connected machine removal lifecycle", () => {
+  test("forward migration exposes the tool through the database fallback default", async () => {
+    if (!available) return;
+    const [column] = await admin<{ column_default: string | null }[]>`
+      select column_default
+      from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = 'sessions'
+        and column_name = 'first_party_mcp_tools'`;
+
+    expect(column?.column_default).toContain('"connected_machine_remove"');
+  });
+
   test("removes an offline enrollment without deleting history, rejects stale heartbeat, and replays idempotently", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
