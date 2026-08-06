@@ -64,7 +64,7 @@ const APP_URL = appUrl.toString();
 const SEARCH_PATH = `${SCHEMA},opengeni_private,public`;
 const IMAGE = "pgvector/pgvector:pg17";
 const lifecycleMigrationUrl = new URL(
-  "../drizzle/0179_retained_screenshot_lifecycle_fences.sql",
+  "../drizzle/0180_retained_screenshot_lifecycle_fences.sql",
   import.meta.url,
 );
 
@@ -519,7 +519,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(routine?.definition).toContain(`${SCHEMA}.files`);
   });
 
-  test("an existing dedicated 0140 lifecycle shape upgrades through 0179 and remains callable", async () => {
+  test("an existing dedicated 0140 lifecycle shape upgrades through 0180 and remains callable", async () => {
     if (!available) return;
     const databaseName = `og_0179_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
     const schemaName = "tenantupgrade";
@@ -596,7 +596,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           NULL::text, NULL::text, NULL::bigint, NULL::text, NULL::integer,
           NULL::integer, NULL::timestamptz, NULL::text WHERE false';
         DELETE FROM ${quoteIdentifier(schemaName)}.schema_migrations
-          WHERE name = '0179_retained_screenshot_lifecycle_fences.sql';
+          WHERE name = '0180_retained_screenshot_lifecycle_fences.sql';
       `);
 
       await migrate(upgradeUrl.toString(), schemaName);
@@ -633,7 +633,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       const [migration] = await upgradeAdmin<Array<{ count: number }>>`
         SELECT count(*)::int AS count
         FROM ${upgradeAdmin(schemaName)}.schema_migrations
-        WHERE name = '0179_retained_screenshot_lifecycle_fences.sql'`;
+        WHERE name = '0180_retained_screenshot_lifecycle_fences.sql'`;
       expect(migration?.count).toBe(1);
       expect(await readFile(lifecycleMigrationUrl, "utf8")).toContain(
         "FROM %1$I.retained_screenshot_artifacts",

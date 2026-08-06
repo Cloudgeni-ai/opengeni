@@ -3248,10 +3248,11 @@ export async function prepareAgentTools(
           ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
         },
       );
+      const optional = tool.optional === true;
       const fetchImpl = isCodexAppsMcpServer(config)
         ? codexAppsAuthFetch(guardedFetch, settings, options)
         : config.connectionRef
-          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
+          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds, optional)
           : firstParty
             ? firstPartyAuthFetch(guardedFetch, settings, options)
             : guardedFetch;
@@ -3272,10 +3273,12 @@ export async function prepareAgentTools(
       // a best-effort server whose tools/list throws (e.g. an expired connection
       // credential surfacing as a StreamableHTTP "authentication required" 401)
       // degrades to zero tools rather than throwing out of the SDK's run-time
-      // getAllMcpTools and failing an unrelated turn. The actionable
-      // tool.auth_needed signal is preserved: the connection-broker fetch
-      // publishes it before returning the 401 that provokes the throw.
-      const optional = tool.optional === true;
+      // getAllMcpTools and failing an unrelated turn. Setup-time auth misses
+      // for an optional server are availability state, not evidence that the
+      // user asked to use that integration, so they do not publish a
+      // conversational tool.auth_needed event. A concrete tools/call auth
+      // failure still publishes the actionable event before returning the MCP
+      // auth-needed tool result.
       const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
       const server = new PrefixedMcpServer(
         new MCPServerStreamableHttp({
@@ -3389,6 +3392,7 @@ function connectionBrokerFetch(
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
   resolvedMcpConnectionIds: Map<string, string>,
+  suppressSetupAuthNeeded: boolean,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
@@ -3406,7 +3410,14 @@ function connectionBrokerFetch(
       false,
     );
     if (first.status === "auth_needed") {
-      return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
+      return await authNeededFetchResponse(
+        options,
+        config.id,
+        request,
+        first,
+        connectionRef,
+        suppressSetupAuthNeeded,
+      );
     }
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     const response = await baseFetch(
@@ -3434,10 +3445,24 @@ function connectionBrokerFetch(
       );
       if (refreshed.status === "auth_needed") {
         if (!request.replaySafeAfter401) {
-          await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
+          await publishAuthNeededForRequest(
+            options,
+            config.id,
+            request,
+            refreshed,
+            connectionRef,
+            suppressSetupAuthNeeded,
+          );
           return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
-        return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          refreshed,
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
@@ -3451,7 +3476,14 @@ function connectionBrokerFetch(
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
         if (auth) {
           await cancelMcpResponseBody(retry);
-          return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+          return await authNeededFetchResponse(
+            options,
+            config.id,
+            request,
+            auth,
+            connectionRef,
+            suppressSetupAuthNeeded,
+          );
         }
         return retry;
       }
@@ -3474,6 +3506,7 @@ function connectionBrokerFetch(
               : {}),
           },
           connectionRef,
+          suppressSetupAuthNeeded,
         );
       }
       return retry;
@@ -3482,7 +3515,14 @@ function connectionBrokerFetch(
       const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
       if (auth) {
         await cancelMcpResponseBody(response);
-        return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          auth,
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       return response;
     }
@@ -3593,10 +3633,18 @@ async function authNeededFetchResponse(
   request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
+  suppressSetupAuthNeeded: boolean,
 ): Promise<Response> {
-  await publishAuthNeededForRequest(options, serverId, request, auth, connectionRef);
-  if (request.method === "tools/call") {
-    return mcpToolAuthNeededResponse(request.id);
+  await publishAuthNeededForRequest(
+    options,
+    serverId,
+    request,
+    auth,
+    connectionRef,
+    suppressSetupAuthNeeded,
+  );
+  if (request.toolName) {
+    return mcpToolAuthNeededResponse(request);
   }
   return new Response("Authentication required for MCP server connection", {
     status: 401,
@@ -3609,7 +3657,11 @@ async function publishAuthNeededForRequest(
   request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
+  suppressSetupAuthNeeded: boolean,
 ): Promise<void> {
+  if (suppressSetupAuthNeeded && !request.toolName) {
+    return;
+  }
   const connectionId = auth.connectionId ?? connectionRef.connectionId;
   await publishAuthNeeded(options, {
     serverId,
@@ -3724,16 +3776,14 @@ const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
     "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
-function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
+function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
   return new Response(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: id ?? null,
-      error: {
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, {
         code: MCP_AUTH_NEEDED_ERROR.code,
         message: MCP_AUTH_NEEDED_ERROR.message,
-      },
-    }),
+      }),
+    ),
     {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -4513,11 +4563,10 @@ export class PrefixedMcpServer implements MCPServer {
       // expired/failed connection credential surfacing as a StreamableHTTP
       // "authentication required" 401, a provider 5xx, a network blip) — would
       // otherwise take down an unrelated turn. Drop this server's tools for the
-      // turn instead. An auth failure additionally published tool.auth_needed via
-      // the connection-broker fetch before the throw (so that actionable signal
-      // is preserved), but a non-auth failure has NO such signal — the structured
-      // warn below is its only visibility, so a chronically-dead optional
-      // integration surfaces in logs/metrics rather than being silently swallowed.
+      // turn instead. Optional setup-time auth is intentionally non-conversational;
+      // only a concrete tools/call failure publishes tool.auth_needed. A non-auth
+      // failure has no such signal, so the structured warn below is its visibility
+      // when a chronically-dead optional integration is skipped.
       // Warn once per degraded server per turn (instances are per-turn), so a
       // re-list across model turns does not spam the log.
       if (!this.loggedListToolsFailure) {

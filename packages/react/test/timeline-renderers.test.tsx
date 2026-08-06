@@ -74,6 +74,7 @@ describe("provider MCP unavailable rendering", () => {
         events={[
           timelineEvent("tool.auth_needed", {
             serverId: "gitlab-hosted",
+            toolName: "search_projects",
             provider: "gitlab",
             providerDomain: "gitlab.com",
             connectionId: "host-gitlab-one",
@@ -492,6 +493,7 @@ describe("MessageTimeline — settled turn folding", () => {
         "tool.auth_needed",
         {
           serverId: "mcp-linear",
+          toolName: "create_issue",
           providerDomain: "linear.app",
           reason: "missing_connection",
         },

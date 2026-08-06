@@ -18,6 +18,7 @@ import {
   encryptVariableSetValue,
   getLatestSessionModelForSubject,
   getOrCreateSlackInteraction,
+  getSessionForSubject,
   getWorkspaceGrant,
   grantWorkspaceAccess,
   saveSlackBotUserLink,
@@ -108,6 +109,11 @@ type SlackReactionContext = SlackReactionContextPage & {
   pages?: Record<string, SlackReactionContextPage>;
 };
 
+type SlackPostPause = {
+  entered: Promise<void>;
+  release: () => void;
+};
+
 function fakeSlack(
   deniedChannels: Set<string> = new Set(),
   options: {
@@ -123,12 +129,41 @@ function fakeSlack(
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
   >();
+  const postFailuresByChannel = new Map<
+    string,
+    { error?: string; status?: number; retryAfterSeconds?: number }
+  >();
   const channelAccessFailures = new Map<
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
   >();
   const acceptedByClientMessageId = new Map<string, SlackPost>();
   const failedAfterAccept = new Set<string>();
+  const postPauses = new Map<
+    string,
+    {
+      signalEntered: () => void;
+      released: Promise<void>;
+    }
+  >();
+  const pauseBeforePost = (textFragment: string): SlackPostPause => {
+    if (postPauses.has(textFragment)) throw new Error("Slack post pause already exists");
+    let signalEntered!: () => void;
+    let signalReleased!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      signalReleased = resolve;
+    });
+    postPauses.set(textFragment, { signalEntered, released });
+    return {
+      entered,
+      release: () => {
+        signalReleased();
+      },
+    };
+  };
   let nextTimestamp = 1;
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
@@ -215,10 +250,17 @@ function fakeSlack(
         clientMessageId,
         timestamp,
       };
+      const paused = [...postPauses.entries()].find(([fragment]) => post.text.includes(fragment));
+      if (paused) {
+        const [fragment, gate] = paused;
+        gate.signalEntered();
+        await gate.released;
+        postPauses.delete(fragment);
+      }
       posts.push(post);
-      const configuredFailure = [...failuresByText.entries()].find(([fragment]) =>
-        post.text.includes(fragment),
-      )?.[1];
+      const configuredFailure =
+        postFailuresByChannel.get(post.channel) ??
+        [...failuresByText.entries()].find(([fragment]) => post.text.includes(fragment))?.[1];
       if (configuredFailure) {
         const status = configuredFailure.status ?? 200;
         return Response.json(
@@ -253,7 +295,9 @@ function fakeSlack(
     reactionContexts,
     reactionContextHits,
     failuresByText,
+    postFailuresByChannel,
     channelAccessFailures,
+    pauseBeforePost,
   };
 }
 
@@ -2770,10 +2814,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       trigger_id: `shortcut-${crypto.randomUUID()}`,
       team: { id: value.teamId },
       user: { id: value.ownerSlackUserId },
-      channel: { id: "D_HUMAN_TO_HUMAN" },
+      channel: { id: "C_SHORTCUT" },
       message: {
         ts: "1725000000.000001",
-        text: "Explicitly send this human DM message to OpenGeni",
+        text: "Explicitly send this channel message to OpenGeni",
       },
     });
     const shortcut = new URLSearchParams({
@@ -2799,7 +2843,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           visibility: "workspace",
         }),
         expect.objectContaining({
-          route_key: "D_HUMAN_TO_HUMAN:1725000000.000001",
+          route_key: "C_SHORTCUT:1725000000.000001",
           slack_thread_ts: "1725000000.000001",
           visibility: "workspace",
         }),
@@ -2877,6 +2921,698 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       expect(inbox[0]!.count).toBe(0);
     }
   });
+
+  test("human-DM shortcuts stay owner-private and continue in the invoking user's bot DM", async () => {
+    if (!available) return;
+    const sourceDm = "D_HUMAN_TO_HUMAN";
+    const value = await fixture({
+      deniedChannels: [sourceDm],
+      linkOther: true,
+    });
+    const shortcut = async (slackUserId: string, triggerId: string) => {
+      const payload = JSON.stringify({
+        type: "message_action",
+        trigger_id: triggerId,
+        team: { id: value.teamId },
+        user: { id: slackUserId },
+        channel: { id: sourceDm },
+        message: {
+          ts: "1725000000.000001",
+          text: "Explicitly send this human DM message to OpenGeni",
+        },
+      });
+      return await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/interactions",
+          new URLSearchParams({ payload }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+    };
+
+    const ownerTriggerId = `shortcut-owner-${crypto.randomUUID()}`;
+    expect((await shortcut(value.ownerSlackUserId, ownerTriggerId)).status).toBe(200);
+    await drainAll(value.deps);
+
+    const ownerAck = value.slack.posts.at(-1)!;
+    expect(ownerAck).toMatchObject({
+      channel: `D_${value.ownerSlackUserId}`,
+      threadTimestamp: null,
+    });
+    expect(ownerAck.text).toContain("started a private task from the selected DM message");
+    expect(ownerAck.text).toContain("source DM was not opened to the bot");
+    expect(
+      value.slack.calls.some(
+        (call) => call.method === "conversations.info" && call.channel === sourceDm,
+      ),
+    ).toBe(false);
+
+    let routes = await interactions(value.owner.workspaceId);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      route_key: `${ownerAck.channel}:${ownerAck.timestamp}`,
+      slack_thread_ts: ownerAck.timestamp,
+      visibility: "private",
+    });
+
+    // Reclaiming the exact durable event after acknowledgement reuses the same
+    // session and post operation rather than recreating work after a crash.
+    await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'pending',
+          claim_holder_id = null,
+          claim_expires_at = null,
+          retry_at = null,
+          processed_at = null,
+          updated_at = now()
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${`shortcut:${ownerTriggerId}`}`;
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
+    expect(value.slack.posts).toHaveLength(1);
+
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_SHORTCUT_BOT_DM_REPLY_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: ownerAck.channel,
+            ts: "1725000000.000003",
+            thread_ts: ownerAck.timestamp,
+            text: "Continue the private shortcut task",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [ownerMessages] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${routes[0]!.session_id}
+        and type = 'user.message'`;
+    expect(ownerMessages!.count).toBe(2);
+
+    // The same human-to-human DM may contain multiple linked workspace users.
+    // Each explicit invocation receives a distinct private bot-DM route.
+    expect(
+      (await shortcut(value.otherSlackUserId, `shortcut-other-${crypto.randomUUID()}`)).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    routes = await interactions(value.owner.workspaceId);
+    expect(routes).toHaveLength(2);
+    expect(routes.every((route) => route.visibility === "private")).toBe(true);
+    expect(new Set(routes.map((route) => route.session_id)).size).toBe(2);
+    expect(new Set(routes.map((route) => route.route_key)).size).toBe(2);
+    expect(value.slack.posts.at(-1)?.channel).toBe(`D_${value.otherSlackUserId}`);
+
+    const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
+      select
+        (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
+        (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
+    expect(persistence).toEqual({ documents: 0, memories: 0 });
+  });
+
+  test("a reused human-DM shortcut route repairs a later durable session after bind failure", async () => {
+    if (!available) return;
+    const sourceDm = "D_REUSED_HUMAN_TO_HUMAN";
+    const value = await fixture({
+      deniedChannels: [sourceDm],
+      linkOther: true,
+    });
+    const shortcut = async (triggerId: string) => {
+      const payload = JSON.stringify({
+        type: "message_action",
+        trigger_id: triggerId,
+        team: { id: value.teamId },
+        user: { id: value.ownerSlackUserId },
+        channel: { id: sourceDm },
+        message: {
+          ts: "1726000000.000001",
+          text: "Recover this explicitly selected human DM message",
+        },
+      });
+      return await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/interactions",
+          new URLSearchParams({ payload }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+    };
+
+    const firstTriggerId = `shortcut-failed-${crypto.randomUUID()}`;
+    expect((await shortcut(firstTriggerId)).status).toBe(200);
+    const firstFailureSuffix = crypto.randomUUID().replaceAll("-", "");
+    const firstFailureFunction = `og_test_slack_first_session_failure_${firstFailureSuffix}`;
+    const firstFailureTrigger = `og_test_slack_first_session_failure_${firstFailureSuffix}`;
+    await shared!.admin.unsafe(`
+      create function ${firstFailureFunction}() returns trigger language plpgsql as $$
+      begin
+        if new.workspace_id = '${value.owner.workspaceId}'::uuid then
+          raise exception 'fixture first Slack shortcut session failure';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger ${firstFailureTrigger}
+        before insert on sessions
+        for each row execute function ${firstFailureFunction}();
+    `);
+    try {
+      expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    } finally {
+      await shared!.admin.unsafe(`
+        drop trigger if exists ${firstFailureTrigger} on sessions;
+        drop function if exists ${firstFailureFunction}();
+      `);
+    }
+
+    const [failedCreator] = await shared!.admin<
+      {
+        interaction_id: string;
+        session_reservation_id: string;
+        session_id: string | null;
+        triggering_provider_event_id: string;
+        inbox_id: string;
+        inbox_status: string;
+      }[]
+    >`
+      select interaction.id as interaction_id,
+        interaction.session_reservation_id,
+        interaction.session_id,
+        interaction.triggering_provider_event_id,
+        inbox.id as inbox_id,
+        inbox.status as inbox_status
+      from slack_interactions interaction
+      join slack_interaction_inbox inbox
+        on inbox.workspace_id = interaction.workspace_id
+        and inbox.connection_id = interaction.connection_id
+        and inbox.provider_event_id = ${`shortcut:${firstTriggerId}`}
+      where interaction.workspace_id = ${value.owner.workspaceId}`;
+    if (!failedCreator) throw new Error("expected the failed shortcut creator route");
+    const interactionId = failedCreator.interaction_id;
+    const sessionReservationId = failedCreator.session_reservation_id;
+    const firstInboxId = failedCreator.inbox_id;
+    expect(typeof interactionId).toBe("string");
+    expect(typeof sessionReservationId).toBe("string");
+    expect(typeof firstInboxId).toBe("string");
+    expect(failedCreator).toEqual({
+      interaction_id: interactionId,
+      session_reservation_id: sessionReservationId,
+      session_id: null,
+      triggering_provider_event_id: `shortcut:${firstTriggerId}`,
+      inbox_id: firstInboxId,
+      inbox_status: "pending",
+    });
+    expect(value.slack.posts).toHaveLength(0);
+    await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'failed', claim_holder_id = null, claim_expires_at = null,
+        retry_at = null, last_error_code = 'fixture_failed_creator',
+        processed_at = now(), updated_at = now()
+      where id = ${firstInboxId}`;
+
+    const secondTriggerId = `shortcut-success-${crypto.randomUUID()}`;
+    expect((await shortcut(secondTriggerId)).status).toBe(200);
+    const bindFailureSuffix = crypto.randomUUID().replaceAll("-", "");
+    const bindFailureFunction = `og_test_slack_reused_bind_failure_${bindFailureSuffix}`;
+    const bindFailureTrigger = `og_test_slack_reused_bind_failure_${bindFailureSuffix}`;
+    await shared!.admin.unsafe(`
+      create function ${bindFailureFunction}() returns trigger language plpgsql as $$
+      begin
+        if old.workspace_id = '${value.owner.workspaceId}'::uuid
+          and old.session_id is null
+          and new.session_id is not null
+        then
+          raise exception 'fixture reused Slack shortcut bind failure';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger ${bindFailureTrigger}
+        before update on slack_interactions
+        for each row execute function ${bindFailureFunction}();
+    `);
+    try {
+      expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    } finally {
+      await shared!.admin.unsafe(`
+        drop trigger if exists ${bindFailureTrigger} on slack_interactions;
+        drop function if exists ${bindFailureFunction}();
+      `);
+    }
+
+    const [afterBindFailure] = await shared!.admin<
+      {
+        interaction_id: string;
+        session_reservation_id: string;
+        session_id: string | null;
+        triggering_provider_event_id: string;
+        inbox_id: string;
+        inbox_status: string;
+        session_count: number;
+        message_count: number;
+      }[]
+    >`
+      select interaction.id as interaction_id,
+        interaction.session_reservation_id,
+        interaction.session_id,
+        interaction.triggering_provider_event_id,
+        inbox.id as inbox_id,
+        inbox.status as inbox_status,
+        (select count(*)::int from sessions
+          where workspace_id = ${value.owner.workspaceId}) as session_count,
+        (select count(*)::int from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = interaction.session_reservation_id
+            and client_event_id = ${`slack:shortcut:${secondTriggerId}`}
+            and type = 'user.message') as message_count
+      from slack_interactions interaction
+      join slack_interaction_inbox inbox
+        on inbox.workspace_id = interaction.workspace_id
+        and inbox.connection_id = interaction.connection_id
+        and inbox.provider_event_id = ${`shortcut:${secondTriggerId}`}
+      where interaction.id = ${interactionId}`;
+    if (!afterBindFailure) throw new Error("expected the durable unbound shortcut session");
+    const secondInboxId = afterBindFailure.inbox_id;
+    expect(typeof secondInboxId).toBe("string");
+    expect(afterBindFailure).toEqual({
+      interaction_id: interactionId,
+      session_reservation_id: sessionReservationId,
+      session_id: null,
+      triggering_provider_event_id: `shortcut:${firstTriggerId}`,
+      inbox_id: secondInboxId,
+      inbox_status: "pending",
+      session_count: 1,
+      message_count: 1,
+    });
+    expect(value.slack.posts).toHaveLength(0);
+
+    // Model a route stranded by the pre-gate race: a second pump delivered to
+    // the source human DM, classified channel_not_found as permanent, and
+    // closed delivery before the durable shortcut replay could acknowledge and
+    // rekey it. Rekey must repair this exact pre-ack failure atomically.
+    await shared!.admin`
+      update slack_interactions
+      set terminal_delivery_state = 'failed', delivery_attempt_count = 1,
+        delivery_last_error_code = 'channel_not_found', updated_at = now()
+      where id = ${interactionId}`;
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now()
+      where id = ${secondInboxId}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+
+    const [repaired] = await shared!.admin<
+      {
+        session_reservation_id: string;
+        session_id: string | null;
+        triggering_provider_event_id: string;
+        route_key: string;
+        slack_channel_id: string;
+        slack_thread_ts: string;
+        ack_slack_message_ts: string;
+        visibility: string;
+        terminal_delivery_state: string;
+        delivery_attempt_count: number;
+        delivery_last_error_code: string | null;
+        inbox_status: string;
+        session_count: number;
+        message_count: number;
+      }[]
+    >`
+      select interaction.session_reservation_id,
+        interaction.session_id,
+        interaction.triggering_provider_event_id,
+        interaction.route_key,
+        interaction.slack_channel_id,
+        interaction.slack_thread_ts,
+        interaction.ack_slack_message_ts,
+        interaction.visibility,
+        interaction.terminal_delivery_state,
+        interaction.delivery_attempt_count,
+        interaction.delivery_last_error_code,
+        inbox.status as inbox_status,
+        (select count(*)::int from sessions
+          where workspace_id = ${value.owner.workspaceId}) as session_count,
+        (select count(*)::int from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = interaction.session_reservation_id
+            and client_event_id = ${`slack:shortcut:${secondTriggerId}`}
+            and type = 'user.message') as message_count
+      from slack_interactions interaction
+      join slack_interaction_inbox inbox
+        on inbox.workspace_id = interaction.workspace_id
+        and inbox.connection_id = interaction.connection_id
+        and inbox.provider_event_id = ${`shortcut:${secondTriggerId}`}
+      where interaction.id = ${interactionId}`;
+    if (!repaired) throw new Error("expected the repaired private shortcut route");
+    const acknowledgement = value.slack.posts[0]!;
+    expect(acknowledgement).toMatchObject({
+      channel: `D_${value.ownerSlackUserId}`,
+      threadTimestamp: null,
+    });
+    expect(repaired).toMatchObject({
+      session_reservation_id: sessionReservationId,
+      session_id: sessionReservationId,
+      triggering_provider_event_id: `shortcut:${firstTriggerId}`,
+      route_key: `${acknowledgement.channel}:${acknowledgement.timestamp}`,
+      slack_channel_id: acknowledgement.channel,
+      slack_thread_ts: acknowledgement.timestamp,
+      ack_slack_message_ts: acknowledgement.timestamp,
+      visibility: "private",
+      terminal_delivery_state: "open",
+      delivery_attempt_count: 0,
+      delivery_last_error_code: null,
+      inbox_status: "processed",
+      session_count: 1,
+      message_count: 1,
+    });
+    expect(value.slack.posts).toHaveLength(1);
+    expect(
+      value.slack.calls.some(
+        (call) => call.method === "conversations.info" && call.channel === sourceDm,
+      ),
+    ).toBe(false);
+
+    await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'pending', claim_holder_id = null, claim_expires_at = null,
+        retry_at = now(), last_error_code = 'forced_retry', processed_at = null,
+        updated_at = now()
+      where id = ${secondInboxId}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(value.slack.posts).toHaveLength(1);
+    const [afterReplay] = await shared!.admin<{ sessions: number; messages: number }[]>`
+      select
+        (select count(*)::int from sessions
+          where workspace_id = ${value.owner.workspaceId}) as sessions,
+        (select count(*)::int from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = ${sessionReservationId}
+            and type = 'user.message') as messages`;
+    expect(afterReplay).toEqual({ sessions: 1, messages: 1 });
+
+    expect(
+      await getSessionForSubject(
+        client.db,
+        value.owner.workspaceId,
+        sessionReservationId,
+        value.owner.subjectId,
+      ),
+    ).not.toBeNull();
+    expect(
+      await getSessionForSubject(
+        client.db,
+        value.owner.workspaceId,
+        sessionReservationId,
+        value.otherSubjectId,
+      ),
+    ).toBeNull();
+
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_REUSED_SHORTCUT_REPLY_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: acknowledgement.channel,
+            ts: "1726000000.000003",
+            thread_ts: acknowledgement.timestamp,
+            text: "Continue only in the private bot-DM route",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [afterContinuation] = await shared!.admin<{ messages: number }[]>`
+      select count(*)::int as messages
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${sessionReservationId}
+        and type = 'user.message'`;
+    expect(afterContinuation).toEqual({ messages: 2 });
+  }, 60_000);
+
+  test("private human-DM shortcut delivery waits for durable bot-DM rekey", async () => {
+    if (!available) return;
+    const [databasePosture] = await shared!.admin<
+      {
+        server_version_num: number;
+        vector_version: string | null;
+        app_is_superuser: boolean;
+        interactions_force_rls: boolean;
+      }[]
+    >`
+      select current_setting('server_version_num')::int as server_version_num,
+        (select extversion from pg_extension where extname = 'vector') as vector_version,
+        (select rolsuper from pg_roles where rolname = 'opengeni_app') as app_is_superuser,
+        (select relrowsecurity and relforcerowsecurity
+          from pg_class
+          where oid = 'slack_interactions'::regclass) as interactions_force_rls`;
+    expect(databasePosture!.server_version_num).toBeGreaterThanOrEqual(160000);
+    expect(databasePosture!.vector_version).not.toBeNull();
+    expect(databasePosture!.app_is_superuser).toBe(false);
+    expect(databasePosture!.interactions_force_rls).toBe(true);
+
+    const sourceDm = "D_BOUND_BEFORE_REKEY_SOURCE";
+    const value = await fixture({
+      deniedChannels: [sourceDm],
+      linkOther: true,
+    });
+    value.slack.postFailuresByChannel.set(sourceDm, { error: "channel_not_found" });
+    const acknowledgementPause = value.slack.pauseBeforePost(
+      "started a private task from the selected DM message",
+    );
+    const triggerId = `shortcut-bound-before-rekey-${crypto.randomUUID()}`;
+    const payload = JSON.stringify({
+      type: "message_action",
+      trigger_id: triggerId,
+      team: { id: value.teamId },
+      user: { id: value.ownerSlackUserId },
+      channel: { id: sourceDm },
+      message: {
+        ts: "1727000000.000001",
+        text: "Keep delivery private while the bot-DM route is not durable",
+      },
+    });
+    expect(
+      (
+        await value.app.request(
+          signedRequest(
+            "/v1/integrations/slack/interactions",
+            new URLSearchParams({ payload }).toString(),
+            "application/x-www-form-urlencoded",
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const firstPump = drainSlackInteractionsOnce(value.deps);
+    let acknowledgementReleased = false;
+    const releaseAcknowledgement = () => {
+      if (acknowledgementReleased) return;
+      acknowledgementReleased = true;
+      acknowledgementPause.release();
+    };
+    try {
+      await acknowledgementPause.entered;
+      const [boundBeforeRekey] = await shared!.admin<
+        {
+          id: string;
+          session_id: string;
+          route_key: string;
+          slack_channel_id: string;
+          slack_thread_ts: string;
+          ack_slack_message_ts: string | null;
+          terminal_delivery_state: string;
+          delivery_attempt_count: number;
+          delivery_last_error_code: string | null;
+        }[]
+      >`
+      select id, session_id, route_key, slack_channel_id, slack_thread_ts,
+        ack_slack_message_ts, terminal_delivery_state, delivery_attempt_count,
+        delivery_last_error_code
+      from slack_interactions
+      where workspace_id = ${value.owner.workspaceId}`;
+      if (!boundBeforeRekey) throw new Error("expected the bound pre-rekey shortcut route");
+      const interactionId = boundBeforeRekey.id;
+      const sessionId = boundBeforeRekey.session_id;
+      expect(typeof interactionId).toBe("string");
+      expect(typeof sessionId).toBe("string");
+      expect(boundBeforeRekey).toEqual({
+        id: interactionId,
+        session_id: sessionId,
+        route_key: `${sourceDm}:1727000000.000001:shortcut-user:${value.ownerSlackUserId}`,
+        slack_channel_id: sourceDm,
+        slack_thread_ts: "1727000000.000001",
+        ack_slack_message_ts: null,
+        terminal_delivery_state: "open",
+        delivery_attempt_count: 0,
+        delivery_last_error_code: null,
+      });
+      await appendSessionEvents(client.db, value.owner.workspaceId, sessionId, [
+        { type: "turn.completed", payload: { output: "Private rekeyed result" } },
+      ]);
+
+      const replicaDeps = {
+        ...value.deps,
+        bus: new MemoryEventBus(),
+      } as ApiRouteDeps;
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(false);
+      expect(
+        value.slack.calls.filter(
+          (call) => call.method === "chat.postMessage" && call.channel === sourceDm,
+        ),
+      ).toHaveLength(0);
+      const [beforeAcknowledgement] = await shared!.admin<
+        {
+          source_post_operations: number;
+          terminal_delivery_state: string;
+          delivery_attempt_count: number;
+          delivery_last_error_code: string | null;
+        }[]
+      >`
+      select
+        (select count(*)::int from slack_bot_post_operations
+          where workspace_id = ${value.owner.workspaceId}
+            and target_kind = 'channel'
+            and target_id = ${sourceDm}) as source_post_operations,
+        terminal_delivery_state,
+        delivery_attempt_count,
+        delivery_last_error_code
+      from slack_interactions
+      where id = ${interactionId}`;
+      expect(beforeAcknowledgement).toEqual({
+        source_post_operations: 0,
+        terminal_delivery_state: "open",
+        delivery_attempt_count: 0,
+        delivery_last_error_code: null,
+      });
+      expect(value.slack.posts).toHaveLength(0);
+
+      releaseAcknowledgement();
+      expect(await firstPump).toBe(true);
+      expect(value.slack.posts).toHaveLength(1);
+      const acknowledgement = value.slack.posts[0]!;
+      expect(acknowledgement).toMatchObject({
+        channel: `D_${value.ownerSlackUserId}`,
+        threadTimestamp: null,
+      });
+      const [rekeyed] = await shared!.admin<
+        {
+          route_key: string;
+          slack_channel_id: string;
+          slack_thread_ts: string;
+          ack_slack_message_ts: string;
+          terminal_delivery_state: string;
+          delivery_attempt_count: number;
+          delivery_last_error_code: string | null;
+        }[]
+      >`
+      select route_key, slack_channel_id, slack_thread_ts, ack_slack_message_ts,
+        terminal_delivery_state, delivery_attempt_count, delivery_last_error_code
+      from slack_interactions
+      where id = ${interactionId}`;
+      expect(rekeyed).toEqual({
+        route_key: `${acknowledgement.channel}:${acknowledgement.timestamp}`,
+        slack_channel_id: acknowledgement.channel,
+        slack_thread_ts: acknowledgement.timestamp,
+        ack_slack_message_ts: acknowledgement.timestamp,
+        terminal_delivery_state: "open",
+        delivery_attempt_count: 0,
+        delivery_last_error_code: null,
+      });
+
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(true);
+      expect(value.slack.posts).toHaveLength(2);
+      const resultPost = value.slack.posts[1]!;
+      expect(resultPost.channel).toBe(acknowledgement.channel);
+      expect(resultPost.threadTimestamp).toBe(acknowledgement.timestamp);
+      expect(resultPost.text).toContain("Private rekeyed result");
+      expect(
+        value.slack.calls.filter(
+          (call) => call.method === "chat.postMessage" && call.channel === sourceDm,
+        ),
+      ).toHaveLength(0);
+      expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+        terminal_delivery_state: "completed",
+      });
+
+      await shared!.admin`
+      update slack_interactions
+      set terminal_delivery_state = 'open',
+        last_delivered_session_event_sequence = 0,
+        delivery_claim_holder_id = null,
+        delivery_claim_expires_at = null,
+        updated_at = now()
+      where id = ${interactionId}`;
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(true);
+      expect(value.slack.posts).toHaveLength(2);
+
+      await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'pending', claim_holder_id = null, claim_expires_at = null,
+        retry_at = now(), processed_at = null, updated_at = now()
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${`shortcut:${triggerId}`}`;
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(true);
+      expect(value.slack.posts).toHaveLength(2);
+      expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+        terminal_delivery_state: "completed",
+      });
+
+      expect(
+        await getSessionForSubject(
+          client.db,
+          value.owner.workspaceId,
+          sessionId,
+          value.owner.subjectId,
+        ),
+      ).not.toBeNull();
+      expect(
+        await getSessionForSubject(
+          client.db,
+          value.owner.workspaceId,
+          sessionId,
+          value.otherSubjectId,
+        ),
+      ).toBeNull();
+      expect(
+        (
+          await postEvent(value.app, {
+            teamId: value.teamId,
+            eventId: `E_BOUND_BEFORE_REKEY_REPLY_${crypto.randomUUID()}`,
+            event: {
+              type: "message",
+              user: value.ownerSlackUserId,
+              channel: acknowledgement.channel,
+              ts: "1727000000.000003",
+              thread_ts: acknowledgement.timestamp,
+              text: "Continue through the owner-only bot-DM route",
+            },
+          })
+        ).status,
+      ).toBe(200);
+      await drainAll(replicaDeps);
+      const [continuation] = await shared!.admin<{ messages: number }[]>`
+      select count(*)::int as messages
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${sessionId}
+        and type = 'user.message'`;
+      expect(continuation).toEqual({ messages: 2 });
+    } finally {
+      releaseAcknowledgement();
+      await firstPump.catch(() => undefined);
+    }
+  }, 60_000);
 
   test("unmapped identities receive a link affordance, denied channels fail closed, and bot loops create nothing", async () => {
     if (!available) return;

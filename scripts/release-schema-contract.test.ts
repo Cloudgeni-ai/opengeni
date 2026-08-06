@@ -195,13 +195,19 @@ describe("release schema contract", () => {
         (migrations.has("0176_lossless_canonical_json.sql") ? 1 : 0) +
         (migrations.has("0177_session_events_workspace_turn_type_index.sql") ? 1 : 0) +
         (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0) +
-        (migrations.has("0179_retained_screenshot_lifecycle_fences.sql") ? 1 : 0),
+        (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0) +
+        (migrations.has("0180_retained_screenshot_lifecycle_fences.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "cef4a0d93fb0c4b1922fd7dc75115e5c5e63cf7e154bb011167662de8a1656bb",
+      "b9793bcf0c3ec1d79c038725a3ab0080294735b5807dbe5340fbca747e4334de",
     );
-    expect(contract.latestMigration).toBe("0179_retained_screenshot_lifecycle_fences.sql");
-    expect(migrations.get("0179_retained_screenshot_lifecycle_fences.sql")).toMatchObject({
+    expect(contract.latestMigration).toBe("0180_retained_screenshot_lifecycle_fences.sql");
+    expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({
+      sha256: "184bd3bb0360d63abc72e09ad5461646679320c61c0a24a5e67cc3af5a7d008a",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0179_slack_private_shortcut_delivery_gate.sql")).toMatchObject({
+      sha256: "eabb9498659f0fe7a9aa080568f4a6963bc4e51bb9b7df897c0a9f7060671824",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0178_permissioned_secret_reads.sql")).toMatchObject({
