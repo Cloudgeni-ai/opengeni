@@ -540,7 +540,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "tool.auth_needed":
       case "credential.auth_needed": {
-        if (event.type === "tool.auth_needed" && !stringValue(payload.toolName)) {
+        if (
+          event.type === "tool.auth_needed" &&
+          !stringValue(payload.toolName) &&
+          stringValue(payload.serverId) !== "codex_apps"
+        ) {
           // Historical optional-MCP initialize/tools-list credential misses are
           // setup availability, not evidence of a concrete conversational tool
           // call. Keep the raw event in Debug/audit but do not manufacture an
@@ -557,6 +561,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "auth-needed",
           id: event.id,
           turnId,
+          serverId: typeof payload.serverId === "string" ? payload.serverId : null,
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           reason: authNeededReason(payload.reason),

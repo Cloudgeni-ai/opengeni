@@ -190,4 +190,14 @@ describe("Slack auth prompt gating", () => {
       ),
     ).toBe(true);
   });
+
+  test("keeps Codex Apps provider failures actionable even without a tool name", () => {
+    expect(
+      shouldPublishToolAuthNeededForTurn(
+        { providerDomain: "chatgpt.com", toolName: null },
+        { type: "system.update.delivered", payload: {} },
+        serviceTurn,
+      ),
+    ).toBe(true);
+  });
 });

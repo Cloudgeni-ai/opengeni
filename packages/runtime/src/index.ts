@@ -3265,12 +3265,9 @@ export async function prepareAgentTools(
       // a best-effort server whose tools/list throws (e.g. an expired connection
       // credential surfacing as a StreamableHTTP "authentication required" 401)
       // degrades to zero tools rather than throwing out of the SDK's run-time
-      // getAllMcpTools and failing an unrelated turn. Setup-time auth misses
-      // for an optional server are availability state, not evidence that the
-      // user asked to use that integration, so they do not publish a
-      // conversational tool.auth_needed event. A concrete tools/call auth
-      // failure still publishes the actionable event before returning the MCP
-      // auth-needed tool result.
+      // getAllMcpTools and failing an unrelated turn. Codex Apps setup-time
+      // auth misses are still published as actionable state because the
+      // workspace catalog explicitly told the user that the surface existed.
       const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
       const server = new PrefixedMcpServer(
         new MCPServerStreamableHttp({
@@ -4310,25 +4307,55 @@ function codexAppsAuthFetch(
   options: PrepareToolsOptions,
 ): FetchLike {
   return async (input, init) => {
+    const request = await mcpRequestReplayInfo(input, init);
     const auth = options.codexAppsAuth;
     if (!auth) {
+      await publishCodexAppsAuthNeeded(options, request, "missing_connection");
       throw new Error("Codex Apps has no explicit workspace designation");
     }
-    return await auth.withAuthorization(async (token) => {
-      const headers: Record<string, string> = {
-        authorization: `Bearer ${token.accessToken}`,
-        originator: CODEX_ORIGINATOR,
-        "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
-        version: auth.clientVersion,
-      };
-      if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
-      if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
-      return await baseFetch(
-        fetchInputForAttempt(input),
-        withConnectionHeaders(input, init, headers),
-      );
-    });
+    try {
+      return await auth.withAuthorization(async (token) => {
+        const headers: Record<string, string> = {
+          authorization: `Bearer ${token.accessToken}`,
+          originator: CODEX_ORIGINATOR,
+          "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
+          version: auth.clientVersion,
+        };
+        if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
+        if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
+        const response = await baseFetch(
+          fetchInputForAttempt(input),
+          withConnectionHeaders(input, init, headers),
+        );
+        if (response.status === 401 || response.status === 403) {
+          await publishCodexAppsAuthNeeded(
+            options,
+            request,
+            response.status === 403 ? "insufficient_scope" : "expired",
+          );
+        }
+        return response;
+      });
+    } catch (error) {
+      await publishCodexAppsAuthNeeded(options, request, "refresh_failed");
+      throw error;
+    }
   };
+}
+
+async function publishCodexAppsAuthNeeded(
+  options: PrepareToolsOptions,
+  request: McpRequestReplayInfo,
+  reason: ToolAuthNeededPayload["reason"],
+): Promise<void> {
+  await publishAuthNeeded(options, {
+    serverId: CODEX_APPS_MCP_SERVER_ID,
+    toolName: request.toolName ?? null,
+    providerDomain: new URL(CODEX_APPS_MCP_URL).hostname,
+    provider: "codex_apps",
+    reason,
+    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+  });
 }
 
 // The first-party MCP permission set signed into a worker's delegated token

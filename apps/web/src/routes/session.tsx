@@ -269,6 +269,14 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
+      if (item.serverId === "codex_apps") {
+        // Codex Apps is authorized by the designated workspace subscription,
+        // not by the generic connection broker. Send the user to the existing
+        // Codex subscription control instead of starting a meaningless OAuth
+        // flow for chatgpt.com.
+        window.location.assign(`/workspaces/${encodeURIComponent(workspaceId)}/settings`);
+        return;
+      }
       const connections = await context.client
         .listConnections(workspaceId)
         .catch(() => [] as ConnectionMetadata[]);

@@ -67,6 +67,23 @@ describe("context compaction rendering", () => {
 });
 
 describe("provider MCP unavailable rendering", () => {
+  test("labels Codex Apps auth failures as Codex Apps rather than ChatGPT domain text", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "refresh_failed",
+        })}
+        onReconnect={() => undefined}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Reconnect Codex Apps");
+    expect(r.container.textContent).not.toContain("Reconnect Chatgpt");
+    await r.unmount();
+  });
+
   test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
     let reconnects = 0;
     const r = await renderComponent(
@@ -429,6 +446,7 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
     kind: "auth-needed",
     id: "auth-1",
     turnId: "turn-1",
+    serverId: null,
     providerDomain: "linear.app",
     connectionId: null,
     reason: "missing_connection",

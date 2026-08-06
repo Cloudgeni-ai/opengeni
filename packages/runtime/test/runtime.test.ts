@@ -5093,15 +5093,57 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
+    const authNeeded: ToolAuthNeededPayload[] = [];
     // Inference authentication is deliberately not consulted as a fallback.
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
-      { mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+      {
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "missing_connection",
+          toolName: null,
+        }),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: provider 401 publishes an actionable expired-auth signal", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer provider-rejected" },
+    });
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "expired",
+          toolName: null,
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
@@ -5137,17 +5179,27 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
+    const authNeeded: ToolAuthNeededPayload[] = [];
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
       {
         codexAppsAuth: makeCodexAppsAuth({ tokenError: new Error("needs_relogin") }),
         mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
       },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "refresh_failed",
+          toolName: null,
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
