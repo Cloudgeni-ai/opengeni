@@ -3446,8 +3446,10 @@ describe("useEnvironments", () => {
     expect(hook.result.current.environments.map((environment) => environment.name)).toEqual([
       "staging",
     ]);
-    const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
-    expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
+    await flushing(async () => {
+      const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
+      expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
+    });
     // Plaintext is returned directly to the caller and never triggers a
     // metadata-cache refresh that could retain it.
     expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");

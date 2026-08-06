@@ -84,7 +84,7 @@ describe("startSocialOAuth", () => {
     expect(payload.returnPath).toBe("/social?tab=x");
     expect(typeof payload.nonce).toBe("string");
     // The PKCE verifier must never travel in cleartext state.
-    expect(String(payload.encryptedPkceVerifier)).toStartWith("v1:");
+    expect(String(payload.encryptedPkceVerifier)).toStartWith("v2:");
   });
 
   test("caller-provided scopes replace defaults", async () => {

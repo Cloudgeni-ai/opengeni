@@ -61,7 +61,7 @@ describe("permissioned variable-set plaintext reads", () => {
     const { grant, subjectId } = await fixture("roundtrip");
     const exact =
       `ordinary source: const tokenized = "ghp_not_a_credential";\n` +
-      `shell: printf '%s\\n' \"$VALUE\"\n` +
+      `shell: printf '%s\\n' "$VALUE"\n` +
       `unicode:${String.fromCharCode(0)}:${String.fromCharCode(0xd800)}:${String.fromCharCode(0xdc00)}`;
     const variableSet = await createVariableSet(client.db, {
       accountId: grant.accountId,

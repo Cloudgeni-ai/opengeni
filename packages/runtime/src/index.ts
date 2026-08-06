@@ -2132,7 +2132,9 @@ function composedPersistentAgentInstructions(
             appendGitCredentialBindingInstructions(
               appendToolspaceInstructions(
                 personaAndCore,
-                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+                settings.toolspaceEnabled &&
+                  options.activeSandboxBackend !== "selfhosted" &&
+                  Boolean(options.toolspaceTokenSeed),
               ),
               options.gitCredentialBindings,
               options.activeSandboxBackend,
@@ -2163,7 +2165,9 @@ function composedPersistentAgentInstructions(
           ),
           options.persistentSessionSettings,
         ),
-        settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+        settings.toolspaceEnabled &&
+          options.activeSandboxBackend !== "selfhosted" &&
+          Boolean(options.toolspaceTokenSeed),
       ),
       options.gitCredentialBindings,
       options.activeSandboxBackend,
@@ -2178,14 +2182,11 @@ function composedPersistentAgentInstructions(
  * substrate prompting — the same text for every host, never per-host copy.
  *
  * Included ONLY when `toolspaceAvailable` is true, which the caller sets from the
- * exact condition that gates the sandbox token mint: the toolspace feature is
- * enabled AND a toolspace token was minted for THIS turn. That mint now happens
- * on every backend including selfhosted (connected machines get the token too),
- * so the block appears there as well; a turn with no minted token (feature off)
- * has no toolspace URL/token in its sandbox and must not advertise a capability
- * that is not there — the gate is false and this is a no-op. Placed BEFORE the
- * per-session instructions so host/session specificity still wins over this
- * substrate note.
+ * exact condition that gates the managed-sandbox token mint: the feature is
+ * enabled, the effective backend is not selfhosted, and a token was minted for
+ * this turn. A turn with no minted token has no Toolspace URL/token and must not
+ * advertise a capability that is not there. Placed before the per-session
+ * instructions so host/session specificity still wins over this substrate note.
  */
 export function appendToolspaceInstructions(composed: string, toolspaceAvailable: boolean): string {
   return toolspaceAvailable ? `${composed} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}` : composed;
@@ -2384,9 +2385,7 @@ export function buildOpenGeniAgent(
     //   1. workspace instructionsTemplate (or deployment default) with the
     //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
     //   2. + the generic programmatic-tool-calling (toolspace) directive, ONLY
-    //      when a toolspace token was minted for this turn (feature enabled + a
-    //      per-turn seed — the mint gate, which includes selfhosted turns since
-    //      they now receive the token too) — appendToolspaceInstructions,
+    //      when a toolspace token was minted for this managed-sandbox turn,
     //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
     //   4. + workspace memory working set, ONLY when the workspace setting is on
@@ -2531,7 +2530,7 @@ export function buildOpenGeniAgent(
   if (options.gitCredentialBindings && options.gitCredentialBindings.length > 0) {
     agentGitCredentialBindings.set(agent, options.gitCredentialBindings);
   }
-  if (options.toolspaceTokenSeed) {
+  if (options.toolspaceTokenSeed && options.activeSandboxBackend !== "selfhosted") {
     agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
     agentToolspaceTokenSessionId.set(agent, options.toolspaceTokenSessionId!);
   }
@@ -3904,6 +3903,7 @@ function inspectMcpTransportError(
   complete: boolean;
   hasConnectivityCode: boolean;
   hasConnectivityMarker: boolean;
+  hasTypedError: boolean;
   hasRequestTimeout: boolean;
   statuses: number[];
 } {
@@ -3911,6 +3911,7 @@ function inspectMcpTransportError(
   const statuses: number[] = [];
   let hasConnectivityCode = false;
   let hasConnectivityMarker = false;
+  let hasTypedError = false;
   let hasRequestTimeout = false;
   let inspectedNodes = 0;
   let complete = true;
@@ -3932,6 +3933,12 @@ function inspectMcpTransportError(
       code = record.code;
       failureKind = record.mcpTransportFailureKind;
       message = record.message;
+      if (
+        current.value instanceof Error &&
+        Object.getPrototypeOf(current.value) !== Error.prototype
+      ) {
+        hasTypedError = true;
+      }
     } catch {
       complete = false;
       continue;
@@ -3983,6 +3990,7 @@ function inspectMcpTransportError(
     complete,
     hasConnectivityCode,
     hasConnectivityMarker,
+    hasTypedError,
     hasRequestTimeout,
     statuses,
   };
@@ -4036,7 +4044,12 @@ function isRawMcpTransportConnectivityError(
   } catch {
     // A hostile proxy is not a rollout-safe plain transport Error.
   }
-  return options.recoverySafeSetup === true && inspection.statuses.length === 0 && isPlainError;
+  return (
+    options.recoverySafeSetup === true &&
+    inspection.statuses.length === 0 &&
+    !inspection.hasTypedError &&
+    isPlainError
+  );
 }
 
 /**
@@ -5973,7 +5986,7 @@ export async function pinProvidedSessionManifestEnvironment(
  * refactor for the eager path: same order, same gates, same idempotency
  * (clone skips a materialized tree, token seed overwrites — the desired per-turn
  * refresh, az login is idempotent). The connected-machine (selfhosted) branch
- * keeps platform setup OFF the user's real box and seeds ONLY the toolspace token.
+ * runs no platform setup against the user's real machine.
  *
  * `gitTokenSeedsOverride` lets the lazy provisioner pass its own freshly-minted
  * run-scoped provider tokens (minted at establish time, not turn start);
@@ -6057,17 +6070,6 @@ export async function runOwnedSandboxSetup(
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
     await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
-  } else {
-    // SELFHOSTED TOOLSPACE (parity): platform setup hooks stay OFF the user's
-    // real machine. The toolspace token is one narrowly-scoped per-turn input
-    // that must reach it (a scoped,
-    // own-session-bound token written to $OPENGENI_TOOLSPACE_TOKEN_FILE over the
-    // same off-manifest exec channel the clone-seed uses; the machine's only path
-    // to programmatic tool calling). Seed it (only) here.
-    const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
-    if (toolspaceHooks.length > 0) {
-      await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
-    }
   }
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is

@@ -1,5 +1,16 @@
 # @opengeni/observability
 
+## 0.5.2
+
+### Patch Changes
+
+- 78a1577: Separate expected sandbox path misses from actual provider-operation failures in metrics and alerts.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/contracts@0.39.2
+
 ## 0.5.1
 
 ### Patch Changes

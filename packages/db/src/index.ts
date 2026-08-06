@@ -27714,6 +27714,46 @@ export async function releaseLeaseHolder(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        // A direct request reaches this release seam only after its provider
+        // operation has resolved, rejected, or been physically quiesced by the
+        // Channel-A cancellation fence. If the ordinary settlement callback
+        // failed after that physical boundary (for example, its worker was
+        // interrupted during a rollout), leaving a null-outcome admission here
+        // would block archive capture forever after the request holder leaves.
+        //
+        // Lock admission -> lease, the same suffix used by mutation settlement
+        // and retained-process promotion. Taking the lease first recreates the
+        // admission/lease deadlock this fallback exists to recover. A promoted
+        // process has provider_outcome='retained' and is deliberately untouched;
+        // its non-TTL process holder remains the only settlement authority.
+        if (input.kind === "direct") {
+          await tx.execute(sql`
+            select id
+            from sandbox_workspace_mutation_admissions
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and sandbox_group_id = ${input.sandboxGroupId}
+              and actor_kind = 'direct'
+              and holder_kind = 'direct'
+              and holder_id = ${input.holderId}
+              and provider_outcome is null
+              and settled_at is null
+            order by id
+            for update
+          `);
+          await tx.execute(sql`
+            update sandbox_workspace_mutation_admissions
+            set provider_outcome = 'rejected', settled_at = now()
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and sandbox_group_id = ${input.sandboxGroupId}
+              and actor_kind = 'direct'
+              and holder_kind = 'direct'
+              and holder_id = ${input.holderId}
+              and provider_outcome is null
+              and settled_at is null
+          `);
+        }
         const rows = await tx.execute<LeaseRow>(sql`
         select * from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
@@ -39357,7 +39397,10 @@ export type SessionAttemptInterruptionSettlement = {
  * exact turn -> exact attempt lock order and require the durable interruption.
  * Temporal activity cancellation/terminalization is transport state only. The
  * workflow admits a replacement from this durable receipt, never from the
- * activity promise.
+ * activity promise. The same boundary also applies when the activity itself
+ * durably requested same-turn recovery (for example during a worker rollout):
+ * that recovery event is the logical settlement cause in place of a
+ * Pause/Steer interruption row.
  */
 export async function markSessionAttemptQuiesced(
   db: Database,
@@ -39453,23 +39496,48 @@ export async function markSessionAttemptQuiesced(
           .orderBy(asc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1)
       : [];
-    if (!interruption) {
+    const [recoveryRequest] =
+      attempt && !interruption
+        ? await scopedDb
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.accountId, attempt.accountId),
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.turnId, attempt.turnId),
+                eq(schema.sessionEvents.turnAttemptId, input.attemptId),
+                eq(schema.sessionEvents.type, "turn.recovery.requested"),
+              ),
+            )
+            .limit(1)
+        : [];
+    const recoveryQuiescence =
+      !interruption &&
+      recoveryRequest !== undefined &&
+      attempt.state === "closed" &&
+      attempt.outcome === "interrupted_recoverable";
+    if (!interruption && !recoveryQuiescence) {
       if (input.allowUninterrupted) return [];
       throw new SessionControlInvariantError(
-        `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption`,
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption or recovery request`,
       );
     }
     const liveQuiescence =
+      interruption !== undefined &&
       (attempt.state === "claimed" || attempt.state === "running") &&
       (interruption.state === "pending" ||
         interruption.state === "delivered" ||
         interruption.state === "acknowledged");
     const settledQuiescence =
-      attempt.state === "closed" &&
-      (interruption.state === "settled" || interruption.state === "rejected_stale");
+      recoveryQuiescence ||
+      (interruption !== undefined &&
+        attempt.state === "closed" &&
+        (interruption.state === "settled" || interruption.state === "rejected_stale"));
     if (!liveQuiescence && !settledQuiescence) {
       throw new SessionControlInvariantError(
-        `Attempt ${input.attemptId} cannot acknowledge quiescence from ${attempt.state}/${interruption.state}`,
+        `Attempt ${input.attemptId} cannot acknowledge quiescence from ${attempt.state}/${interruption?.state ?? "recovery"}`,
       );
     }
 
@@ -39760,17 +39828,20 @@ export async function reconcileSessionAttemptQuiescence(
       const rows = await scopedDb.execute<{
         account_id: string;
         state: string;
+        outcome: string | null;
         quiesced_at: Date | string | null;
         temporal_workflow_id: string;
         temporal_workflow_run_id: string;
         temporal_activity_id: string;
         interruption_settled: boolean;
         interruption_pending: boolean;
+        recovery_requested: boolean;
         writer_pending: boolean;
       }>(sql`
         select
           attempt.account_id,
           attempt.state,
+          attempt.outcome,
           attempt.quiesced_at,
           attempt.temporal_workflow_id,
           attempt.temporal_workflow_run_id,
@@ -39791,6 +39862,16 @@ export async function reconcileSessionAttemptQuiescence(
               and interruption.attempt_id = attempt.id
               and interruption.state in ('pending', 'delivered', 'acknowledged')
           ) as interruption_pending,
+          exists (
+            select 1
+            from session_events event
+            where event.account_id = attempt.account_id
+              and event.workspace_id = attempt.workspace_id
+              and event.session_id = attempt.session_id
+              and event.turn_id = attempt.turn_id
+              and event.turn_attempt_id = attempt.id
+              and event.type = 'turn.recovery.requested'
+          ) as recovery_requested,
           (
             exists (
               select 1
@@ -39842,7 +39923,8 @@ export async function reconcileSessionAttemptQuiescence(
     eligibility.temporal_workflow_run_id !== input.temporalWorkflowRunId ||
     eligibility.temporal_activity_id !== input.temporalActivityId ||
     eligibility.state !== "closed" ||
-    !eligibility.interruption_settled ||
+    (!eligibility.interruption_settled &&
+      (!eligibility.recovery_requested || eligibility.outcome !== "interrupted_recoverable")) ||
     eligibility.interruption_pending
   ) {
     return { action: "stale", events: [] };
@@ -40241,11 +40323,15 @@ export type SessionWorkPeek =
   | { kind: "idle" };
 
 /**
- * Return the oldest exact attempt whose logical interruption settled but whose
- * physical quiescence receipt is still missing. This deliberately searches all
- * attempts: a provider-recovery race can create a newer generation before the
- * predecessor receipt is reconciled, and looking only at the newest attempt
- * would strand the replacement forever.
+ * Return an exact attempt whose logical interruption or same-turn recovery
+ * request settled but whose physical quiescence receipt is still missing.
+ * Durable Pause/Steer interruptions deliberately search all predecessors: a
+ * recovery race can create a newer generation before their receipt arrives.
+ * A recovery-only row blocks admission only while it is the session's newest
+ * attempt. A later admitted attempt is durable proof that pre-fix code already
+ * crossed that recovery boundary; replaying every historical recovery receipt
+ * on the user's next prompt would add unbounded critical-path work. Historical
+ * rows remain available for the bounded operator cleanup.
  */
 async function nextSessionAttemptAwaitingQuiescence(
   db: Database,
@@ -40259,27 +40345,52 @@ async function nextSessionAttemptAwaitingQuiescence(
       attemptId: schema.sessionTurnAttempts.id,
     })
     .from(schema.sessionTurnAttempts)
-    .innerJoin(
-      schema.sessionAttemptInterruptions,
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
-        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
-        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
-      ),
-    )
     .where(
       and(
         eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
         eq(schema.sessionTurnAttempts.sessionId, sessionId),
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
-        inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+        sql`(
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+              and interruption.session_id = ${schema.sessionTurnAttempts.sessionId}
+              and interruption.attempt_id = ${schema.sessionTurnAttempts.id}
+              and interruption.state in ('settled', 'rejected_stale')
+          )
+          or (
+            ${schema.sessionTurnAttempts.outcome} = 'interrupted_recoverable'
+            and not exists (
+              select 1
+              from session_turn_attempts successor
+              where successor.account_id = ${schema.sessionTurnAttempts.accountId}
+                and successor.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+                and successor.session_id = ${schema.sessionTurnAttempts.sessionId}
+                and (
+                  successor.started_at > ${schema.sessionTurnAttempts.startedAt}
+                  or (
+                    successor.started_at = ${schema.sessionTurnAttempts.startedAt}
+                    and successor.id > ${schema.sessionTurnAttempts.id}
+                  )
+                )
+            )
+            and exists (
+              select 1
+              from session_events event
+              where event.account_id = ${schema.sessionTurnAttempts.accountId}
+                and event.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+                and event.session_id = ${schema.sessionTurnAttempts.sessionId}
+                and event.turn_id = ${schema.sessionTurnAttempts.turnId}
+                and event.turn_attempt_id = ${schema.sessionTurnAttempts.id}
+                and event.type = 'turn.recovery.requested'
+            )
+          )
+        )`,
       ),
     )
-    .orderBy(
-      asc(schema.sessionAttemptInterruptions.requestedAt),
-      asc(schema.sessionAttemptInterruptions.id),
-    )
+    .orderBy(asc(schema.sessionTurnAttempts.closedAt), asc(schema.sessionTurnAttempts.id))
     .limit(1);
   return row ?? null;
 }

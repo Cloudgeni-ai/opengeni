@@ -1,5 +1,33 @@
 # @opengeni/core
 
+## 0.21.4
+
+### Patch Changes
+
+- 7dbd057: Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- c3876d4: Preserve sliding managed-session renewal cookies on protected API responses so active browser sessions do not expire at their original sign-in boundary.
+- 23de73b: Add explicitly permissioned, audited plaintext reads for encrypted workspace variable-set values across REST, SDK, React, MCP, and UI surfaces.
+- Updated dependencies [1fbb6e7]
+- Updated dependencies [7dbd057]
+- Updated dependencies [78a1577]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+- Updated dependencies [1503151]
+- Updated dependencies [0b23696]
+- Updated dependencies [4c7b956]
+- Updated dependencies [42c04ce]
+- Updated dependencies [a296081]
+  - @opengeni/runtime@0.18.19
+  - @opengeni/contracts@0.39.2
+  - @opengeni/observability@0.5.2
+  - @opengeni/codex@0.2.12
+  - @opengeni/db@0.28.3
+  - @opengeni/events@0.3.82
+  - @opengeni/config@0.11.2
+  - @opengeni/documents@0.5.12
+  - @opengeni/storage@0.2.70
+
 ## 0.21.3
 
 ### Patch Changes

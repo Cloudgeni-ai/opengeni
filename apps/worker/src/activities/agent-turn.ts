@@ -2378,6 +2378,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       acknowledgeQuiescence = true;
       noteCancellationRequested();
     };
+    const acknowledgeRecoveryQuiescence = (): void => {
+      // requestSessionTurnRecovery closed this exact attempt and durably
+      // recorded the replacement cause. The activity still owns the physical
+      // tool/credential boundary until finally drains it and publishes the
+      // exact quiescence receipt; a workflow result alone is never that proof.
+      acknowledgeQuiescence = true;
+      noteCancellationRequested();
+    };
     let turnId: string | undefined;
     let triggerEventId: string | undefined;
     const claimedResult = (
@@ -4851,6 +4859,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sandboxWorkspaceEnvironmentValues,
           {
             skipGitHubToken: activeSandboxBackend === "selfhosted",
+            skipToolspace: activeSandboxBackend === "selfhosted",
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
@@ -5633,14 +5642,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        // Toolspace is delivered on EVERY backend including selfhosted. The git-
-        // token skip does NOT transfer: that token is inert on a connected
-        // machine (it uses its own git creds), but the toolspace token is the
-        // machine's ONLY path to programmatic tool calling and grants no more
-        // than toolspace:call for its own session (own-session-bound,
-        // short-lived and renewable, per-active-turn budgeted, approval-tools
-        // excluded). The runtime seeds it to the box's token file over the same
-        // exec channel, off-manifest, on every backend.
+        // Toolspace delivery is managed-sandbox-only. Connected Machines own any
+        // manually configured API credentials and must never be contacted during
+        // turn admission merely to seed OpenGeni tooling.
         ...(sandboxToolspaceToken
           ? {
               toolspaceTokenSeed: sandboxToolspaceToken,
@@ -6492,9 +6496,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     tokenSession: ToolspaceTokenWriterSession,
                   ) => {
                     const renewalSession =
-                      activeSandboxBackend === "selfhosted"
-                        ? tokenSession
-                        : ((setupBoxSession as ToolspaceTokenWriterSession | null) ?? tokenSession);
+                      (setupBoxSession as ToolspaceTokenWriterSession | null) ?? tokenSession;
                     await attachToolspaceTokenRenewal(renewalSession);
                   },
                 }
@@ -7142,6 +7144,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -7193,6 +7196,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -7242,6 +7246,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -8029,6 +8034,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return claimedResult({ status: "cancelled" });
         }
         if (recovery.action === "recovering") {
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,
@@ -8105,6 +8111,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
           }
+          acknowledgeRecoveryQuiescence();
           await publishDurableSessionEvents(
             bus,
             input.workspaceId,

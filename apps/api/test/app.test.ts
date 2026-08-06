@@ -298,6 +298,24 @@ describe("API helpers", () => {
     });
     expect(
       temporalScheduleSpec({
+        type: "interval",
+        everySeconds: 21_600,
+        startAt: "2026-05-08T21:00:00.000Z",
+      }),
+    ).toEqual({
+      intervals: [{ every: "21600s", offset: "10800000ms" }],
+      startAt: new Date("2026-05-08T21:00:00.000Z"),
+    });
+    expect(
+      temporalScheduleSpec({
+        type: "interval",
+        everySeconds: 21_600,
+      }),
+    ).toEqual({
+      intervals: [{ every: "21600s" }],
+    });
+    expect(
+      temporalScheduleSpec({
         type: "calendar",
         timeZone: "Europe/Oslo",
         hour: 9,

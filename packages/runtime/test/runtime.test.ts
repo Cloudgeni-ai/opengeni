@@ -257,6 +257,9 @@ test("recovers only rollout-safe first-party MCP setup 404 and statusless Error 
     status: 404,
   });
   const statuslessTransport = new Error("fetch failed for a secret first-party URL");
+  const typedCause = Object.assign(new Error("wrapped protocol failure"), {
+    cause: new TypeError("invalid MCP response shape"),
+  });
   const authRejected = Object.assign(new Error("authentication failed"), { status: 401 });
   const typedProtocolFailure = new TypeError("invalid MCP response shape");
 
@@ -273,6 +276,11 @@ test("recovers only rollout-safe first-party MCP setup 404 and statusless Error 
       mcpTransportErrorWithRetryMetadata(statuslessTransport, { recoverySafeSetup: true }),
     ),
   ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(typedCause, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
   expect(
     isMcpTransportConnectivityError(
       mcpTransportErrorWithRetryMetadata(authRejected, { recoverySafeSetup: true }),
