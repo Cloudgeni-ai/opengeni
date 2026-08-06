@@ -14,13 +14,13 @@
 //! * **Budgets** — every byte figure is derived from the measured
 //!   [`HostCapacity`] as a fraction with the old absolute defaults as FLOORS
 //!   (rule R), and the per-frame wire size is T-derived from the negotiated
-//!   NATS `max_payload` ([`Engine::set_negotiated_max_payload`]).
+//!   NATS `max_payload` (the smallest active link value wins).
 //! * **Spool ledger** — the global disk budget (PROTOCOL.md ruling M2): each
 //!   job reserves its per-op spool quota against the shared budget at start
 //!   and releases it at teardown; when the budget is short the op's quota is
 //!   clamped (loudly) rather than the op refused.
-//! * **Routing** — `op_id → mailbox` for wire-command delivery and the
-//!   broadcast [`Engine::detach_all`] a link fires on connection loss.
+//! * **Routing** — connection-scoped `op_id → mailbox` for wire-command
+//!   delivery. A lost link detaches only the jobs it owns.
 //!
 //! Lock discipline: every mutex here is a plain `std::sync::Mutex` held only
 //! for map/state operations — never across an `.await`, a spawn, or a hook.
@@ -47,6 +47,21 @@ use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobP
 /// The admission-fairness origin for legacy request/reply work (legacy
 /// requests carry no session identity; they share one fairness domain).
 pub const LEGACY_ORIGIN: &str = "legacy";
+
+/// Builds the process-internal operation identity. The wire id remains unchanged;
+/// the local connection scope prevents unrelated OpenGeni deployments from
+/// colliding in the shared registry/admission/router.
+#[must_use]
+pub fn scoped_op_id(scope: &str, wire_op_id: &str) -> OpId {
+    OpId::new(format!("{scope}:{wire_op_id}"))
+}
+
+/// Namespaces an admission fairness origin for the same reason as
+/// [`scoped_op_id`].
+#[must_use]
+pub fn scoped_origin(scope: &str, origin: &str) -> String {
+    format!("{scope}:{origin}")
+}
 
 /// Commands queued to one job. A pipe diameter, not a limit (queue rule):
 /// senders block/backpressure, the pump drains every loop iteration.
@@ -233,6 +248,10 @@ pub struct Engine {
     spool_reserved: Mutex<u64>,
     /// T-derived per-frame data size (from the negotiated max_payload).
     max_frame_bytes: AtomicUsize,
+    /// Negotiated payload per active deployment link. The shared engine uses the
+    /// smallest active transport envelope so every emitted frame is publishable on
+    /// the link that owns it; removing a link recomputes the value.
+    transport_payloads: Mutex<HashMap<String, usize>>,
     /// Op frames dropped by the fire-and-forget publish path (bulk lane down
     /// or its channel full). Protocol-healed (gap-detect + replay), but per
     /// FAILURE-VISIBILITY healed faults are RECORDED — this feeds the
@@ -301,6 +320,7 @@ impl Engine {
             spool_root,
             spool_reserved: Mutex::new(0),
             max_frame_bytes: AtomicUsize::new(FALLBACK_FRAME_BYTES),
+            transport_payloads: Mutex::new(HashMap::new()),
             frames_dropped: AtomicU64::new(0),
             started: std::time::Instant::now(),
         })
@@ -350,12 +370,45 @@ impl Engine {
 
     /// Derives the per-frame data size from the connection's negotiated
     /// `max_payload` (rule T: query the external constraint, derive from it).
+    #[cfg(test)]
     pub fn set_negotiated_max_payload(&self, max_payload: usize) {
-        let frame = if max_payload > 2 * FRAME_ENVELOPE_MARGIN {
-            max_payload - FRAME_ENVELOPE_MARGIN
-        } else {
-            FALLBACK_FRAME_BYTES
-        };
+        self.set_link_max_payload("default", max_payload);
+    }
+
+    /// Records one active link's negotiated payload and derives the safe shared
+    /// frame size from the smallest active transport.
+    pub fn set_link_max_payload(&self, scope: &str, max_payload: usize) {
+        self.transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .insert(scope.to_string(), max_payload);
+        self.recompute_frame_bytes();
+    }
+
+    /// Removes a disconnected link's transport envelope from the shared minimum.
+    pub fn clear_link_max_payload(&self, scope: &str) {
+        self.transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .remove(scope);
+        self.recompute_frame_bytes();
+    }
+
+    fn recompute_frame_bytes(&self) {
+        let min_payload = self
+            .transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .values()
+            .copied()
+            .min();
+        let frame = min_payload.map_or(FALLBACK_FRAME_BYTES, |max_payload| {
+            if max_payload > 2 * FRAME_ENVELOPE_MARGIN {
+                max_payload - FRAME_ENVELOPE_MARGIN
+            } else {
+                FALLBACK_FRAME_BYTES
+            }
+        });
         self.max_frame_bytes.store(frame, Ordering::Relaxed);
     }
 
@@ -659,16 +712,17 @@ impl Engine {
         self.registry.lock().expect("registry lock").counters()
     }
 
-    /// Broadcasts `Detach` to every live job — a link lost its connection.
-    /// Ops keep running and retaining output (op ⊥ connection); the server
-    /// re-attaches per op after reconnect.
-    pub fn detach_all(&self) {
+    /// Detaches only jobs owned by one deployment/workspace link. Other links
+    /// continue streaming uninterrupted when this transport reconnects.
+    pub fn detach_scope(&self, scope: &str) {
+        let prefix = format!("{scope}:");
         let routes: Vec<mpsc::Sender<JobCommand>> = self
             .routes
             .lock()
             .expect("routes lock")
-            .values()
-            .cloned()
+            .iter()
+            .filter(|(op_id, _)| op_id.as_str().starts_with(&prefix))
+            .map(|(_, sender)| sender.clone())
             .collect();
         for sender in routes {
             let _ = sender.try_send(JobCommand::Detach);
@@ -838,6 +892,30 @@ mod tests {
         // A degenerate negotiation falls back to the floor, never to zero.
         engine.set_negotiated_max_payload(1024);
         assert_eq!(engine.max_frame_bytes(), FALLBACK_FRAME_BYTES);
+    }
+
+    #[test]
+    fn shared_frame_size_uses_smallest_active_connection() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        engine.set_link_max_payload("large", 4 * 1024 * 1024);
+        engine.set_link_max_payload("small", 1024 * 1024);
+        assert_eq!(
+            engine.max_frame_bytes(),
+            1024 * 1024 - FRAME_ENVELOPE_MARGIN
+        );
+        engine.clear_link_max_payload("small");
+        assert_eq!(
+            engine.max_frame_bytes(),
+            4 * 1024 * 1024 - FRAME_ENVELOPE_MARGIN
+        );
+    }
+
+    #[test]
+    fn identical_wire_operation_ids_are_distinct_across_connections() {
+        let first = scoped_op_id("deployment-a", "call:0");
+        let second = scoped_op_id("deployment-b", "call:0");
+        assert_ne!(first, second);
+        assert_eq!(first.as_str(), "deployment-a:call:0");
     }
 
     #[tokio::test]

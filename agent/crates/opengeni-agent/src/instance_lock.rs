@@ -1,10 +1,9 @@
-//! Single-instance guard: at most ONE enrolled agent process per machine.
+//! Single-instance guard: at most ONE agent process per machine.
 //!
-//! An enrolled agent's identity IS its NATS subject (`agent.<ws>.<id>.rpc`, see
+//! Every connection's identity IS its NATS subject (`agent.<ws>.<id>.rpc`, see
 //! [`config::StoredCredentials::rpc_subject`](crate::config::StoredCredentials::rpc_subject)).
-//! Two `run` processes on one machine share that single identity: BOTH subscribe
-//! as duplicate control-RPC responders and BOTH publish heartbeats, so ops route
-//! nondeterministically to one responder or the other and the lease flaps. This
+//! Two `run` processes on one machine would duplicate every configured responder
+//! and heartbeat publisher, so ops route nondeterministically and leases flap. This
 //! is not theoretical — it was observed live (twice): a Finder/Raycast launch (now
 //! run-by-default when enrolled, see [`run_default`](crate::run_default)) racing a
 //! terminal `opengeni-agent run` produced a second full agent sharing the identity
@@ -18,15 +17,15 @@
 //! the holding process exits — the OS drops the `flock` when the fd closes, so a
 //! crash never leaves a stale lock wedged.
 //!
-//! Only `run` (explicit and run-by-default) takes the lock. `enroll`, `uninstall`,
-//! `service`, and `update` legitimately run BESIDE a live agent and must not.
+//! Only `run` (explicit and run-by-default) takes the lock. `connect`,
+//! `connections`, `disconnect`, `uninstall`, `service`, and `update` legitimately
+//! run BESIDE a live agent and must not.
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-/// The lock file name inside the config dir. Sits next to `credentials.json` so
-/// the whole per-user agent state lives in one place.
+/// The lock file name inside the config dir, next to the connection store.
 const LOCK_FILE: &str = "agent.lock";
 
 /// Why a single-instance lock could not be taken.

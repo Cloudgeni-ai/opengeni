@@ -10,11 +10,14 @@
 //! rollback all live in `opengeni-agent-update` (cargo-unit-tested there); this
 //! module only wires the config and prints the outcome.
 
+use std::collections::BTreeSet;
+
 use opengeni_agent_update::{check_update, CheckOutcome, HttpSource, UpdateConfig};
 use tracing::{info, warn};
 
 use crate::cli::UpdateArgs;
-use crate::config;
+use crate::config::{self, StoredConnection};
+use crate::enrollment::InstallIdentity;
 
 /// The default release base URL when neither the flag/env nor an enrolled value is
 /// present (mirrors the install scripts' default).
@@ -26,15 +29,24 @@ const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
 ///
 /// Returns a human-facing error string on any fetch/verify/apply failure.
 pub fn run(args: &UpdateArgs) -> Result<(), String> {
-    let creds =
-        config::load_credentials().map_err(|e| format!("could not load credentials: {e}"))?;
+    let legacy_api_url =
+        std::env::var("OPENGENI_API_URL").unwrap_or_else(|_| "https://api.opengeni.ai".to_string());
+    let connections = config::load_connections(&legacy_api_url)
+        .map_err(|e| format!("could not load connections: {e}"))?;
 
-    // Resolve channel + agent id from the enrolled creds when present; flags win.
-    let (agent_id, enrolled_channel) = creds.as_ref().map_or_else(
-        || ("unenrolled".to_string(), "stable".to_string()),
-        |c| (c.agent_id.clone(), c.update_channel.clone()),
-    );
-    let channel = args.channel.clone().unwrap_or(enrolled_channel);
+    // The binary is process-global, so update policy is process-global too. Never
+    // silently let whichever connection sorts first choose the channel for every
+    // deployment. Matching channels compose naturally; a mixed setup requires an
+    // explicit operator choice.
+    let channel = resolve_channel(args.channel.as_deref(), &connections)?;
+    // Staged rollout cohorting must be stable for the physical install, not tied
+    // to an arbitrary workspace agent id. Every enrollment already shares this
+    // durable keypair, including across independent OpenGeni deployments.
+    let install_identity = InstallIdentity::load_or_generate(
+        &config::config_dir().map_err(|e| format!("could not resolve config dir: {e}"))?,
+    )
+    .map_err(|e| format!("could not load install identity: {e}"))?;
+    let agent_id = install_identity.public_key_base64();
     let base_url = args
         .base_url
         .clone()
@@ -83,5 +95,70 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
             );
             Ok(())
         }
+    }
+}
+
+fn resolve_channel(
+    explicit: Option<&str>,
+    connections: &[StoredConnection],
+) -> Result<String, String> {
+    if let Some(channel) = explicit {
+        return Ok(channel.to_string());
+    }
+    let channels: BTreeSet<_> = connections
+        .iter()
+        .map(|connection| connection.credentials.update_channel.as_str())
+        .collect();
+    match channels.len() {
+        0 => Ok("stable".to_string()),
+        1 => Ok(channels.into_iter().next().expect("one channel").to_string()),
+        _ => Err(format!(
+            "configured connections use multiple update channels ({}); pass --channel stable or --channel beta explicitly",
+            channels.into_iter().collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::StoredCredentials;
+
+    fn connection(channel: &str) -> StoredConnection {
+        StoredConnection::new(
+            "https://example.com",
+            StoredCredentials {
+                agent_id: "agent".to_string(),
+                workspace_id: channel.to_string(),
+                nats_bearer: "secret".to_string(),
+                nats_urls: Vec::new(),
+                relay_url: String::new(),
+                relay_token: String::new(),
+                update_pubkey: String::new(),
+                consented_whole_machine: true,
+                consented_screen_control: false,
+                update_channel: channel.to_string(),
+                resume_token: String::new(),
+                last_known_epoch: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn matching_connection_channels_compose() {
+        assert_eq!(
+            resolve_channel(None, &[connection("stable"), connection("stable")]),
+            Ok("stable".to_string())
+        );
+    }
+
+    #[test]
+    fn mixed_channels_require_an_explicit_global_choice() {
+        let connections = [connection("stable"), connection("beta")];
+        assert!(resolve_channel(None, &connections).is_err());
+        assert_eq!(
+            resolve_channel(Some("beta"), &connections),
+            Ok("beta".to_string())
+        );
     }
 }

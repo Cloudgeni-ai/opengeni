@@ -23,7 +23,7 @@ never `git clone`s a repo onto the machine.
 | Crate | Role |
 |---|---|
 | `opengeni-agent-proto` | Generated wire-protocol types (Rust side of the codegen). |
-| `opengeni-agent` | The binary: `run`/`enroll`/`service`/`update`/`uninstall`; dial, RPC dispatch, supervisor. |
+| `opengeni-agent` | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`; multi-deployment dial, RPC dispatch, supervisor. |
 | `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer. |
 | `opengeni-agent-stream` | Relay-edge stream transport + pty/framebuffer pumps. |
 | `opengeni-agent-update` | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback. |
@@ -38,7 +38,7 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   Each detects os/arch, resolves the matching GitHub-Release asset, downloads it,
   **verifies it two ways** — a minisign signature against a public key **pinned in
   the script body** + a sha256 — then installs to a per-user path and prints the
-  enroll+run command. It installs **no service by default** (foreground `run` is
+  connect+run command. It installs **no service by default** (foreground `run` is
   the default run model) and contains **no secrets**. Read it before
   piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base (e.g. a local mock
   dir or the direct GitHub-Releases URL). [`install/uninstall.sh`](install/uninstall.sh)
@@ -61,6 +61,37 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
   (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows
   Authenticode are guarded creds-drop-ins that skip cleanly when absent).
+
+## One agent, many OpenGeni deployments
+
+Install the binary once, then run the one-liner from every workspace you want
+this machine to serve. `opengeni-agent connect` adds or refreshes only that exact
+deployment/workspace pair; it never replaces other credentials. A running agent
+reconciles the connection directory live within a few seconds.
+
+```sh
+opengeni-agent connections
+opengeni-agent disconnect <connection-id-or-prefix>
+```
+
+Credentials live as independent owner-only documents under
+`$OPENGENI_CONFIG_DIR/connections/` (or the platform config default). The local
+identity is derived from **API origin + workspace id**, so unrelated deployments
+may safely contain the same workspace UUID. Each link owns its NATS bearer, relay
+token, epoch, reconnect loop, and stream registrar. Links share one host-capacity
+sampler, one operation engine/spool ledger, and the OS containment manager.
+Operation ids and admission origins are locally namespaced by connection, so one
+deployment cannot cancel, query, acknowledge, detach, or collide with another's
+work. Removing one connection sends its own going-offline event and leaves every
+other link and command running.
+
+An installation upgraded from the old single-connection file keeps that link
+online immediately. Because the old file did not record its deployment URL,
+`connections` labels the migrated origin unverified; running the exact
+deployment's connect command once confirms the origin and replaces only that
+legacy record. Self-update is binary-wide: matching per-connection channels are
+used automatically, while mixed `stable`/`beta` links require an explicit
+`opengeni-agent update --channel …` choice instead of silently picking one.
 
 ## Wire protocol — single source of truth
 
