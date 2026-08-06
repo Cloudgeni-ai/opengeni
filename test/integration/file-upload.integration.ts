@@ -36,7 +36,7 @@ import {
   registerFileUploadReaperSchedule,
 } from "../../apps/worker/src/index";
 
-const APP_ROLE_PASSWORD = "fileupload-app-role-password";
+const APP_ROLE_PASSWORD = "opengeni_app";
 const DELEGATION_SECRET = "fileupload-file-upload-delegation-secret";
 
 describe("file upload crash, concurrency, RLS, and object cleanup", () => {
