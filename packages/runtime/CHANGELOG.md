@@ -1,5 +1,16 @@
 # @opengeni/runtime
 
+## 0.18.20
+
+### Patch Changes
+
+- ece124b: Normalize JavaScript-only undefined object fields from SDK history before durable JSON persistence while rejecting other non-JSON values with an exact path.
+- af24281: Keep Connected Machine outages inside the agent loop and reserve automatic Toolspace setup for managed sandboxes.
+- Updated dependencies [5d8bb99]
+- Updated dependencies [af24281]
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+
 ## 0.18.19
 
 ### Patch Changes
