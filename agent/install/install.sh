@@ -10,7 +10,7 @@
 # `opengeni-agent` binary for your OS/arch, VERIFIES it two independent ways
 # (a minisign signature against a public key PINNED in this script's body, AND
 # a sha256 checksum), installs it to a per-user path, and then PRINTS the exact
-# command to enroll + run it. It installs NO background service by default and
+# command to connect + run it. It installs NO background service by default and
 # contains NO secrets. The pinned public key travels WITH this audited script,
 # so a compromised CDN or mirror cannot serve a binary that verifies.
 #
@@ -30,26 +30,26 @@
 #                              URL is the documented fallback (see below).
 #   OPENGENI_INSTALL_DIR       Install dir. Default: ~/.local/bin (no sudo).
 #   OPENGENI_SYSTEM=1          Install to /usr/local/bin (needs sudo/root).
-#   OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation/fleet):
-#                              the script runs `enroll --token <tok>
-#                              --non-interactive --force` itself — the token IS
-#                              the requested fresh grant, so it replaces any
-#                              enrollment already present on the machine and
-#                              needs NO device-approve step. The workspace is
+#   OPENGENI_ENROLL_TOKEN      Non-interactive connection token (CI/automation/fleet):
+#                              the script runs `connect --token <tok>
+#                              --non-interactive` itself — the token IS the
+#                              requested grant. It adds or refreshes only that
+#                              deployment/workspace connection and needs NO
+#                              device-approve step. The workspace is
 #                              encoded in the token; OPENGENI_WORKSPACE_ID is not
 #                              needed on this path.
 #   OPENGENI_NO_RUN=1          Do not start a foreground run; just print the
-#                              enroll+run command (the default when stdin is not
+#                              connect+run command (the default when stdin is not
 #                              a TTY, e.g. piped from curl).
-#   OPENGENI_API_URL           Control-plane API base URL for enrollment. Carried
-#                              into BOTH the non-interactive enroll (forwarded as
-#                              --api-url below) and the interactive `enroll`/`run`
+#   OPENGENI_API_URL           Control-plane API base URL for connection. Carried
+#                              into BOTH the non-interactive connect (forwarded as
+#                              --api-url below) and the interactive `connect`/`run`
 #                              (the agent reads $OPENGENI_API_URL via clap). Set it
 #                              to target a specific deployment instead of the
 #                              api.opengeni.ai default.
 #   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
-#                              enroll binds to (the user who approves must hold a
-#                              grant in it). Honored by the agent's `enroll`/`run`
+#                              connection binds to (the approver must hold a grant
+#                              in it). Honored by the agent's `connect`/`run`
 #                              via clap ($OPENGENI_WORKSPACE_ID); the one-liner
 #                              from the Machines page sets it so no UUID is typed.
 #                              Not used on the OPENGENI_ENROLL_TOKEN path.
@@ -70,7 +70,7 @@
 # — one code-signing identity for both the CLI and the background app. macOS TCC
 # (Screen Recording / Accessibility) grants attach to that identity + bundle id, so
 # the agent's screen/computer-use features work from either entry point. The two
-# system permission prompts fire at `opengeni-agent enroll`, not on first use.
+# system permission prompts fire at `opengeni-agent connect`, not on first use.
 #
 # Immutable-per-version + GH-Releases fallback. The edge serves the latest
 # release at $BASE/install.sh and immutable copies at $BASE/v/<ver>/install.sh.
@@ -662,40 +662,41 @@ path_hint() {
   esac
 }
 
-# Print the enroll+run instructions, or — in CI mode — enroll non-interactively.
+# Print the connect+run instructions, or connect non-interactively.
 # Per §23.0 the installer NEVER installs a service and only starts a foreground
 # run when explicitly asked on an interactive TTY.
 finish() {
   _bin="$1"
   echo ""
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
-    log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
+    log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
     # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
     # (not the api.opengeni.ai default) even when the agent's env-inherit path is
     # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
     # alone would suffice — this is belt-and-suspenders. The workspace is encoded
     # in the token, so no --workspace-id is needed on this path. A supplied token
-    # is an explicit request for this enrollment; --force prevents a previous
-    # control-plane credential from being silently reused.
+    # is an explicit request for this connection. The multi-connection store
+    # upserts only this deployment/workspace and preserves every other link.
     if [ -n "${OPENGENI_API_URL:-}" ]; then
-      "$_bin" --api-url "$OPENGENI_API_URL" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive --force
+      "$_bin" --api-url "$OPENGENI_API_URL" connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
     else
-      "$_bin" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive --force
+      "$_bin" connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
     fi
-    log "enrolled. Start the agent (foreground) with:  $_bin run"
+    log "connected. Agents v0.1.10+ pick up future connections automatically. If this upgraded an older running agent, restart that process once."
+    log "Otherwise start the agent (foreground) with:  $_bin run"
     return 0
   fi
 
   # Concise post-install: at most 3 short lines, one clear next command. The
   # always-on service + uninstall hints fold into a single `--help` pointer.
   #
-  # The interactive device-flow enroll needs the workspace id (and, for a
+  # The interactive device-flow connection needs the workspace id (and, for a
   # non-default deployment, the api url). When this ran as `curl | sh`, those env
   # vars existed ONLY for this piped process — they do NOT survive into the user's
-  # shell, and the pipe has no TTY so we cannot enroll here. So a bare `enroll`
-  # they paste later would fail with "enrollment requires a workspace id". When we
+  # shell, and the pipe has no TTY so we cannot connect here. So a bare `connect`
+  # they paste later would fail with "connection requires a workspace id". When we
   # know them, bake them into the printed command so the copy-paste is correct;
-  # otherwise the single next step is exactly `opengeni-agent enroll`.
+  # otherwise the single next step is exactly `opengeni-agent connect`.
   _enroll_env=""
   if [ -n "${OPENGENI_WORKSPACE_ID:-}" ]; then
     _enroll_env="OPENGENI_WORKSPACE_ID=$OPENGENI_WORKSPACE_ID"
@@ -709,9 +710,9 @@ finish() {
   fi
   printf '%s\n' "opengeni-agent installed."
   if [ -n "$_enroll_env" ]; then
-    printf '%s\n' "Next: $_enroll_env $_bin enroll   (then: $_bin run)"
+    printf '%s\n' "Next: $_enroll_env $_bin connect   (then: $_bin run)"
   else
-    printf '%s\n' "Next: $_bin enroll   (then: $_bin run)"
+    printf '%s\n' "Next: $_bin connect   (then: $_bin run)"
   fi
   printf '%s\n' "Always-on service, uninstall, and more: $_bin --help"
 

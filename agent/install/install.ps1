@@ -9,7 +9,7 @@
   for your arch, VERIFIES it two independent ways (a minisign signature against a
   public key PINNED in this script's body, AND a sha256 checksum), installs it to
   a per-user path, adds that path to your user PATH, and then PRINTS the exact
-  command to enroll + run it. It installs NO Windows Service by default and
+  command to connect + run it. It installs NO Windows Service by default and
   contains NO secrets. The pinned public key travels WITH this audited script, so
   a compromised CDN cannot serve a binary that verifies.
 
@@ -24,10 +24,10 @@
                              Point at a local mock (http://localhost/...) to test offline.
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
   OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
-  OPENGENI_ENROLL_TOKEN      Non-interactive fresh-enrollment token
-                             (CI/automation); replaces an existing enrollment.
+  OPENGENI_ENROLL_TOKEN      Non-interactive connection token (CI/automation);
+                             adds or refreshes only its deployment/workspace.
   OPENGENI_NO_RUN            "1" => do not start a foreground run; just print the command.
-  OPENGENI_API_URL           Control-plane API base URL for enrollment.
+  OPENGENI_API_URL           Control-plane API base URL for the connection.
 
   Immutable-per-version + GitHub-Releases fallback: assets resolve to
   $BASE/agent/v<ver>/<asset>. If the edge is down, the same assets are mirrored at
@@ -219,18 +219,24 @@ function Complete-Install($bin) {
   Write-Host ""
   $enrollToken = [Environment]::GetEnvironmentVariable('OPENGENI_ENROLL_TOKEN')
   if (-not [string]::IsNullOrEmpty($enrollToken)) {
-    Log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
-    # Supplying a token explicitly requests this enrollment. Never silently
-    # retain credentials for a previous control plane.
-    & $bin enroll --token $enrollToken --non-interactive --force
-    Log "enrolled. Start the agent (foreground) with:  $bin run"
+    Log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
+    # This upserts only the token's deployment/workspace connection; unrelated
+    # OpenGeni connections remain configured and online.
+    $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
+    if ([string]::IsNullOrEmpty($apiUrl)) {
+      & $bin connect --token $enrollToken --non-interactive
+    } else {
+      & $bin --api-url $apiUrl connect --token $enrollToken --non-interactive
+    }
+    Log "connected. Agents v0.1.10+ pick up future connections automatically. If this upgraded an older running agent, restart that process once."
+    Log "Otherwise start the agent (foreground) with:  $bin run"
     return
   }
 
   Write-Host "opengeni-agent installed at: $bin"
   Write-Host ""
   Write-Host "Next steps (the agent runs in the FOREGROUND — it does NOT install a service):"
-  Write-Host "  1. Enroll this machine:   $bin enroll"
+  Write-Host "  1. Connect this machine:  $bin connect"
   Write-Host "  2. Run it (online while this runs, offline when you stop it):"
   Write-Host "       $bin run"
   Write-Host ""

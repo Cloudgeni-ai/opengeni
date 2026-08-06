@@ -275,11 +275,11 @@ tfvars in private operator-controlled storage outside the repository.
 
 Sessions are durable. Reloading the browser or opening the session URL later replays event history from Postgres and reconnects to live events.
 
-### Enrolling a Connected Machine
+### Connecting a Machine
 
-When Connected Machines are enabled, enroll one from the workspace **Machines** dashboard (or from the composer's machine picker):
+When Connected Machines are enabled, connect one from the workspace **Machines** dashboard (or from the composer's machine picker):
 
-1. Click **Enroll a machine** and run the printed install one-liner on the computer you want to connect. It pulls the OpenGeni agent binary from the control plane and starts it.
+1. Click **Connect a machine** and run the printed one-liner on the computer you want to connect. The same command installs or updates the agent and adds this workspace without replacing any existing OpenGeni connections on that computer.
 2. Approve the machine. Two paths exist:
    - **Device flow (consent):** the agent prints a short code and a verification link; you open it and click **Grant** in the workspace to approve that specific machine. Approval is the loud, explicit consent step, and it records who approved.
    - **Zero-click enroll token:** mint a short-lived enroll token in the workspace ahead of time; the agent redeems it headlessly (the token is the grant, no per-machine click) — the path for scripted or fleet enrollment.
