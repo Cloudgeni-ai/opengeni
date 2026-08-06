@@ -3300,6 +3300,148 @@ describe("worker activities integration", () => {
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
   });
 
+  test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "existing scheduled target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "failed");
+    const goal = await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: target.id,
+      text: "Keep the original target goal",
+      successCriteria: "Do not replace this goal",
+      createdBy: "api",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-existing-session",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "existing_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "continue exactly here",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+    const workflowWakes: unknown[] = [];
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "ok" }]),
+      }),
+    });
+    const beforeSessions = await listSessions(dbClient.db, grant.workspaceId);
+    const producerKey = `existing-session-fire:${crypto.randomUUID()}`;
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    const retry = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+
+    expect(first).toMatchObject({ action: "signal", sessionId: target.id });
+    expect(retry).toMatchObject({
+      action: "signal",
+      sessionId: target.id,
+      triggerEventId: first.triggerEventId,
+    });
+    expect(await listSessions(dbClient.db, grant.workspaceId)).toHaveLength(beforeSessions.length);
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, target.id)).toMatchObject({
+      id: goal.id,
+      text: goal.text,
+      version: goal.version,
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, target.id),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "scheduled_occurrence",
+        summary: "continue exactly here",
+        payload: expect.objectContaining({
+          type: "scheduled_occurrence",
+          scheduledTaskId: task.id,
+        }),
+      }),
+    ]);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(1);
+    expect(workflowWakes).toHaveLength(1);
+  });
+
+  test("fails closed when an existing-session target is cancelled or deleted", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "terminal scheduled target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-terminal-existing-session",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "existing_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "must fail closed", resources: [], tools: [], metadata: {} },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "must not run" }]),
+      }),
+    });
+
+    await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "cancelled");
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("cannot be revived");
+
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, async (scopedDb) => {
+      await scopedDb.execute(dbSql`delete from sessions where id = ${target.id}`);
+    });
+    expect(
+      (await requireScheduledTask(dbClient.db, grant.workspaceId, task.id)).targetSessionId,
+    ).toBeNull();
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("scheduled task target session is unavailable");
+  });
+
   test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {
     const grant = await testGrant(dbClient.db);
     const settings = testSettings({

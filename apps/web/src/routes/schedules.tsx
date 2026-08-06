@@ -33,6 +33,7 @@ import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   activeOpenGeniSlackBotConnections,
   openGeniSlackBotConnectionLabel,
@@ -47,13 +48,14 @@ import {
   type ScheduledTaskFormState,
 } from "@/lib/scheduled-tasks";
 import { cn } from "@/lib/utils";
-import type { ConnectionMetadata, ScheduledTask, ScheduledTaskRun } from "@/types";
+import type { ConnectionMetadata, ScheduledTask, ScheduledTaskRun, Session } from "@/types";
 
 export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [slackBotConnections, setSlackBotConnections] = useState<ConnectionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
@@ -70,6 +72,9 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const canAttachOpenGeniTool = context.clientConfig.mcpServers.some(
     (server) => server.id === "opengeni",
   );
+  const canTargetSessions =
+    hasWorkspacePermission(context.accessContext, workspaceId, "sessions:read") &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "sessions:control");
   // Honest list state: the initial fetch renders as loading and a failed load
   // as an error with retry — never as the "No scheduled tasks." empty state.
   const tasksView = listViewState({ loading, error: loadError, count: tasks.length });
@@ -81,11 +86,15 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [next, connections] = await Promise.all([
+      const [next, connections, targetSessions] = await Promise.all([
         client.listScheduledTasks(workspaceId),
         client.listConnections(workspaceId).catch(() => []),
+        canTargetSessions
+          ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
+          : Promise.resolve([]),
       ]);
       setTasks(next);
+      setSessions(targetSessions.filter((session) => session.status !== "cancelled"));
       setSlackBotConnections(activeOpenGeniSlackBotConnections(connections));
       setLoadError(null);
       // Track each task's run-history load outcome separately: a failed history
@@ -112,7 +121,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [client, workspaceId]);
+  }, [canTargetSessions, client, workspaceId]);
 
   useEffect(() => {
     void refresh();
@@ -141,12 +150,17 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       toast.error("Scheduled task prompt is required");
       return;
     }
+    if (form.runMode === "existing_session" && !form.targetSessionId) {
+      toast.error("Choose an existing session for this task");
+      return;
+    }
     setBusyTaskId("new");
     try {
       await client.createScheduledTask(workspaceId, {
         name: form.name.trim() || form.prompt.trim().slice(0, 64),
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
+        ...(form.runMode === "existing_session" ? { targetSessionId: form.targetSessionId } : {}),
         overlapPolicy: form.overlapPolicy,
         agentConfig: agentConfigFromFormState(form, undefined, {
           resources: context.currentResources,
@@ -171,12 +185,17 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       toast.error("Scheduled task prompt is required");
       return;
     }
+    if (form.runMode === "existing_session" && !form.targetSessionId) {
+      toast.error("Choose an existing session for this task");
+      return;
+    }
     setBusyTaskId(task.id);
     try {
       await client.updateScheduledTask(workspaceId, task.id, {
         name: form.name.trim() || form.prompt.trim().slice(0, 64),
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
+        targetSessionId: form.runMode === "existing_session" ? form.targetSessionId : null,
         overlapPolicy: form.overlapPolicy,
         agentConfig: agentConfigFromFormState(form, task),
       });
@@ -272,6 +291,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
           submitLabel="Create scheduled task"
           busy={busyTaskId === "new"}
           canAttachOpenGeniTool={canAttachOpenGeniTool}
+          canTargetSessions={canTargetSessions}
+          sessions={sessions}
           slackBotConnections={slackBotConnections}
           onSubmit={(form) => void createTask(form)}
         />
@@ -412,6 +433,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                     submitLabel="Save changes"
                     busy={busyTaskId === task.id}
                     canAttachOpenGeniTool={canAttachOpenGeniTool}
+                    canTargetSessions={canTargetSessions}
+                    sessions={sessions}
                     slackBotConnections={slackBotConnections}
                     onSubmit={(form) => void saveTask(task, form)}
                     onCancel={() => setEditingTaskId(null)}
@@ -526,6 +549,8 @@ function ScheduledTaskForm(props: {
   submitLabel: string;
   busy: boolean;
   canAttachOpenGeniTool: boolean;
+  canTargetSessions: boolean;
+  sessions: Session[];
   slackBotConnections: ConnectionMetadata[];
   onSubmit: (form: ScheduledTaskFormState) => void;
   onCancel?: () => void;
@@ -623,6 +648,9 @@ function ScheduledTaskForm(props: {
               >
                 <option value="new_session_per_run">New session each run</option>
                 <option value="reusable_session">Reuse one session</option>
+                <option value="existing_session" disabled={!props.canTargetSessions}>
+                  Use an existing session
+                </option>
               </Select>
             </div>
             <div className="grid gap-1.5">
@@ -639,6 +667,34 @@ function ScheduledTaskForm(props: {
               </Select>
             </div>
           </div>
+          {form.runMode === "existing_session" ? (
+            <div className="grid gap-1.5">
+              <Label>Existing session</Label>
+              <Select
+                value={form.targetSessionId}
+                disabled={!props.canTargetSessions}
+                onChange={(event) => update("targetSessionId", event.target.value)}
+              >
+                <option value="">Choose an existing session</option>
+                {form.targetSessionId &&
+                !props.sessions.some((session) => session.id === form.targetSessionId) ? (
+                  <option value={form.targetSessionId} disabled>
+                    Selected session {form.targetSessionId} is unavailable
+                  </option>
+                ) : null}
+                {props.sessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {session.title?.trim() || session.initialMessage.trim() || "Untitled session"} ·{" "}
+                    {session.status}
+                  </option>
+                ))}
+              </Select>
+              <p className="text-2xs text-fg-subtle">
+                Each occurrence wakes this exact session with a durable scheduled-task update; it
+                does not replace the session goal.
+              </p>
+            </div>
+          ) : null}
           <label className="flex items-center gap-2 text-xs text-fg-muted">
             <input
               type="checkbox"

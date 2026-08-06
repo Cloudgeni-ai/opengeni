@@ -4,6 +4,9 @@ import type {
   McpPersonalConnectionDelegation,
   ScheduledTask,
   ScheduledTaskAgentConfig,
+  Session,
+  SessionAuthorizationPort,
+  SessionAuthorizationSurface,
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
 } from "@opengeni/contracts";
@@ -15,6 +18,7 @@ import {
   getRig,
   getScheduledTask,
   getScheduledTaskPersonalConnectionDelegations,
+  getSession,
   requireWorkspace,
   updateScheduledTask,
   type Database,
@@ -22,6 +26,11 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission, requirePermission } from "../access";
+import {
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+} from "../session-authorization";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
@@ -38,6 +47,7 @@ import {
 } from "./sessions";
 import {
   hasReservedOpenGeniSlackBotSessionMetadata,
+  scheduledSlackBotConnectionId,
   validateOpenGeniSlackBotConnectionSelection,
 } from "./slack-bot";
 import {
@@ -81,6 +91,8 @@ export async function createValidatedScheduledTask(input: {
   // Set for pack-installation-inherited attachments that were already
   // authorized with variable-sets:use when the pack was enabled.
   variableSetPreauthorized?: boolean;
+  sessionAuthorization?: SessionAuthorizationPort | null | undefined;
+  authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<ScheduledTask> {
   const agentConfig = await validateScheduledTaskAgentConfig({
     ...input,
@@ -88,6 +100,17 @@ export async function createValidatedScheduledTask(input: {
   });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
+  const target = await validateScheduledTaskTarget({
+    db: input.db,
+    sessionAuthorization: input.sessionAuthorization,
+    authorizationSurface: input.authorizationSurface,
+    grant: input.grant,
+    targetSessionId: input.payload.targetSessionId,
+    runMode: input.payload.runMode,
+    variableSetId: input.payload.variableSetId,
+    rigId: input.payload.rigId,
+    agentConfig,
+  });
   if (input.payload.variableSetId) {
     await validateVariableSetAttachment(
       { settings: input.settings, db: input.db },
@@ -132,10 +155,124 @@ export async function createValidatedScheduledTask(input: {
     ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
     createdByActor: creationInitiator.actor ?? null,
     personalConnectionDelegations,
+    targetSessionId: target?.id ?? null,
     variableSetId: input.payload.variableSetId ?? null,
     rigId: input.payload.rigId ?? null,
     metadata: input.payload.metadata,
   });
+}
+
+export async function validateScheduledTaskTarget(input: {
+  db: Database;
+  sessionAuthorization?: SessionAuthorizationPort | null | undefined;
+  authorizationSurface?: SessionAuthorizationSurface | undefined;
+  grant: AccessGrant;
+  targetSessionId: string | null | undefined;
+  runMode: ScheduledTask["runMode"];
+  variableSetId: string | null | undefined;
+  rigId: string | null | undefined;
+  agentConfig: ScheduledTaskAgentConfig;
+  missingTargetStatus?: 404 | 422;
+}): Promise<Session | null> {
+  if (input.runMode !== "existing_session") {
+    if (input.targetSessionId) {
+      throw new HTTPException(422, {
+        message: "targetSessionId requires runMode=existing_session",
+      });
+    }
+    return null;
+  }
+  if (!input.targetSessionId) {
+    throw new HTTPException(input.missingTargetStatus ?? 422, {
+      message:
+        input.missingTargetStatus === 404
+          ? "target session not found"
+          : "targetSessionId is required when runMode=existing_session",
+    });
+  }
+  requirePermission(input.grant, "sessions:control");
+  if (input.agentConfig.goal) {
+    throw new HTTPException(422, {
+      message: "agentConfig.goal cannot be used with an existing-session target",
+    });
+  }
+  try {
+    await requireSessionAuthorization(
+      {
+        db: input.db,
+        ...(input.sessionAuthorization !== undefined
+          ? { sessionAuthorization: input.sessionAuthorization }
+          : {}),
+      },
+      input.grant,
+      {
+        sessionId: input.targetSessionId,
+        operation: "session.control",
+        surface: input.authorizationSurface ?? "http",
+      },
+    );
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw new HTTPException(404, { message: "target session not found" });
+    }
+    if (error instanceof SessionAuthorizationUnavailableError) {
+      throw new HTTPException(503, { message: "session authorization is unavailable" });
+    }
+    throw error;
+  }
+  const session = await getSession(input.db, input.grant.workspaceId, input.targetSessionId);
+  if (!session || session.accountId !== input.grant.accountId) {
+    throw new HTTPException(404, { message: "target session not found" });
+  }
+  if (session.status === "cancelled") {
+    throw new HTTPException(409, {
+      message: "target session is cancelled; choose a revivable session",
+    });
+  }
+  if ((session.variableSetId ?? null) !== (input.variableSetId ?? null)) {
+    throw new HTTPException(422, {
+      message: "target session variableSet attachment does not match the scheduled task",
+    });
+  }
+  if (input.rigId && input.rigId !== session.rigId) {
+    throw new HTTPException(422, {
+      message: "target session rig does not match the scheduled task",
+    });
+  }
+  if (
+    input.agentConfig.sandboxBackend !== undefined &&
+    input.agentConfig.sandboxBackend !== session.sandboxBackend
+  ) {
+    throw new HTTPException(422, {
+      message: "target session sandbox backend does not match the scheduled task",
+    });
+  }
+  if (
+    scheduledSlackBotConnectionId(session.metadata) !==
+    (input.agentConfig.slackBotConnectionId ?? null)
+  ) {
+    throw new HTTPException(422, {
+      message: "target session OpenGeni Slack bot binding does not match the scheduled task",
+    });
+  }
+  return session;
+}
+
+export function scheduledTaskForGrant(task: ScheduledTask, grant: AccessGrant): ScheduledTask {
+  if (hasPermission(grant.permissions, "sessions:control") || task.targetSessionId === null) {
+    return task;
+  }
+  return { ...task, targetSessionId: null };
+}
+
+export function scheduledTaskRunForGrant<T extends { sessionId: string | null }>(
+  run: T,
+  grant: AccessGrant,
+): T {
+  if (hasPermission(grant.permissions, "sessions:control") || run.sessionId === null) {
+    return run;
+  }
+  return { ...run, sessionId: null };
 }
 
 // Validate a scheduled task's rig reference: it must name a rig in the
@@ -160,8 +297,28 @@ export async function validatedScheduledTaskUpdate(input: {
   payload: UpdateScheduledTaskPayload;
   /** See createValidatedScheduledTask; only consulted when agentConfig is updated. */
   toolsProvided?: boolean;
+  sessionAuthorization?: SessionAuthorizationPort | null | undefined;
+  authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const update: UpdateScheduledTaskInput = {};
+  const existingTarget = input.existing.targetSessionId;
+  const nextRunMode = input.payload.runMode ?? input.existing.runMode;
+  const nextTargetSessionId =
+    input.payload.targetSessionId !== undefined
+      ? input.payload.targetSessionId
+      : nextRunMode === "existing_session"
+        ? existingTarget
+        : null;
+  if (
+    input.existing.runMode === "reusable_session" &&
+    input.existing.reusableSessionId &&
+    nextRunMode === "existing_session"
+  ) {
+    throw new HTTPException(409, {
+      message:
+        "cannot target an existing session after this task created its reusable session; create a new task",
+    });
+  }
   if (input.payload.name !== undefined) {
     update.name = trimmedScheduledTaskName(input.payload.name);
   }
@@ -278,6 +435,43 @@ export async function validatedScheduledTaskUpdate(input: {
     }
     update.personalConnectionDelegations = personalConnectionDelegations;
   }
+  if (
+    existingTarget &&
+    (nextRunMode !== "existing_session" || nextTargetSessionId !== existingTarget)
+  ) {
+    await validateScheduledTaskTarget({
+      db: input.db,
+      sessionAuthorization: input.sessionAuthorization,
+      authorizationSurface: input.authorizationSurface,
+      grant: input.grant,
+      targetSessionId: existingTarget,
+      runMode: "existing_session",
+      variableSetId: input.existing.variableSetId,
+      rigId: input.existing.rigId,
+      agentConfig: input.existing.agentConfig,
+    });
+  }
+  await validateScheduledTaskTarget({
+    db: input.db,
+    sessionAuthorization: input.sessionAuthorization,
+    authorizationSurface: input.authorizationSurface,
+    grant: input.grant,
+    targetSessionId: nextTargetSessionId,
+    runMode: nextRunMode,
+    variableSetId:
+      input.payload.variableSetId !== undefined
+        ? input.payload.variableSetId
+        : input.existing.variableSetId,
+    rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
+    agentConfig: update.agentConfig ?? input.existing.agentConfig,
+  });
+  if (
+    input.payload.targetSessionId !== undefined ||
+    input.existing.runMode === "existing_session" ||
+    nextRunMode === "existing_session"
+  ) {
+    update.targetSessionId = nextTargetSessionId;
+  }
   return update;
 }
 
@@ -325,7 +519,9 @@ export async function restoreScheduledTask(
     overlapPolicy: task.overlapPolicy,
     agentConfig: task.agentConfig,
     personalConnectionDelegations: previous.personalConnectionDelegations,
-    reusableSessionId: task.reusableSessionId,
+    ...(task.runMode === "existing_session"
+      ? { targetSessionId: task.targetSessionId }
+      : { reusableSessionId: task.reusableSessionId }),
     variableSetId: task.variableSetId,
     rigId: task.rigId,
     metadata: task.metadata,

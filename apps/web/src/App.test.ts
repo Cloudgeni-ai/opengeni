@@ -1877,6 +1877,7 @@ function scheduledTask(
     runMode: "new_session_per_run",
     overlapPolicy: "allow_concurrent",
     agentConfig: scheduledTaskAgentConfig(),
+    targetSessionId: null,
     reusableSessionId: null,
     rigId: null,
     variableSetId: null,
