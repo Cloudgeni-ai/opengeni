@@ -46,6 +46,7 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import type { SessionWorkflowClient } from "../dependencies";
+import { normalizeResources } from "../domain/resources";
 import {
   requireSessionAuthorization,
   type ResolvedSessionAuthorization,
@@ -710,6 +711,7 @@ export async function saveHumanComposerDraft(
         saveComposerDraftInTransaction(tx as unknown as Database, {
           ...context,
           ...input,
+          resources: normalizeResources(input.resources),
           subjectId: context.subjectId,
         }),
       ),

@@ -265,6 +265,7 @@ describe("WorkspaceDock", () => {
       expect(
         rendered.container.querySelector('[role="dialog"][aria-label="Workspace"][hidden]'),
       ).not.toBeNull();
+      expect((overlay as HTMLElement | null)?.style.display).toBe("none");
       expect(primary?.getAttribute("inert")).toBeNull();
       expect(primary?.getAttribute("aria-hidden")).toBeNull();
 
@@ -277,6 +278,7 @@ describe("WorkspaceDock", () => {
       expect(
         rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
       ).not.toBeNull();
+      expect((overlay as HTMLElement | null)?.style.display).toBe("");
       expect(primary?.getAttribute("inert")).not.toBeNull();
       expect(primary?.getAttribute("aria-hidden")).toBe("true");
       expect(document.activeElement?.getAttribute("role")).toBe("tab");
