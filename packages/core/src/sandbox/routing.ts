@@ -15,6 +15,7 @@ import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config"
 import {
   advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
+  getEnrollment,
   getRetainedProcess,
   getSandbox,
   markWarmLeaseInstanceLost,
@@ -32,6 +33,7 @@ import {
   isProviderSandboxGoneDuringRoutedOperation,
   makeActiveBackendResolver,
   NatsControlRpc,
+  NatsOpStreamTransport,
   RoutingSandboxSession,
   resolveModalCheckpointProviderBindingForSession,
   type ControlRpc,
@@ -44,6 +46,7 @@ import {
   type RoutingRetainedProcessTerminalProof,
   type RoutingSandboxOperationObserver,
   type SelfhostedRelayConfig,
+  type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime/sandbox";
 
 type PersistableMutationAdmission = {
@@ -112,6 +115,27 @@ function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
       }
       return bus.getRequestConnection();
     });
+}
+
+async function resolveSelfhostedOpStream(
+  services: ChannelARoutingServices,
+  workspaceId: string,
+  sandbox: RoutableSandbox,
+): Promise<SelfhostedOpStreamDeps | undefined> {
+  if (
+    services.settings.agentOpStreamEnabled !== true ||
+    !services.bus?.getOpStreamConnection ||
+    !sandbox.enrollmentId
+  ) {
+    return undefined;
+  }
+  const enrollment = await getEnrollment(services.db, workspaceId, sandbox.enrollmentId);
+  if (enrollment?.opStream !== true) return undefined;
+  return {
+    transport: new NatsOpStreamTransport(
+      async () => services.bus?.getOpStreamConnection?.() ?? null,
+    ),
+  };
 }
 
 /** Whether the routing proxy should wrap the Channel-A box: gated by the
@@ -389,6 +413,8 @@ export function wrapChannelABoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
+    resolveSelfhostedOpStream: (sandbox) =>
+      resolveSelfhostedOpStream(services, ids.workspaceId, sandbox),
     relay: relayConfigFromSettings(settings),
     selfhostedTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
     selfhostedExecTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,

@@ -81,6 +81,30 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(seen[0]?.timeoutMs).toBe(17_000);
   });
 
+  test("an explicit unbounded deadline never starts on the legacy transport", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      execTimeoutMs: 0,
+    });
+
+    const error = await session.exec({ cmd: "sleep 999" }).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
+    expect(String((error as Error).message)).toContain("streaming command protocol");
+    expect(mock.requests).toHaveLength(0);
+  });
+
   test("exec preserves the ambient machine shell only when no shell is requested", async () => {
     const mock = new MockAgentResponder();
     await sessionWith(mock).exec({ cmd: "printf ambient" });

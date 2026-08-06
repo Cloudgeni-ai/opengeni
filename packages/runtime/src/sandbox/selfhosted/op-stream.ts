@@ -76,9 +76,12 @@ export const OP_STREAM_SILENCE_TIMEOUT_MS = 30_000;
  *  the client fails it typed (PROTOCOL liveness rule: hold ≤120s, then only a
  *  definitive answer fails the op). */
 export const OP_STREAM_RECONNECT_HOLD_MS = 120_000;
-/** Bound on stashed out-of-order frames per op (each ≤128 KiB payload). A gap
- *  that outgrows this is healed by attach-replay, not by buffering forever. */
-const OP_STREAM_MAX_STASHED_FRAMES = 4_096;
+/** The out-of-order stash is a disposable replay optimization, never retained
+ *  command output. Bound it in bytes to two live-flow windows per op: a gap that
+ *  outgrows that cache drops the cache and heals from the runner's authoritative
+ *  retention log. This scales with the negotiated stream window and cannot turn
+ *  100 concurrent quiet gaps into a multi-gigabyte frame-count allocation. */
+const OP_STREAM_STASH_WINDOW_MULTIPLIER = 2;
 /** OpStart DRAINING retry budget — mirrors the legacy exec's patient budget
  *  (retry-policy.ts): op start is not latency-critical and a saturated machine
  *  should queue, not fail. OpStart is idempotent by op id, so timeout blips are
@@ -203,7 +206,8 @@ export class OpStreamExecClient {
    * Run one exec over the op stream. `opId` is the durable id (B1) — a re-issue
    * with the same id attaches instead of re-running. `deadlineMs` is the exec
    * process budget (relative); the runner's enforcement is authoritative.
-   * `wallMs` is the client-side give-up wall (deadline + reply grace).
+   * `wallMs` is the client-side give-up wall (deadline + reply grace); 0 means
+   * no duration wall. Liveness probing and explicit cancellation still apply.
    */
   async exec(
     opId: string,
@@ -275,7 +279,8 @@ class OpConsumer {
 
   /** Highest contiguously APPLIED seq (frames start at 1; 0 = none yet). */
   private lastApplied = 0n;
-  private readonly stash = new Map<bigint, OpFrame>();
+  private readonly stash = new Map<bigint, { frame: OpFrame; wireBytes: number }>();
+  private stashedWireBytes = 0;
   private readonly chunks: { stdout: Uint8Array[]; stderr: Uint8Array[] } = {
     stdout: [],
     stderr: [],
@@ -366,12 +371,10 @@ class OpConsumer {
     // Settled: the exit frame and every frame before it are applied.
     const exit = this.exit as OpExit;
     const exitSeq = this.exitSeq as bigint;
-    this.verifyByteExact(exit);
     if (exit.failureCode) {
       throw runnerFailureToControlError(exit);
     }
-    const stdout = concatChunks(this.chunks.stdout);
-    const stderr = concatChunks(this.chunks.stderr);
+    const { stdout, stderr } = this.assembleAndVerify(exit);
     return {
       outcome: {
         response: {
@@ -436,7 +439,8 @@ class OpConsumer {
           error.code === ErrorCode.ERROR_CODE_UNSUPPORTED
         ) {
           throw new OpStreamUnavailableError(
-            `the runner refused OpStart (${error.message}); falling back to the legacy exec`,
+            `the runner refused OpStart (${error.message})`,
+            "runner",
           );
         }
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
@@ -565,8 +569,16 @@ class OpConsumer {
     if (seq !== this.lastApplied + 1n) {
       // Out of order: stash and ask for the gap. Replay heals from the frontier,
       // so an overgrown stash is dropped, not grown without bound.
-      if (this.stash.size < OP_STREAM_MAX_STASHED_FRAMES) {
-        this.stash.set(seq, frame);
+      const wireBytes = payload.byteLength;
+      const stashMaxBytes = this.windowBytes * OP_STREAM_STASH_WINDOW_MULTIPLIER;
+      if (!this.stash.has(seq)) {
+        if (this.stashedWireBytes + wireBytes <= stashMaxBytes) {
+          this.stash.set(seq, { frame, wireBytes });
+          this.stashedWireBytes += wireBytes;
+        } else {
+          this.stash.clear();
+          this.stashedWireBytes = 0;
+        }
       }
       this.requestAttachHeal();
       return;
@@ -574,12 +586,13 @@ class OpConsumer {
     this.applyFrame(frame);
     // Drain any stashed continuation.
     for (;;) {
-      const next = this.stash.get(this.lastApplied + 1n);
-      if (!next) {
+      const stashed = this.stash.get(this.lastApplied + 1n);
+      if (!stashed) {
         break;
       }
       this.stash.delete(this.lastApplied + 1n);
-      this.applyFrame(next);
+      this.stashedWireBytes -= stashed.wireBytes;
+      this.applyFrame(stashed.frame);
     }
     this.maybeSettle();
     this.maybeGrantCredit();
@@ -654,7 +667,7 @@ class OpConsumer {
   /**
    * The liveness watcher: probes a silent op with OpQuery, re-attaches when the
    * runner is ahead of us (frames lost in flight), holds a quiet-but-alive op
-   * open through the reconnect window, and enforces the client-side wall.
+   * open through the reconnect window, and enforces an explicit client-side wall.
    * Resolves only by rejection (typed failure) or by `stop()` at settle.
    */
   private watchLiveness(wallMs: number): { wall: Promise<never>; stop: () => void } {
@@ -667,7 +680,7 @@ class OpConsumer {
           return;
         }
         try {
-          if (Date.now() - startedAt >= wallMs) {
+          if (wallMs > 0 && Date.now() - startedAt >= wallMs) {
             // The runner enforces the exec deadline and emits Exit{timed_out};
             // reaching OUR wall means even that terminal frame never arrived —
             // the same ambiguity as a legacy reply timeout, surfaced the same.
@@ -737,11 +750,16 @@ class OpConsumer {
     }
   }
 
-  /** Byte-exactness proof: totals AND blake3 digests of the reassembled
-   *  channels must match the runner's Exit record exactly. */
-  private verifyByteExact(exit: OpExit): void {
+  /** Assemble each channel once and prove byte exactness. Clearing the chunk
+   *  arrays after assembly avoids keeping both every source frame and the final
+   *  contiguous result live while a large response crosses the caller boundary. */
+  private assembleAndVerify(exit: OpExit): { stdout: Uint8Array; stderr: Uint8Array } {
+    const assembled = {
+      stdout: concatChunks(this.chunks.stdout),
+      stderr: concatChunks(this.chunks.stderr),
+    };
     for (const channel of ["stdout", "stderr"] as const) {
-      const bytes = concatChunks(this.chunks[channel]);
+      const bytes = assembled[channel];
       const declaredTotal = exit.totals[channel];
       if (declaredTotal !== undefined && BigInt(declaredTotal) !== BigInt(bytes.byteLength)) {
         throw protocolError(
@@ -759,7 +777,9 @@ class OpConsumer {
           );
         }
       }
+      this.chunks[channel].length = 0;
     }
+    return assembled;
   }
 }
 

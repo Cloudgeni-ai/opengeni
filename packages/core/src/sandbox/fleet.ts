@@ -27,6 +27,7 @@ import {
 import type { EventBus } from "@opengeni/events";
 import {
   NatsControlRpc,
+  NatsOpStreamTransport,
   selfhostedLiveness,
   SelfhostedSession,
   swapTargetEstablishability,
@@ -34,6 +35,7 @@ import {
   type ControlRpc,
   type NatsRequestConnection,
   type SelfhostedRelayConfig,
+  type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
@@ -567,6 +569,8 @@ export type RunOnSelfhostedMachine = {
   controlTimeoutMs: number;
   /** Longer agent-side process deadline for exec. */
   execTimeoutMs: number;
+  /** Streaming transport required when execTimeoutMs is 0 (unbounded). */
+  opStream?: SelfhostedOpStreamDeps;
 };
 
 /**
@@ -587,6 +591,7 @@ export async function executeRunOnSelfhostedMachine(
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
     execTimeoutMs: machine.execTimeoutMs,
+    ...(machine.opStream !== undefined ? { opStream: machine.opStream } : {}),
   });
 
   try {
@@ -634,6 +639,11 @@ export async function executeRunOnSelfhostedMachine(
       // so leave `timedOut` absent while still reporting the enforced deadline.
       ...(op.kind === "exec" ? { deadlineMs: session.effectiveExecDeadlineMs } : {}),
     };
+  } finally {
+    // This one-off has no turn journal. Once its result has been accepted by
+    // this call, final-ack any settled stream so the runner can immediately
+    // release replay/output retention instead of waiting for TTL cleanup.
+    await session.finalizeOpStreamOps().catch(() => undefined);
   }
 }
 
@@ -689,6 +699,17 @@ export async function runOnSandbox(
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+      ...(services.settings.agentOpStreamEnabled === true &&
+      enrollment.opStream === true &&
+      services.bus?.getOpStreamConnection
+        ? {
+            opStream: {
+              transport: new NatsOpStreamTransport(
+                async () => services.bus?.getOpStreamConnection?.() ?? null,
+              ),
+            },
+          }
+        : {}),
     },
     target,
     op,

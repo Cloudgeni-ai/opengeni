@@ -50,6 +50,7 @@ import {
   ensureTurnModalRegistryImage,
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
+  finalizeDurableTurnOpStreams,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
@@ -93,6 +94,45 @@ import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("Connected Machine durable stream finalization", () => {
+  test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
+    const calls: string[] = [];
+    const eagerProxy = {
+      finalizeOpStreamOps: async () => {
+        calls.push("eager");
+      },
+    };
+    const lazyProxy = {
+      finalizeOpStreamOps: async () => {
+        calls.push("lazy");
+        throw new Error("runner unreachable");
+      },
+    };
+    const fallback = {
+      finalizeOpStreamOps: async () => {
+        calls.push("fallback");
+      },
+    };
+
+    await finalizeDurableTurnOpStreams(
+      [lazyProxy, eagerProxy, lazyProxy, null, { finalizeOpStreamOps: "not-a-function" }],
+      fallback,
+    );
+
+    expect(calls).toEqual(["lazy", "eager"]);
+  });
+
+  test("uses the machine-primary fallback when no routing proxy exists", async () => {
+    let finalized = 0;
+    await finalizeDurableTurnOpStreams([null, undefined], {
+      finalizeOpStreamOps: async () => {
+        finalized += 1;
+      },
+    });
+    expect(finalized).toBe(1);
+  });
+});
 
 describe("disconnected MCP turn instructions", () => {
   test("warns the model without exposing an unbounded unavailable registry", () => {

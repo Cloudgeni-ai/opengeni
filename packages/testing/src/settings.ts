@@ -218,10 +218,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     rigVerificationLeaseOwnershipEnabled: false,
     sandboxLazyProvisionEnabled: false,
     sandboxSelfhostedEnabled: false,
-    agentOpStreamEnabled: false,
-    // Mirror the production defaults for the split selfhosted op deadlines
-    // (config/src/index.ts): short control window, longer exec budget.
-    sandboxSelfhostedExecTimeoutMs: 120_000,
+    agentOpStreamEnabled: true,
+    // Mirror production: command duration is unbounded; control probes remain short.
+    sandboxSelfhostedExecTimeoutMs: 0,
     sandboxSelfhostedControlTimeoutMs: 30_000,
     enrollmentSigningSecret: undefined,
     selfhostedNatsUrl: undefined,
