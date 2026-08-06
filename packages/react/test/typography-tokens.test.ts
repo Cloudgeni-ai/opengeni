@@ -4,6 +4,7 @@ import { cn } from "../src/lib/cn";
 
 const tokens = await Bun.file(`${import.meta.dir}/../styles/tokens.css`).text();
 const styles = await Bun.file(`${import.meta.dir}/../styles/index.css`).text();
+const responsive = await Bun.file(`${import.meta.dir}/../styles/responsive.css`).text();
 
 describe("public typography token contract", () => {
   test("keeps apps/web's current default metrics", () => {
@@ -69,11 +70,11 @@ describe("public typography token contract", () => {
   });
 
   test("ships additive container-query hooks and panel-bounded portal menus", () => {
-    expect(styles).toContain('data-og-responsive-basis="container"');
-    expect(styles).toContain("container: og-composer / inline-size");
-    expect(styles).toContain("@container og-composer (max-width: 39.999rem)");
-    expect(styles).toContain("@media (pointer: coarse)");
-    expect(styles).toContain("var(--og-portal-source-inline-size, 100vw)");
-    expect(styles).toContain("var(--radix-dropdown-menu-content-available-width, 100vw)");
+    expect(responsive).toContain('data-og-responsive-basis="container"');
+    expect(responsive).toContain("container: og-composer / inline-size");
+    expect(responsive).toContain("@container og-composer (max-width: 39.999rem)");
+    expect(responsive).toContain("@media (pointer: coarse)");
+    expect(responsive).toContain("var(--og-portal-source-inline-size, 100vw)");
+    expect(responsive).toContain("var(--radix-dropdown-menu-content-available-width, 100vw)");
   });
 });

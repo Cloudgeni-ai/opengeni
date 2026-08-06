@@ -15,7 +15,6 @@
    -------------------------------------------------------------------------- */
 
 @import "./tokens.css";
-@import "./effective-tokens.css";
 
 @theme inline {
   --font-og-sans: var(--og-font-sans);
@@ -63,7 +62,7 @@
   --color-og-accent-strong: var(--og-color-accent-strong);
   --color-og-accent-deep: var(--og-color-accent-deep);
   --color-og-accent-fg: var(--og-color-accent-fg);
-  --color-og-accent-soft: var(--_og-color-accent-soft);
+  --color-og-accent-soft: var(--og-color-accent-soft);
 
   --color-og-status-queued: var(--og-color-status-queued);
   --color-og-status-running: var(--og-color-status-running);
@@ -135,13 +134,13 @@
   --shadow-og-sm: var(--og-shadow-sm);
   --shadow-og-md: var(--og-shadow-md);
   --shadow-og-lg: var(--og-shadow-lg);
-  --shadow-og-glow: var(--_og-shadow-glow);
+  --shadow-og-glow: var(--og-shadow-glow);
 
   --ease-og-out: var(--og-ease-out);
   --ease-og-in-out: var(--og-ease-in-out);
   --ease-og-spring: var(--og-ease-spring);
 
-  --animate-og-enter: og-enter var(--_og-duration-base) var(--og-ease-out) both;
+  --animate-og-enter: og-enter var(--og-duration-base) var(--og-ease-out) both;
   --animate-og-pulse: og-pulse 2s var(--og-ease-in-out) infinite;
   --animate-og-blink: og-blink 1s steps(2, start) infinite;
   --animate-og-shimmer: og-shimmer 2.2s linear infinite;
@@ -150,16 +149,16 @@
   --animate-pulse: og-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   --animate-og-waveform: og-waveform 1.15s var(--og-ease-in-out) infinite;
   /* Manual disclose — snappy. Auto settle-collapse is the slow path below. */
-  --animate-og-expand: og-expand var(--_og-duration-disclose) var(--og-ease-in-out);
-  --animate-og-collapse: og-collapse var(--_og-duration-disclose) var(--og-ease-in-out);
+  --animate-og-expand: og-expand var(--og-duration-disclose) var(--og-ease-in-out);
+  --animate-og-collapse: og-collapse var(--og-duration-disclose) var(--og-ease-in-out);
   /* Auto-fold the reader did not ask for: ~7× manual so it reads as choreography. */
-  --animate-og-settle-chip: og-settle-chip var(--_og-duration-slow) var(--og-ease-out) both;
+  --animate-og-settle-chip: og-settle-chip var(--og-duration-slow) var(--og-ease-out) both;
   /* Ease-out: settle lands softly (slow tail), not a symmetric ease-in-out stop. */
-  --animate-og-settle-collapse: og-collapse var(--_og-duration-disclose-settle) var(--og-ease-out);
+  --animate-og-settle-collapse: og-collapse var(--og-duration-disclose-settle) var(--og-ease-out);
   /* Live tool rows arriving mid-turn — soft, not tied to manual disclose speed. */
-  --animate-og-row-enter: og-row-enter var(--_og-duration-slow) var(--og-ease-stream) both;
+  --animate-og-row-enter: og-row-enter var(--og-duration-slow) var(--og-ease-stream) both;
   /* Stream end fallback breath when View Transitions are unavailable. */
-  --animate-og-markdown-settle: og-markdown-settle var(--_og-duration-markdown-crystallize)
+  --animate-og-markdown-settle: og-markdown-settle var(--og-duration-markdown-crystallize)
     var(--og-ease-stream) both;
 }
 
@@ -276,7 +275,7 @@
 }
 .og-stream-ink {
   display: inline;
-  animation: og-stream-ink var(--_og-duration-stream) var(--og-ease-out) both;
+  animation: og-stream-ink var(--og-duration-stream) var(--og-ease-out) both;
 }
 
 /* Stream-end remount fallback when View Transitions are unavailable.
@@ -446,207 +445,6 @@
 .og-root :where(*) {
   scrollbar-width: thin;
   scrollbar-color: var(--og-color-border-strong) transparent;
-}
-
-/* Composer responsiveness is viewport-based unless the public Root opts into
-   its own inline-size container. The semantic hooks below intentionally keep
-   information density separate from pointer target sizing. */
-.og-composer[data-og-responsive-basis="container"] {
-  container: og-composer / inline-size;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-composer-input {
-  padding-inline: 1rem;
-  font-size: var(--og-font-size-composer-wide);
-  line-height: var(--og-line-height-composer-wide);
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-composer-footer {
-  gap: 0.375rem;
-  padding-inline: 0.625rem;
-  padding-bottom: 0.625rem;
-}
-
-.og-composer[data-og-responsive-basis="container"]
-  .og-composer-footer[data-og-stack-actions] {
-  flex-wrap: wrap;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-composer-controls {
-  flex-wrap: wrap;
-  gap: 0.375rem;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-composer-hint {
-  display: inline;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-composer-actions {
-  gap: 0.375rem;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
-  --og-model-policy-label-full-display: inline;
-  --og-model-policy-label-short-display: none;
-  --og-model-policy-effort-display: inline;
-  height: var(--og-model-picker-trigger-height);
-  max-width: 16rem;
-  padding-inline: 0.625rem;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full {
-  display: var(--og-model-policy-label-full-display);
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short {
-  display: var(--og-model-policy-label-short-display);
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
-  display: var(--og-model-policy-effort-display);
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-model-picker-native {
-  max-width: 180px;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label {
-  max-width: 11rem;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-transcription-error-label {
-  max-width: 10rem;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-command-description {
-  display: inline;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-realtime-primary,
-.og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
-  height: 2rem;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-realtime-primary {
-  width: 2rem;
-}
-
-.og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
-  display: inline-flex;
-  width: 1.5rem;
-}
-
-.og-composer[data-og-responsive-basis="container"]
-  .og-realtime-control[data-model-menu="split-desktop"]
-  .og-realtime-primary {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
-@container og-composer (max-width: 47.999rem) {
-  .og-composer[data-og-responsive-basis="container"] .og-composer-input {
-    padding-inline: 0.875rem;
-    font-size: var(--og-font-size-composer);
-    line-height: var(--og-line-height-composer);
-  }
-}
-
-@container og-composer (max-width: 39.999rem) {
-  .og-composer[data-og-responsive-basis="container"] .og-composer-footer {
-    flex-wrap: nowrap;
-    align-items: center;
-    gap: 0.25rem;
-    padding-inline: 0.5rem;
-    padding-bottom: 0.5rem;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-composer-controls,
-  .og-composer[data-og-responsive-basis="container"] .og-composer-actions {
-    flex-wrap: nowrap;
-    gap: 0.25rem;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-composer-hint,
-  .og-composer[data-og-responsive-basis="container"] .og-command-description {
-    display: none;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,
-  .og-composer[data-og-responsive-basis="container"] .og-model-picker-native {
-    max-width: 7.5rem;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
-    --og-model-policy-label-full-display: none;
-    --og-model-policy-label-short-display: inline;
-    --og-model-policy-effort-display: none;
-    padding-inline: 0.5rem;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label {
-    max-width: 7rem;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-transcription-error-label {
-    max-width: 6rem;
-  }
-
-  .og-composer[data-og-responsive-basis="container"]
-    .og-realtime-control[data-model-menu="split-desktop"]
-    .og-realtime-primary {
-    border-radius: var(--og-radius-md);
-  }
-
-  .og-composer[data-og-responsive-basis="container"]
-    .og-realtime-control[data-model-menu="split-desktop"]
-    .og-realtime-model-trigger {
-    display: none;
-  }
-}
-
-@container og-composer (max-width: 24.999rem) {
-  .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-long {
-    display: none;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-short {
-    display: inline;
-  }
-}
-
-@media (pointer: coarse) {
-  .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,
-  .og-composer[data-og-responsive-basis="container"] .og-realtime-primary,
-  .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
-    height: 2.75rem;
-  }
-
-  .og-composer[data-og-responsive-basis="container"] .og-realtime-primary,
-  .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
-    width: 2.75rem;
-  }
-}
-
-/* Portalled menus retain theme/density tokens from their trigger and, in
-   container mode, the live composer width supplied by ResizeObserver. */
-.og-model-policy-menu {
-  box-sizing: border-box;
-  width: min(
-    var(--og-model-picker-menu-width),
-    calc(var(--og-portal-source-inline-size, 100vw) - 1rem),
-    var(--radix-dropdown-menu-content-available-width, 100vw)
-  );
-  max-width: calc(100vw - 1rem);
-}
-
-.og-realtime-menu {
-  box-sizing: border-box;
-  width: min(
-    var(--og-realtime-menu-width),
-    calc(var(--og-portal-source-inline-size, 100vw) - 1rem),
-    var(--radix-dropdown-menu-content-available-width, 100vw)
-  );
-  max-width: calc(100vw - 1rem);
 }
 
 /* The machine popover stays mounted so its trigger's `aria-controls` always

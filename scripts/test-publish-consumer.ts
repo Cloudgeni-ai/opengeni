@@ -179,6 +179,8 @@ try {
     "package/styles/compiled.css",
     "package/styles/compiled.d.ts",
     "package/styles/effective-tokens.css",
+    "package/styles/responsive.css",
+    "package/styles/responsive.d.ts",
   ]) {
     if (!reactTarballContents.split("\n").includes(artifact)) {
       throw new Error(`react tarball is missing ${artifact}`);

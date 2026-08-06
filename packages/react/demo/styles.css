@@ -2,6 +2,7 @@
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 @import "@opengeni/react/styles.css";
+@import "../styles/responsive.css";
 
 @source "../../../node_modules/@opengeni/react/src";
 

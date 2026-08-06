@@ -88,10 +88,13 @@ Tailwind v4 hosts may instead keep the additive source bridge:
 ```css
 @import "tailwindcss";
 @import "@opengeni/react/styles.css";
+@import "@opengeni/react/responsive.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
-Import one styling path, not both. Hosts consuming only
+The small `responsive.css` layer is needed only when the source-bridge host uses
+`responsiveBasis="container"`; `compiled.css` already contains it. Import one
+styling path, not both. Hosts consuming only
 `@opengeni/react/session` need no CSS; that headless subpath remains CSS-free.
 For token-only use, import `@opengeni/react/tokens.css` directly.
 
@@ -200,3 +203,5 @@ transcription, paused, and command controls follow its actual width. Portalled
 model/realtime menus observe that same root and are bounded to it while retaining
 the copied theme/density tokens. Pointer modality remains independent: container
 width chooses information density, while coarse pointers choose 44px targets.
+Source-bridge hosts import `@opengeni/react/responsive.css`; the compiled entry
+already contains this layout layer.

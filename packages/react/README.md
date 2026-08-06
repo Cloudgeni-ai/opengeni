@@ -75,11 +75,15 @@ want OpenGeni utilities compiled into their own Tailwind entry:
 ```css
 @import "tailwindcss";
 @import "@opengeni/react/styles.css";
+@import "@opengeni/react/responsive.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
 `@source` lets the host compiler discover utilities used inside the components.
-Do not import both `compiled.css` and `styles.css`. Consuming only the tokens?
+`responsive.css` is the small opt-in layout layer for
+`responsiveBasis="container"`; omit it when every composer keeps the historical
+viewport basis. `compiled.css` already contains that layer. Do not import both
+`compiled.css` and `styles.css`. Consuming only the tokens?
 Import `@opengeni/react/tokens.css` and use the `--og-*` variables directly.
 
 ### Product-compatible theming and density
@@ -125,7 +129,8 @@ feature, so a narrow mouse-driven panel stays compact while touch targets remain
 at least 44px. Composer-owned model and realtime menus keep their portal
 placement but copy the live root width with the existing theme tokens and never
 grow wider than that source container. Compound layouts can pass the same prop
-to `Composer.Root`.
+to `Composer.Root`. Hosts using the Tailwind source bridge import
+`@opengeni/react/responsive.css`; the ready-to-use `compiled.css` includes it.
 
 The preset is only a starting point. Override individual runtime tokens on the
 same ancestor without rebuilding Tailwind:

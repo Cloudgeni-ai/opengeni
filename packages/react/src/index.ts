@@ -5,7 +5,8 @@
 //
 // Import the ready-to-use styles once:
 //   import "@opengeni/react/compiled.css";
-// Tailwind v4 hosts may instead use the additive styles.css + @source bridge.
+// Tailwind v4 hosts may instead use the additive styles.css + @source bridge;
+// container-responsive composers additionally import responsive.css.
 
 export type {
   EmbeddedFileAttachmentClientLike,
