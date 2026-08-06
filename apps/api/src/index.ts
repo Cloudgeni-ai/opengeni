@@ -18,9 +18,10 @@ import type {
 import {
   assertRuntimeDatabasePosture,
   createDb,
+  ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+  ENABLED_V2_PROTECTED_TABLES,
+  ENABLED_V2_TABLE_PRIVILEGES,
   markSessionWorkflowWakeDelivered,
-  ORGANIZATION_GOVERNANCE_PROTECTED_TABLES,
-  ORGANIZATION_GOVERNANCE_TABLE_PRIVILEGES,
   runtimeDatabaseReadyCheck,
   type Database,
 } from "@opengeni/db";
@@ -296,13 +297,13 @@ export async function startApi() {
     rlsStrategy: settings.rlsStrategy,
     expectedRole: servingRole,
     targetSchema: settings.dbSchema.trim() || "public",
-  } as const;
-  const governanceDatabasePosture = {
-    rlsStrategy: settings.rlsStrategy,
-    expectedRole: settings.organizationGovernanceDatabaseRole,
-    targetSchema: settings.dbSchema.trim() || "public",
-    protectedTables: ORGANIZATION_GOVERNANCE_PROTECTED_TABLES,
-    tablePrivileges: ORGANIZATION_GOVERNANCE_TABLE_PRIVILEGES,
+    ...(settings.organizationGovernanceEnabled
+      ? {
+          protectedTables: ENABLED_V2_PROTECTED_TABLES,
+          tablePrivileges: ENABLED_V2_TABLE_PRIVILEGES,
+          protectedNoDirectDmlTables: ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+        }
+      : {}),
   } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
@@ -317,7 +318,7 @@ export async function startApi() {
     if (governanceDbClient) {
       await retryStartupDependency(
         "organization governance PostgreSQL runtime posture",
-        () => assertRuntimeDatabasePosture(governanceDbClient.db, governanceDatabasePosture),
+        () => assertRuntimeDatabasePosture(governanceDbClient.db, databasePosture),
         { ...retryOptions, onRetry },
       );
     }
@@ -369,7 +370,7 @@ export async function startApi() {
       db: async () => {
         await runtimeDatabaseReadyCheck(dbClient.db, databasePosture)();
         if (governanceDbClient) {
-          await runtimeDatabaseReadyCheck(governanceDbClient.db, governanceDatabasePosture)();
+          await runtimeDatabaseReadyCheck(governanceDbClient.db, databasePosture)();
         }
       },
     },

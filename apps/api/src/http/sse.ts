@@ -13,6 +13,7 @@ const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+export const SSE_DEFAULT_REAUTHORIZE_AFTER_MS = 15_000;
 const activeSseStreams: Record<"session" | "workspace_control", number> = {
   session: 0,
   workspace_control: 0,
@@ -257,15 +258,7 @@ export async function sseSessionStream(
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
-  if (
-    options.reauthorize &&
-    options.reauthorizeAfterMs !== undefined &&
-    (!Number.isSafeInteger(options.reauthorizeAfterMs) ||
-      options.reauthorizeAfterMs < 1_000 ||
-      options.reauthorizeAfterMs > 60_000)
-  ) {
-    throw new RangeError("session stream reauthorization must be between 1000 and 60000ms");
-  }
+  validateReauthorizationInterval(options.reauthorizeAfterMs, "session");
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: SessionEvent | null = null;
@@ -304,7 +297,7 @@ export async function sseSessionStream(
   };
   const scheduleReauthorization = () => {
     if (!options.reauthorize || channel.stopped()) return;
-    const interval = options.reauthorizeAfterMs ?? 15_000;
+    const interval = options.reauthorizeAfterMs ?? SSE_DEFAULT_REAUTHORIZE_AFTER_MS;
     reauthorizationTimer = setTimeout(() => {
       reauthorizationTimer = null;
       void options.reauthorize!()
@@ -455,11 +448,13 @@ export async function sseWorkspaceControlStream(
   options: SseDeliveryOptions = {},
 ): Promise<Response> {
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
+  validateReauthorizationInterval(options.reauthorizeAfterMs, "workspace control");
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: WorkspaceControlEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<WorkspaceControlEvent> | null = null;
+  let reauthorizationTimer: ReturnType<typeof setTimeout> | null = null;
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
   let closeMetrics = () => {};
@@ -469,6 +464,10 @@ export async function sseWorkspaceControlStream(
     if (heartbeatTimer) {
       clearTimeout(heartbeatTimer);
       heartbeatTimer = null;
+    }
+    if (reauthorizationTimer) {
+      clearTimeout(reauthorizationTimer);
+      reauthorizationTimer = null;
     }
     delivery?.stop();
     const release = unsubscribe;
@@ -486,6 +485,17 @@ export async function sseWorkspaceControlStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("workspace control stream delivery failed", error));
   };
+  const scheduleReauthorization = () => {
+    if (!options.reauthorize || channel.stopped()) return;
+    const interval = options.reauthorizeAfterMs ?? SSE_DEFAULT_REAUTHORIZE_AFTER_MS;
+    reauthorizationTimer = setTimeout(() => {
+      reauthorizationTimer = null;
+      void options.reauthorize!()
+        .then(scheduleReauthorization)
+        .catch((error) => fail(error));
+    }, interval);
+  };
+  scheduleReauthorization();
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
@@ -650,13 +660,12 @@ export type SseDeliveryOptions = {
   heartbeatIntervalMs?: number;
   observability?: Observability | undefined;
   onObservation?: ((observation: SseDeliveryBoundObservation) => void) | undefined;
-};
-
-export type SessionSseDeliveryOptions = SseDeliveryOptions & {
   /** Host ACL re-check, run even while the event stream is otherwise idle. */
   reauthorize?: (() => Promise<void>) | undefined;
   reauthorizeAfterMs?: number | undefined;
 };
+
+export type SessionSseDeliveryOptions = SseDeliveryOptions;
 
 function sseObservationReporter(
   stream: "session" | "workspace_control",
@@ -691,4 +700,10 @@ function resolveHeartbeatInterval(value: number | undefined): number {
     throw new RangeError("SSE heartbeat interval must be between 1000 and 60000ms");
   }
   return interval;
+}
+
+function validateReauthorizationInterval(value: number | undefined, stream: string): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 1_000 || value > 60_000)) {
+    throw new RangeError(`${stream} stream reauthorization must be between 1000 and 60000ms`);
+  }
 }

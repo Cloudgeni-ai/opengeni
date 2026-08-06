@@ -418,32 +418,48 @@ export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.fr
   ),
 });
 
-/** Minimal verified privilege class for the v2 governance runtime role. */
-export const ORGANIZATION_GOVERNANCE_PROTECTED_TABLES = [
-  "api_keys",
-  "organization_authorization_invalidations",
-  "organization_governance_commands",
-  "organization_recovery_approvals",
-  "organization_recovery_audit",
-  "organization_recovery_custodians",
-  "organization_recovery_operations",
-] as const;
+function mergeTablePrivilegeContracts(
+  ...contracts: RuntimeTablePrivilegeContract[]
+): RuntimeTablePrivilegeContract {
+  const tableNames = new Set<string>();
+  for (const contract of contracts) {
+    for (const tableName of Object.keys(contract)) tableNames.add(tableName);
+  }
+  return Object.freeze(
+    Object.fromEntries(
+      [...tableNames]
+        .sort((a, b) => a.localeCompare(b))
+        .map((tableName) => [
+          tableName,
+          (["SELECT", "INSERT", "UPDATE", "DELETE"] as const).filter((privilege) =>
+            contracts.some((contract) => contract[tableName]?.includes(privilege)),
+          ),
+        ]),
+    ),
+  ) as RuntimeTablePrivilegeContract;
+}
 
-export const ORGANIZATION_GOVERNANCE_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract =
+/**
+ * Exact table contract for the enabled v2 serving role. New API/worker
+ * binaries use this one principal for ordinary application traffic and the
+ * organization-governance recovery plane, so the posture and provisioning
+ * checks must describe the same complete surface.
+ */
+export const ENABLED_V2_PROTECTED_TABLES = FORCE_RLS_TABLES;
+export const ENABLED_V2_TABLE_PRIVILEGES = mergeTablePrivilegeContracts(
+  RUNTIME_TABLE_PRIVILEGES,
   Object.freeze({
-    api_keys: FULL_DML_PRIVILEGES,
-    auth_sessions: ["SELECT"] as const,
-    auth_users: ["SELECT"] as const,
-    managed_accounts: FULL_DML_PRIVILEGES,
     organization_authorization_invalidations: ["SELECT", "INSERT"] as const,
     organization_governance_commands: ["SELECT", "INSERT", "UPDATE"] as const,
     organization_recovery_approvals: FULL_DML_PRIVILEGES,
     organization_recovery_audit: ["SELECT", "INSERT"] as const,
     organization_recovery_custodians: FULL_DML_PRIVILEGES,
     organization_recovery_operations: FULL_DML_PRIVILEGES,
-    workspace_memberships: FULL_DML_PRIVILEGES,
-    workspaces: FULL_DML_PRIVILEGES,
-  });
+  }),
+);
+export const ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES = Object.freeze(
+  PROTECTED_NO_DIRECT_DML_TABLES.filter((tableName) => !(tableName in ENABLED_V2_TABLE_PRIVILEGES)),
+);
 
 /** All tables with any direct runtime DML; retained as the aggregate public contract. */
 export const RUNTIME_DML_TABLES = Object.freeze(

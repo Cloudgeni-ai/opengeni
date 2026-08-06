@@ -12,6 +12,9 @@ import {
 import {
   assertRuntimeDatabasePosture,
   createDb,
+  ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+  ENABLED_V2_PROTECTED_TABLES,
+  ENABLED_V2_TABLE_PRIVILEGES,
   markSessionWorkflowWakeDelivered,
   type Database,
   type RuntimeDatabasePostureOptions,
@@ -787,6 +790,13 @@ export async function startWorker() {
     rlsStrategy: settings.rlsStrategy,
     expectedRole: servingRole,
     targetSchema: settings.dbSchema.trim() || "public",
+    ...(settings.organizationGovernanceEnabled
+      ? {
+          protectedTables: ENABLED_V2_PROTECTED_TABLES,
+          tablePrivileges: ENABLED_V2_TABLE_PRIVILEGES,
+          protectedNoDirectDmlTables: ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+        }
+      : {}),
   } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;

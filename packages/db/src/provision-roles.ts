@@ -1,10 +1,10 @@
 import postgres from "postgres";
 import type { RlsStrategy } from "./database";
 import {
-  RUNTIME_FULL_DML_TABLES,
+  ENABLED_V2_TABLE_PRIVILEGES,
   RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
-  RUNTIME_READ_INSERT_TABLES,
-  RUNTIME_READ_ONLY_TABLES,
+  RUNTIME_TABLE_PRIVILEGES,
+  type RuntimeTablePrivilegeContract,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -150,8 +150,13 @@ export async function provisionRoles(
       // before adding the governance-specific authorization surface; the
       // legacy app role remains a separate old-fleet identity until atomic
       // activation revokes it and sets it NOLOGIN.
-      await grantAppRoleIfSchemaExists(sql, organizationGovernanceRole, schema);
-      await grantOrganizationGovernanceRoleIfSchemaExists(sql, organizationGovernanceRole, schema);
+      await grantAppRoleIfSchemaExists(
+        sql,
+        organizationGovernanceRole,
+        schema,
+        ENABLED_V2_TABLE_PRIVILEGES,
+      );
+      await grantOrganizationGovernanceOperatorFunctionIfSchemaExists(sql);
       provisionedOrganizationGovernanceRole = organizationGovernanceRole;
     }
 
@@ -186,88 +191,13 @@ export async function provisionRoles(
   }
 }
 
-async function grantOrganizationGovernanceRoleIfSchemaExists(
+async function grantOrganizationGovernanceOperatorFunctionIfSchemaExists(
   sql: postgres.Sql,
-  role: string,
-  schema: string,
 ): Promise<void> {
-  const fullDmlTables = [
-    "managed_accounts",
-    "workspace_memberships",
-    "workspaces",
-    "api_keys",
-    "organization_recovery_custodians",
-    "organization_recovery_operations",
-    "organization_recovery_approvals",
-  ];
-  const readWriteTables = ["organization_governance_commands"];
-  const readInsertTables = [
-    "organization_authorization_invalidations",
-    "organization_recovery_audit",
-  ];
-  const readOnlyTables = ["auth_users", "auth_sessions"];
   await sql.unsafe(`
 DO $$
-DECLARE
-  table_name text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
-    FOREACH table_name IN ARRAY ARRAY[
-      ${fullDmlTables.map(literal).join(", ")}
-    ] LOOP
-      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
-        EXECUTE format(
-          'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
-          ${literal(schema)}, table_name, ${literal(role)}
-        );
-      END IF;
-    END LOOP;
-    FOREACH table_name IN ARRAY ARRAY[
-      ${readWriteTables.map(literal).join(", ")}
-    ] LOOP
-      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
-        EXECUTE format(
-          'GRANT SELECT, INSERT, UPDATE ON TABLE %I.%I TO %I',
-          ${literal(schema)}, table_name, ${literal(role)}
-        );
-      END IF;
-    END LOOP;
-    FOREACH table_name IN ARRAY ARRAY[
-      ${readInsertTables.map(literal).join(", ")}
-    ] LOOP
-      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
-        EXECUTE format(
-          'GRANT SELECT, INSERT ON TABLE %I.%I TO %I',
-          ${literal(schema)}, table_name, ${literal(role)}
-        );
-      END IF;
-    END LOOP;
-    FOREACH table_name IN ARRAY ARRAY[
-      ${readOnlyTables.map(literal).join(", ")}
-    ] LOOP
-      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
-        EXECUTE format(
-          'GRANT SELECT ON TABLE %I.%I TO %I',
-          ${literal(schema)}, table_name, ${literal(role)}
-        );
-      END IF;
-    END LOOP;
-  END IF;
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private') THEN
-    EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
-    IF to_regprocedure('opengeni_private.account_rls_visible(uuid)') IS NOT NULL THEN
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION opengeni_private.account_rls_visible(uuid) TO %I',
-        ${literal(role)}
-      );
-    END IF;
-    IF to_regprocedure('opengeni_private.reject_organization_recovery_history_mutation()') IS NOT NULL THEN
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION opengeni_private.reject_organization_recovery_history_mutation() TO %I',
-        ${literal(role)}
-      );
-    END IF;
     IF to_regprocedure('opengeni_private.activate_organization_governance_target(text)') IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION opengeni_private.activate_organization_governance_target(text) TO opengeni_governance_operator'
@@ -545,10 +475,35 @@ async function grantAppRoleIfSchemaExists(
   sql: postgres.Sql,
   role: string,
   schema: string,
+  tablePrivileges: RuntimeTablePrivilegeContract = RUNTIME_TABLE_PRIVILEGES,
 ): Promise<void> {
-  const runtimeFullDmlTables = `ARRAY[${RUNTIME_FULL_DML_TABLES.map(literal).join(", ")}]`;
-  const runtimeReadOnlyTables = `ARRAY[${RUNTIME_READ_ONLY_TABLES.map(literal).join(", ")}]`;
-  const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
+  const tableGrantGroups = new Map<string, string[]>();
+  for (const [tableName, privileges] of Object.entries(tablePrivileges)) {
+    const grant = privileges.join(", ");
+    const tableNames = tableGrantGroups.get(grant) ?? [];
+    tableNames.push(tableName);
+    tableGrantGroups.set(grant, tableNames);
+  }
+  const tableGrantLoops = [...tableGrantGroups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([grant, tableNames]) => {
+      const tables = `ARRAY[${tableNames
+        .sort((a, b) => a.localeCompare(b))
+        .map(literal)
+        .join(", ")}]`;
+      return `
+    FOREACH runtime_table IN ARRAY ${tables} LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT ${grant} ON TABLE %I.%I TO %I',
+          ${literal(schema)},
+          runtime_table,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;`;
+    })
+    .join("\n");
   await sql.unsafe(`
 DO $$
 DECLARE
@@ -561,36 +516,7 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
-    FOREACH runtime_table IN ARRAY ${runtimeFullDmlTables} LOOP
-      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
-        EXECUTE format(
-          'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
-          ${literal(schema)},
-          runtime_table,
-          ${literal(role)}
-        );
-      END IF;
-    END LOOP;
-    FOREACH runtime_table IN ARRAY ${runtimeReadOnlyTables} LOOP
-      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
-        EXECUTE format(
-          'GRANT SELECT ON TABLE %I.%I TO %I',
-          ${literal(schema)},
-          runtime_table,
-          ${literal(role)}
-        );
-      END IF;
-    END LOOP;
-    FOREACH runtime_table IN ARRAY ${runtimeReadInsertTables} LOOP
-      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
-        EXECUTE format(
-          'GRANT SELECT, INSERT ON TABLE %I.%I TO %I',
-          ${literal(schema)},
-          runtime_table,
-          ${literal(role)}
-        );
-      END IF;
-    END LOOP;
+    ${tableGrantLoops}
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to

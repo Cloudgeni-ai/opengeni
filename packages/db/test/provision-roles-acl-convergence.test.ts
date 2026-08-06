@@ -3,6 +3,13 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+  ENABLED_V2_PROTECTED_TABLES,
+  ENABLED_V2_TABLE_PRIVILEGES,
+} from "../src/index";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const externalRootUrl = process.env.OPENGENI_TEST_THROWAWAY_POSTGRES_ROOT_URL?.trim();
@@ -218,6 +225,58 @@ describe("provisionRoles private-function ACL convergence", () => {
         .unsafe(`DROP OWNED BY ${roleIdentifier}; DROP ROLE IF EXISTS ${roleIdentifier}`)
         .catch(() => undefined);
       await admin.end();
+    }
+  }, 300_000);
+
+  test("provisions the enabled v2 role for the complete serving posture", async () => {
+    if (!available || !blank) return;
+
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 20);
+    const legacyRole = `og_v2_legacy_${suffix}`;
+    const governanceRole = `og_v2_${suffix}`;
+    const governancePassword = `og-v2-${suffix}`;
+    const legacyIdentifier = quoteIdentifier(legacyRole);
+    const governanceIdentifier = quoteIdentifier(governanceRole);
+    await provisionRoles(blank.databaseUrl, {
+      rlsStrategy: "force",
+      appRole: legacyRole,
+      appPassword: `${appPassword}-legacy`,
+      organizationGovernanceRole: governanceRole,
+      organizationGovernancePassword: governancePassword,
+    });
+
+    const governanceUrl = new URL(blank.databaseUrl);
+    governanceUrl.username = governanceRole;
+    governanceUrl.password = governancePassword;
+    const governanceDb = createDb(governanceUrl.toString());
+    try {
+      const posture = await assertRuntimeDatabasePosture(governanceDb.db, {
+        rlsStrategy: "force",
+        expectedRole: governanceRole,
+        targetSchema: "public",
+        protectedTables: ENABLED_V2_PROTECTED_TABLES,
+        tablePrivileges: ENABLED_V2_TABLE_PRIVILEGES,
+        protectedNoDirectDmlTables: ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+      });
+      expect(posture.tables.find((table) => table.name === "sessions")).toMatchObject({
+        select: true,
+        insert: true,
+        update: true,
+        delete: true,
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+      });
+    } finally {
+      await governanceDb.close();
+      const admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
+      try {
+        await admin.unsafe(
+          `DROP OWNED BY ${governanceIdentifier}; DROP ROLE IF EXISTS ${governanceIdentifier}; DROP OWNED BY ${legacyIdentifier}; DROP ROLE IF EXISTS ${legacyIdentifier}`,
+        );
+      } finally {
+        await admin.end();
+      }
     }
   }, 300_000);
 });

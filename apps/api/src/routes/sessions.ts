@@ -1603,19 +1603,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.raw.signal,
       {
         observability: deps.observability,
-        ...(authorization
-          ? {
-              reauthorizeAfterMs:
-                authorization.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
-              reauthorize: async () => {
-                await requireSessionAuthorization(deps, grant, {
-                  sessionId,
-                  operation: "session.stream.read",
-                  surface: "stream",
-                });
-              },
-            }
-          : {}),
+        reauthorizeAfterMs:
+          authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+        reauthorize: async () => {
+          // Re-read the access grant as well as the optional host session
+          // authorization. Recovery replaces memberships and invalidates old
+          // delegated authority, so a stream must not retain the grant that
+          // was valid only when the HTTP request opened.
+          const freshGrant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+          await requireSessionAuthorization(deps, freshGrant, {
+            sessionId,
+            operation: "session.stream.read",
+            surface: "stream",
+          });
+        },
       },
     );
   });

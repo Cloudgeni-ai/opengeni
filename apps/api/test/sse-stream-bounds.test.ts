@@ -273,6 +273,38 @@ test("workspace-control SSE uses the same one-frame stall bound", async () => {
   await expect(response.body!.getReader().read()).rejects.toBeInstanceOf(TypeError);
 });
 
+test("an idle workspace-control stream closes after authoritative access is revoked", async () => {
+  durableControlEvents = [];
+  let authorized = true;
+  let reauthorizations = 0;
+  let released = 0;
+  const bus = {
+    subscribeWorkspaceControl: async () => () => {
+      released += 1;
+    },
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    {
+      reauthorizeAfterMs: 1_000,
+      reauthorize: async () => {
+        reauthorizations += 1;
+        if (!authorized) throw new Error("authoritative workspace grant revoked");
+      },
+    },
+  );
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+  authorized = false;
+  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  expect(reauthorizations).toBe(1);
+  expect(released).toBe(1);
+});
+
 test("workspace-control replay bounds a poison row and reconnect advances past it", async () => {
   durableControlEvents = [
     {

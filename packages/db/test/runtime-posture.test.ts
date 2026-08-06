@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+  ENABLED_V2_PROTECTED_TABLES,
+  ENABLED_V2_TABLE_PRIVILEGES,
   evaluateRuntimeDatabasePosture,
   FORCE_RLS_TABLES,
   NON_RLS_RUNTIME_TABLES,
@@ -120,6 +123,39 @@ describe("runtime database posture evaluator", () => {
     expect([...RUNTIME_PRIVATE_FUNCTION_SIGNATURES].sort()).toEqual([
       ...RUNTIME_PRIVATE_FUNCTION_SIGNATURES,
     ]);
+  });
+
+  test("enabled v2 composes ordinary runtime and governance tables exactly", () => {
+    expect(ENABLED_V2_PROTECTED_TABLES).toEqual(FORCE_RLS_TABLES);
+    expect([...ENABLED_V2_PROTECTED_TABLES]).toEqual([...ENABLED_V2_PROTECTED_TABLES].sort());
+    expect(ENABLED_V2_TABLE_PRIVILEGES.sessions).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
+    expect(ENABLED_V2_TABLE_PRIVILEGES.organization_governance_commands).toEqual([
+      "SELECT",
+      "INSERT",
+      "UPDATE",
+    ]);
+    expect(ENABLED_V2_TABLE_PRIVILEGES.organization_authorization_invalidations).toEqual([
+      "SELECT",
+      "INSERT",
+    ]);
+    expect(ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES).toEqual(
+      expect.arrayContaining([
+        "host_export_config",
+        "host_export_consumers",
+        "host_export_cursor_state",
+        "host_export_dead_letters",
+        "host_export_outbox",
+      ]),
+    );
+    expect(ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES).not.toContain(
+      "organization_governance_commands",
+    );
+    expect(
+      new Set([
+        ...Object.keys(ENABLED_V2_TABLE_PRIVILEGES),
+        ...ENABLED_V2_PROTECTED_NO_DIRECT_DML_TABLES,
+      ]),
+    ).toEqual(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]));
   });
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {

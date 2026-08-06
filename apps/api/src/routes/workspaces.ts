@@ -53,7 +53,7 @@ import {
   resolveMemberSubjectId,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
-import { sseWorkspaceControlStream } from "../http/sse";
+import { SSE_DEFAULT_REAUTHORIZE_AFTER_MS, sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
 import {
   AI_GATEWAY_REALTIME_MODELS,
@@ -309,7 +309,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       after,
       c.req.raw.signal,
-      { observability: deps.observability },
+      {
+        observability: deps.observability,
+        reauthorizeAfterMs: SSE_DEFAULT_REAUTHORIZE_AFTER_MS,
+        reauthorize: async () => {
+          // Governance recovery can replace every workspace membership while
+          // this connection remains open. Re-read the grant periodically so
+          // an already-open stream terminates fail-closed.
+          await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+        },
+      },
     );
   });
 

@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type SessionAuthorizationPort } from "@opengeni/contracts";
+import * as opengeniDb from "@opengeni/db";
 import {
   bootstrapWorkspace,
   acquireLease,
@@ -25,6 +26,7 @@ import { Hono } from "hono";
 import postgres from "postgres";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { migrate } from "@opengeni/db/migrate";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const SECRET = "session-authorization-route-test-secret";
@@ -37,7 +39,36 @@ let client: DbClient;
 setDefaultTimeout(60_000);
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("api-session-authorization");
+  const explicitRootUrl = process.env.OPENGENI_TEST_THROWAWAY_POSTGRES_ROOT_URL?.trim();
+  if (explicitRootUrl) {
+    const rootUrl = new URL(explicitRootUrl);
+    rootUrl.pathname = "/postgres";
+    const root = postgres(rootUrl.toString(), { max: 1, prepare: false });
+    const databaseName = `og_api_session_auth_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+    const databaseUrl = new URL(rootUrl);
+    databaseUrl.pathname = `/${databaseName}`;
+    try {
+      await root.unsafe(`CREATE DATABASE "${databaseName}"`);
+      await migrate(databaseUrl.toString());
+      const admin = postgres(databaseUrl.toString(), { max: 4, prepare: false });
+      shared = {
+        admin,
+        adminUrl: databaseUrl.toString(),
+        appUrl: databaseUrl.toString(),
+        release: async () => {
+          await admin.end();
+          await root.unsafe(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+          await root.end();
+        },
+      };
+    } catch (error) {
+      await root.unsafe(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`).catch(() => {});
+      await root.end();
+      throw error;
+    }
+  } else {
+    shared = await acquireSharedTestDatabase("api-session-authorization");
+  }
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error("PostgreSQL test database unavailable while OPENGENI_REQUIRE_REAL_DB=1");
@@ -175,6 +206,43 @@ async function fixture() {
 }
 
 describe("embedding host session authorization routes", () => {
+  test("standalone session SSE closes after a cross-process governance invalidation", async () => {
+    if (!available) return;
+    const value = await fixture();
+    let invalidated = false;
+    const status = spyOn(opengeniDb, "getOrganizationGovernanceStatus").mockImplementation(
+      async (_db, accountId) => ({
+        accountId,
+        kind: "team",
+        state: "active",
+        governanceRevision: invalidated ? 2 : 1,
+        authoritySubjectId: value.grant.subjectId,
+        authorizationInvalidatedAt: invalidated ? new Date().toISOString() : null,
+      }),
+    );
+    const port: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, reauthorizeAfterMs: 1_000 }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    try {
+      const response = await appWith(port).request(
+        `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/events/stream`,
+        { headers: { authorization: value.authorization } },
+      );
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+
+      // The status read below represents the authoritative row observed by a
+      // different API process after recovery committed. The open stream still
+      // holds the old grant object, so only its periodic re-read can close it.
+      invalidated = true;
+      await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+    } finally {
+      status.mockRestore();
+    }
+  }, 30_000);
+
   test("GET goal ignores a malformed legacy continuation instead of returning 500", async () => {
     if (!available || !shared) return;
     const value = await fixture();
