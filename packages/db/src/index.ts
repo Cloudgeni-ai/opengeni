@@ -266,6 +266,7 @@ import {
   MEMORY_NEAR_DUP_NEIGHBORS,
   MEMORY_SEARCH_DEFAULT_LIMIT,
   MEMORY_SEARCH_MAX_LIMIT,
+  normalizeMemoryText,
   renderWorkspaceMemoryBlock,
   memoryTextForStorage,
   WORKSPACE_MEMORY_BLOCK_EMPTY,
@@ -7945,7 +7946,7 @@ export async function updateKnowledgeMemory(
   let textUpdate: MemoryTextUpdate | undefined;
   if (input.text !== undefined) {
     const exactText = memoryTextForStorage(input.text);
-    if (exactText.length === 0) {
+    if (normalizeMemoryText(exactText).length === 0) {
       throw new Error("Memory text is empty; nothing to save.");
     }
     if (isMemoryTextTooLong(exactText)) {
@@ -8013,7 +8014,7 @@ export async function updateKnowledgeMemory(
     }
     if (!wasVisible && willBeVisible && textUpdate === undefined) {
       const exactText = memoryTextForStorage(existingText);
-      if (exactText.length === 0) {
+      if (normalizeMemoryText(exactText).length === 0) {
         throw new Error("Memory text is empty; nothing to save.");
       }
       if (isMemoryTextTooLong(exactText)) {
@@ -8431,7 +8432,7 @@ export async function saveWorkspaceMemory(
   embedder?: MemoryEmbedder,
 ): Promise<SaveWorkspaceMemoryResult> {
   const exactText = memoryTextForStorage(input.text);
-  if (exactText.length === 0) {
+  if (normalizeMemoryText(exactText).length === 0) {
     throw new Error("Memory text is empty; nothing to save.");
   }
   if (isMemoryTextTooLong(exactText)) {
@@ -8780,8 +8781,8 @@ export async function correctWorkspaceMemory(
   input: CorrectWorkspaceMemoryInput,
   embedder?: MemoryEmbedder,
 ): Promise<CorrectWorkspaceMemoryResult> {
-  const replacementText = input.replacementText?.trim();
-  if (replacementText) {
+  const replacementText = input.replacementText;
+  if (replacementText !== undefined) {
     // Correction WITH a replacement is a full supersede through the one write gate.
     const [old] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
       const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
