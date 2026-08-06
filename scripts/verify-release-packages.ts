@@ -1,4 +1,4 @@
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { publishableWorkspacePackages } from "./publishable-workspaces";
 
@@ -18,6 +18,16 @@ export type ReleasePackageReceipt = PublishablePackage & {
   state: "pending" | "published";
   gitHead: string | null;
   integrity: string | null;
+};
+
+export type VerifiedPackagePublicationReceipt = {
+  schemaVersion: 1;
+  phase: "verify";
+  sourceSha: string;
+  needsPublish: false;
+  releaseReady: true;
+  packages: ReleasePackageReceipt[];
+  bomPackages: ReleasePackageReceipt[];
 };
 
 const packageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9._-]*$/;
@@ -44,6 +54,76 @@ export function parseExpectedPackages(value: string): PublishablePackage[] {
     seen.add(name);
     return { name, version };
   });
+}
+
+export function validateVerifiedPackagePublicationReceipt(
+  value: unknown,
+  expected: { sourceSha: string; packageNames: string[] },
+): VerifiedPackagePublicationReceipt {
+  const receipt = record(value, "verified package publication receipt");
+  exactKeys(
+    receipt,
+    [
+      "schemaVersion",
+      "phase",
+      "sourceSha",
+      "needsPublish",
+      "releaseReady",
+      "packages",
+      "bomPackages",
+    ],
+    "verified package publication receipt",
+  );
+  if (receipt.schemaVersion !== 1 || receipt.phase !== "verify") {
+    throw new Error("verified package publication receipt schema or phase is invalid");
+  }
+  if (receipt.sourceSha !== expected.sourceSha || !sourceShaPattern.test(expected.sourceSha)) {
+    throw new Error("verified package publication receipt source SHA does not match");
+  }
+  if (receipt.needsPublish !== false || receipt.releaseReady !== true) {
+    throw new Error("verified package publication receipt is not terminal and release-ready");
+  }
+
+  const packages = normalizePublishedPackageReceipts(receipt.packages, "packages");
+  const bomPackages = normalizePublishedPackageReceipts(receipt.bomPackages, "bomPackages");
+  const expectedNames = [...expected.packageNames].sort();
+  const actualNames = bomPackages.map((pkg) => pkg.name);
+  if (
+    actualNames.length !== expectedNames.length ||
+    actualNames.some((name, index) => name !== expectedNames[index])
+  ) {
+    throw new Error(
+      "verified package publication receipt does not cover the exact package closure",
+    );
+  }
+  const bomByName = new Map(bomPackages.map((pkg) => [pkg.name, pkg]));
+  for (const pkg of packages) {
+    if (pkg.gitHead !== expected.sourceSha) {
+      throw new Error("verified published package does not belong to the package source SHA");
+    }
+    if (JSON.stringify(bomByName.get(pkg.name)) !== JSON.stringify(pkg)) {
+      throw new Error("verified published package is not identical to its package BOM entry");
+    }
+  }
+
+  return {
+    schemaVersion: 1,
+    phase: "verify",
+    sourceSha: expected.sourceSha,
+    needsPublish: false,
+    releaseReady: true,
+    packages,
+    bomPackages,
+  };
+}
+
+export function assertPackageEvidenceMatchesRegistry(
+  evidence: VerifiedPackagePublicationReceipt,
+  bomPackages: ReleasePackageReceipt[],
+): void {
+  if (JSON.stringify(evidence.bomPackages) !== JSON.stringify(bomPackages)) {
+    throw new Error("verified package publication receipt no longer matches npm registry identity");
+  }
 }
 
 export function deriveExpectedReleasePackages(
@@ -174,8 +254,8 @@ export function reconcileReleasePackages(options: {
   return { needsPublish, releaseReady: !needsPublish, packages, bomPackages };
 }
 
-export function loadPublishablePackages(): PublishablePackage[] {
-  return publishableWorkspacePackages()
+export function loadPublishablePackages(root?: string): PublishablePackage[] {
+  return publishableWorkspacePackages(root)
     .map(({ name, version }) => {
       if (!packageNamePattern.test(name) || !packageVersionPattern.test(version)) {
         throw new Error(`invalid publishable package manifest: ${name}@${version}`);
@@ -250,12 +330,37 @@ async function main(): Promise<void> {
     throw new Error("OPENGENI_RELEASE_PACKAGE_PHASE must be plan or verify");
   }
 
-  const publishable = loadPublishablePackages();
+  const packageClosureRoot = process.env.OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT;
+  const localPublishable = loadPublishablePackages(
+    packageClosureRoot ? resolve(packageClosureRoot) : undefined,
+  );
   const declaredExpected = parseExpectedPackages(process.env.OPENGENI_EXPECTED_PACKAGES ?? "");
   const deriveExpectedValue = process.env.OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED ?? "";
   if (deriveExpectedValue !== "" && deriveExpectedValue !== "true") {
     throw new Error("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED must be true or unset");
   }
+  const packageEvidencePath = process.env.OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT ?? "";
+  const packageEvidenceSourceSha = process.env.OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA ?? "";
+  if (Boolean(packageEvidencePath) !== Boolean(packageEvidenceSourceSha)) {
+    throw new Error(
+      "OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT and OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA must be set together",
+    );
+  }
+  if (packageEvidencePath && (declaredExpected.length !== 0 || deriveExpectedValue !== "")) {
+    throw new Error("verified package BOM evidence is valid only for an application-only release");
+  }
+  const packageEvidence = packageEvidencePath
+    ? validateVerifiedPackagePublicationReceipt(
+        JSON.parse(await readFile(resolve(root, packageEvidencePath), "utf8")) as unknown,
+        {
+          sourceSha: packageEvidenceSourceSha,
+          packageNames: localPublishable.map((pkg) => pkg.name),
+        },
+      )
+    : null;
+  const publishable = packageEvidence
+    ? packageEvidence.bomPackages.map(({ name, version }) => ({ name, version }))
+    : localPublishable;
   const expectedNames = new Set(declaredExpected.map((pkg) => pkg.name));
   const registryEntries = await Promise.all(
     publishable.map(
@@ -281,6 +386,7 @@ async function main(): Promise<void> {
     expected,
     registry,
   });
+  if (packageEvidence) assertPackageEvidenceMatchesRegistry(packageEvidence, result.bomPackages);
 
   const receipt = {
     schemaVersion: 1,
@@ -312,6 +418,65 @@ async function main(): Promise<void> {
     );
   }
   console.log(JSON.stringify(receipt));
+}
+
+function normalizePublishedPackageReceipts(value: unknown, label: string): ReleasePackageReceipt[] {
+  if (!Array.isArray(value))
+    throw new Error(`verified package publication ${label} must be an array`);
+  const seen = new Set<string>();
+  return value
+    .map((item, index) => {
+      const pkg = record(item, `verified package publication ${label}[${index}]`);
+      exactKeys(
+        pkg,
+        ["name", "version", "state", "gitHead", "integrity"],
+        `verified package publication ${label}[${index}]`,
+      );
+      if (
+        typeof pkg.name !== "string" ||
+        !packageNamePattern.test(pkg.name) ||
+        typeof pkg.version !== "string" ||
+        !packageVersionPattern.test(pkg.version) ||
+        pkg.state !== "published" ||
+        typeof pkg.gitHead !== "string" ||
+        !sourceShaPattern.test(pkg.gitHead) ||
+        typeof pkg.integrity !== "string" ||
+        !pkg.integrity.startsWith("sha512-")
+      ) {
+        throw new Error(`verified package publication ${label}[${index}] is invalid`);
+      }
+      if (seen.has(pkg.name)) {
+        throw new Error(`verified package publication ${label} contains a duplicate package`);
+      }
+      seen.add(pkg.name);
+      return {
+        name: pkg.name,
+        version: pkg.version,
+        state: "published" as const,
+        gitHead: pkg.gitHead,
+        integrity: pkg.integrity,
+      };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  if (actual.length !== canonical.length || actual.some((key, index) => key !== canonical[index])) {
+    throw new Error(`${label} must contain exactly: ${canonical.join(", ")}`);
+  }
 }
 
 if (import.meta.main) {

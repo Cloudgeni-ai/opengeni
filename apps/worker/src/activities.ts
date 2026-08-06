@@ -21,6 +21,7 @@ import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
 import { createWorkflowWakeActivities } from "./activities/workflow-wake";
 import { createRigVerificationActivities } from "./activities/rig-verification";
+import { createRetainedScreenshotMaintenanceActivities } from "./activities/retained-screenshot-reaper";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
 import {
   observabilityEventLogger,
@@ -152,6 +153,7 @@ function controlActivities(services: () => Promise<ActivityServices>) {
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
     ...createFileUploadReaperActivities(services),
+    ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
     // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
     // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
@@ -164,13 +166,18 @@ export function createControlActivities(dependencies: ActivityDependencies = {})
 }
 
 export function createTurnActivities(dependencies: ActivityDependencies = {}) {
-  return { runAgentTurn: createRunAgentTurnActivity(createActivityServices(dependencies)) };
+  return {
+    runAgentTurn: createRunAgentTurnActivity(createActivityServices(dependencies)),
+  };
 }
 
 /** Direct activity harness for tests; production workers always choose one role. */
 export function createActivityTestHarness(dependencies: ActivityDependencies = {}) {
   const services = createActivityServices(dependencies);
-  return { runAgentTurn: createRunAgentTurnActivity(services), ...controlActivities(services) };
+  return {
+    runAgentTurn: createRunAgentTurnActivity(services),
+    ...controlActivities(services),
+  };
 }
 
 const defaultControlActivities = createControlActivities();
@@ -196,6 +203,7 @@ export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWai
 export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

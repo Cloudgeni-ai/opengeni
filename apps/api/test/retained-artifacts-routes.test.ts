@@ -9,10 +9,15 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import {
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   completeFileUpload,
   createDb,
   createFileUpload,
+  createSession,
+  initializeSessionStartAtomically,
   markFileUploadFailed,
+  prepareRetainedScreenshotArtifact,
+  settleRetainedScreenshotArtifactReady,
   type DbClient,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
@@ -155,6 +160,82 @@ async function createArtifact(
 
 function artifactUrl(workspaceId: string, artifactId: string, content = false): string {
   return `http://x/v1/workspaces/${workspaceId}/artifacts/${artifactId}${content ? "/content" : ""}`;
+}
+
+function sessionArtifactUrl(
+  workspaceId: string,
+  sessionId: string,
+  artifactId: string,
+  content = false,
+): string {
+  return `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}${content ? "/content" : ""}`;
+}
+
+async function createScreenshotArtifact(
+  workspace: Awaited<ReturnType<typeof workspaceFixture>>,
+  input: { bytes: Uint8Array; expiresAt?: Date; ready?: boolean },
+) {
+  const session = await createSession(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    initialMessage: "retain this screenshot",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    sandboxBackend: "none",
+  });
+  await initializeSessionStartAtomically(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `retained-artifact-api-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") {
+    throw new Error(`Could not claim retained screenshot API fixture: ${claim.reason}`);
+  }
+
+  const artifactId = crypto.randomUUID();
+  const settlementKey = `api:${crypto.randomUUID()}`;
+  const objectKey = `workspaces/${workspace.workspaceId}/files/${artifactId}/retained/computer-screenshot.png`;
+  await prepareRetainedScreenshotArtifact(client.db, {
+    artifactId,
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    sessionId: session.id,
+    turnId: claim.turn.id,
+    attemptId,
+    settlementKey,
+    toolCallId: `call-${artifactId}`,
+    toolOutputId: `output-${artifactId}`,
+    mediaType: "image/png",
+    sizeBytes: input.bytes.byteLength,
+    sha256: "b".repeat(64),
+    width: 1,
+    height: 1,
+    retentionExpiresAt: input.expiresAt ?? new Date(Date.now() + 60_000),
+    bucket: "retained-test-bucket",
+    objectKey,
+    workspaceQuotaBytes: 100 * 1024 * 1024,
+  });
+  if (input.ready !== false) {
+    await settleRetainedScreenshotArtifactReady(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      artifactId,
+      settlementKey,
+    });
+  }
+  return { sessionId: session.id, artifactId, objectKey };
 }
 
 describe("retained artifact metadata and bounded content", () => {
@@ -400,5 +481,115 @@ describe("retained artifact metadata and bounded content", () => {
     } finally {
       governance.mockRestore();
     }
+  });
+
+  test("serves session-qualified screenshots with bounded ranges and no storage leakage", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const bytes = new Uint8Array(2 * 1024 * 1024);
+    for (let index = 0; index < bytes.byteLength; index += 1) bytes[index] = index % 239;
+    const artifact = await createScreenshotArtifact(workspace, { bytes });
+    fixture.objects.set(artifact.objectKey, bytes);
+    const app = routeApp(fixture.storage);
+
+    const metadataResponse = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, artifact.sessionId, artifact.artifactId),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(metadataResponse.status).toBe(200);
+    const metadata = (await metadataResponse.json()) as Record<string, unknown>;
+    expect(metadata).toMatchObject({
+      available: true,
+      artifactId: artifact.artifactId,
+      kind: "computer_screenshot",
+      contentType: "image/png",
+      originalBytes: bytes.byteLength,
+      sha256: "b".repeat(64),
+      dimensions: { width: 1, height: 1 },
+      retention: { policy: "session_screenshot" },
+      retrieval: {
+        path: `/v1/workspaces/${workspace.workspaceId}/sessions/${artifact.sessionId}/artifacts/${artifact.artifactId}/content`,
+        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      },
+    });
+    expect(JSON.stringify(metadata)).not.toContain("retained-test-bucket");
+    expect(JSON.stringify(metadata)).not.toContain(artifact.objectKey);
+
+    const range = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, artifact.sessionId, artifact.artifactId, true),
+      {
+        headers: {
+          authorization: workspace.authorization,
+          range: "bytes=1048576-1572863",
+        },
+      },
+    );
+    expect(range.status).toBe(206);
+    expect(range.headers.get("content-range")).toBe(`bytes 1048576-1572863/${bytes.byteLength}`);
+    expect(range.headers.get("content-length")).toBe("524288");
+    expect(new Uint8Array(await range.arrayBuffer())).toEqual(bytes.slice(1_048_576, 1_572_864));
+    expect(fixture.calls).toEqual([
+      { fileId: artifact.artifactId, start: 1_048_576, end: 1_572_863 },
+    ]);
+  });
+
+  test("session screenshot lookups deny wrong-session and cross-workspace IDs before storage", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const other = await workspaceFixture();
+    const fixture = storageFixture();
+    const bytes = new Uint8Array(64);
+    const local = await createScreenshotArtifact(workspace, { bytes });
+    const foreign = await createScreenshotArtifact(other, { bytes });
+    fixture.objects.set(local.objectKey, bytes);
+    fixture.objects.set(foreign.objectKey, bytes);
+    const app = routeApp(fixture.storage);
+
+    const wrongSession = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, crypto.randomUUID(), local.artifactId, true),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(wrongSession.status).toBe(404);
+    expect(await wrongSession.json()).toMatchObject({ reason: "deleted" });
+
+    const crossWorkspace = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, foreign.sessionId, foreign.artifactId, true),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(crossWorkspace.status).toBe(404);
+    expect(await crossWorkspace.json()).toMatchObject({ reason: "deleted" });
+    expect(fixture.calls).toHaveLength(0);
+    expect(fixture.existenceCalls).toHaveLength(0);
+  });
+
+  test("session screenshot content reports pending and expired evidence without provider access", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const bytes = new Uint8Array(64);
+    const pending = await createScreenshotArtifact(workspace, { bytes, ready: false });
+    const expired = await createScreenshotArtifact(workspace, {
+      bytes,
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+    fixture.objects.set(expired.objectKey, bytes);
+    const app = routeApp(fixture.storage);
+
+    const pendingResponse = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, pending.sessionId, pending.artifactId, true),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(pendingResponse.status).toBe(409);
+    expect(await pendingResponse.json()).toMatchObject({ reason: "pending" });
+
+    const expiredResponse = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, expired.sessionId, expired.artifactId, true),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(expiredResponse.status).toBe(410);
+    expect(await expiredResponse.json()).toMatchObject({ reason: "expired" });
+    expect(fixture.calls).toHaveLength(0);
+    expect(fixture.existenceCalls).toHaveLength(0);
   });
 });

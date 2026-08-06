@@ -733,6 +733,66 @@ describe("OpenGeniClient files", () => {
     );
     expect(cancelReason).toBe("invalid retained artifact content-length");
   });
+
+  test("assembles a retained screenshot across authenticated ranges with bounded retry and SHA", async () => {
+    const bytes = new Uint8Array(RETAINED_OUTPUT_MAX_PAGE_BYTES + 17);
+    for (let index = 0; index < bytes.byteLength; index += 1) bytes[index] = index % 251;
+    const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+    const sha256 = [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    const metadata = {
+      available: true as const,
+      artifactId: FILE_ID,
+      kind: "computer_screenshot" as const,
+      contentType: "image/png",
+      originalBytes: bytes.byteLength,
+      sha256,
+      retainedAt: "2026-07-31T00:00:00.000Z",
+      dimensions: { width: 1024, height: 768 },
+      retention: {
+        policy: "session_screenshot" as const,
+        expiresAt: "2026-08-30T00:00:00.000Z",
+      },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      },
+    };
+    let retried = false;
+    const { client, requests } = makeClient((request) => {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith(`/artifacts/${FILE_ID}`)) return jsonResponse(metadata);
+      const match = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range ?? "");
+      if (!match) throw new Error("missing exact screenshot range");
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      if (start === RETAINED_OUTPUT_MAX_PAGE_BYTES && !retried) {
+        retried = true;
+        return jsonResponse({ message: "temporary" }, 503);
+      }
+      const page = bytes.slice(start, end + 1);
+      return new Response(page, {
+        status: 206,
+        headers: {
+          "Accept-Ranges": "bytes",
+          "Content-Length": String(page.byteLength),
+          "Content-Range": `bytes ${start}-${end}/${bytes.byteLength}`,
+          "Content-Type": "image/png",
+        },
+      });
+    });
+
+    const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
+    expect(downloaded.metadata).toEqual(metadata);
+    expect(downloaded.bytes).toEqual(bytes);
+    expect(requests.filter((request) => request.headers.range)).toHaveLength(3);
+    expect(
+      requests.every((request) => request.headers.authorization === "Bearer og_test_key"),
+    ).toBe(true);
+  });
 });
 
 describe("OpenGeniClient documents", () => {

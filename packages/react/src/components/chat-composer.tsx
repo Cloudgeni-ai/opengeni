@@ -1,6 +1,6 @@
 import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import { LayoutGroup, motion } from "motion/react";
-import type { ClipboardEvent, ReactNode } from "react";
+import { lazy, Suspense, type ClipboardEvent, type ReactNode } from "react";
 import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
@@ -30,10 +30,12 @@ import {
   type ChatComposerMessages,
   type ComposerControlLinks,
 } from "./composer";
-import {
-  ComposerTranscriptionControl,
-  type ComposerTranscriptionControlProps,
-} from "./composer-transcription-control";
+import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
+
+const LazyComposerTranscriptionControl = lazy(async () => {
+  const module = await import("./composer-transcription-control");
+  return { default: module.ComposerTranscriptionControl };
+});
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
@@ -161,13 +163,15 @@ export function ChatComposer({
                     {controlsLeading}
                     <AttachButton className={attachButtonClassName} />
                     {transcription ? (
-                      <ComposerTranscriptionControl
-                        {...transcription}
-                        suppressed={transcriptionSuppressed}
-                        className={[transcription.className, transcriptionClassName]
-                          .filter(Boolean)
-                          .join(" ")}
-                      />
+                      <Suspense fallback={null}>
+                        <LazyComposerTranscriptionControl
+                          {...transcription}
+                          suppressed={transcriptionSuppressed}
+                          className={[transcription.className, transcriptionClassName]
+                            .filter(Boolean)
+                            .join(" ")}
+                        />
+                      </Suspense>
                     ) : null}
                     {models ? (
                       <motion.span
