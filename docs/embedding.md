@@ -1,4 +1,11 @@
-# Embedding OpenGeni
+# Advanced In-Process Embedding
+
+> Most customer products do **not** need this integration shape. When OpenGeni
+> remains a standalone service and the product presents an OpenGeni-backed agent
+> in its own UI, use `@opengeni/sdk` through a tenant-scoped server proxy and add
+> only the `@opengeni/react` surfaces the product wants. See the package READMEs
+> and the `opengeni-client` skill. This guide is for the rarer case where the
+> host mounts OpenGeni's router or calls its core domain packages in-process.
 
 This guide is for a host application that embeds OpenGeni instead of running it only as the stock API + worker service. Embedding means binding host-owned concerns (identity, tenancy, billing admission, credentials, persistence, worker process, and event bus) into the same OpenGeni domain/runtime code the standalone stack uses.
 
