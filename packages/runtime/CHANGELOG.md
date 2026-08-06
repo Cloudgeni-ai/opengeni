@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 0.18.20
+
+### Patch Changes
+
+- b783f12: Keep optional MCP setup authentication out of unrelated chat timelines while preserving actionable tool-call reconnect events.
+- ece124b: Normalize JavaScript-only undefined object fields from SDK history before durable JSON persistence while rejecting other non-JSON values with an exact path.
+- 7a84e1b: Retry transient retained-process promotion transactions and hand ambiguous yielded processes to exact-route turn finalization so they cannot strand sandbox leases.
+- af24281: Keep Connected Machine outages inside the agent loop and reserve automatic Toolspace setup for managed sandboxes.
+- Updated dependencies [5d8bb99]
+- Updated dependencies [af24281]
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+
 ## 0.18.19
 
 ### Patch Changes

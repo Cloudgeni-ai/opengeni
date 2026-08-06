@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 0.46.4
+
+### Patch Changes
+
+- b783f12: Keep optional MCP setup authentication out of unrelated chat timelines while preserving actionable tool-call reconnect events.
+- 252095e: Keep durable composer voice recordings in automatic bounded recovery after transient failures, while requiring explicit insertion for every delayed or reload-recovered transcript.
+- 4fd349d: Revoke attachment preview URLs on unmount even when React has not committed their attachment state yet.
+- Updated dependencies [5d8bb99]
+  - @opengeni/sdk@0.46.4
+
 ## 0.46.3
 
 ### Patch Changes
