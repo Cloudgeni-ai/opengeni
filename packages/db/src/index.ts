@@ -6210,9 +6210,17 @@ export async function rekeySlackInteractionRoute(
     slackChannelId?: string;
     slackThreadTs: string;
     ackSlackMessageTs: string;
+    repairUnacknowledgedPrivateShortcutDelivery?: boolean;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
+    const repairableDelivery = sql`(
+      ${schema.slackInteractions.ackSlackMessageTs} is null
+      and ${schema.slackInteractions.visibility} = 'private'
+      and ${schema.slackInteractions.triggeringProviderEventId} like 'shortcut:%'
+      and ${schema.slackInteractions.terminalDeliveryState} = 'failed'
+      and ${schema.slackInteractions.deliveryLastErrorCode} in ('channel_not_found', 'not_in_channel')
+    )`;
     const [row] = await scopedDb
       .update(schema.slackInteractions)
       .set({
@@ -6220,6 +6228,16 @@ export async function rekeySlackInteractionRoute(
         ...(input.slackChannelId ? { slackChannelId: input.slackChannelId } : {}),
         slackThreadTs: input.slackThreadTs,
         ackSlackMessageTs: input.ackSlackMessageTs,
+        ...(input.repairUnacknowledgedPrivateShortcutDelivery
+          ? {
+              terminalDeliveryState: sql`case when ${repairableDelivery} then 'open' else ${schema.slackInteractions.terminalDeliveryState} end`,
+              deliveryClaimHolderId: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryClaimHolderId} end`,
+              deliveryClaimExpiresAt: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryClaimExpiresAt} end`,
+              deliveryAttemptCount: sql`case when ${repairableDelivery} then 0 else ${schema.slackInteractions.deliveryAttemptCount} end`,
+              deliveryRetryAt: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryRetryAt} end`,
+              deliveryLastErrorCode: sql`case when ${repairableDelivery} then null else ${schema.slackInteractions.deliveryLastErrorCode} end`,
+            }
+          : {}),
         updatedAt: sql`now()`,
       })
       .where(

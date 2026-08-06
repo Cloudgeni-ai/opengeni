@@ -776,6 +776,7 @@ async function acknowledgeSlackSession(
       slackChannelId: ack.channelId,
       slackThreadTs: ack.timestamp,
       ackSlackMessageTs: ack.timestamp,
+      repairUnacknowledgedPrivateShortcutDelivery: directMessageShortcut,
     });
     if (!rekeyed) throw new Error("Slack acknowledgement could not rekey its durable route");
   }

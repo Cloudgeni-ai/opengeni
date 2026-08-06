@@ -109,6 +109,11 @@ type SlackReactionContext = SlackReactionContextPage & {
   pages?: Record<string, SlackReactionContextPage>;
 };
 
+type SlackPostPause = {
+  entered: Promise<void>;
+  release: () => void;
+};
+
 function fakeSlack(
   deniedChannels: Set<string> = new Set(),
   options: {
@@ -124,12 +129,41 @@ function fakeSlack(
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
   >();
+  const postFailuresByChannel = new Map<
+    string,
+    { error?: string; status?: number; retryAfterSeconds?: number }
+  >();
   const channelAccessFailures = new Map<
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
   >();
   const acceptedByClientMessageId = new Map<string, SlackPost>();
   const failedAfterAccept = new Set<string>();
+  const postPauses = new Map<
+    string,
+    {
+      signalEntered: () => void;
+      released: Promise<void>;
+    }
+  >();
+  const pauseBeforePost = (textFragment: string): SlackPostPause => {
+    if (postPauses.has(textFragment)) throw new Error("Slack post pause already exists");
+    let signalEntered!: () => void;
+    let signalReleased!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      signalReleased = resolve;
+    });
+    postPauses.set(textFragment, { signalEntered, released });
+    return {
+      entered,
+      release: () => {
+        signalReleased();
+      },
+    };
+  };
   let nextTimestamp = 1;
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
@@ -216,10 +250,17 @@ function fakeSlack(
         clientMessageId,
         timestamp,
       };
+      const paused = [...postPauses.entries()].find(([fragment]) => post.text.includes(fragment));
+      if (paused) {
+        const [fragment, gate] = paused;
+        gate.signalEntered();
+        await gate.released;
+        postPauses.delete(fragment);
+      }
       posts.push(post);
-      const configuredFailure = [...failuresByText.entries()].find(([fragment]) =>
-        post.text.includes(fragment),
-      )?.[1];
+      const configuredFailure =
+        postFailuresByChannel.get(post.channel) ??
+        [...failuresByText.entries()].find(([fragment]) => post.text.includes(fragment))?.[1];
       if (configuredFailure) {
         const status = configuredFailure.status ?? 200;
         return Response.json(
@@ -254,7 +295,9 @@ function fakeSlack(
     reactionContexts,
     reactionContextHits,
     failuresByText,
+    postFailuresByChannel,
     channelAccessFailures,
+    pauseBeforePost,
   };
 }
 
@@ -3169,6 +3212,15 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     expect(value.slack.posts).toHaveLength(0);
 
+    // Model a route stranded by the pre-gate race: a second pump delivered to
+    // the source human DM, classified channel_not_found as permanent, and
+    // closed delivery before the durable shortcut replay could acknowledge and
+    // rekey it. Rekey must repair this exact pre-ack failure atomically.
+    await shared!.admin`
+      update slack_interactions
+      set terminal_delivery_state = 'failed', delivery_attempt_count = 1,
+        delivery_last_error_code = 'channel_not_found', updated_at = now()
+      where id = ${interactionId}`;
     await shared!.admin`
       update slack_interaction_inbox
       set retry_at = now()
@@ -3185,6 +3237,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         slack_thread_ts: string;
         ack_slack_message_ts: string;
         visibility: string;
+        terminal_delivery_state: string;
+        delivery_attempt_count: number;
+        delivery_last_error_code: string | null;
         inbox_status: string;
         session_count: number;
         message_count: number;
@@ -3198,6 +3253,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         interaction.slack_thread_ts,
         interaction.ack_slack_message_ts,
         interaction.visibility,
+        interaction.terminal_delivery_state,
+        interaction.delivery_attempt_count,
+        interaction.delivery_last_error_code,
         inbox.status as inbox_status,
         (select count(*)::int from sessions
           where workspace_id = ${value.owner.workspaceId}) as session_count,
@@ -3227,6 +3285,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       slack_thread_ts: acknowledgement.timestamp,
       ack_slack_message_ts: acknowledgement.timestamp,
       visibility: "private",
+      terminal_delivery_state: "open",
+      delivery_attempt_count: 0,
+      delivery_last_error_code: null,
       inbox_status: "processed",
       session_count: 1,
       message_count: 1,
@@ -3297,6 +3358,260 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and session_id = ${sessionReservationId}
         and type = 'user.message'`;
     expect(afterContinuation).toEqual({ messages: 2 });
+  }, 60_000);
+
+  test("private human-DM shortcut delivery waits for durable bot-DM rekey", async () => {
+    if (!available) return;
+    const [databasePosture] = await shared!.admin<
+      {
+        server_version_num: number;
+        vector_version: string | null;
+        app_is_superuser: boolean;
+        interactions_force_rls: boolean;
+      }[]
+    >`
+      select current_setting('server_version_num')::int as server_version_num,
+        (select extversion from pg_extension where extname = 'vector') as vector_version,
+        (select rolsuper from pg_roles where rolname = 'opengeni_app') as app_is_superuser,
+        (select relrowsecurity and relforcerowsecurity
+          from pg_class
+          where oid = 'slack_interactions'::regclass) as interactions_force_rls`;
+    expect(databasePosture!.server_version_num).toBeGreaterThanOrEqual(160000);
+    expect(databasePosture!.vector_version).not.toBeNull();
+    expect(databasePosture!.app_is_superuser).toBe(false);
+    expect(databasePosture!.interactions_force_rls).toBe(true);
+
+    const sourceDm = "D_BOUND_BEFORE_REKEY_SOURCE";
+    const value = await fixture({
+      deniedChannels: [sourceDm],
+      linkOther: true,
+    });
+    value.slack.postFailuresByChannel.set(sourceDm, { error: "channel_not_found" });
+    const acknowledgementPause = value.slack.pauseBeforePost(
+      "started a private task from the selected DM message",
+    );
+    const triggerId = `shortcut-bound-before-rekey-${crypto.randomUUID()}`;
+    const payload = JSON.stringify({
+      type: "message_action",
+      trigger_id: triggerId,
+      team: { id: value.teamId },
+      user: { id: value.ownerSlackUserId },
+      channel: { id: sourceDm },
+      message: {
+        ts: "1727000000.000001",
+        text: "Keep delivery private while the bot-DM route is not durable",
+      },
+    });
+    expect(
+      (
+        await value.app.request(
+          signedRequest(
+            "/v1/integrations/slack/interactions",
+            new URLSearchParams({ payload }).toString(),
+            "application/x-www-form-urlencoded",
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const firstPump = drainSlackInteractionsOnce(value.deps);
+    let acknowledgementReleased = false;
+    const releaseAcknowledgement = () => {
+      if (acknowledgementReleased) return;
+      acknowledgementReleased = true;
+      acknowledgementPause.release();
+    };
+    try {
+      await acknowledgementPause.entered;
+      const [boundBeforeRekey] = await shared!.admin<
+        {
+          id: string;
+          session_id: string;
+          route_key: string;
+          slack_channel_id: string;
+          slack_thread_ts: string;
+          ack_slack_message_ts: string | null;
+          terminal_delivery_state: string;
+          delivery_attempt_count: number;
+          delivery_last_error_code: string | null;
+        }[]
+      >`
+      select id, session_id, route_key, slack_channel_id, slack_thread_ts,
+        ack_slack_message_ts, terminal_delivery_state, delivery_attempt_count,
+        delivery_last_error_code
+      from slack_interactions
+      where workspace_id = ${value.owner.workspaceId}`;
+      if (!boundBeforeRekey) throw new Error("expected the bound pre-rekey shortcut route");
+      const interactionId = boundBeforeRekey.id;
+      const sessionId = boundBeforeRekey.session_id;
+      expect(typeof interactionId).toBe("string");
+      expect(typeof sessionId).toBe("string");
+      expect(boundBeforeRekey).toEqual({
+        id: interactionId,
+        session_id: sessionId,
+        route_key: `${sourceDm}:1727000000.000001:shortcut-user:${value.ownerSlackUserId}`,
+        slack_channel_id: sourceDm,
+        slack_thread_ts: "1727000000.000001",
+        ack_slack_message_ts: null,
+        terminal_delivery_state: "open",
+        delivery_attempt_count: 0,
+        delivery_last_error_code: null,
+      });
+      await appendSessionEvents(client.db, value.owner.workspaceId, sessionId, [
+        { type: "turn.completed", payload: { output: "Private rekeyed result" } },
+      ]);
+
+      const replicaDeps = {
+        ...value.deps,
+        bus: new MemoryEventBus(),
+      } as ApiRouteDeps;
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(false);
+      expect(
+        value.slack.calls.filter(
+          (call) => call.method === "chat.postMessage" && call.channel === sourceDm,
+        ),
+      ).toHaveLength(0);
+      const [beforeAcknowledgement] = await shared!.admin<
+        {
+          source_post_operations: number;
+          terminal_delivery_state: string;
+          delivery_attempt_count: number;
+          delivery_last_error_code: string | null;
+        }[]
+      >`
+      select
+        (select count(*)::int from slack_bot_post_operations
+          where workspace_id = ${value.owner.workspaceId}
+            and target_kind = 'channel'
+            and target_id = ${sourceDm}) as source_post_operations,
+        terminal_delivery_state,
+        delivery_attempt_count,
+        delivery_last_error_code
+      from slack_interactions
+      where id = ${interactionId}`;
+      expect(beforeAcknowledgement).toEqual({
+        source_post_operations: 0,
+        terminal_delivery_state: "open",
+        delivery_attempt_count: 0,
+        delivery_last_error_code: null,
+      });
+      expect(value.slack.posts).toHaveLength(0);
+
+      releaseAcknowledgement();
+      expect(await firstPump).toBe(true);
+      expect(value.slack.posts).toHaveLength(1);
+      const acknowledgement = value.slack.posts[0]!;
+      expect(acknowledgement).toMatchObject({
+        channel: `D_${value.ownerSlackUserId}`,
+        threadTimestamp: null,
+      });
+      const [rekeyed] = await shared!.admin<
+        {
+          route_key: string;
+          slack_channel_id: string;
+          slack_thread_ts: string;
+          ack_slack_message_ts: string;
+          terminal_delivery_state: string;
+          delivery_attempt_count: number;
+          delivery_last_error_code: string | null;
+        }[]
+      >`
+      select route_key, slack_channel_id, slack_thread_ts, ack_slack_message_ts,
+        terminal_delivery_state, delivery_attempt_count, delivery_last_error_code
+      from slack_interactions
+      where id = ${interactionId}`;
+      expect(rekeyed).toEqual({
+        route_key: `${acknowledgement.channel}:${acknowledgement.timestamp}`,
+        slack_channel_id: acknowledgement.channel,
+        slack_thread_ts: acknowledgement.timestamp,
+        ack_slack_message_ts: acknowledgement.timestamp,
+        terminal_delivery_state: "open",
+        delivery_attempt_count: 0,
+        delivery_last_error_code: null,
+      });
+
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(true);
+      expect(value.slack.posts).toHaveLength(2);
+      const resultPost = value.slack.posts[1]!;
+      expect(resultPost.channel).toBe(acknowledgement.channel);
+      expect(resultPost.threadTimestamp).toBe(acknowledgement.timestamp);
+      expect(resultPost.text).toContain("Private rekeyed result");
+      expect(
+        value.slack.calls.filter(
+          (call) => call.method === "chat.postMessage" && call.channel === sourceDm,
+        ),
+      ).toHaveLength(0);
+      expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+        terminal_delivery_state: "completed",
+      });
+
+      await shared!.admin`
+      update slack_interactions
+      set terminal_delivery_state = 'open',
+        last_delivered_session_event_sequence = 0,
+        delivery_claim_holder_id = null,
+        delivery_claim_expires_at = null,
+        updated_at = now()
+      where id = ${interactionId}`;
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(true);
+      expect(value.slack.posts).toHaveLength(2);
+
+      await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'pending', claim_holder_id = null, claim_expires_at = null,
+        retry_at = now(), processed_at = null, updated_at = now()
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${`shortcut:${triggerId}`}`;
+      expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(true);
+      expect(value.slack.posts).toHaveLength(2);
+      expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+        terminal_delivery_state: "completed",
+      });
+
+      expect(
+        await getSessionForSubject(
+          client.db,
+          value.owner.workspaceId,
+          sessionId,
+          value.owner.subjectId,
+        ),
+      ).not.toBeNull();
+      expect(
+        await getSessionForSubject(
+          client.db,
+          value.owner.workspaceId,
+          sessionId,
+          value.otherSubjectId,
+        ),
+      ).toBeNull();
+      expect(
+        (
+          await postEvent(value.app, {
+            teamId: value.teamId,
+            eventId: `E_BOUND_BEFORE_REKEY_REPLY_${crypto.randomUUID()}`,
+            event: {
+              type: "message",
+              user: value.ownerSlackUserId,
+              channel: acknowledgement.channel,
+              ts: "1727000000.000003",
+              thread_ts: acknowledgement.timestamp,
+              text: "Continue through the owner-only bot-DM route",
+            },
+          })
+        ).status,
+      ).toBe(200);
+      await drainAll(replicaDeps);
+      const [continuation] = await shared!.admin<{ messages: number }[]>`
+      select count(*)::int as messages
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${sessionId}
+        and type = 'user.message'`;
+      expect(continuation).toEqual({ messages: 2 });
+    } finally {
+      releaseAcknowledgement();
+      await firstPump.catch(() => undefined);
+    }
   }, 60_000);
 
   test("unmapped identities receive a link affordance, denied channels fail closed, and bot loops create nothing", async () => {
