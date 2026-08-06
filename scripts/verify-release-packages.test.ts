@@ -1,21 +1,34 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertPackageEvidenceMatchesRegistry,
   deriveExpectedReleasePackages,
   loadPublishablePackages,
   parseExpectedPackages,
   reconcileReleasePackages,
   resolveExpectedReleasePackages,
+  validateVerifiedPackagePublicationReceipt,
   type PublishablePackage,
+  type ReleasePackageReceipt,
   type RegistryPackage,
 } from "./verify-release-packages";
 
 const sha = "a".repeat(40);
+const packageSha = "d".repeat(40);
 const react = { name: "@opengeni/react", version: "0.14.0" };
 const sdk = { name: "@opengeni/sdk", version: "0.13.0" };
 
 function published(pkg: PublishablePackage, gitHead = sha): RegistryPackage {
   return {
     ...pkg,
+    gitHead,
+    integrity: "sha512-release-integrity",
+  };
+}
+
+function receipt(pkg: PublishablePackage, gitHead: string): ReleasePackageReceipt {
+  return {
+    ...pkg,
+    state: "published",
     gitHead,
     integrity: "sha512-release-integrity",
   };
@@ -73,6 +86,68 @@ describe("release package evidence", () => {
         },
       ],
     });
+  });
+
+  test("accepts an exact verified package publication receipt as an application-only BOM", () => {
+    const reactReceipt = receipt(react, packageSha);
+    const sdkReceipt = receipt(sdk, "c".repeat(40));
+    const evidence = validateVerifiedPackagePublicationReceipt(
+      {
+        schemaVersion: 1,
+        phase: "verify",
+        sourceSha: packageSha,
+        needsPublish: false,
+        releaseReady: true,
+        packages: [reactReceipt],
+        bomPackages: [sdkReceipt, reactReceipt],
+      },
+      { sourceSha: packageSha, packageNames: [react.name, sdk.name] },
+    );
+
+    expect(evidence.bomPackages).toEqual([reactReceipt, sdkReceipt]);
+    expect(() =>
+      assertPackageEvidenceMatchesRegistry(evidence, [reactReceipt, sdkReceipt]),
+    ).not.toThrow();
+    expect(() =>
+      assertPackageEvidenceMatchesRegistry(evidence, [
+        { ...reactReceipt, integrity: "sha512-drift" },
+        sdkReceipt,
+      ]),
+    ).toThrow("no longer matches npm registry identity");
+  });
+
+  test("rejects incomplete, mutable, or source-mismatched package publication evidence", () => {
+    const reactReceipt = receipt(react, packageSha);
+    const sdkReceipt = receipt(sdk, "c".repeat(40));
+    const base = {
+      schemaVersion: 1,
+      phase: "verify",
+      sourceSha: packageSha,
+      needsPublish: false,
+      releaseReady: true,
+      packages: [reactReceipt],
+      bomPackages: [reactReceipt, sdkReceipt],
+    };
+    const expected = { sourceSha: packageSha, packageNames: [react.name, sdk.name] };
+
+    expect(() =>
+      validateVerifiedPackagePublicationReceipt({ ...base, sourceSha: sha }, expected),
+    ).toThrow("source SHA does not match");
+    expect(() =>
+      validateVerifiedPackagePublicationReceipt({ ...base, bomPackages: [reactReceipt] }, expected),
+    ).toThrow("exact package closure");
+    expect(() =>
+      validateVerifiedPackagePublicationReceipt(
+        { ...base, packages: [{ ...reactReceipt, gitHead: sha }] },
+        expected,
+      ),
+    ).toThrow("does not belong to the package source SHA");
+    expect(() =>
+      validateVerifiedPackagePublicationReceipt(
+        { ...base, bomPackages: [{ ...reactReceipt, state: "pending" }, sdkReceipt] },
+        expected,
+      ),
+    ).toThrow("is invalid");
   });
 
   test("plans exactly the declared missing package and ignores unchanged published packages", () => {

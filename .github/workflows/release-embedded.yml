@@ -17,6 +17,16 @@ on:
         required: false
         default: ""
         type: string
+      package_source_sha:
+        description: Exact source SHA of the verified package-publication receipt for an application-only release.
+        required: false
+        default: ""
+        type: string
+      package_run_id:
+        description: Successful canonical publish-packages run that retained the verified package BOM.
+        required: false
+        default: ""
+        type: string
       candidate_run_id:
         description: Completed run ID of the canonical release-candidate workflow for source_sha.
         required: true
@@ -56,10 +66,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check out exact release controller
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release/controller
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Validate exact released source
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          PACKAGE_SOURCE_SHA: ${{ inputs.package_source_sha }}
+          PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -70,6 +91,19 @@ jobs:
             echo "candidate_run_id must be a positive workflow run ID" >&2
             exit 1
           }
+          if [ -z "$EXPECTED_PACKAGES" ]; then
+            [[ "$PACKAGE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "application-only releases require package_source_sha" >&2
+              exit 1
+            }
+            [[ "$PACKAGE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || {
+              echo "application-only releases require package_run_id" >&2
+              exit 1
+            }
+          elif [ -n "$PACKAGE_SOURCE_SHA" ] || [ -n "$PACKAGE_RUN_ID" ]; then
+            echo "source-bound package publication cannot also select package BOM evidence" >&2
+            exit 1
+          fi
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
             echo "checked-out source does not match source_sha" >&2
             exit 1
@@ -83,6 +117,12 @@ jobs:
             echo "source_sha must be reachable from current main" >&2
             exit 1
           }
+          if [ -n "$PACKAGE_SOURCE_SHA" ]; then
+            git merge-base --is-ancestor "$PACKAGE_SOURCE_SHA" origin/main || {
+              echo "package_source_sha must be reachable from current main" >&2
+              exit 1
+            }
+          fi
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
             echo "pending changesets remain; merge the generated Version PR first" >&2
             exit 1
@@ -105,12 +145,53 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          bun scripts/verify-release-provenance.ts \
+          bun .release/controller/scripts/verify-release-provenance.ts \
             --kind candidate \
             --source-sha "$SOURCE_SHA" \
             --run-id "$CANDIDATE_RUN_ID" \
             --output evidence/candidate-provenance.json \
             --output-prefix candidate
+
+      - name: Resolve trusted package publication provenance
+        if: ${{ inputs.expected_packages == '' }}
+        id: package
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE_SOURCE_SHA: ${{ inputs.package_source_sha }}
+          PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
+        run: |
+          set -euo pipefail
+          bun .release/controller/scripts/verify-release-provenance.ts \
+            --kind package \
+            --source-sha "$PACKAGE_SOURCE_SHA" \
+            --run-id "$PACKAGE_RUN_ID" \
+            --output evidence/package-provenance.json \
+            --output-prefix package
+
+      - name: Download immutable package publication evidence
+        if: ${{ inputs.expected_packages == '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE_ARTIFACT_ID: ${{ steps.package.outputs.package_artifact_id }}
+          PACKAGE_ARTIFACT_DIGEST: ${{ steps.package.outputs.package_artifact_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release/package-artifact
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PACKAGE_ARTIFACT_ID}/zip" \
+            > .release/package-artifact.zip
+          printf '%s  %s\n' \
+            "${PACKAGE_ARTIFACT_DIGEST#sha256:}" \
+            .release/package-artifact.zip \
+            | sha256sum --check --strict -
+          unzip -q .release/package-artifact.zip -d .release/package-artifact
+          mapfile -t package_receipts < <(find .release/package-artifact -type f -name release-packages-verified.json)
+          [ "${#package_receipts[@]}" = 1 ] || {
+            echo "package publication artifact must contain exactly one verified receipt" >&2
+            exit 1
+          }
+          cp "${package_receipts[0]}" evidence/package-publication-verified.json
 
       - name: Download and validate immutable candidate
         env:
@@ -249,9 +330,12 @@ jobs:
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
           OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT: ${{ github.workspace }}
+          OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT: ${{ inputs.expected_packages == '' && format('{0}/evidence/package-publication-verified.json', github.workspace) || '' }}
+          OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA: ${{ inputs.package_source_sha }}
           OPENGENI_RELEASE_PACKAGE_PHASE: plan
-          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
-        run: bun scripts/verify-release-packages.ts
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: ${{ github.workspace }}/evidence/release-packages-plan.json
+        run: bun .release/controller/scripts/verify-release-packages.ts
 
       - name: Set up Node for npm provenance
         if: steps.package-plan.outputs.needs_publish == 'true'
@@ -275,9 +359,12 @@ jobs:
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
           OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT: ${{ github.workspace }}
+          OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT: ${{ inputs.expected_packages == '' && format('{0}/evidence/package-publication-verified.json', github.workspace) || '' }}
+          OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA: ${{ inputs.package_source_sha }}
           OPENGENI_RELEASE_PACKAGE_PHASE: verify
-          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
-        run: bun scripts/verify-release-packages.ts
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: ${{ github.workspace }}/evidence/release-packages-verified.json
+        run: bun .release/controller/scripts/verify-release-packages.ts
 
       - name: Verify complete package evidence
         env:
@@ -465,6 +552,8 @@ jobs:
             evidence/release-bom.sha256
             evidence/release-candidate.json
             evidence/candidate-provenance.json
+            evidence/package-provenance.json
+            evidence/package-publication-verified.json
             evidence/release-packages-verified.json
             .release/opengeni-${{ steps.meta.outputs.version }}.tgz
           if-no-files-found: error
