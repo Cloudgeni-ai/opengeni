@@ -68,6 +68,7 @@ import {
   type NoticeItem,
   type TimelineGroup,
   type TimelineItem,
+  type RetainedScreenshotLoader,
   type ToolRegistry,
   type TurnSummaryOptions,
   type UserMessageItem,
@@ -137,6 +138,8 @@ export type MessageTimelineProps = {
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
    */
   toolRegistry?: ToolRegistry | undefined;
+  /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /**
    * Display name of the session's active compute target (Connected Machine or
    * cloud sandbox). When set, exec_command collapsed previews prefix `on {label}`.
@@ -279,6 +282,7 @@ export function MessageTimeline({
   onReconnect,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
+  loadRetainedScreenshot,
   computeLabel = null,
   turnSummary,
   autoFollow = true,
@@ -1325,6 +1329,7 @@ export function MessageTimeline({
                                 onReconnect,
                                 resolveProviderLogo,
                                 toolRegistry,
+                                loadRetainedScreenshot,
                                 turnSummary,
                               ]}
                             >
@@ -1337,6 +1342,7 @@ export function MessageTimeline({
                                   onReconnect={onReconnect}
                                   resolveProviderLogo={resolveProviderLogo}
                                   toolRegistry={toolRegistry}
+                                  loadRetainedScreenshot={loadRetainedScreenshot}
                                   turnSummary={turnSummary}
                                   foldLiveCluster={isAgentProgress(next)}
                                   trailingAgentText={trailingAgentTextAfterTurn(group, next)}
@@ -1677,6 +1683,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect,
   resolveProviderLogo,
   toolRegistry,
+  loadRetainedScreenshot,
   turnSummary,
   insideTurn = false,
   nestClusterChips = false,
@@ -1693,6 +1700,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -1766,6 +1774,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
+              loadRetainedScreenshot={loadRetainedScreenshot}
               bare
             />
           );
@@ -1787,6 +1796,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
+              loadRetainedScreenshot={loadRetainedScreenshot}
               bare
             />
           </TurnSummary>
@@ -1812,6 +1822,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
                 onOpenSession={onOpenSession}
                 onMemoryClick={onMemoryClick}
                 toolRegistry={toolRegistry}
+                loadRetainedScreenshot={loadRetainedScreenshot}
                 bare
               />
             </TurnRailFrame>
@@ -1838,6 +1849,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onReconnect,
               resolveProviderLogo,
               toolRegistry,
+              loadRetainedScreenshot,
               turnSummary,
             ]}
           >
@@ -1849,6 +1861,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onReconnect={onReconnect}
               resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
+              loadRetainedScreenshot={loadRetainedScreenshot}
               turnSummary={turnSummary}
               insideTurn
               nestClusterChips={nestClusters}

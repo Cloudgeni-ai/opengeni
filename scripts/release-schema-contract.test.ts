@@ -154,6 +154,7 @@ describe("release schema contract", () => {
         (migrations.has("0137_preference_registry.sql") ? 1 : 0) +
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
+        (migrations.has("0140_retained_screenshot_artifacts.sql") ? 1 : 0) +
         (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
         (migrations.has("0141_social_connection_credentials.sql") ? 1 : 0) +
         (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0) +
@@ -194,12 +195,17 @@ describe("release schema contract", () => {
         (migrations.has("0176_lossless_canonical_json.sql") ? 1 : 0) +
         (migrations.has("0177_session_events_workspace_turn_type_index.sql") ? 1 : 0) +
         (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0) +
-        (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0),
+        (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0) +
+        (migrations.has("0180_retained_screenshot_lifecycle_fences.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "7c309fe6dfc82a2806760e12c9f22d584da8302c6db0094887d2ae33bfb4c1ce",
+      "b9793bcf0c3ec1d79c038725a3ab0080294735b5807dbe5340fbca747e4334de",
     );
-    expect(contract.latestMigration).toBe("0179_slack_private_shortcut_delivery_gate.sql");
+    expect(contract.latestMigration).toBe("0180_retained_screenshot_lifecycle_fences.sql");
+    expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({
+      sha256: "184bd3bb0360d63abc72e09ad5461646679320c61c0a24a5e67cc3af5a7d008a",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0179_slack_private_shortcut_delivery_gate.sql")).toMatchObject({
       sha256: "eabb9498659f0fe7a9aa080568f4a6963bc4e51bb9b7df897c0a9f7060671824",
       deploymentMode: "rolling",
@@ -400,6 +406,7 @@ describe("release schema contract", () => {
       "0137_preference_registry.sql",
       "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
       "0139_codex_provider_artifact_invalidations.sql",
+      "0140_retained_screenshot_artifacts.sql",
       "0140_sandbox_restore_and_reaper_fences.sql",
       "0141_social_connection_credentials.sql",
       "0142_sandbox_archive_capture_gate.sql",

@@ -108,6 +108,8 @@ import type {
   PackInstallation,
   LatencyMode,
   ReasoningEffort,
+  RetainedScreenshotDownload,
+  RetainedScreenshotDownloadOptions,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
   RetainedArtifactMetadata,
@@ -265,6 +267,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
+  COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
 
@@ -2884,22 +2887,118 @@ export class OpenGeniClient {
     artifactId: string,
     options: RetainedArtifactContentOptions = {},
   ): Promise<RetainedArtifactContent> {
+    return await this.getRetainedArtifactContentAtPath(
+      `/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`,
+      options,
+    );
+  }
+
+  async getSessionRetainedArtifact(
+    workspaceId: string,
+    sessionId: string,
+    artifactId: string,
+  ): Promise<RetainedArtifactMetadata> {
+    return await this.requestJson<RetainedArtifactMetadata>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}`,
+    );
+  }
+
+  async getSessionRetainedArtifactContent(
+    workspaceId: string,
+    sessionId: string,
+    artifactId: string,
+    options: RetainedArtifactContentOptions = {},
+  ): Promise<RetainedArtifactContent> {
+    return await this.getRetainedArtifactContentAtPath(
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}/content`,
+      options,
+    );
+  }
+
+  /** Assemble one retained screenshot from bounded authenticated API ranges. */
+  async downloadRetainedScreenshot(
+    workspaceId: string,
+    sessionId: string,
+    artifactId: string,
+    options: RetainedScreenshotDownloadOptions = {},
+  ): Promise<RetainedScreenshotDownload> {
+    const maxRetries = options.maxRetries ?? 2;
+    if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 3) {
+      throw new RangeError("retained screenshot maxRetries must be an integer from 0 to 3");
+    }
+    const metadata = await this.getSessionRetainedArtifact(workspaceId, sessionId, artifactId);
+    if (!metadata.available) return { metadata, bytes: null };
+    if (
+      metadata.kind !== "computer_screenshot" ||
+      metadata.contentType !== "image/png" ||
+      !metadata.dimensions ||
+      metadata.originalBytes <= 0 ||
+      metadata.originalBytes > COMPUTER_SCREENSHOT_MAX_BYTES
+    ) {
+      throw new OpenGeniApiError(502, "retained screenshot metadata is invalid");
+    }
+    const bytes = new Uint8Array(metadata.originalBytes);
+    const pageBytes = Math.min(metadata.retrieval.maxRangeBytes, RETAINED_OUTPUT_MAX_PAGE_BYTES);
+    if (!Number.isSafeInteger(pageBytes) || pageBytes <= 0) {
+      throw new OpenGeniApiError(502, "retained screenshot range metadata is invalid");
+    }
+    for (let start = 0; start < bytes.byteLength; start += pageBytes) {
+      options.signal?.throwIfAborted();
+      const end = Math.min(start + pageBytes, bytes.byteLength) - 1;
+      let page: RetainedArtifactContent | null = null;
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        try {
+          page = await this.getSessionRetainedArtifactContent(workspaceId, sessionId, artifactId, {
+            range: `bytes=${start}-${end}`,
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
+          break;
+        } catch (error) {
+          options.signal?.throwIfAborted();
+          if (
+            attempt >= maxRetries ||
+            (error instanceof OpenGeniApiError && error.status >= 400 && error.status < 500)
+          ) {
+            throw error;
+          }
+        }
+      }
+      if (!page) throw new OpenGeniApiError(502, "retained screenshot range retry exhausted");
+      const expectedLength = end - start + 1;
+      if (
+        page.status !== 206 ||
+        page.contentType !== metadata.contentType ||
+        page.contentLength !== expectedLength ||
+        page.contentRange !== `bytes ${start}-${end}/${metadata.originalBytes}`
+      ) {
+        throw new OpenGeniApiError(502, "retained screenshot range response is invalid");
+      }
+      bytes.set(page.bytes, start);
+    }
+    if ((await sha256Hex(bytes)) !== metadata.sha256) {
+      throw new OpenGeniApiError(502, "retained screenshot checksum mismatch");
+    }
+    return { metadata, bytes };
+  }
+
+  private async getRetainedArtifactContentAtPath(
+    path: string,
+    options: RetainedArtifactContentOptions,
+  ): Promise<RetainedArtifactContent> {
     if (options.range && (options.range.length > 128 || /[^\x20-\x7e]/.test(options.range))) {
       throw new RangeError("retained artifact range must be at most 128 printable ASCII bytes");
     }
     const correlationId = crypto.randomUUID();
-    const response = await this.fetchImpl(
-      this.url(`/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`),
-      {
-        method: "GET",
-        headers: {
-          ...this.headers(correlationId),
-          Accept: "application/octet-stream",
-          ...(options.range ? { Range: options.range } : {}),
-        },
-        ...(options.signal ? { signal: options.signal } : {}),
+    const response = await this.fetchImpl(this.url(path), {
+      method: "GET",
+      headers: {
+        ...this.headers(correlationId),
+        Accept: "application/octet-stream",
+        ...(options.range ? { Range: options.range } : {}),
       },
-    );
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
     try {
       assertApiContractResponse(response);
     } catch (error) {
@@ -4013,6 +4112,12 @@ async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<strin
         ? new Uint8Array(await body.arrayBuffer())
         : new Uint8Array(body);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const owned = Uint8Array.from(bytes);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", owned.buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 

@@ -330,6 +330,16 @@ import {
   prepareRecordingForSettlement,
   type ActiveRecording,
 } from "./recording";
+import {
+  collectRetainedScreenshotReceipts,
+  collectRetainedScreenshotRunStateReceipts,
+  compactRetainedScreenshotHistory,
+  compactRetainedScreenshotRunState,
+  materializeRetainedScreenshotHistory,
+  materializeRetainedScreenshotRunState,
+  retainComputerScreenshot,
+  typedScreenshotFromSdkEvent,
+} from "./retained-screenshots";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
@@ -346,6 +356,7 @@ import {
   resourceMountPath,
   type LatencyMode,
   type ResourceRef,
+  type RetainedArtifactMetadata,
   type SessionEvent,
   type SessionEventType,
   type SessionStatus,
@@ -3068,6 +3079,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // stable and this scalar append watermark is valid again. The sanitizer
     // remains the final call/result pairing guard for every other reconcile.
     let persistedHistoryCount = 0;
+    const retainedScreenshotReceiptsByCallId = new Map<string, RetainedArtifactMetadata>();
+    const computerScreenshotCallIds = new Set<string>();
+    const materializeScreenshotHistory = async (history: Array<Record<string, unknown>>) => {
+      collectRetainedScreenshotReceipts(history, retainedScreenshotReceiptsByCallId);
+      return await materializeRetainedScreenshotHistory({
+        db,
+        objectStorage,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        history,
+      });
+    };
+    const materializeScreenshotRunState = async (serialized: string) => {
+      collectRetainedScreenshotRunStateReceipts(serialized, retainedScreenshotReceiptsByCallId);
+      return await materializeRetainedScreenshotRunState({
+        db,
+        objectStorage,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        serialized,
+      });
+    };
     let providerArtifactCandidates: Awaited<
       ReturnType<typeof turnInput>
     >["providerArtifactCandidates"] = {
@@ -3088,8 +3121,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         const rawHistory = (stream.state as { history?: unknown[] }).history;
         if (Array.isArray(rawHistory)) {
-          const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
+          const durableHistory = compactRetainedScreenshotHistory(
             rawHistory as Array<Record<string, unknown>>,
+            retainedScreenshotReceiptsByCallId,
+          );
+          const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
+            durableHistory,
             persistedHistoryCount,
             nextHistoryPosition,
             modelRunSettings.modelToolOutputTruncationTokens,
@@ -3406,7 +3443,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerSeq: ++producerSeq,
         }));
         const runState = inputSettlement.runState
-          ? (inputSettlement.runState as typeof inputSettlement.runState)
+          ? {
+              ...inputSettlement.runState,
+              serializedRunState: compactRetainedScreenshotRunState(
+                inputSettlement.runState.serializedRunState,
+                retainedScreenshotReceiptsByCallId,
+              ),
+            }
           : undefined;
         const result = await applySessionTurnSettlement(db, input.workspaceId, {
           sessionId: input.sessionId,
@@ -4507,6 +4550,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   force: true,
                   clearRequestedCompaction: true,
                   trigger: "operator",
+                  materializeHistory: materializeScreenshotHistory,
                   projectModelInput: compactionModelHistoryProjector,
                   ...compactionModeOptions,
                 },
@@ -6159,11 +6203,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     force: true,
                     clearRequestedCompaction: true,
                     trigger: "operator",
+                    materializeHistory: materializeScreenshotHistory,
                     projectModelInput: compactionModelHistoryProjector,
                     ...compactionModeOptions,
                   }
                 : {
                     trigger: "auto",
+                    materializeHistory: materializeScreenshotHistory,
                     projectModelInput: compactionModelHistoryProjector,
                     ...compactionModeOptions,
                   },
@@ -6316,6 +6362,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
           ...(runCredentialsNote ? { runCredentialsNote } : {}),
           providerApi,
+          materializeModelHistory: materializeScreenshotHistory,
+          materializeSerializedRunState: materializeScreenshotRunState,
           projectModelHistory: modelHistoryProjector,
         });
         runInput = prepared.input;
@@ -6376,6 +6424,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               force: true,
               ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
               trigger: triggerLabel,
+              materializeHistory: materializeScreenshotHistory,
               projectModelInput: compactionModelHistoryProjector,
               ...compactionModeOptions,
             },
@@ -6565,6 +6614,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
+            let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
             const responseResult = await processModelResponseTerminalEvent({
               event: next.value,
               state: modelResponseState,
@@ -6648,9 +6698,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
               currentToolBatchCallIds.add(pendingToolCall.callId);
+              if (pendingToolCall.callName === "computer_screenshot") {
+                computerScreenshotCallIds.add(pendingToolCall.callId);
+              }
             }
             const completedToolCall = completedToolCallFromSdkEvent(next.value);
             if (completedToolCall) {
+              const typedScreenshot = typedScreenshotFromSdkEvent(next.value);
+              if (
+                typedScreenshot &&
+                typedScreenshot.callId === completedToolCall.callId &&
+                computerScreenshotCallIds.has(completedToolCall.callId)
+              ) {
+                retainedScreenshotMetadata = await retainComputerScreenshot({
+                  db,
+                  objectStorage,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  output: typedScreenshot,
+                });
+                retainedScreenshotReceiptsByCallId.set(
+                  completedToolCall.callId,
+                  retainedScreenshotMetadata,
+                );
+              }
+              const durableResultItem = retainedScreenshotMetadata
+                ? (compactRetainedScreenshotHistory(
+                    [completedToolCall.resultItem],
+                    retainedScreenshotReceiptsByCallId,
+                  )[0] ?? completedToolCall.resultItem)
+                : completedToolCall.resultItem;
               // Keep every parallel result in the attempt ledger until the full
               // call batch has settled. The SDK's computed history is
               // non-monotonic while parallel calls complete (a later call may
@@ -6665,7 +6745,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 attemptId: input.attemptId,
                 callId: completedToolCall.callId,
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-                resultItem: completedToolCall.resultItem as Record<string, unknown>,
+                resultItem: durableResultItem as Record<string, unknown>,
               });
               if (!recorded.accepted) {
                 throw new TurnAttemptFencedError(
@@ -6694,7 +6774,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 completedCurrentToolBatch = currentBatchIsStable;
               }
             }
-            const normalized = normalizeSdkEvent(next.value);
+            const normalized = normalizeSdkEvent(
+              next.value,
+              retainedScreenshotMetadata
+                ? {
+                    toolOutputOverride: retainedScreenshotMetadata,
+                    retainedOutputEvidence: retainedScreenshotMetadata.available
+                      ? retainedScreenshotMetadata
+                      : {
+                          available: false,
+                          reason: retainedScreenshotMetadata.reason,
+                        },
+                  }
+                : {},
+            );
             for (const event of normalized) {
               streamTiming.onEvent(event.type);
               await batcher.push(event);
@@ -6717,6 +6810,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               if (completedCurrentToolBatch) {
                 currentToolBatchCallIds = new Set<string>();
                 currentToolBatchCompletedCallIds = new Set<string>();
+              }
+              for (const callId of stableToolCallIdsToClear) {
+                computerScreenshotCallIds.delete(callId);
               }
             }
           }
@@ -9075,6 +9171,7 @@ const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 function pendingToolCallFromSdkEvent(event: unknown): {
   callId: string;
   callType: string;
+  callName: string | null;
   callItem: Record<string, unknown>;
 } | null {
   if (!event || typeof event !== "object") return null;
@@ -9095,7 +9192,12 @@ function pendingToolCallFromSdkEvent(event: unknown): {
   if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {
     return null;
   }
-  return { callId, callType, callItem: raw };
+  return {
+    callId,
+    callType,
+    callName: typeof raw.name === "string" ? raw.name : null,
+    callItem: raw,
+  };
 }
 
 function completedToolCallFromSdkEvent(event: unknown): {
