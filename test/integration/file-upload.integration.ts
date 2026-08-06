@@ -470,7 +470,15 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
     expect(afterFailure[0]).toEqual({ upload_status: "cleanup_pending", file_status: "failed" });
     const claimedRetry = await completeRequest(app, fixture, expired.uploadId);
     expect(claimedRetry.status).toBe(409);
-    expect(await claimedRetry.text()).toBe("file upload is failed");
+    expect(await claimedRetry.json()).toEqual({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: "file upload is failed",
+        retryable: false,
+        requestId: expect.any(String),
+      },
+    });
 
     const second = await activities.reapExpiredFileUploads();
     expect(second).toEqual({ claimed: 1, deleted: 1, failed: 0 });
