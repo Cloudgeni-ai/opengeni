@@ -43,6 +43,10 @@ class ControlledResizeObserver implements ResizeObserver {
   }
 }
 
+function observersFor(target: Element): ControlledResizeObserver[] {
+  return ControlledResizeObserver.instances.filter((observer) => observer.observed.has(target));
+}
+
 afterEach(async () => {
   if (mounted) {
     const current = mounted;
@@ -136,7 +140,7 @@ describe("container-responsive composer", () => {
     expect(root?.classList.contains("og-root")).toBe(true);
     expect(root?.querySelector(".og-composer-input")).not.toBeNull();
     expect(root?.querySelector(".og-composer-footer[data-og-stack-actions]")).not.toBeNull();
-    expect(ControlledResizeObserver.instances).toHaveLength(0);
+    expect(observersFor(root!)).toHaveLength(0);
   });
 
   test("tracks the actual composer width for portalled tokens and disconnects cleanly", async () => {
@@ -152,8 +156,8 @@ describe("container-responsive composer", () => {
     const root = mounted.container.querySelector<HTMLElement>(".og-composer");
     const trigger = mounted.container.querySelector<HTMLButtonElement>("[data-portal-source]");
     expect(root?.dataset.ogResponsiveBasis).toBe("container");
-    expect(ControlledResizeObserver.instances).toHaveLength(1);
-    expect(ControlledResizeObserver.instances[0]?.observed.has(root!)).toBe(true);
+    const [observer] = observersFor(root!);
+    expect(observersFor(root!)).toHaveLength(1);
 
     let inlineSize = 320;
     Object.defineProperty(root, "clientWidth", {
@@ -163,7 +167,7 @@ describe("container-responsive composer", () => {
     trigger?.style.setProperty("--og-test-portal-token", "container-value");
 
     await act(async () => {
-      ControlledResizeObserver.instances[0]?.emit();
+      observer?.emit();
       await Promise.resolve();
     });
 
@@ -173,12 +177,11 @@ describe("container-responsive composer", () => {
 
     inlineSize = 420;
     await act(async () => {
-      ControlledResizeObserver.instances[0]?.emit();
+      observer?.emit();
       await Promise.resolve();
     });
     expect(content?.style.getPropertyValue(PORTAL_SOURCE_INLINE_SIZE)).toBe("420px");
 
-    const observer = ControlledResizeObserver.instances[0]!;
     const current = mounted;
     mounted = null;
     await current.unmount();
@@ -197,7 +200,7 @@ describe("container-responsive composer", () => {
 
     const root = mounted.container.querySelector<HTMLElement>(".og-composer")!;
     expect(mounted.container.querySelector('[aria-label="Model and effort"]')).toBeNull();
-    expect(ControlledResizeObserver.instances).toHaveLength(0);
+    expect(observersFor(root)).toHaveLength(0);
     Object.defineProperty(root, "clientWidth", { configurable: true, value: 336 });
 
     await mounted.rerender(
@@ -209,8 +212,7 @@ describe("container-responsive composer", () => {
     );
 
     expect(mounted.container.querySelector('[aria-label="Model and effort"]')).not.toBeNull();
-    expect(ControlledResizeObserver.instances).toHaveLength(1);
-    expect(ControlledResizeObserver.instances[0]?.observed.has(root)).toBe(true);
+    expect(observersFor(root)).toHaveLength(1);
   });
 
   test("restarts observation when the source element is replaced", async () => {
@@ -222,7 +224,9 @@ describe("container-responsive composer", () => {
         controlsStart={<PortalStyleProbe />}
       />,
     );
-    const initialObserver = ControlledResizeObserver.instances[0]!;
+    const [initialObserver] = observersFor(
+      mounted.container.querySelector<HTMLElement>(".og-composer")!,
+    );
     expect(
       mounted.container
         .querySelector<HTMLElement>("[data-portal-style]")
@@ -237,8 +241,10 @@ describe("container-responsive composer", () => {
       />,
     );
 
-    expect(initialObserver.disconnected).toBe(true);
-    expect(ControlledResizeObserver.instances.length).toBeGreaterThanOrEqual(2);
+    expect(initialObserver?.disconnected).toBe(true);
+    expect(
+      observersFor(mounted.container.querySelector<HTMLElement>(".og-composer")!),
+    ).toHaveLength(1);
     expect(
       mounted.container
         .querySelector<HTMLElement>("[data-portal-style]")
