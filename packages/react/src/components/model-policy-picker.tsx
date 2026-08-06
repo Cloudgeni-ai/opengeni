@@ -243,7 +243,7 @@ export function PickerNavRow(props: {
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
@@ -278,7 +278,7 @@ export function PickerBackHeader(props: {
         type="button"
         onClick={props.onBack}
         data-testid="model-picker-back"
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-og-sm px-1.5 py-1.5 text-left text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-og-sm px-1.5 py-1.5 text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40"
       >
         <ChevronLeftIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
         {props.icon}
@@ -455,7 +455,7 @@ export function ModelPolicyPickerMenu(
                   );
                 }}
                 className={cn(
-                  "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-og-sm text-og-fg-subtle outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+                  "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-og-sm text-og-fg-subtle outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
                   activeModel && props.latencyMode === "fast" && "text-og-fg",
                 )}
               >
@@ -487,7 +487,7 @@ export function ModelPolicyPickerMenu(
                 disabled={!focusModel.selectable}
                 onClick={() => selectEffort(focusModel, effort)}
                 className={cn(
-                  "flex h-[var(--og-model-picker-effort-height)] w-full cursor-pointer items-center rounded-og-sm px-[var(--og-model-picker-row-padding-x)] text-left text-og-menu text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+                  "flex h-[var(--og-model-picker-effort-height)] w-full cursor-pointer items-center rounded-og-sm px-[var(--og-model-picker-row-padding-x)] text-left text-og-menu text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
                   selected && "bg-og-surface-2",
                 )}
               >
@@ -556,7 +556,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     return (
       <span
         className={cn(
-          "inline-flex h-8 w-40 shrink-0 animate-pulse rounded-full bg-og-surface-2",
+          "og-root inline-flex h-8 w-40 shrink-0 animate-pulse rounded-full bg-og-surface-2",
           props.className,
         )}
         aria-label={messages.loading}
@@ -573,7 +573,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           disabled={props.disabled}
           aria-label={messages.label}
           className={cn(
-            "og-root inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+            "og-root inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
             props.className,
           )}
         >

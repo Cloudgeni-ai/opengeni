@@ -69,16 +69,31 @@ transport, any object with the same method surface works. See
 
 ## 3. Styles
 
-Import the stylesheet once in your Tailwind entry CSS, and add the `@source` line
-so Tailwind compiles the utility classes used inside the components:
+For the styled workbench, import the ready-to-use stylesheet once from the host
+application entry. The host does not need Tailwind or a package source scan:
+
+```tsx
+import "@opengeni/react/compiled.css";
+```
+
+The artifact omits Preflight, scopes every utility to `.og-root`, and does not
+register Tailwind's global `--tw-*` properties. Independent token defaults
+inherit without replacing host `--og-*` values; derived defaults use scoped
+effective values, so accent, radius, motion, and surface relationships remain
+live. Portalled components copy the trigger's effective tokens onto their
+standalone roots.
+
+Tailwind v4 hosts may instead keep the additive source bridge:
 
 ```css
+@import "tailwindcss";
 @import "@opengeni/react/styles.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
-Not using Tailwind? Import `@opengeni/react/tokens.css` instead and the
-components still render — they only need the `--og-*` CSS variables to be present.
+Import one styling path, not both. Hosts consuming only
+`@opengeni/react/session` need no CSS; that headless subpath remains CSS-free.
+For token-only use, import `@opengeni/react/tokens.css` directly.
 
 ## 4. Mount `<SandboxWorkspace>`
 

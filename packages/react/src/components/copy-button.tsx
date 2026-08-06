@@ -96,7 +96,7 @@ export function CopyButton({
             "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm pointer-coarse:size-11",
             "text-og-fg-subtle transition-[opacity,color,background-color] duration-150",
             "hover:bg-og-surface-2/80 hover:text-og-fg",
-            "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent/40",
+            "focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40",
             reveal === "group-hover" &&
               "opacity-0 group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-70",
             copied && "opacity-100 text-og-accent",

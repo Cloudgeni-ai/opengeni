@@ -3,9 +3,9 @@
 
 // @opengeni/react — hooks + styled components on @opengeni/sdk.
 //
-// Import the styles once in your Tailwind entry CSS:
-//   @import "@opengeni/react/styles.css";
-//   @source "../node_modules/@opengeni/react/src";
+// Import the ready-to-use styles once:
+//   import "@opengeni/react/compiled.css";
+// Tailwind v4 hosts may instead use the additive styles.css + @source bridge.
 
 export type {
   EmbeddedFileAttachmentClientLike,

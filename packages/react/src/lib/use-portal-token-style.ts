@@ -1,6 +1,7 @@
 import { type CSSProperties, type RefObject, useEffect, useState } from "react";
 
-export type PortalTokenStyle = CSSProperties & Record<`--${string}`, string>;
+export type PortalTokenStyle = Pick<CSSProperties, "colorScheme"> &
+  Partial<Record<`--${string}`, string>>;
 
 /**
  * Copy the effective SDK tokens across a portal boundary. A locally themed or

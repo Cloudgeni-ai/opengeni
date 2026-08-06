@@ -6,7 +6,8 @@ import pkg from "./package.json" with { type: "json" };
 // @opengeni/sdk; everything in `dependencies` (motion, lucide-react, radix-ui,
 // clsx, tailwind-merge) plus React itself is marked external so we never bundle
 // a second copy. CSS is shipped untouched from styles/ (the ./styles.css and
-// ./tokens.css subpath exports) — tsup does not compile it.
+// ./compiled.css / ./tokens.css subpath exports) — the package CSS build owns
+// compiled.css and tsup does not process any stylesheet.
 //
 // All @opengeni/* are externalized (via the regex below). @opengeni/sdk stays a
 // real external import in dist (correct — it's a published runtime dep). This

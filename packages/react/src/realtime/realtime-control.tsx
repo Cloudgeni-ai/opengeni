@@ -719,7 +719,7 @@ export function RealtimeVoiceControl(props: {
             // Match transcription mic: ghost icon when idle; filled only when live.
             // Public contract: coarse pointers keep a 44px target; split menu uses
             // left-only rounding at `sm+` where the chevron attaches.
-            "relative inline-flex size-8 items-center justify-center outline-none",
+            "relative inline-flex size-8 items-center justify-center outline-hidden",
             "rounded-og-md transition-[background-color,border-color,color,box-shadow] duration-200 ease-og-out",
             "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
             "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-11",
@@ -748,7 +748,7 @@ export function RealtimeVoiceControl(props: {
                 className={cn(
                   // Keep the split trigger compact on desktop while preserving a
                   // full 44px mobile target independent of pointer-media support.
-                  "inline-flex h-11 w-11 items-center justify-center rounded-r-og-md outline-none sm:h-8 sm:w-6",
+                  "inline-flex h-11 w-11 items-center justify-center rounded-r-og-md outline-hidden sm:h-8 sm:w-6",
                   "transition-[background-color,border-color,color] duration-200 ease-og-out",
                   "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
                   desktopOnlyModelMenu && "hidden sm:inline-flex",
@@ -931,7 +931,7 @@ function RealtimeMuteButton(props: {
       {...(props.reduceMotion ? {} : { whileTap: { scale: 0.92 } })}
       onClick={props.onToggle}
       className={cn(
-        "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md outline-none",
+        "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md outline-hidden",
         "transition-[background-color,border-color,color] duration-150 ease-og-out",
         "focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:size-11",
         props.muted

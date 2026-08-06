@@ -70,7 +70,7 @@ export function QueueErrorAlert({
           role="region"
           aria-label="Queue error details"
           tabIndex={0}
-          className="max-h-[min(5rem,20dvh)] min-w-0 max-w-full flex-[1_1_5rem] overflow-auto overscroll-contain whitespace-pre-wrap rounded-sm outline-none [overflow-wrap:anywhere] [unicode-bidi:plaintext] focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="max-h-[min(5rem,20dvh)] min-w-0 max-w-full flex-[1_1_5rem] overflow-auto overscroll-contain whitespace-pre-wrap rounded-sm outline-hidden [overflow-wrap:anywhere] [unicode-bidi:plaintext] focus-visible:ring-2 focus-visible:ring-ring/40"
           data-testid="queue-error-message"
           dir="auto"
         >
@@ -84,7 +84,7 @@ export function QueueErrorAlert({
           }}
           aria-label="Dismiss queue error and retry"
           title="Retry loading the queue"
-          className="ms-auto inline-flex size-7 shrink-0 items-center justify-center self-start rounded-md outline-none transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 motion-reduce:transition-none pointer-coarse:size-[44px]"
+          className="ms-auto inline-flex size-7 shrink-0 items-center justify-center self-start rounded-md outline-hidden transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 motion-reduce:transition-none pointer-coarse:size-[44px]"
         >
           <RotateCwIcon className="size-3.5" />
         </button>

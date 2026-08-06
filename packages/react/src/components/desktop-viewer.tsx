@@ -507,7 +507,7 @@ function TakeControlCallToAction({
           "border-og-border",
           "bg-og-bg/85 backdrop-blur-md",
           "shadow-og-lg",
-          "outline-none transition-all duration-150 ease-out",
+          "outline-hidden transition-all duration-150 ease-out",
           "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg",
           disabled
             ? "cursor-not-allowed opacity-60"
@@ -568,7 +568,7 @@ function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () =>
           className={cn(
             "inline-flex items-center gap-1.5 rounded-og-sm border px-2.5 py-1 text-og-xs font-semibold shadow-og-md transition-colors",
             "border-og-accent bg-og-bg/90 text-og-fg backdrop-blur-sm",
-            "outline-none hover:bg-og-accent hover:text-og-accent-fg focus-visible:ring-2 focus-visible:ring-og-accent",
+            "outline-hidden hover:bg-og-accent hover:text-og-accent-fg focus-visible:ring-2 focus-visible:ring-og-accent",
           )}
         >
           <MonitorIcon className="size-3.5" strokeWidth={2} aria-hidden />

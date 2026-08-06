@@ -290,7 +290,7 @@ function MemoryRow({
           onClick={() => onMemoryClick?.(targetId)}
           className={cn(
             "group/memlink -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-left text-og-sm text-og-fg-subtle",
-            "outline-none transition-colors duration-150 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent",
+            "outline-hidden transition-colors duration-150 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent",
           )}
         >
           View in memory
@@ -427,7 +427,7 @@ function WorkerRow({
         onClick={() => onOpenSession(sessionId)}
         className={cn(
           "group/worker -mx-1.5 flex w-full items-start gap-2 rounded-og-sm px-1.5 py-1.5 text-left",
-          "outline-none transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
+          "outline-hidden transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
           "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
         )}
       >

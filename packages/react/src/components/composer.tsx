@@ -958,7 +958,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
       }
       className={cn(
         "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-og-composer md:px-4 md:text-og-composer-wide pointer-coarse:min-h-11",
-        "text-og-fg placeholder:text-og-fg-subtle focus:outline-none focus-visible:outline-none",
+        "text-og-fg placeholder:text-og-fg-subtle focus:outline-hidden focus-visible:outline-hidden",
         "disabled:cursor-not-allowed disabled:opacity-60",
         className,
       )}
@@ -1412,7 +1412,7 @@ function WorkstreamPausedStrip({
                 {blockerHref(entry, controlLinks) ? (
                   <a
                     href={blockerHref(entry, controlLinks)}
-                    className="font-medium text-og-fg underline decoration-og-border-strong underline-offset-2 hover:text-og-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-ring/40"
+                    className="font-medium text-og-fg underline decoration-og-border-strong underline-offset-2 hover:text-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-ring/40"
                   >
                     {entry.displayName}
                   </a>

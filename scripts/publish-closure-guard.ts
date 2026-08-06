@@ -181,7 +181,7 @@ if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
 // unable to type a side-effect import unless every consumer adds its own
 // wildcard declaration.
 const reactExports = (reactPkg as PackageJson & { exports?: Record<string, unknown> }).exports;
-for (const subpath of ["./styles.css", "./tokens.css"]) {
+for (const subpath of ["./styles.css", "./compiled.css", "./tokens.css"]) {
   const entry = reactExports?.[subpath];
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
     failures.push(`@opengeni/react ${subpath} must provide typed conditional exports.`);

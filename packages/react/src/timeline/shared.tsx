@@ -163,7 +163,7 @@ export function ActivityDisclosure({
   const inner = (
     <>
       {hasBody ? (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-[var(--og-duration-disclose)] ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
+        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-[var(--_og-duration-disclose)] ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
       ) : (
         <span className="size-3.5 shrink-0" />
       )}
@@ -226,7 +226,7 @@ export function ActivityDisclosure({
         data-status={dataStatus}
         className={cn(
           rowClass,
-          "cursor-pointer outline-none hover:bg-og-surface-1 hover:text-og-fg",
+          "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
           "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
         )}
       >
@@ -498,7 +498,7 @@ export function Thumbnail({
       type="button"
       onClick={(event) => {
         event.stopPropagation();
-        lightbox.open(src, caption);
+        lightbox.open(src, caption, event.currentTarget);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -507,7 +507,7 @@ export function Thumbnail({
       }}
       className={cn(
         MEDIA_BOX,
-        "group/thumb relative inline-flex overflow-hidden bg-og-bg outline-none",
+        "group/thumb relative inline-flex overflow-hidden bg-og-bg outline-hidden",
         "focus-visible:ring-2 focus-visible:ring-og-accent",
       )}
       aria-label="Expand screenshot"
@@ -554,7 +554,7 @@ export function ScreenshotFigure({
       ) : lightbox ? (
         <button
           type="button"
-          onClick={() => lightbox.open(src, caption)}
+          onClick={(event) => lightbox.open(src, caption, event.currentTarget)}
           className={surface}
           aria-label="Expand screenshot"
         >

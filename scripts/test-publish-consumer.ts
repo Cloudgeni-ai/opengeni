@@ -30,6 +30,7 @@ type PackageManifest = {
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  sideEffects?: boolean | string[];
 };
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -167,6 +168,22 @@ try {
   const versions = await workspaceVersions();
   const sdk = await stageTarball("packages/sdk", stagingRoot, tarballRoot, versions);
   const react = await stageTarball("packages/react", stagingRoot, tarballRoot, versions);
+  if (
+    !Array.isArray(react.manifest.sideEffects) ||
+    !react.manifest.sideEffects.includes("**/*.css")
+  ) {
+    throw new Error("react tarball does not preserve the CSS side-effect allowlist");
+  }
+  const reactTarballContents = await run(["tar", "-tzf", react.tarball], consumerRoot, true);
+  for (const artifact of [
+    "package/styles/compiled.css",
+    "package/styles/compiled.d.ts",
+    "package/styles/effective-tokens.css",
+  ]) {
+    if (!reactTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`react tarball is missing ${artifact}`);
+    }
+  }
   const runtime = await stageTarball("packages/runtime", stagingRoot, tarballRoot, versions);
   const runtimeLocalDependencies = await Promise.all(
     [
@@ -217,13 +234,11 @@ try {
       "@opengeni/runtime": `file:${runtime.tarball}`,
     },
     devDependencies: {
-      "@tailwindcss/vite": reactSource.devDependencies?.["@tailwindcss/vite"],
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
       typescript: rootManifest.devDependencies?.typescript,
       "@vitejs/plugin-react": reactSource.devDependencies?.["@vitejs/plugin-react"],
-      tailwindcss: reactSource.devDependencies?.tailwindcss,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
@@ -266,7 +281,7 @@ try {
     ),
     writeFile(
       join(consumerRoot, "vite.config.ts"),
-      'import tailwindcss from "@tailwindcss/vite";\nimport react from "@vitejs/plugin-react";\nimport { defineConfig } from "vite";\nexport default defineConfig({ plugins: [react(), tailwindcss()] });\n',
+      'import react from "@vitejs/plugin-react";\nimport { defineConfig } from "vite";\nexport default defineConfig({ plugins: [react()] });\n',
     ),
     writeFile(
       join(consumerRoot, "session.vite.config.ts"),
@@ -277,12 +292,8 @@ try {
       '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenGeni consumer proof</title></head><body><div id="root"></div><script type="module" src="/browser.tsx"></script></body></html>\n',
     ),
     writeFile(
-      join(consumerRoot, "app.css"),
-      '@import "tailwindcss";\n@import "@opengeni/react/styles.css";\n@source "./node_modules/@opengeni/react/src";\n',
-    ),
-    writeFile(
       join(consumerRoot, "browser.tsx"),
-      'import "./app.css";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main><p>Clean consumer browser proof</p><HostEmbeddedSurfaces /></main>} /></OpenGeniProvider></StrictMode>);\n',
+      'import "@opengeni/react/compiled.css";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main><p>Clean consumer browser proof</p><HostEmbeddedSurfaces /></main>} /></OpenGeniProvider></StrictMode>);\n',
     ),
     writeFile(
       join(consumerRoot, "presentation.tsx"),
@@ -620,19 +631,31 @@ try {
       throw new Error(`Session-only tarball consumer reached forbidden runtime: ${forbidden}`);
     }
   }
+  const sessionArtifacts = await readdir(join(consumerRoot, "session-dist"));
+  if (sessionArtifacts.some((artifact) => artifact.endsWith(".css"))) {
+    throw new Error("Session-only tarball consumer unexpectedly emitted CSS");
+  }
 
   const assetRoot = join(consumerRoot, "dist", "assets");
   const cssFiles = (await readdir(assetRoot)).filter((file) => file.endsWith(".css"));
   const compiledCss = (
     await Promise.all(cssFiles.map((file) => readFile(join(assetRoot, file), "utf8")))
   ).join("\n");
-  if (!compiledCss.includes("--og-color-bg") || !compiledCss.includes(".bg-og-surface-1")) {
-    throw new Error("Vite/Tailwind output is missing OpenGeni tokens or generated utilities");
+  if (
+    !compiledCss.includes("--og-color-bg") ||
+    !compiledCss.includes(":where(.og-root).bg-og-surface-1")
+  ) {
+    throw new Error("Vite output is missing OpenGeni tokens or scoped compiled utilities");
+  }
+  for (const forbidden of ["@tailwind", "@theme", "@source", "@utility"]) {
+    if (compiledCss.includes(forbidden)) {
+      throw new Error(`Vite output retained an uncompiled Tailwind directive: ${forbidden}`);
+    }
   }
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, session-only and realtime-only bundles, browser CSS, SSR, and packed skill-library imports are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, compiler-free scoped browser CSS, CSS-free session and realtime-only bundles, SSR, and packed artifacts are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

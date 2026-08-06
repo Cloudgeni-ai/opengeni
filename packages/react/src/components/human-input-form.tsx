@@ -559,7 +559,7 @@ function QuestionControls({
           aria-describedby={describedBy}
           autoFocus={autoFocus}
           rows={2}
-          className="min-h-14 w-full resize-y rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent"
+          className="min-h-14 w-full resize-y rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg outline-hidden placeholder:text-og-fg-subtle focus:border-og-accent"
         />
       ) : (
         <div
@@ -651,7 +651,7 @@ function QuestionControls({
                       other: event.target.value,
                     }))
                   }
-                  className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-none focus:border-og-accent disabled:opacity-50"
+                  className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
                 />
               </span>
             </label>

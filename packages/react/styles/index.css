@@ -15,6 +15,7 @@
    -------------------------------------------------------------------------- */
 
 @import "./tokens.css";
+@import "./effective-tokens.css";
 
 @theme inline {
   --font-og-sans: var(--og-font-sans);
@@ -62,7 +63,7 @@
   --color-og-accent-strong: var(--og-color-accent-strong);
   --color-og-accent-deep: var(--og-color-accent-deep);
   --color-og-accent-fg: var(--og-color-accent-fg);
-  --color-og-accent-soft: var(--og-color-accent-soft);
+  --color-og-accent-soft: var(--_og-color-accent-soft);
 
   --color-og-status-queued: var(--og-color-status-queued);
   --color-og-status-running: var(--og-color-status-running);
@@ -134,29 +135,31 @@
   --shadow-og-sm: var(--og-shadow-sm);
   --shadow-og-md: var(--og-shadow-md);
   --shadow-og-lg: var(--og-shadow-lg);
-  --shadow-og-glow: var(--og-shadow-glow);
+  --shadow-og-glow: var(--_og-shadow-glow);
 
   --ease-og-out: var(--og-ease-out);
   --ease-og-in-out: var(--og-ease-in-out);
   --ease-og-spring: var(--og-ease-spring);
 
-  --animate-og-enter: og-enter var(--og-duration-base) var(--og-ease-out) both;
+  --animate-og-enter: og-enter var(--_og-duration-base) var(--og-ease-out) both;
   --animate-og-pulse: og-pulse 2s var(--og-ease-in-out) infinite;
   --animate-og-blink: og-blink 1s steps(2, start) infinite;
   --animate-og-shimmer: og-shimmer 2.2s linear infinite;
   --animate-og-spin: og-spin 0.9s linear infinite;
+  --animate-spin: og-spin 1s linear infinite;
+  --animate-pulse: og-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   --animate-og-waveform: og-waveform 1.15s var(--og-ease-in-out) infinite;
   /* Manual disclose — snappy. Auto settle-collapse is the slow path below. */
-  --animate-og-expand: og-expand var(--og-duration-disclose) var(--og-ease-in-out);
-  --animate-og-collapse: og-collapse var(--og-duration-disclose) var(--og-ease-in-out);
+  --animate-og-expand: og-expand var(--_og-duration-disclose) var(--og-ease-in-out);
+  --animate-og-collapse: og-collapse var(--_og-duration-disclose) var(--og-ease-in-out);
   /* Auto-fold the reader did not ask for: ~7× manual so it reads as choreography. */
-  --animate-og-settle-chip: og-settle-chip var(--og-duration-slow) var(--og-ease-out) both;
+  --animate-og-settle-chip: og-settle-chip var(--_og-duration-slow) var(--og-ease-out) both;
   /* Ease-out: settle lands softly (slow tail), not a symmetric ease-in-out stop. */
-  --animate-og-settle-collapse: og-collapse var(--og-duration-disclose-settle) var(--og-ease-out);
+  --animate-og-settle-collapse: og-collapse var(--_og-duration-disclose-settle) var(--og-ease-out);
   /* Live tool rows arriving mid-turn — soft, not tied to manual disclose speed. */
-  --animate-og-row-enter: og-row-enter var(--og-duration-slow) var(--og-ease-stream) both;
+  --animate-og-row-enter: og-row-enter var(--_og-duration-slow) var(--og-ease-stream) both;
   /* Stream end fallback breath when View Transitions are unavailable. */
-  --animate-og-markdown-settle: og-markdown-settle var(--og-duration-markdown-crystallize)
+  --animate-og-markdown-settle: og-markdown-settle var(--_og-duration-markdown-crystallize)
     var(--og-ease-stream) both;
 }
 
@@ -273,7 +276,7 @@
 }
 .og-stream-ink {
   display: inline;
-  animation: og-stream-ink var(--og-duration-stream) var(--og-ease-out) both;
+  animation: og-stream-ink var(--_og-duration-stream) var(--og-ease-out) both;
 }
 
 /* Stream-end remount fallback when View Transitions are unavailable.

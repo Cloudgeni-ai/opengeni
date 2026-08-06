@@ -321,7 +321,7 @@ export function WorkbenchChanges({
               }}
               title={activeFile?.path}
               data-compact-file-picker
-              className="h-11 w-full rounded-og-md border border-og-border bg-og-bg px-3 font-og-mono text-og-sm text-og-fg outline-none transition-colors focus:border-og-accent focus:ring-2 focus:ring-og-accent-soft"
+              className="h-11 w-full rounded-og-md border border-og-border bg-og-bg px-3 font-og-mono text-og-sm text-og-fg outline-hidden transition-colors focus:border-og-accent focus:ring-2 focus:ring-og-accent-soft"
             >
               {orderedFiles.map((file, index) => (
                 <option key={file.path} value={index}>
@@ -480,7 +480,7 @@ function RailFileRow({
       title={file.path}
       data-rail-file
       className={cn(
-        "relative flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm transition-colors hover:bg-og-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
+        "relative flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm transition-colors hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
         grouped && "pl-3",
         active &&
           "bg-og-accent-soft text-og-fg before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-r-full before:bg-og-accent",
@@ -597,7 +597,7 @@ function GuardBody({
         <button
           type="button"
           onClick={() => onOpenFile(file.path)}
-          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11"
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11"
         >
           Open in Files
           <ArrowUpRightIcon className="size-3.5" aria-hidden />
@@ -622,7 +622,7 @@ function LayoutToggle({
           type="button"
           onClick={() => onChange(value)}
           className={cn(
-            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs capitalize focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
             layout === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",
