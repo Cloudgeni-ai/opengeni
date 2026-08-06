@@ -30,6 +30,7 @@ import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
+  getEnrollment,
   getSandbox,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
@@ -49,6 +50,7 @@ import {
   isProviderSandboxNotFoundError,
   SandboxChannelAService,
   NatsControlRpc,
+  NatsOpStreamTransport,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
@@ -190,6 +192,7 @@ export async function withChannelA<T>(
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
+      const enrollment = await getEnrollment(db, workspaceId, sandbox.enrollmentId);
       const built = await buildSelfhostedBackendSession({
         workspaceId,
         agentId: sandbox.enrollmentId,
@@ -200,6 +203,17 @@ export async function withChannelA<T>(
         workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+        ...(settings.agentOpStreamEnabled === true &&
+        enrollment?.opStream === true &&
+        bus.getOpStreamConnection
+          ? {
+              opStream: {
+                transport: new NatsOpStreamTransport(
+                  async () => bus.getOpStreamConnection?.() ?? null,
+                ),
+              },
+            }
+          : {}),
       });
       established = {
         client: built.client,

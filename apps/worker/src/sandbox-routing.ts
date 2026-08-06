@@ -25,6 +25,7 @@ import {
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
+  getEnrollment,
   markWarmLeaseInstanceLost,
   readLease,
   readActiveSandbox,
@@ -712,6 +713,11 @@ export function wrapTurnBoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
+    resolveSelfhostedOpStream: async (sandbox) => {
+      if (!sandbox.enrollmentId) return undefined;
+      const enrollment = await getEnrollment(db, ids.workspaceId, sandbox.enrollmentId);
+      return opStreamDepsFor(services, enrollment?.opStream === true);
+    },
     relay: relayConfigFromSettings(settings),
     // A selfhosted swap target runs real commands too, so give it the same split
     // deadlines the machine-primary establish path uses (short control, long exec).
@@ -890,6 +896,11 @@ export function wrapLazyTurnBoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
+    resolveSelfhostedOpStream: async (sandbox) => {
+      if (!sandbox.enrollmentId) return undefined;
+      const enrollment = await getEnrollment(db, ids.workspaceId, sandbox.enrollmentId);
+      return opStreamDepsFor(services, enrollment?.opStream === true);
+    },
     relay: relayConfigFromSettings(settings),
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),

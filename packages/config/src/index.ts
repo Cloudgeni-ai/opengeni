@@ -700,10 +700,13 @@ const SettingsSchema = z.object({
   // the deploy-staging IaC secret/configmap pattern.
   sandboxSelfhostedEnabled: EnvBoolean.default(false),
   // Gates the op-stream (streaming exec) transport to Connected Machines. The
-  // runner must ALSO advertise Capabilities.op_stream; default off, and legacy
-  // request/reply exec is the permanent fallback. EnvBoolean (NOT
+  // runner must ALSO advertise Capabilities.op_stream. Streaming is the default
+  // because it is the only transport that can keep a command alive without an
+  // arbitrary request/reply wall while still supporting replay and cancellation.
+  // Older runners remain usable when an explicit positive exec timeout is set.
+  // EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true).
-  agentOpStreamEnabled: EnvBoolean.default(false),
+  agentOpStreamEnabled: EnvBoolean.default(true),
   // The HMAC secret the control plane signs the enrollment bearer credential with
   // (the `oge_` envelope the agent presents back to the control plane). Optional:
   // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
@@ -761,23 +764,15 @@ const SettingsSchema = z.object({
   selfhostedNatsControlUser: z.string().optional(),
   selfhostedNatsControlPassword: z.string().optional(),
   // --- selfhosted (Connected Machine) control/exec op deadlines ---------------
-  // The control plane splits its op deadline in two. CONTROL ops (ping / fs / git /
-  // desktop / pty) must stay responsive so a machine's liveness is never masked by a
-  // slow op, so they use the short control timeout. EXEC gets its OWN, larger budget:
-  // a real command (compile, test run, dependency install) routinely outlives the
-  // control timeout, and before the split a long command was killed at the ~30s
-  // control wall. The agent kills the exec child at this deadline; the wire waits
-  // slightly longer (SELFHOSTED_EXEC_REPLY_GRACE_MS) for the typed timed-out reply.
-  //
-  // The exec default is a DELIBERATELY MODEST 2min (not 5): the agent-side admission
-  // pool is (until a later agent release) a FLAT 8 permits with no per-class split,
-  // so 8 slow execs holding a permit for 5 minutes would blanket-DRAIN every fs/git
-  // op — shipping the amplifier before the class-aware-admission fix. 2min still
-  // clears the large majority of the observed >30s exec tail; genuinely long jobs run
-  // in the background (see the exec-deadline hint) or raise the knob per deployment.
-  // Knobs: OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS (default 2min) and
+  // CONTROL ops (ping / fs / git / desktop / pty) keep a short request timeout so
+  // liveness failures surface promptly. EXEC duration is a different concern: by
+  // default it is unbounded (0), exactly like a command launched by an unrestricted
+  // local agent. The op-stream transport keeps control liveness, replay, and explicit
+  // cancellation independent of command duration. A deployment may opt into a hard
+  // process deadline by setting a positive value; 0 never schedules a process kill.
+  // Knobs: OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS (default 0 = none) and
   // OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS (default 30s).
-  sandboxSelfhostedExecTimeoutMs: z.coerce.number().int().positive().default(120_000),
+  sandboxSelfhostedExecTimeoutMs: z.coerce.number().int().nonnegative().default(0),
   sandboxSelfhostedControlTimeoutMs: z.coerce.number().int().positive().default(30_000),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE

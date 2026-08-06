@@ -1031,7 +1031,7 @@ export interface ExecRequest {
   env: { [key: string]: string };
   /** Optional stdin fed to the process. */
   stdin: Uint8Array;
-  /** Hard wall-clock timeout; 0 means the control-plane default. */
+  /** Optional hard wall-clock timeout; 0 means no process deadline. */
   timeoutMs: number;
 }
 

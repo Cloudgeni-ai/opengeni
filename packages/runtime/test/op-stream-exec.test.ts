@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
+import { ErrorCode } from "@opengeni/agent-proto";
 import type { SelfhostedOpObservation } from "../src/sandbox/selfhosted/op-observer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
@@ -16,7 +17,9 @@ import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-c
 const WORKSPACE = "ws-1";
 const AGENT = "agent-1";
 
-function buildRig(opts: { journal?: OpStreamJournal } = {}) {
+function buildRig(
+  opts: { journal?: OpStreamJournal; execTimeoutMs?: number; windowBytes?: number } = {},
+) {
   const transport = new InMemoryOpStreamTransport();
   const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
   const observations: SelfhostedOpObservation[] = [];
@@ -26,12 +29,13 @@ function buildRig(opts: { journal?: OpStreamJournal } = {}) {
     controlRpc: runner,
     relay: { host: "relay.test" },
     timeoutMs: 2_000,
-    execTimeoutMs: 5_000,
+    execTimeoutMs: opts.execTimeoutMs ?? 5_000,
     retryClock: { sleep: async () => {}, jitter: () => 0.5 },
     onOp: (observation) => observations.push(observation),
     opStream: {
       transport,
       ...(opts.journal ? { journal: opts.journal } : {}),
+      ...(opts.windowBytes !== undefined ? { windowBytes: opts.windowBytes } : {}),
       ackIntervalMs: 20,
       silenceTimeoutMs: 120,
       reconnectHoldMs: 600,
@@ -63,6 +67,21 @@ describe("op-stream exec (fake runner)", () => {
     const ok = observations.find((o) => o.outcome === "ok");
     expect(ok?.op).toBe("exec");
     expect(ok?.replyBytes).toBe("hello world".length + "warn\n".length);
+  });
+
+  test("deadline 0 runs over op-stream with no duration wall", async () => {
+    const { runner, session } = buildRig({ execTimeoutMs: 0 });
+    runner.script("call_unbounded:0", {
+      frames: [{ channel: "stdout", bytes: "finished" }],
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const result = await runWithToolCallCorrelation("call_unbounded", () =>
+      session.exec({ cmd: "long-running-build" }),
+    );
+
+    expect(session.effectiveExecDeadlineMs).toBe(0);
+    expect(result.stdout).toBe("finished");
+    expect(result.timedOut).toBe(false);
   });
 
   test("OpCancel physically settles a running connected-machine exec", async () => {
@@ -218,6 +237,25 @@ describe("op-stream exec (fake runner)", () => {
     expect(healed?.healed).toBe(true);
   });
 
+  test("an out-of-order burst larger than the byte stash heals by replay", async () => {
+    const { runner, session } = buildRig({ windowBytes: 4 });
+    runner.script("call_stash:0", {
+      frames: [
+        { channel: "stdout", bytes: "0123456789" },
+        { channel: "stdout", bytes: "abcdefghij" },
+      ],
+      live: true,
+      reorderLivePairs: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const result = await runWithToolCallCorrelation("call_stash", () =>
+      session.exec({ cmd: "burst" }),
+    );
+
+    expect(result.stdout).toBe("0123456789abcdefghij");
+    expect(runner.runs.get("call_stash:0")!.attachCount).toBeGreaterThan(1);
+  });
+
   test("total live loss heals through the silence probe (OpQuery → re-attach)", async () => {
     const { runner, session } = buildRig();
     runner.script("call_silent:0", {
@@ -365,6 +403,35 @@ describe("op-stream exec (fake runner)", () => {
     });
     const result = await session.exec({ cmd: "echo legacy" });
     expect(result.exitCode).toBe(0);
+  });
+
+  test("unbounded exec never degrades to legacy when the stream is unavailable", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    transport.available = false;
+    const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
+    const responder = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      controlRpc: responder,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 0,
+      opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
+    });
+
+    const error = await session.exec({ cmd: "must-not-start" }).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_STREAM,
+      reason: "agent_reconnecting",
+      retryable: true,
+    });
+    expect(responder.requests).toHaveLength(0);
   });
 
   test("a runner that refuses OpStart (protocol) falls back to the legacy exec", async () => {
