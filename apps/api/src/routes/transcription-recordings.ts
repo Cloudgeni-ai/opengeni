@@ -35,14 +35,17 @@ import {
   markTranscriptionRecordingObjectsCleaned,
   reserveTranscriptionRecordingChunk,
   reserveTranscriptionRecordingSegment,
+  runIdempotentPersistenceTransaction,
   startTranscriptionRecordingSegmentProviderCall,
   transcriptionRecordingObjectKeys,
   TranscriptionRecordingConflictError,
   TranscriptionRecordingNotFoundError,
   TranscriptionRecordingStateError,
+  isSessionEventPersistenceError,
 } from "@opengeni/db";
 import { getWorkspace } from "@opengeni/db";
 import type { Context, Hono } from "hono";
+import { ApiHttpError } from "../http/api-error";
 import { TranscriptionSegmenterError } from "../transcription/segmenter";
 
 const CHUNK_SHA256_HEADER = "x-opengeni-chunk-sha256";
@@ -153,17 +156,26 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         ) {
           return c.json({ code: "not_supported" }, 415);
         }
-        const reservation = await reserveTranscriptionRecordingChunk(deps.db, {
-          ...authority,
-          recordingId: existing.recording.id,
-          chunkNumber,
-          byteLength: body.byteLength,
-          sha256,
-          startMilliseconds,
-          durationMilliseconds,
-          maxTotalBytes: deps.settings.voiceInputResumableMaxSizeBytes,
-          maxDurationMilliseconds: deps.settings.voiceInputResumableMaxDurationSeconds * 1_000,
-        });
+        const persistenceCorrelationId = correlationId(c);
+        const reservation = await runIdempotentPersistenceTransaction(
+          {
+            stage: "transcription_recording_chunk_reservation",
+            eventTypes: ["transcription_recording_chunk"],
+            correlationId: persistenceCorrelationId,
+          },
+          () =>
+            reserveTranscriptionRecordingChunk(deps.db, {
+              ...authority,
+              recordingId: existing.recording.id,
+              chunkNumber,
+              byteLength: body.byteLength,
+              sha256,
+              startMilliseconds,
+              durationMilliseconds,
+              maxTotalBytes: deps.settings.voiceInputResumableMaxSizeBytes,
+              maxDurationMilliseconds: deps.settings.voiceInputResumableMaxDurationSeconds * 1_000,
+            }),
+        );
         if (!reservation.deduplicated) {
           try {
             // A concurrent same-hash retry may still observe the row while it is
@@ -180,12 +192,20 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
             throw new RecordingProcessingError("Chunk upload failed", "network", true);
           }
         }
-        const completed = await completeTranscriptionRecordingChunk(deps.db, {
-          workspaceId: authority.workspaceId,
-          subjectId: authority.subjectId,
-          recordingId: existing.recording.id,
-          chunkNumber,
-        });
+        const completed = await runIdempotentPersistenceTransaction(
+          {
+            stage: "transcription_recording_chunk_completion",
+            eventTypes: ["transcription_recording_chunk"],
+            correlationId: persistenceCorrelationId,
+          },
+          () =>
+            completeTranscriptionRecordingChunk(deps.db, {
+              workspaceId: authority.workspaceId,
+              subjectId: authority.subjectId,
+              recordingId: existing.recording.id,
+              chunkNumber,
+            }),
+        );
         const response: UploadTranscriptionRecordingChunkResponse = {
           recording: completed.recording.recording,
           chunk: {
@@ -620,9 +640,25 @@ function routeError(c: Context, error: unknown): Response | Promise<Response> {
               : error.code === "unavailable"
                 ? 503
                 : 502;
+    if (error.retryable) {
+      throw new ApiHttpError(status, {
+        code: "upstream_unavailable",
+        message: "Transcription is temporarily unavailable.",
+        retryable: true,
+        details: { transcriptionCode: error.code },
+      });
+    }
     return c.json({ code: error.code }, status as never);
   }
-  return c.json({ code: "unknown" }, 500);
+  if (isSessionEventPersistenceError(error)) {
+    throw new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "Transcription is temporarily unavailable.",
+      retryable: true,
+      details: { persistenceCode: error.code },
+    });
+  }
+  throw error;
 }
 
 async function jsonBody(c: Context): Promise<unknown> {

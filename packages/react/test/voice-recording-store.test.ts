@@ -29,6 +29,8 @@ describe("durable voice recording storage primitives", () => {
       uploadState: "pending",
       transcriptionState: "pending",
       finalizationState: "pending",
+      recoveryMode: "automatic",
+      handoffMode: "append",
       ownerId: null,
       ownerHeartbeatAt: null,
       transcriptText: null,

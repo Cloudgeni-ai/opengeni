@@ -22,7 +22,9 @@ message by itself.
   512 MiB, and 1,000 normalized provider segments.
 - Interrupted upload, segmentation, or transcription reuses the same recording
   UUID. Duplicate chunks are accepted only when sequence, size, SHA-256, and
-  timing metadata match exactly; conflicting retries fail closed.
+  timing metadata match exactly; conflicting retries fail closed. Retryable API,
+  database, storage, and provider failures stay in a bounded automatic recovery
+  loop, including after reload, until the user explicitly pauses or discards.
 - Provider selection occurs once for the whole server recording before its first
   segment is sent. The private provider id is persisted and every later segment
   or retry remains pinned to it; a possibly-started recording never falls through
@@ -30,8 +32,9 @@ message by itself.
 - Provider results are persisted server-side so another browser carrying the same
   exact authenticated subject can list and resume an unexpired recording. The
   local browser still persists the final transcript before mutating the draft.
-  After an uncertain handoff, reload exposes an explicit saved-transcript insert
-  action rather than automatically retranscribing or appending again.
+  A retry or reload may finish transcription automatically, but its delayed result
+  is held as an explicit saved-transcript insertion so it cannot mutate a draft
+  whose identity is uncertain.
 - Controlled error codes and retryability cross the API. Raw provider detail,
   object keys, credentials, provider ids, audio bytes, and transcript bodies are
   excluded from logs and client capability configuration.
@@ -206,14 +209,21 @@ available independently when a provider is ready.
    handshake plus stale heartbeat. Another live tab cannot retry or discard local
    work, but any browser with the same authenticated server subject can discover
    and resume the server manifest through the SDK list/get methods.
-6. Persist a successful transcript locally before draft mutation. A reload never
-   auto-retranscribes or auto-appends an uncertain result.
+6. Persist a successful transcript locally before draft mutation. Persist whether
+   recovery is automatic or user-paused and whether handoff may append or requires
+   explicit insertion. Any retry/reload forces explicit handoff: recovery may
+   continue automatically, but an uncertain result never auto-appends.
 7. Fence every permission, recorder-stop, persistence, upload, polling, handoff,
    and cleanup callback by workspace/generation/owner identity. Escape, unmount,
    or workspace replacement cannot restore or settle stale work.
 8. Empty or whitespace-only transcripts do not change the draft. Workspace policy
    disablement and missing deployment readiness hide or block the mic without
    exposing provider controls.
+9. Retry only idempotent chunk-reservation/completion database transactions on
+   PostgreSQL serialization/deadlock failures. Exhausted persistence failures and
+   retryable storage failures cross the ordinary typed API error envelope with a
+   correlation id; unexpected failures propagate to HTTP failure observability
+   rather than being converted into anonymous successful-route 500 responses.
 
 ## Canonical implementation
 
