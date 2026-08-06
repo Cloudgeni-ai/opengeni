@@ -27,6 +27,14 @@ describe("lifecycle scripts — real sh execution semantics", () => {
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const { join } = require("node:path") as typeof import("node:path");
 
+  function isolatedProcessEnv(): NodeJS.ProcessEnv {
+    const env = { ...process.env };
+    delete env.OPENGENI_GIT_TOKEN_FILE;
+    delete env.OPENGENI_GIT_CREDENTIALS_DIR;
+    delete env.OPENGENI_GIT_CLI_WRAPPER_DIR;
+    return env;
+  }
+
   /** The generated clone script minus the /workspace-hardcoded invocations, plus a
    *  test-controlled `clone_repository` call. */
   function cloneScriptWithTarget(
@@ -66,7 +74,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     execFileSync("git", ["init", "-b", "main", origin]);
     writeFileSync(join(origin, "README.md"), "hello\n");
     const gitEnv = {
-      ...process.env,
+      ...isolatedProcessEnv(),
       GIT_AUTHOR_NAME: "t",
       GIT_AUTHOR_EMAIL: "t@t",
       GIT_COMMITTER_NAME: "t",
@@ -86,7 +94,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     try {
       // merge stderr into stdout so diagnostics like "Re-materializing..." are visible
       const output = execFileSync("sh", ["-c", `{\n${script}\n} 2>&1`], {
-        env: { ...process.env, ...env },
+        env: { ...isolatedProcessEnv(), ...env },
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -235,17 +243,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ).toEqual([]);
       // the askpass Password branch reads the token file
       const askOut = execFileSync("sh", [askpass, "Password for host"], {
-        env: { ...process.env, HOME: home },
+        env: { ...isolatedProcessEnv(), HOME: home },
         encoding: "utf8",
       });
       expect(askOut).toBe("tok-atomic-123");
       const gitlabOut = execFileSync("sh", [askpass, "Password for https://gitlab.com"], {
-        env: { ...process.env, HOME: home },
+        env: { ...isolatedProcessEnv(), HOME: home },
         encoding: "utf8",
       });
       expect(gitlabOut).toBe("glpat-atomic-456");
       const azureOut = execFileSync("sh", [askpass, "Password for https://dev.azure.com/acme"], {
-        env: { ...process.env, HOME: home },
+        env: { ...isolatedProcessEnv(), HOME: home },
         encoding: "utf8",
       });
       expect(azureOut).toBe("azdo-atomic-789");
@@ -354,7 +362,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const fill = (path: string) =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...process.env,
+            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -429,14 +437,14 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { ...process.env, HOME: home },
+          env: { ...isolatedProcessEnv(), HOME: home },
           encoding: "utf8",
         }).trim(),
       ).toBe("https://broker.example.test/git/session/binding/private.git");
       const fill = (host = "broker.example.test", path = "git/session/binding/private.git") =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...process.env,
+            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -454,7 +462,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         execFileSync("glab", [], {
           cwd: repo,
           env: {
-            ...process.env,
+            ...isolatedProcessEnv(),
             HOME: home,
             GITLAB_TOKEN: "ambient-token-must-not-pass",
             PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -475,7 +483,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(fill()).toContain("password=broker-bearer-two");
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { ...process.env, HOME: home },
+          env: { ...isolatedProcessEnv(), HOME: home },
           encoding: "utf8",
         }).trim(),
       ).toBe("https://broker.example.test/git/session/binding/private.git");
@@ -496,7 +504,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ).toBe(0);
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { ...process.env, HOME: home },
+          env: { ...isolatedProcessEnv(), HOME: home },
           encoding: "utf8",
         }).trim(),
       ).toBe("https://gitlab.com/acme/private.git");
@@ -598,7 +606,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const fill = (host: string, path: string) =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...process.env,
+            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -613,7 +621,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token"))).toBe(false);
 
       const env = {
-        ...process.env,
+        ...isolatedProcessEnv(),
         HOME: home,
         GITLAB_TOKEN: "ambient-token-must-not-win",
         PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -684,7 +692,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const fill = (host: string) =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...process.env,
+            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -760,7 +768,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         ).status,
       ).toBe(0);
       const env = {
-        ...process.env,
+        ...isolatedProcessEnv(),
         HOME: home,
         PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       };
@@ -854,7 +862,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(
         execFileSync("az", [], {
           env: {
-            ...process.env,
+            ...isolatedProcessEnv(),
             HOME: home,
             AZURE_DEVOPS_EXT_PAT: "ambient-pat-must-not-win",
             PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -888,7 +896,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(run.status).toBe(0);
 
       const askpass = join(home, ".opengeni", "askpass");
-      const askEnv = { ...process.env, HOME: home };
+      const askEnv = { ...isolatedProcessEnv(), HOME: home };
       expect(
         execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], {
           env: askEnv,
@@ -966,7 +974,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
       const wrapperPath = join(home, ".opengeni", "bin");
       const wrapperEnv = {
-        ...process.env,
+        ...isolatedProcessEnv(),
         HOME: home,
         PATH: `${wrapperPath}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       };

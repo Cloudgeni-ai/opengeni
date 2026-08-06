@@ -366,11 +366,13 @@ export async function startApi() {
           { db: dbClient.db, settings, callout, observability },
           settings.natsUrl,
         );
-      } catch (error) {
+      } catch {
         // A responder start failure must not crash the API (other planes work); log
         // loudly — selfhosted agents will fail to connect until it is up.
         observability.error("OpenGeni NATS auth-callout responder failed to start", {
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "NatsAuthCalloutOperationError",
+          errorCode: "nats_auth_callout_start_failed",
+          origin: "api",
         });
       }
     } else {
@@ -422,7 +424,7 @@ export function shouldCreateScheduleAfterUpdateError(error: unknown): boolean {
 export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): ScheduleSpec {
   if (schedule.type === "interval") {
     return {
-      intervals: [{ every: `${schedule.everySeconds}s` }],
+      intervals: [temporalIntervalSpec(schedule)],
       ...(schedule.startAt ? { startAt: new Date(schedule.startAt) } : {}),
       ...(schedule.endAt ? { endAt: new Date(schedule.endAt) } : {}),
     };
@@ -453,6 +455,29 @@ export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): Sched
       },
     ],
     timezone: "UTC",
+  };
+}
+
+function temporalIntervalSpec(
+  schedule: Extract<ScheduledTaskScheduleSpec, { type: "interval" }>,
+): NonNullable<ScheduleSpec["intervals"]>[number] {
+  const every = `${schedule.everySeconds}s` as `${number}s`;
+  if (!schedule.startAt) {
+    return { every };
+  }
+
+  // Temporal interval schedules match Epoch + (n * every) + offset. Its
+  // top-level startAt only filters matching times before that boundary, so it
+  // does not itself anchor the cadence. Derive the phase from startAt to make
+  // the stored OpenGeni timestamp the first interval boundary rather than the
+  // next epoch-aligned match.
+  const everyMilliseconds = BigInt(schedule.everySeconds) * 1_000n;
+  const startMilliseconds = BigInt(new Date(schedule.startAt).getTime());
+  const offsetMilliseconds =
+    ((startMilliseconds % everyMilliseconds) + everyMilliseconds) % everyMilliseconds;
+  return {
+    every,
+    ...(offsetMilliseconds === 0n ? {} : { offset: `${offsetMilliseconds}ms` as `${number}ms` }),
   };
 }
 

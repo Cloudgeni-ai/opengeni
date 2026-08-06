@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.12
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+
 ## 0.2.11
 
 ### Patch Changes

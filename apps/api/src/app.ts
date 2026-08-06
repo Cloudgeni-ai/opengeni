@@ -307,7 +307,6 @@ export function createAppComposition(deps: AppDependencies): {
     const start = performance.now();
     const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
       "http.request.method": c.req.method,
-      "url.path": url.pathname,
       "opengeni.route": route,
     });
     try {
@@ -366,7 +365,7 @@ export function createAppComposition(deps: AppDependencies): {
         spanId: span.spanId,
         correlationId,
         errorCode,
-        errorClass: error instanceof Error ? error.name : "NonErrorThrown",
+        errorClass: "HttpOperationError",
       });
       throw error;
     }
@@ -837,12 +836,12 @@ async function runReadinessChecks<const Checks extends Readonly<Record<string, R
       try {
         await withTimeout(Promise.resolve().then(check), timeoutMs);
         return [name, { ok: true }] as const;
-      } catch (error) {
+      } catch {
         return [
           name,
           {
             ok: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: "dependency_unavailable",
           },
         ] as const;
       }

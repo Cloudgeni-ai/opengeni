@@ -23,16 +23,23 @@ describe("recordAuthoritativeModelCallFact", () => {
   });
 
   test("soft-fails fact persist without throwing", async () => {
+    const sentinel = "SECRET_SENTINEL_123";
+    const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
+    const exactError = Object.assign(new SecretSentinelError(`db unavailable ${sentinel}`), {
+      name: sentinel,
+      code: sentinel,
+      cause: { exact: sentinel },
+    });
     const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(async () => {
-      throw new Error("db unavailable");
+      throw exactError;
     });
     restores.push(() => factSpy.mockRestore());
-    const warns: string[] = [];
+    const warns: Array<{ message: string; attributes: Record<string, unknown> }> = [];
     await recordAuthoritativeModelCallFact({
       db,
       observability: {
-        warn: (message: string) => {
-          warns.push(message);
+        warn: (message: string, attributes: Record<string, unknown>) => {
+          warns.push({ message, attributes });
         },
       } as never,
       accountId: ACCOUNT,
@@ -60,7 +67,25 @@ describe("recordAuthoritativeModelCallFact", () => {
         },
       },
     });
-    expect(warns).toEqual(["model call fact persist failed"]);
+    expect(warns).toEqual([
+      {
+        message: "model call fact persist failed",
+        attributes: {
+          errorClass: "WorkerOperationError",
+          errorCode: "worker_operation_failed",
+          origin: "worker",
+        },
+      },
+    ]);
+    expect(JSON.stringify(warns)).not.toContain(ACCOUNT);
+    expect(JSON.stringify(warns)).not.toContain(WORKSPACE);
+    expect(JSON.stringify(warns)).not.toContain("sess-1");
+    expect(JSON.stringify(warns)).not.toContain("turn-1");
+    expect(JSON.stringify(warns)).not.toContain("response-1");
+    expect(JSON.stringify(warns)).not.toContain(sentinel);
+    expect(exactError.message).toBe(`db unavailable ${sentinel}`);
+    expect(exactError.constructor.name).toBe(sentinel);
+    expect(exactError.code).toBe(sentinel);
     expect(factSpy).toHaveBeenCalledTimes(1);
   });
 

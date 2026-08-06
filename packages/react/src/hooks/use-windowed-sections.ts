@@ -108,16 +108,18 @@ export function useWindowedSections(opts: {
     Array.from({ length: count }, (_, i) => estimateHeight(i)),
   );
 
-  // Re-seed heights when the section count changes (a new diff arrives), keeping
-  // any already-measured heights for surviving indices.
+  // Re-seed when the estimate function changes as well as when the count changes.
+  // A replacement diff can contain the same number of files but radically
+  // different section sizes; retaining measurements by index would then place
+  // every unvisited section at an offset belonging to the previous diff.
   useEffect(() => {
     setHeights((prev) => {
-      if (prev.length === count) return prev;
-      return Array.from({ length: count }, (_, i) => prev[i] ?? estimateHeight(i));
+      const next = Array.from({ length: count }, (_, i) => estimateHeight(i));
+      return prev.length === next.length && prev.every((height, index) => height === next[index])
+        ? prev
+        : next;
     });
-    // estimateHeight is expected stable; count is the real trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [count]);
+  }, [count, estimateHeight]);
 
   const heightsRef = useRef(heights);
   heightsRef.current = heights;

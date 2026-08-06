@@ -8,8 +8,8 @@ import type {
 } from "@opengeni/contracts";
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
-import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./database";
+import { LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
 import { flushSessionRealtimeTranscriptTailInTransaction } from "./session-realtime-context";
 import {
   evaluateSessionControl,
@@ -185,7 +185,8 @@ async function appendRealtimeLifecycleEvent(
       sessionId: session.id,
       sequence,
       type,
-      payload: sanitizeEventPayload(payload),
+      payload: payload,
+      payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       occurredAt: now,
     })
     .returning();

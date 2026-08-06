@@ -609,9 +609,9 @@ export const Permission = z.enum([
   "sessions:control",
   // sandbox workspace (sandbox contract §C.3 / crosscut PART 1.2). stream:view is a
   // REAL, distinct permission — strictly BROADER than sessions:read — because the
-  // pixel plane (Channel B) is UN-REDACTED: a viewer of raw pixels can see cloud
-  // creds the agent cat's into a terminal, which the redacted Channel-A event log
-  // never exposes. sessions:read is NOT permission to watch raw pixels.
+  // pixel plane (Channel B) exposes raw pixels: a viewer can see content the
+  // structured Channel-A event log never captured. sessions:read is NOT
+  // permission to watch raw pixels.
   "stream:view",
   // SEPARATE from stream:view: raw input to the desktop (bypasses approvalQueue /
   // interrupt). NEVER granted by default in v1 (the input plane is OFF —
@@ -642,8 +642,14 @@ export const Permission = z.enum([
   "environments:manage",
   /** @deprecated alias of variable-sets:use */
   "environments:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
   "variable-sets:manage",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
   // Attach or rotate per-session third-party MCP server credentials. Deliberately
   // not part of the worker's default first-party MCP permission set: a sandboxed
   // agent must not be able to hand itself new bearer credentials.
@@ -744,6 +750,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_other_session_title",
   "variable_set_list",
   "environment_list",
+  "variable_set_get_variable",
   "variable_set_set_variable",
   "environment_set_variable",
   "github_connect_link",
@@ -1320,7 +1327,9 @@ export function resolveWorkspaceSlackReactionSummonSettings(
     return {
       enabled: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.enabled,
       emoji: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.emoji,
-      channelPolicy: { ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy },
+      channelPolicy: {
+        ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy,
+      },
     };
   }
   return configured.channelPolicy.mode === "allowlist"
@@ -2523,13 +2532,6 @@ export type RunCredentialAuthNeeded = {
   message?: string;
 };
 
-export type RunCredentialRedaction = {
-  /** Bounded diagnostic label used only in the replacement marker. */
-  name: string;
-  /** One atomic secret value that must be removed from streamed/audit output. */
-  value: string;
-};
-
 export type RunCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -2575,12 +2577,6 @@ export type RunCredentialsResolution =
       files?: RunCredentialFile[];
       /** Environment name to one returned relative file path. */
       fileEnvironment?: Record<string, string>;
-      /**
-       * Atomic sensitive values embedded inside credential files or derived
-       * material. Environment values are registered automatically; hosts list
-       * additional file-contained values here so chunked output is redacted.
-       */
-      redactions?: RunCredentialRedaction[];
       /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
       expiresAt?: string | null;
       /** Partial degradation: usable material may coexist with reconnect notices. */
@@ -4424,6 +4420,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.viewer.read",
   "session.viewer.control",
   "session.first_party_mcp.call",
+  "session.secret.read",
   "session.toolspace.call",
   "session.pin.write",
   "session.codex_account.write",
@@ -5145,9 +5142,9 @@ function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T) {
   }, z.object(shape));
 }
 
-// Metadata only by design: no schema in this file ever carries a variable value
-// back to a client. Values are write-only and decrypted exclusively inside the
-// worker at sandbox materialization time.
+// Generic variable-set reads remain metadata-only. Exact plaintext has one
+// dedicated response schema so callers cannot accidentally widen another
+// workspace/session response with secret material.
 export const VariableSetVariableMetadata = z.object({
   name: VariableSetVariableName,
   version: z.number().int().positive(),
@@ -5159,6 +5156,14 @@ export type VariableSetVariableMetadata = z.infer<typeof VariableSetVariableMeta
 export const WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 /** @deprecated use VariableSetVariableMetadata */
 export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
+
+export const VariableSetSecret = z.object({
+  variableSetId: z.string().uuid(),
+  name: VariableSetVariableName,
+  version: z.number().int().positive(),
+  value: z.string(),
+});
+export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
 export const VariableSet = z.object({
   id: z.string().uuid(),
@@ -5425,7 +5430,10 @@ export const ScheduledTask = z.object({
   runMode: ScheduledTaskRunMode,
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
-  createdBy: TurnInitiator.default({ kind: "service", subjectId: "unattributed-legacy" }),
+  createdBy: TurnInitiator.default({
+    kind: "service",
+    subjectId: "unattributed-legacy",
+  }),
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
   reusableSessionId: z.string().uuid().nullable(),
@@ -6973,8 +6981,8 @@ export const RecordingFailedPayload = z.object({
   recordingId: z.string().uuid(),
   turnId: z.string().uuid().nullable(),
   reason: RecordingFailedReason,
-  // ffmpeg-stderr tail / error detail — agent/ffmpeg-controlled, so the producer
-  // caps + scrubs it before emit (it rides redact() like every payload).
+  // Exact ffmpeg stderr/error detail. Event transport limits must reject or
+  // paginate rather than rewriting this canonical diagnostic.
   detail: z.string().nullable().optional(),
 });
 export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
@@ -9725,9 +9733,10 @@ export const TurnExecutionReasoningSourceV1 =
   );
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
-export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionLatencyModeSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
 
 /**
@@ -10192,7 +10201,6 @@ export function evaluateWorkspaceModelPolicy(
 }
 
 export * from "./codex-fleet-policy";
-export * from "./secret-redaction";
 export * from "./workspace-instruction-policies";
 export * from "./workspace-state";
 export * from "./preference-registry";

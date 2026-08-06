@@ -1366,6 +1366,47 @@ Do not put provider credentials, model keys, storage keys, kubeconfigs, TLS priv
 
 OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
 
+### Out-of-band read-only health audit
+
+Run the frequent deployment audit from an operator host that has read-only
+`kubectl` access and can list the Helm release. It does not create Kubernetes
+resources, exec into pods, restart workloads, resume sessions, or run synthetic
+agent/storage checks. Internal API, worker, and relay endpoints are read through
+the Kubernetes Service proxy, so ClusterIP services do not need to be publicly
+exposed:
+
+```bash
+bun run deployment:health-audit -- \
+  --namespace opengeni \
+  --release opengeni \
+  --expected-revision "$DECLARED_SOURCE_REVISION" \
+  --upstream-revision "$OPTIONAL_CURRENT_MAIN"
+```
+
+The command always prints one bounded
+`opengeni.deployment-health-audit.v1` JSON document and uses stable exit codes:
+
+| Exit | Status | Meaning |
+| ---: | --- | --- |
+| `0` | `healthy` | Every requested read-only check passed. |
+| `1` | `degraded` | The deployment is serving, but recent restarts or warning events need observation. |
+| `2` | `incident` | A workload, endpoint, Helm release, PVC, or deployment-revision invariant failed. |
+| `3` | `audit_error` | The audit itself could not establish trustworthy evidence, for example because inventory JSON was unavailable or malformed. |
+
+`--upstream-revision` is context only. A coherent, intentionally pinned
+deployment behind upstream is healthy. `--expected-revision` is declarative
+authority: a mismatch between that value and the API/workers is an incident.
+Raw command stderr is never copied into the JSON result.
+
+Use `--verify-observability` only from the exact deployed OpenGeni source tree.
+It composes `scripts/verify-observability-stack.ts`, which compares canonical
+dashboard bytes and source annotations as well as live Prometheus/Grafana state.
+
+This read-only command is suitable for a frequent systemd timer, CI job, or
+external watchdog. Keep `deployment:conformance` on a slower cadence: that
+suite intentionally creates and cleans up temporary sessions, scheduled tasks,
+and storage objects, so it proves deeper behavior but is not a liveness probe.
+
 Service endpoints:
 
 - API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
@@ -1400,7 +1441,7 @@ Minimum production dashboards should cover:
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
-- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_operations_total{backend,op,outcome}`, `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
+- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue and billing: `opengeni_turns_queued`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, CPU/memory saturation, pod pending time, collector scrape/export errors, and OTLP export failures.

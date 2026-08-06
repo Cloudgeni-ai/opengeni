@@ -47,6 +47,23 @@ export type ResolvedSessionAuthorization = {
 };
 
 /**
+ * Prove that a first-party request belongs to the exact currently active
+ * attempt of the named caller session. Unlike the optional embedding-host ACL
+ * port, this database fence is mandatory for high-trust operations.
+ */
+export async function requireLiveAgentAttemptAuthorization(
+  db: Database,
+  grant: AccessGrant,
+  callerSessionId: string,
+): Promise<Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>> {
+  const actor = await resolveSessionAuthorizationActor(db, grant);
+  if (actor.kind !== "agent_attempt" || actor.callerSessionId !== callerSessionId) {
+    throw new SessionAuthorizationDeniedError("caller_stale");
+  }
+  return actor;
+}
+
+/**
  * Resolve and enforce the host ACL for one session. The target and agent actor
  * are reconstructed from workspace-scoped durable state. A request can supply
  * an immediate target id and signed attempt claims, but can never nominate a

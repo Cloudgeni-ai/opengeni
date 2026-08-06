@@ -2038,8 +2038,14 @@ export const KNOWN_PERMISSIONS = [
   "connections:write",
   "environments:manage",
   "environments:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
   "variable-sets:manage",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
   "mcp_servers:attach",
   "toolspace:call",
   "goals:manage",
@@ -2091,6 +2097,7 @@ export type FirstPartyMcpToolName =
   | "set_other_session_title"
   | "variable_set_list"
   | "environment_list"
+  | "variable_set_get_variable"
   | "variable_set_set_variable"
   | "environment_set_variable"
   | "github_connect_link"
@@ -3227,16 +3234,20 @@ export type ScheduledTaskRun = {
 
 // --- VariableSets -------------------------------------------------------------
 
-/**
- * Variable values are write-only by design: the API never returns a value, so
- * reads expose name + version metadata only. Values are decrypted exclusively
- * inside the worker at sandbox materialization time.
- */
+/** Generic variable-set reads expose name + version metadata only. */
 export type VariableSetVariableMetadata = {
   name: string;
   version: number;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Dedicated permissioned plaintext response; never embedded in metadata reads. */
+export type VariableSetSecret = {
+  variableSetId: string;
+  name: string;
+  version: number;
+  value: string;
 };
 
 export type VariableSet = {

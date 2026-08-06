@@ -394,7 +394,10 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       db: client.db,
       managedAuth: {
         api: {
-          getSession: async () => ({ user }),
+          getSession: async () => ({
+            headers: new Headers(),
+            response: { user },
+          }),
         },
       },
     } as unknown as ApiRouteDeps);

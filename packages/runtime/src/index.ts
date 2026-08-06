@@ -30,7 +30,6 @@ import {
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
-  redactSensitiveText,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
@@ -2133,7 +2132,9 @@ function composedPersistentAgentInstructions(
             appendGitCredentialBindingInstructions(
               appendToolspaceInstructions(
                 personaAndCore,
-                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+                settings.toolspaceEnabled &&
+                  options.activeSandboxBackend !== "selfhosted" &&
+                  Boolean(options.toolspaceTokenSeed),
               ),
               options.gitCredentialBindings,
               options.activeSandboxBackend,
@@ -2164,7 +2165,9 @@ function composedPersistentAgentInstructions(
           ),
           options.persistentSessionSettings,
         ),
-        settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+        settings.toolspaceEnabled &&
+          options.activeSandboxBackend !== "selfhosted" &&
+          Boolean(options.toolspaceTokenSeed),
       ),
       options.gitCredentialBindings,
       options.activeSandboxBackend,
@@ -2179,14 +2182,11 @@ function composedPersistentAgentInstructions(
  * substrate prompting — the same text for every host, never per-host copy.
  *
  * Included ONLY when `toolspaceAvailable` is true, which the caller sets from the
- * exact condition that gates the sandbox token mint: the toolspace feature is
- * enabled AND a toolspace token was minted for THIS turn. That mint now happens
- * on every backend including selfhosted (connected machines get the token too),
- * so the block appears there as well; a turn with no minted token (feature off)
- * has no toolspace URL/token in its sandbox and must not advertise a capability
- * that is not there — the gate is false and this is a no-op. Placed BEFORE the
- * per-session instructions so host/session specificity still wins over this
- * substrate note.
+ * exact condition that gates the managed-sandbox token mint: the feature is
+ * enabled, the effective backend is not selfhosted, and a token was minted for
+ * this turn. A turn with no minted token has no Toolspace URL/token and must not
+ * advertise a capability that is not there. Placed before the per-session
+ * instructions so host/session specificity still wins over this substrate note.
  */
 export function appendToolspaceInstructions(composed: string, toolspaceAvailable: boolean): string {
   return toolspaceAvailable ? `${composed} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}` : composed;
@@ -2291,7 +2291,7 @@ export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = redactSensitiveText(error instanceof Error ? error.message : String(error));
+  const details = error instanceof Error ? error.message : String(error);
   return {
     isError: true,
     content: [
@@ -2385,9 +2385,7 @@ export function buildOpenGeniAgent(
     //   1. workspace instructionsTemplate (or deployment default) with the
     //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
     //   2. + the generic programmatic-tool-calling (toolspace) directive, ONLY
-    //      when a toolspace token was minted for this turn (feature enabled + a
-    //      per-turn seed — the mint gate, which includes selfhosted turns since
-    //      they now receive the token too) — appendToolspaceInstructions,
+    //      when a toolspace token was minted for this managed-sandbox turn,
     //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
     //   4. + workspace memory working set, ONLY when the workspace setting is on
@@ -2532,7 +2530,7 @@ export function buildOpenGeniAgent(
   if (options.gitCredentialBindings && options.gitCredentialBindings.length > 0) {
     agentGitCredentialBindings.set(agent, options.gitCredentialBindings);
   }
-  if (options.toolspaceTokenSeed) {
+  if (options.toolspaceTokenSeed && options.activeSandboxBackend !== "selfhosted") {
     agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
     agentToolspaceTokenSessionId.set(agent, options.toolspaceTokenSessionId!);
   }
@@ -3092,6 +3090,12 @@ export type PrepareToolsOptions = {
 
 type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
 
+type McpLifecyclePhase = "connect" | "close";
+
+type McpLifecycleAwareServer = MCPServer & {
+  unwrapLifecycleError?: (error: Error, phase: McpLifecyclePhase) => Error | undefined;
+};
+
 export type ConnectedMcpServerBatches = {
   active: MCPServer[];
   failed: MCPServer[];
@@ -3112,18 +3116,21 @@ export async function connectMcpServersInBatches(
   const batches: ConnectedMcpServerBatch[] = [];
   try {
     for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-      batches.push(
-        await connectMcpServers(
-          servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS),
-          {
+      const batchServers = servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS);
+      try {
+        batches.push(
+          await connectMcpServers(batchServers, {
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
             connectInParallel: true,
             strict: options.strict,
-          },
-        ),
-      );
+          }),
+        );
+      } catch (error) {
+        const sdkError = error instanceof Error ? error : new Error(String(error));
+        throw unwrapMcpLifecycleErrorFromServers(batchServers, sdkError, "connect");
+      }
     }
   } catch (error) {
     await closeMcpServerBatches(batches).catch(() => undefined);
@@ -3132,7 +3139,9 @@ export async function connectMcpServersInBatches(
 
   const errors = new Map<MCPServer, Error>();
   for (const batch of batches) {
-    for (const [server, error] of batch.errors) errors.set(server, error);
+    for (const [server, error] of batch.errors) {
+      errors.set(server, unwrapMcpLifecycleError(server, error, "connect") ?? error);
+    }
   }
   return {
     active: batches.flatMap((batch) => batch.active),
@@ -3152,8 +3161,31 @@ async function closeMcpServerBatches(batches: ConnectedMcpServerBatch[]): Promis
     } catch (error) {
       firstError ??= error;
     }
+    for (const [server, error] of batch.errors) {
+      firstError ??= unwrapMcpLifecycleError(server, error, "close");
+    }
   }
   if (firstError !== undefined) throw firstError;
+}
+
+function unwrapMcpLifecycleError(
+  server: MCPServer,
+  error: Error,
+  phase: McpLifecyclePhase,
+): Error | undefined {
+  return (server as McpLifecycleAwareServer).unwrapLifecycleError?.(error, phase);
+}
+
+function unwrapMcpLifecycleErrorFromServers(
+  servers: MCPServer[],
+  error: Error,
+  phase: McpLifecyclePhase,
+): Error {
+  for (const server of servers) {
+    const exact = unwrapMcpLifecycleError(server, error, phase);
+    if (exact) return exact;
+  }
+  return error;
 }
 
 export async function prepareAgentTools(
@@ -3244,7 +3276,7 @@ export async function prepareAgentTools(
           // The upstream transport logger receives raw thrown errors, whose
           // messages may contain response bodies, URLs, headers, or echoed
           // credentials. Keep its diagnostic surface structural only.
-          logger: safeMcpTransportLogger(config.id),
+          logger: mcpTransportLogger(config.id),
           // codex_apps returns connector tools with empty `outputSchema: {}` that the
           // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
           // sanitize the response on the wire before validation. The namespace Set
@@ -3280,8 +3312,12 @@ export async function prepareAgentTools(
   // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
   // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
   // ChatGPT plan is a normal, non-noteworthy state).
-  const optionalServerNames = new Set(
-    servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
+  const optionalServerIds = new Set(
+    servers
+      .filter((entry) => entry.optional)
+      .map((entry) => entry.server)
+      .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+      .map((server) => server.registryId),
   );
   const connectedRequired = await connectMcpServersInBatches(requiredServers, {
     strict: true,
@@ -3306,13 +3342,13 @@ export async function prepareAgentTools(
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
       }
-      if (!optionalServerNames.has(failed.name)) {
+      if (!(failed instanceof PrefixedMcpServer) || !optionalServerIds.has(failed.registryId)) {
         continue;
       }
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
-        `[mcp] optional server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
-        safeMcpErrorFields(error),
+        "[mcp] optional server failed to connect/list tools; skipping it for this turn",
+        mcpErrorFields(error, "mcp_connect_failed"),
       );
     }
   }
@@ -3369,7 +3405,16 @@ function connectionBrokerFetch(
       withConnectionHeaders(input, init, first.headers),
     );
     if (response.status === 401) {
-      await cancelMcpResponseBody(response);
+      const providerFailure = request.replaySafeAfter401
+        ? null
+        : {
+            status: response.status,
+            statusText: response.statusText,
+            body: await response.text(),
+          };
+      if (!providerFailure) {
+        await cancelMcpResponseBody(response);
+      }
       const refreshed = await resolveConnectionForRequest(
         options,
         config.id,
@@ -3381,13 +3426,13 @@ function connectionBrokerFetch(
       if (refreshed.status === "auth_needed") {
         if (!request.replaySafeAfter401) {
           await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
-          return mcpOutcomeUncertainResponse(request);
+          return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
-        return mcpOutcomeUncertainResponse(request);
+        return mcpOutcomeUncertainResponse(request, providerFailure!);
       }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
@@ -3687,9 +3732,23 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
   );
 }
 
-function mcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
+type McpOutcomeUncertainProviderFailure = {
+  status: number;
+  statusText: string;
+  body: string;
+};
+
+function mcpOutcomeUncertainResponse(
+  request: McpRequestReplayInfo,
+  providerFailure: McpOutcomeUncertainProviderFailure,
+): Response {
   return new Response(
-    JSON.stringify(mcpJsonRpcErrorPayloadForRequest(request, MCP_TOOL_OUTCOME_UNCERTAIN_ERROR)),
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, {
+        ...MCP_TOOL_OUTCOME_UNCERTAIN_ERROR,
+        data: { providerFailure },
+      }),
+    ),
     {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -3710,63 +3769,89 @@ function isAuthNeededMcpError(error: unknown): boolean {
 }
 
 function isToolOutcomeUncertainMcpError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const code = (error as { code?: unknown }).code;
   return (
-    code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code &&
-    (error.message === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message ||
-      error.message ===
-        `MCP error ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code}: ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message}`)
+    error instanceof Error &&
+    (error as { code?: unknown }).code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code
   );
 }
 
-// Model-facing text for a best-effort server whose tool call failed for a
-// non-auth reason (transport 401/403 that never became the broker's JSON-RPC
-// short-circuit, a provider 5xx, a network blip). The copy is LOOP-SAFE: it
-// tells the model the tool is dead for the REST OF THIS TURN and to NOT retry
-// it, so a model that would otherwise burn the turn re-calling the same broken
-// optional tool moves on instead. Only the safe error surface (JS error class +
-// numeric HTTP status) is interpolated — NEVER the raw error message/response
-// body, which for a broker 401/403 can echo request URLs/headers/credentials.
-function mcpToolUnavailableMessage(reason: string): string {
-  return `This tool is unavailable for the rest of this turn (${reason}). Do not retry it — continue without it or use another approach.`;
+function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; text: string }> {
+  const data = error && typeof error === "object" ? (error as { data?: unknown }).data : undefined;
+  const providerFailure =
+    data && typeof data === "object"
+      ? (data as { providerFailure?: unknown }).providerFailure
+      : undefined;
+  const body =
+    providerFailure && typeof providerFailure === "object"
+      ? (providerFailure as { body?: unknown }).body
+      : undefined;
+  return [
+    ...(typeof body === "string" ? [{ type: "text" as const, text: body }] : []),
+    { type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message },
+  ];
 }
 
-// The only error detail safe to surface to the model or the logs: the JS error
-// constructor name and, when present, a numeric HTTP status. A StreamableHTTP
-// transport error carries the raw response BODY in its `.message` (a broker
-// 401/403 body can echo request detail), so `.message` is never included; the
-// numeric `.code`/`.status` (e.g. 401) is safe and useful.
-function safeMcpErrorFields(error: unknown): {
-  errorClass: string;
-  status?: number;
-} {
-  let errorClass: string;
-  let raw: unknown;
-  let altRaw: unknown;
-  try {
-    errorClass = error instanceof Error ? error.constructor.name : typeof error;
-    raw = (error as { code?: unknown; status?: unknown } | null)?.code;
-    altRaw = (error as { status?: unknown } | null)?.status;
-  } catch {
-    return { errorClass: "unknown" };
-  }
-  const status = typeof raw === "number" ? raw : undefined;
-  if (status === undefined) {
-    return typeof altRaw === "number" ? { errorClass, status: altRaw } : { errorClass };
-  }
-  return { errorClass, status };
+// Preserve the exact source diagnostic as one independent content item. The
+// second item is OpenGeni guidance and never substitutes for or mutates it.
+function mcpToolUnavailableContent(error: unknown): Array<{ type: "text"; text: string }> {
+  return [
+    { type: "text", text: exactErrorMessage(error) },
+    {
+      type: "text",
+      text: "This tool is unavailable for the rest of this turn. Do not retry it — continue without it or use another approach.",
+    },
+  ];
 }
 
-type SafeMcpTransportError = Error & {
+function exactErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+type McpPublicErrorFields = {
+  errorClass: "McpOperationError";
+  errorCode: McpPublicFailureCode;
   status?: number;
-  code?: number;
-  mcpTransportFailureKind?: "request_timeout" | "connectivity_unavailable";
+  origin: "runtime";
 };
 
-type SafeMcpTransportErrorOptions = {
+type McpPublicFailureCode =
+  | "mcp_connect_failed"
+  | "mcp_close_failed"
+  | "mcp_transport_failed"
+  | "mcp_tools_list_failed"
+  | "mcp_tool_call_failed";
+
+/** Allowlisted projection for public SDK/console telemetry; internal errors stay exact. */
+function mcpErrorFields(error: unknown, errorCode: McpPublicFailureCode): McpPublicErrorFields {
+  const fields: McpPublicErrorFields = {
+    errorClass: "McpOperationError",
+    errorCode,
+    origin: "runtime",
+  };
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public diagnostics are best-effort. Hostile getters/proxies must never
+    // replace the exact internal failure with a logging projection failure.
+  }
+  return fields;
+}
+
+type McpTransportError = Error & {
+  status?: number;
+  code?: number;
+  mcpTransportFailureKind?: McpTransportFailureKind;
+};
+
+type McpTransportFailureKind = "request_timeout" | "connectivity_unavailable";
+
+type McpTransportErrorOptions = {
   /**
    * The failed operation was connect/tools-list for a required first-party MCP
    * server. Those setup requests have no external side effect; the worker
@@ -3776,6 +3861,22 @@ type SafeMcpTransportErrorOptions = {
    */
   recoverySafeSetup?: boolean;
 };
+
+// Lifecycle errors must cross the SDK boundary as structural safe errors while
+// the authoritative caller receives the original Error object. Keep retry
+// classification out-of-band so exact Error identity and content are unchanged.
+const mcpTransportFailureKinds = new WeakMap<object, McpTransportFailureKind>();
+
+function mcpTransportFailureKind(error: object): McpTransportFailureKind | undefined {
+  try {
+    const inline = (error as Record<string, unknown>).mcpTransportFailureKind;
+    if (inline === "request_timeout" || inline === "connectivity_unavailable") return inline;
+  } catch {
+    // Hostile getters/proxies cannot replace the exact internal failure or
+    // widen its retry classification.
+  }
+  return mcpTransportFailureKinds.get(error);
+}
 
 const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNRESET",
@@ -3802,6 +3903,7 @@ function inspectMcpTransportError(
   complete: boolean;
   hasConnectivityCode: boolean;
   hasConnectivityMarker: boolean;
+  hasTypedError: boolean;
   hasRequestTimeout: boolean;
   statuses: number[];
 } {
@@ -3809,6 +3911,7 @@ function inspectMcpTransportError(
   const statuses: number[] = [];
   let hasConnectivityCode = false;
   let hasConnectivityMarker = false;
+  let hasTypedError = false;
   let hasRequestTimeout = false;
   let inspectedNodes = 0;
   let complete = true;
@@ -3830,6 +3933,12 @@ function inspectMcpTransportError(
       code = record.code;
       failureKind = record.mcpTransportFailureKind;
       message = record.message;
+      if (
+        current.value instanceof Error &&
+        Object.getPrototypeOf(current.value) !== Error.prototype
+      ) {
+        hasTypedError = true;
+      }
     } catch {
       complete = false;
       continue;
@@ -3881,20 +3990,21 @@ function inspectMcpTransportError(
     complete,
     hasConnectivityCode,
     hasConnectivityMarker,
+    hasTypedError,
     hasRequestTimeout,
     statuses,
   };
 }
 
 /**
- * Preserve only an allowlisted transport-connectivity meaning across MCP SDK
+ * Classify an allowlisted transport-connectivity meaning across MCP SDK
  * wrappers. HTTP client failures remain authoritative and fail closed even if
- * a nested object also carries a socket-looking code. Raw messages, URLs,
- * response bodies, and arbitrary provider codes are never copied forward.
+ * a nested object also carries a socket-looking code. Classification never
+ * rewrites the source diagnostic.
  */
 function isRawMcpTransportConnectivityError(
   error: unknown,
-  options: SafeMcpTransportErrorOptions = {},
+  options: McpTransportErrorOptions = {},
 ): boolean {
   if (!error || typeof error !== "object") {
     return false;
@@ -3928,15 +4038,22 @@ function isRawMcpTransportConnectivityError(
   // Error shape. Typed parser, validation, and programming errors remain
   // terminal so a broken protocol implementation cannot masquerade as rollout
   // unavailability.
+  let isPlainError = false;
+  try {
+    isPlainError = error instanceof Error && Object.getPrototypeOf(error) === Error.prototype;
+  } catch {
+    // A hostile proxy is not a rollout-safe plain transport Error.
+  }
   return (
     options.recoverySafeSetup === true &&
     inspection.statuses.length === 0 &&
-    safeMcpErrorFields(error).errorClass === "Error"
+    !inspection.hasTypedError &&
+    isPlainError
   );
 }
 
 /**
- * Test only the secret-safe marker emitted by `safeMcpTransportError`. Callers
+ * Test only the typed marker emitted by `mcpTransportErrorWithRetryMetadata`. Callers
  * outside the MCP boundary must not infer MCP ownership from a generic 5xx or
  * socket-shaped provider error.
  */
@@ -3944,13 +4061,12 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
   return (
     !!error &&
     typeof error === "object" &&
-    (error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable"
+    mcpTransportFailureKind(error) === "connectivity_unavailable"
   );
 }
 
 /**
- * Preserve the MCP SDK's exact request-timeout meaning without retaining or
- * exposing a raw HTTP response body. The numeric code is not sufficient:
+ * Preserve the MCP SDK's exact request-timeout meaning. The numeric code is not sufficient:
  * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
  * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
  */
@@ -3958,28 +4074,45 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
   return inspectMcpTransportError(error, seen).hasRequestTimeout;
 }
 
-export function safeMcpTransportError(
+export function mcpTransportErrorWithRetryMetadata(
   error: unknown,
-  options: SafeMcpTransportErrorOptions = {},
-): SafeMcpTransportError {
-  const fields = safeMcpErrorFields(error);
-  const safeError = new Error(
-    `MCP transport operation failed (${mcpErrorReason(fields)})`,
-  ) as SafeMcpTransportError;
-  safeError.name = "McpTransportError";
-  if (fields.status !== undefined) {
-    safeError.status = fields.status;
-    safeError.code = fields.status;
-  }
+  options: McpTransportErrorOptions = {},
+): McpTransportError {
+  const classified =
+    error instanceof Error
+      ? (error as McpTransportError)
+      : (new Error(exactErrorMessage(error), { cause: error }) as McpTransportError);
   if (isMcpRequestTimeoutError(error)) {
-    safeError.mcpTransportFailureKind = "request_timeout";
+    mcpTransportFailureKinds.set(classified, "request_timeout");
   } else if (isRawMcpTransportConnectivityError(error, options)) {
-    safeError.mcpTransportFailureKind = "connectivity_unavailable";
+    mcpTransportFailureKinds.set(classified, "connectivity_unavailable");
   }
-  return safeError;
+  return classified;
 }
 
-function safeMcpTransportLogger(serverId: string) {
+/**
+ * Compatibility alias retained for the rollout-recovery API introduced on
+ * main. Despite the historical name, internal callers receive exact content;
+ * public lifecycle logging uses `publicMcpLifecycleError` instead.
+ */
+export function safeMcpTransportError(
+  error: unknown,
+  options: McpTransportErrorOptions = {},
+): McpTransportError {
+  return mcpTransportErrorWithRetryMetadata(error, options);
+}
+
+function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOptions = {}): Error {
+  const exactError = error instanceof Error ? error : new Error(String(error), { cause: error });
+  if (isMcpRequestTimeoutError(error)) {
+    mcpTransportFailureKinds.set(exactError, "request_timeout");
+  } else if (isRawMcpTransportConnectivityError(error, options)) {
+    mcpTransportFailureKinds.set(exactError, "connectivity_unavailable");
+  }
+  return exactError;
+}
+
+function mcpTransportLogger(_serverId: string) {
   const logFailure = (_message: string, ...args: unknown[]) => {
     let error: unknown;
     for (let index = args.length - 1; index >= 0; index -= 1) {
@@ -3988,10 +4121,7 @@ function safeMcpTransportLogger(serverId: string) {
         break;
       }
     }
-    console.warn("[mcp] transport operation failed", {
-      serverId,
-      ...safeMcpErrorFields(error),
-    });
+    console.warn("[mcp] transport operation failed", mcpErrorFields(error, "mcp_transport_failed"));
   };
   return {
     namespace: "opengeni:mcp-transport",
@@ -4001,12 +4131,6 @@ function safeMcpTransportLogger(serverId: string) {
     dontLogModelData: true,
     dontLogToolData: true,
   };
-}
-
-// Compose the safe model/log reason string ("StreamableHTTPError 401", or just
-// the class when no numeric status is available). Never carries the raw body.
-function mcpErrorReason(fields: { errorClass: string; status?: number }): string {
-  return fields.status === undefined ? fields.errorClass : `${fields.errorClass} ${fields.status}`;
 }
 
 async function mcpServerRequestInit(
@@ -4259,10 +4383,35 @@ export function prefixedMcpToolName(registryId: string, toolName: string): strin
   return sharedPrefixedMcpToolName(registryId, toolName);
 }
 
-class PrefixedMcpServer implements MCPServer {
+const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
+
+type McpLifecycleFailure = {
+  phase: McpLifecyclePhase;
+  publicError: Error;
+  exactError: Error;
+};
+
+function publicMcpLifecycleError(error: Error, phase: McpLifecyclePhase): Error {
+  const errorCode = phase === "connect" ? "mcp_connect_failed" : "mcp_close_failed";
+  const fields = mcpErrorFields(error, errorCode);
+  const lifecycleError = new Error(`MCP lifecycle ${phase} failed`) as Error & {
+    code?: string;
+    status?: number;
+    origin?: string;
+  };
+  lifecycleError.name = "McpLifecycleError";
+  lifecycleError.code = fields.errorCode;
+  if (fields.status !== undefined) lifecycleError.status = fields.status;
+  lifecycleError.origin = fields.origin;
+  return lifecycleError;
+}
+
+/** @internal Exported for exact SDK-boundary conformance tests. */
+export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
-  readonly name: string;
+  readonly name = MCP_SDK_LIFECYCLE_NAME;
   readonly prefix: string;
+  readonly registryId: string;
   private readonly allowedTools: Set<string> | undefined;
   // Best-effort servers (optional refs, connectionRef-backed capability MCPs,
   // codex_apps) must never fail a turn: a tools/list throw degrades to zero
@@ -4272,6 +4421,7 @@ class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private modelToolSchemaAccountingDeferred = false;
+  private readonly lifecycleFailures: Partial<Record<McpLifecyclePhase, McpLifecycleFailure>> = {};
 
   constructor(
     private readonly inner: MCPServer,
@@ -4282,24 +4432,45 @@ class PrefixedMcpServer implements MCPServer {
     private readonly aggregateSourceId = registryId,
     private readonly recoverySafeSetup = false,
   ) {
-    this.name = registryId;
+    this.registryId = registryId;
     this.prefix = prefixedMcpToolName(registryId, "");
     this.cacheToolsList = inner.cacheToolsList;
     this.allowedTools = allowedTools ? new Set(allowedTools) : undefined;
     this.bestEffort = bestEffort;
   }
 
-  connect(): Promise<void> {
-    return this.inner.connect().catch((error: unknown) => {
-      // connectMcpServers has its own global logger and logs the thrown Error.
-      // Never let a raw transport response body cross that logging boundary.
-      throw safeMcpTransportError(error, { recoverySafeSetup: this.recoverySafeSetup });
-    });
+  async connect(): Promise<void> {
+    try {
+      await this.inner.connect();
+      delete this.lifecycleFailures.connect;
+    } catch (error) {
+      // The SDK logs its rejected Error directly. Keep exact internal truth
+      // out-of-band and reject only a structural public lifecycle error.
+      const exactError = exactMcpLifecycleError(error, {
+        recoverySafeSetup: this.recoverySafeSetup,
+      });
+      const publicError = publicMcpLifecycleError(exactError, "connect");
+      this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
+      throw publicError;
+    }
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
     this.releaseAggregateBudget();
-    return this.inner.close();
+    try {
+      await this.inner.close();
+      delete this.lifecycleFailures.close;
+    } catch (error) {
+      const exactError = exactMcpLifecycleError(error);
+      const publicError = publicMcpLifecycleError(exactError, "close");
+      this.lifecycleFailures.close = { phase: "close", publicError, exactError };
+      throw publicError;
+    }
+  }
+
+  unwrapLifecycleError(error: Error, phase: McpLifecyclePhase): Error | undefined {
+    const failure = this.lifecycleFailures[phase];
+    return failure?.publicError === error ? failure.exactError : undefined;
   }
 
   releaseAggregateBudget(): void {
@@ -4313,7 +4484,7 @@ class PrefixedMcpServer implements MCPServer {
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => ({
           ...tool,
-          name: prefixedMcpToolName(this.name, tool.name),
+          name: prefixedMcpToolName(this.registryId, tool.name),
         }));
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
@@ -4323,7 +4494,9 @@ class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort) {
-        throw safeMcpTransportError(error, { recoverySafeSetup: this.recoverySafeSetup });
+        throw mcpTransportErrorWithRetryMetadata(error, {
+          recoverySafeSetup: this.recoverySafeSetup,
+        });
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a
@@ -4342,9 +4515,7 @@ class PrefixedMcpServer implements MCPServer {
         this.loggedListToolsFailure = true;
         console.warn(
           "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          // Safe surface only (class + numeric status), never the raw error
-          // message/response body — a broker 401/403 body can echo request detail.
-          { serverId: this.name, ...safeMcpErrorFields(error) },
+          mcpErrorFields(error, "mcp_tools_list_failed"),
         );
       }
       this.releaseAggregateBudget();
@@ -4373,7 +4544,7 @@ class PrefixedMcpServer implements MCPServer {
   ): Promise<any> {
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
-      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
+      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
     try {
       const output = await this.inner.callTool(unprefixed, args, meta);
@@ -4387,7 +4558,7 @@ class PrefixedMcpServer implements MCPServer {
       if (isToolOutcomeUncertainMcpError(error)) {
         return {
           isError: true,
-          content: [{ type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message }],
+          content: mcpToolOutcomeUncertainContent(error),
         };
       }
       // The connection broker's auth-needed short-circuit arrives as a thrown
@@ -4415,19 +4586,13 @@ class PrefixedMcpServer implements MCPServer {
       // already published upstream by the connection-broker fetch before the
       // throw, so degrading here never silences it.
       if (this.bestEffort) {
-        const fields = safeMcpErrorFields(error);
         console.warn(
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
-          { serverId: this.name, toolName: unprefixed, ...fields },
+          mcpErrorFields(error, "mcp_tool_call_failed"),
         );
         return {
           isError: true,
-          content: [
-            {
-              type: "text",
-              text: mcpToolUnavailableMessage(mcpErrorReason(fields)),
-            },
-          ],
+          content: mcpToolUnavailableContent(error),
         };
       }
       throw error;
@@ -4443,7 +4608,7 @@ class PrefixedMcpServer implements MCPServer {
       listResources?: (params?: Record<string, unknown>) => Promise<any>;
     };
     if (!resourcesServer.listResources) {
-      throw new Error(`MCP server ${this.name} does not support resources`);
+      throw new Error(`MCP server ${this.registryId} does not support resources`);
     }
     return await resourcesServer.listResources(params);
   }
@@ -4453,7 +4618,7 @@ class PrefixedMcpServer implements MCPServer {
       listResourceTemplates?: (params?: Record<string, unknown>) => Promise<any>;
     };
     if (!resourcesServer.listResourceTemplates) {
-      throw new Error(`MCP server ${this.name} does not support resource templates`);
+      throw new Error(`MCP server ${this.registryId} does not support resource templates`);
     }
     return await resourcesServer.listResourceTemplates(params);
   }
@@ -4463,7 +4628,7 @@ class PrefixedMcpServer implements MCPServer {
       readResource?: (uri: string) => Promise<any>;
     };
     if (!resourcesServer.readResource) {
-      throw new Error(`MCP server ${this.name} does not support resource reads`);
+      throw new Error(`MCP server ${this.registryId} does not support resource reads`);
     }
     return await resourcesServer.readResource(uri);
   }
@@ -4474,7 +4639,7 @@ class PrefixedMcpServer implements MCPServer {
 
   private unprefixToolName(toolName: string): string {
     if (!toolName.startsWith(this.prefix)) {
-      throw new Error(`MCP tool ${toolName} is missing expected ${this.name} prefix`);
+      throw new Error(`MCP tool ${toolName} is missing expected ${this.registryId} prefix`);
     }
     return toolName.slice(this.prefix.length);
   }
@@ -4622,8 +4787,12 @@ export async function prepareRunInput(
     );
   }
   const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
-  for (const repair of compatibleRunState.repairs) {
-    console.warn("[runtime] repaired incompatible RunState exposedPorts", repair);
+  if (compatibleRunState.repairs.length > 0) {
+    console.warn("[runtime] repaired incompatible RunState exposedPorts", {
+      errorClass: "RunStateCompatibilityError",
+      errorCode: "incompatible_exposed_ports",
+      origin: "runtime",
+    });
   }
   const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
   const interruptions = state.getInterruptions();
@@ -5817,7 +5986,7 @@ export async function pinProvidedSessionManifestEnvironment(
  * refactor for the eager path: same order, same gates, same idempotency
  * (clone skips a materialized tree, token seed overwrites — the desired per-turn
  * refresh, az login is idempotent). The connected-machine (selfhosted) branch
- * keeps platform setup OFF the user's real box and seeds ONLY the toolspace token.
+ * runs no platform setup against the user's real machine.
  *
  * `gitTokenSeedsOverride` lets the lazy provisioner pass its own freshly-minted
  * run-scoped provider tokens (minted at establish time, not turn start);
@@ -5901,17 +6070,6 @@ export async function runOwnedSandboxSetup(
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
     await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
-  } else {
-    // SELFHOSTED TOOLSPACE (parity): platform setup hooks stay OFF the user's
-    // real machine. The toolspace token is one narrowly-scoped per-turn input
-    // that must reach it (a scoped,
-    // own-session-bound token written to $OPENGENI_TOOLSPACE_TOKEN_FILE over the
-    // same off-manifest exec channel the clone-seed uses; the machine's only path
-    // to programmatic tool calling). Seed it (only) here.
-    const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
-    if (toolspaceHooks.length > 0) {
-      await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
-    }
   }
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is
@@ -8645,6 +8803,22 @@ export function sandboxCommandOutput(result: unknown): string {
   return [candidate.output, candidate.stderr, candidate.stdout]
     .filter((value): value is string => typeof value === "string" && value.length > 0)
     .join("\n");
+}
+
+/**
+ * Return the command's stdout body exactly once. `sandboxCommandOutput()` is a
+ * human-readable aggregate and deliberately joins output/stderr/stdout; it is
+ * unsafe for machine-parsed output because a provider adapter may preserve the
+ * same body in both `output` and `stdout`.
+ */
+export function sandboxCommandStdout(result: unknown): string {
+  if (typeof result === "string") return sandboxCommandOutput(result);
+  if (!result || typeof result !== "object") return "";
+  const candidate = result as { output?: unknown; stdout?: unknown };
+  if (typeof candidate.stdout === "string" && candidate.stdout.length > 0) {
+    return candidate.stdout;
+  }
+  return typeof candidate.output === "string" ? candidate.output : "";
 }
 
 function assertSandboxCommandSucceeded(result: unknown, operation: string): void {

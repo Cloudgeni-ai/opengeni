@@ -911,7 +911,7 @@ describe("sandbox preparation profiles", () => {
     expect(env.PATH).toBeUndefined();
   });
 
-  test("preserves machine HOME and uses a shell-resolved Toolspace pointer for selfhosted", () => {
+  test("adds no Toolspace pointers for selfhosted", () => {
     const settings = withEnv(
       {
         OPENGENI_SANDBOX_BACKEND: "selfhosted",
@@ -922,9 +922,7 @@ describe("sandbox preparation profiles", () => {
     );
     const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
 
-    expect(env.HOME).toBeUndefined();
-    expect(env.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("$HOME/.opengeni/toolspace-token");
-    expect(env.OPENGENI_TOOLSPACE_URL).toBe("http://127.0.0.1:8000/v1/workspaces/ws-1/mcp");
+    expect(env).toEqual({});
   });
 
   test("requires a delegation secret when toolspace is enabled", () => {

@@ -4,16 +4,29 @@ import {
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
-  SanitizedDatabasePersistenceCause,
   SessionEventPersistenceError,
 } from "../src";
+
+const syntheticValue = ["synthetic", "db", "value", "123456"].join("-");
+
+function databaseError(overrides: Record<string, unknown> = {}): Error {
+  return Object.assign(new Error(`Failed query containing ${syntheticValue}`), {
+    query: "insert into session_events values ($1)",
+    params: [syntheticValue],
+    driverError: {
+      table_name: "session_events",
+      detail: syntheticValue,
+    },
+    ...overrides,
+  });
+}
 
 describe("session event persistence failure truth", () => {
   test("recognizes only database-shaped failures without SQLSTATE", () => {
     expect(
       isDatabasePersistenceFailure({
         query: "insert into session_events values ($1)",
-        params: ["private-token"],
+        params: [syntheticValue],
       }),
     ).toBe(true);
     expect(isDatabasePersistenceFailure({ driverError: { name: "PostgresError" } })).toBe(true);
@@ -21,16 +34,14 @@ describe("session event persistence failure truth", () => {
     expect(isDatabasePersistenceFailure(new Error("expected domain conflict"))).toBe(false);
   });
 
-  test("finds nested SQLSTATE and retains only allowlisted catalog facts", () => {
-    const error = Object.assign(new Error("Failed query: insert into session_events"), {
-      query: "insert into session_events values ($1)",
-      params: ["private-token"],
+  test("finds nested SQLSTATE and derives value-free classification facts", () => {
+    const error = databaseError({
       cause: {
         code: "40P01",
         severity: "ERROR",
         table_name: "session_events",
         constraint_name: "session_events_workspace_session_sequence_idx",
-        detail: "raw row includes private-token",
+        detail: syntheticValue,
       },
     });
     expect(nestedPostgresSqlState(error)).toBe("40P01");
@@ -40,7 +51,7 @@ describe("session event persistence failure truth", () => {
       table: "session_events",
       constraint: "session_events_workspace_session_sequence_idx",
     });
-    expect(JSON.stringify(facts)).not.toContain("private-token");
+    expect(JSON.stringify(facts)).not.toContain(syntheticValue);
     expect(JSON.stringify(facts)).not.toContain("insert into");
   });
 
@@ -72,7 +83,10 @@ describe("session event persistence failure truth", () => {
     expect(persistenceAttempts).toBe(3);
   });
 
-  test("exhaustion is sanitized and keeps one correlation id", async () => {
+  test("exhaustion retains the exact final driver failure and one correlation id", async () => {
+    const source = databaseError({
+      cause: { code: "40P01", table: "session_events", detail: syntheticValue },
+    });
     const error = await runIdempotentPersistenceTransaction(
       {
         stage: "session_events.append_for_turn_attempt",
@@ -81,13 +95,10 @@ describe("session event persistence failure truth", () => {
         correlationId: "stable-correlation",
       },
       async () => {
-        throw {
-          message: "Failed query: insert into session_events",
-          params: ["private-token"],
-          cause: { code: "40P01", table: "session_events" },
-        };
+        throw source;
       },
     ).catch((caught) => caught);
+
     expect(error).toBeInstanceOf(SessionEventPersistenceError);
     expect((error as SessionEventPersistenceError).details).toMatchObject({
       code: "db_deadlock",
@@ -97,22 +108,16 @@ describe("session event persistence failure truth", () => {
       correlationId: "stable-correlation",
       database: { table: "session_events" },
     });
-    expect((error as SessionEventPersistenceError).cause).toBeInstanceOf(
-      SanitizedDatabasePersistenceCause,
-    );
-    expect((error as SessionEventPersistenceError).cause).toMatchObject({
-      sqlState: "40P01",
-      database: { table: "session_events" },
-    });
+    expect((error as SessionEventPersistenceError).cause).toBe(source);
+    expect((error as Error).message).toContain(source.message);
+    expect((error as Error).message).toContain(syntheticValue);
     expect(nestedPostgresSqlState(error)).toBe("40P01");
-    expect(JSON.stringify((error as SessionEventPersistenceError).details)).not.toContain(
-      "private-token",
-    );
   });
 
-  test("sanitizes failures without SQLSTATE and never retries them", async () => {
+  test("non-SQLSTATE failures retain exact query, parameters, and nested detail", async () => {
     let attempts = 0;
     let retries = 0;
+    const source = databaseError();
     const error = await runIdempotentPersistenceTransaction(
       {
         stage: "session_events.append_for_turn_attempt",
@@ -124,14 +129,7 @@ describe("session event persistence failure truth", () => {
       },
       async () => {
         attempts += 1;
-        throw Object.assign(new Error("Failed query: insert into session_events (private-token)"), {
-          query: "insert into session_events values ($1)",
-          params: ["private-token"],
-          cause: {
-            table_name: "session_events",
-            detail: "bound parameter private-token",
-          },
-        });
+        throw source;
       },
     ).catch((caught) => caught);
 
@@ -148,20 +146,15 @@ describe("session event persistence failure truth", () => {
       retryOutcome: "not_retryable",
       database: { table: "session_events" },
     });
-    expect((error as SessionEventPersistenceError).cause).toMatchObject({
-      name: "SanitizedDatabasePersistenceCause",
-      sqlState: null,
-      database: { table: "session_events" },
-    });
-    const observable = JSON.stringify({
-      message: (error as Error).message,
-      stack: (error as Error).stack,
-      details: (error as SessionEventPersistenceError).details,
-      cause: (error as SessionEventPersistenceError).cause,
-    });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
-    expect(observable).not.toContain("values ($1)");
+    expect((error as SessionEventPersistenceError).cause).toBe(source);
+    expect((error as Error).message).toContain(syntheticValue);
+    expect((source as Error & { query: string }).query).toBe(
+      "insert into session_events values ($1)",
+    );
+    expect((source as Error & { params: string[] }).params).toEqual([syntheticValue]);
+    expect((source as Error & { driverError: { detail: string } }).driverError.detail).toBe(
+      syntheticValue,
+    );
   });
 
   test("rethrows a domain error unchanged and never retries it", async () => {
@@ -190,15 +183,20 @@ describe("session event persistence failure truth", () => {
     expect(retries).toBe(0);
     expect(caught).toBe(original);
     expect(caught).toBeInstanceOf(ExpectedDomainError);
-    expect(caught).toMatchObject({
-      code: "EXPECTED_DOMAIN_CONFLICT",
-      message: "preserve this domain error",
-    });
   });
 
-  test("sanitizes a terminal database SQLSTATE without retrying it", async () => {
+  test("terminal database SQLSTATE retains the exact original failure without retrying", async () => {
     let attempts = 0;
     let retries = 0;
+    const source = databaseError({
+      cause: {
+        code: "23505",
+        severity: "ERROR",
+        table_name: "session_command_receipts",
+        constraint_name: "session_command_receipts_operation_uq",
+        detail: syntheticValue,
+      },
+    });
     const caught = await runIdempotentPersistenceTransaction(
       {
         stage: "session_commands.agent_message",
@@ -210,53 +208,25 @@ describe("session event persistence failure truth", () => {
       },
       async () => {
         attempts += 1;
-        throw Object.assign(new Error("private duplicate value"), {
-          query: "insert into session_command_receipts values ($1)",
-          params: ["private-token"],
-          cause: {
-            code: "23505",
-            severity: "ERROR",
-            table_name: "session_command_receipts",
-            constraint_name: "session_command_receipts_operation_uq",
-          },
-        });
+        throw source;
       },
     ).catch((error) => error);
 
     expect(attempts).toBe(1);
     expect(retries).toBe(0);
     expect(caught).toBeInstanceOf(SessionEventPersistenceError);
-    expect((caught as SessionEventPersistenceError).details).toEqual({
+    expect((caught as SessionEventPersistenceError).details).toMatchObject({
       code: "db_failure",
       sqlState: "23505",
-      stage: "session_commands.agent_message",
-      eventTypes: ["system.update.pending"],
       correlationId: "terminal-database-correlation",
-      attempts: 1,
-      retryOutcome: "not_retryable",
       database: {
         severity: "ERROR",
         table: "session_command_receipts",
         constraint: "session_command_receipts_operation_uq",
       },
     });
-    expect((caught as SessionEventPersistenceError).cause).toMatchObject({
-      name: "SanitizedDatabasePersistenceCause",
-      sqlState: "23505",
-      database: {
-        severity: "ERROR",
-        table: "session_command_receipts",
-        constraint: "session_command_receipts_operation_uq",
-      },
-    });
+    expect((caught as SessionEventPersistenceError).cause).toBe(source);
+    expect((caught as Error).message).toContain(source.message);
     expect(nestedPostgresSqlState(caught)).toBe("23505");
-    const observable = JSON.stringify({
-      message: (caught as Error).message,
-      stack: (caught as Error).stack,
-      details: (caught as SessionEventPersistenceError).details,
-      cause: (caught as SessionEventPersistenceError).cause,
-    });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
   });
 });

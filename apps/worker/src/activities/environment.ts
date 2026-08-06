@@ -203,6 +203,7 @@ export async function sandboxEnvironmentForRun(
   // value later. `= {}` default so the non-optional reads below are safe.
   options: RunGitCredentialOptions & {
     skipGitHubToken?: boolean;
+    skipToolspace?: boolean;
     deferGitHubToken?: boolean;
     toolspaceAuthority?: SandboxToolspaceAuthority;
   } = {},
@@ -234,18 +235,18 @@ export async function sandboxEnvironmentForRun(
   // proactively renews every selected provider behind these stable pointers.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
-  // TOOLSPACE (selfhosted parity): the toolspace token is minted for EVERY
-  // backend, including a connected machine. Unlike platform git provider tokens
-  // (inert on selfhosted → skipped above), the toolspace token is the machine's
-  // only path to programmatic tool calling, and it grants no more than the
-  // machine owner's own authority (toolspace:call, own-session-bound,
-  // short-lived and renewable, per-active-turn budgeted, approval-tools
-  // excluded). Delivery mirrors the docker path: the caller threads it
-  // OFF-MANIFEST as the seed the runtime writes to
-  // $OPENGENI_TOOLSPACE_TOKEN_FILE over the box's exec channel.
+  // Connected Machines own their environment and credentials. They do not
+  // receive OpenGeni Toolspace pointers, package hints, or delegated tokens.
+  // Scrub the stable pointers as well as skipping the mint because a session
+  // whose home backend is managed may be actively routed to selfhosted.
+  if (options.skipToolspace) {
+    delete environment.OPENGENI_TOOLSPACE_URL;
+    delete environment.OPENGENI_TOOLSPACE_TOKEN_FILE;
+    delete environment.OPENGENI_OGTOOL_PACKAGE_SPEC;
+  }
   const toolspaceScope = options.scope;
   const toolspaceToken =
-    toolspaceScope && options.toolspaceAuthority
+    !options.skipToolspace && toolspaceScope && options.toolspaceAuthority
       ? await mintSandboxToolspaceToken(settings, toolspaceScope, options.toolspaceAuthority)
       : undefined;
   if (toolspaceToken && toolspaceScope) {

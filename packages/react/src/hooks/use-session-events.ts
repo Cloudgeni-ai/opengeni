@@ -1178,7 +1178,7 @@ async function loadPreviousPage(
     compact: true,
     // Monitoring summaries omit correlation fields once a bounded durable
     // payload exceeds their preview threshold. The browser timeline needs the
-    // sanitized stored payload so persisted tool outputs still match their
+    // exact stored payload so persisted tool outputs still match their
     // calls and expose truthful truncation telemetry after a reload.
     payloadMode: "full",
   });

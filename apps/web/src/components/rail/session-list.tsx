@@ -903,7 +903,9 @@ export function SessionList() {
 
   // Consume an explicit reveal/focus intent once. Data churn can rerun this
   // effect, but with no intent it owns neither DOM focus nor rail scroll.
-  useEffect(() => {
+  // Layout timing makes real DOM focus part of the discrete keyboard commit;
+  // a passive effect can leave Home/End visibly on the prior row for a frame.
+  useLayoutEffect(() => {
     const root = listRef.current;
     if (focusIndex < 0 || !root) {
       return;
