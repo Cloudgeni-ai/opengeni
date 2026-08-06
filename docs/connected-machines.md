@@ -1,14 +1,14 @@
 # Connected Machines (bring-your-own-compute)
 
 A **Connected Machine** is one of a session's compute targets — your own
-computer (a laptop, a workstation, a CI box, even a macOS machine) enrolled into
+computer (a laptop, a workstation, a CI box, even a macOS machine) connected to
 a workspace and driven by the agent directly. It is a **first-class, co-equal
 primary compute target**, not a backend variant layered on top of a managed
 box.
 
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
-sandbox, enroll a machine (zero-click token or the interactive device flow), and
+sandbox, connect a machine (zero-click token or the interactive device flow), and
 revoke/detach — all through the typed [`@opengeni/sdk`](../packages/sdk/README.md)
 client. The matching UI ships in
 [`@opengeni/react/machines`](../packages/react/README.md).
@@ -250,10 +250,30 @@ Validation (ownership, liveness, epoch fence) is server-side; a rejected target
 comes back as `swapped: false` with a `reason` rather than throwing. The next
 turn runs on whatever the pointer resolves to.
 
-## Enroll a machine
+## Connect a machine
 
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
-There are two paths. Both require the caller to hold `enrollments:manage`.
+The machine agent is multi-connection: installing it once and connecting another
+workspace—even on a different OpenGeni deployment—adds an independent link and
+preserves all existing links. There are two enrollment paths. Both require the
+caller to hold `enrollments:manage`.
+
+The universal Machines-page one-liner installs or updates the binary and runs
+`opengeni-agent connect` for that deployment. A running v0.1.10+ foreground or
+service agent detects the new owner-only connection file automatically. When the
+command upgrades an older running process, restart that process once; subsequent
+connections load live.
+Operators can inspect or remove local links with:
+
+```sh
+opengeni-agent connections
+opengeni-agent disconnect <connection-id-or-prefix>
+```
+
+`disconnect` stops only the local link. The enrollment remains visible offline
+in that workspace until a workspace administrator removes/revokes it. This is
+intentional: possessing the machine credential does not grant workspace-admin
+authority.
 
 ### Zero-click token (fleet / headless)
 
@@ -268,7 +288,8 @@ const { token, expiresAt, expiresInSeconds } =
 // Run on the machine (the installer dials OpenGeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
-//   curl -fsSL https://…/install.sh | sh -s -- --token <token>
+//   OPENGENI_API_URL=https://… OPENGENI_ENROLL_TOKEN=<token> \
+//     sh -c 'curl -fsSL "$OPENGENI_API_URL/install.sh" | sh'
 ```
 
 `allowScreenControl` bakes the (optional) screen-control consent into the token;

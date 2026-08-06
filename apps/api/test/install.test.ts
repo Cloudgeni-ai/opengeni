@@ -40,7 +40,7 @@ describe("get.<domain> install routes", () => {
     // The real committed install.sh body (no secrets; curl|sh entrypoint).
     expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
     expect(body).toContain("opengeni-agent");
-    expect(body).toContain('enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive --force');
+    expect(body).toContain('connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive');
   });
 
   // "The agent ships inside the control-plane": a DEPLOYED control plane self-serves
@@ -78,7 +78,7 @@ describe("get.<domain> install routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body.length).toBeGreaterThan(0);
-    expect(body).toContain("enroll --token $enrollToken --non-interactive --force");
+    expect(body).toContain("connect --token $enrollToken --non-interactive");
   });
 
   test("GET /uninstall.sh serves the uninstall script", async () => {
@@ -105,7 +105,7 @@ describe("get.<domain> install routes", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.9/opengeni-agent-universal-apple-darwin",
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.10/opengeni-agent-universal-apple-darwin",
     );
   });
 
@@ -213,7 +213,7 @@ describe("get.<domain> install routes — baked binary serving", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toContain(
-      "/releases/download/agent-v0.1.9/opengeni-agent-universal-apple-darwin",
+      "/releases/download/agent-v0.1.10/opengeni-agent-universal-apple-darwin",
     );
   });
 });
