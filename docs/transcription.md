@@ -224,6 +224,9 @@ available independently when a provider is ready.
    retryable storage failures cross the ordinary typed API error envelope with a
    correlation id; unexpected failures propagate to HTTP failure observability
    rather than being converted into anonymous successful-route 500 responses.
+10. Prove chunk ingestion through the real Bun HTTP listener, not only Hono's
+    in-memory `app.request()` path. The bounded reader owns one complete read and
+    must not assume the runtime exposes an optional stream-lock release method.
 
 ## Canonical implementation
 
