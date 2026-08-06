@@ -4652,6 +4652,126 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("preserves actionable auth for single and batched optional MCP tool calls", async () => {
+    const connectionId = "79797979-7979-4979-8979-797979797979";
+    const mcp = startTestMcpServer();
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-batched-auth",
+            name: "Batched auth capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-batched-auth", optional: true }],
+      {
+        workspaceId: "89898989-8989-4989-8989-898989898989",
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> =>
+          input.toolName
+            ? {
+                status: "auth_needed",
+                reason: "expired",
+                providerDomain: "api.example.com",
+                connectionId,
+              }
+            : {
+                status: "ok",
+                connectionId,
+                headers: { authorization: "Bearer list-token" },
+              },
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      const server = prepared.mcpServers[0]!;
+      await server.listTools();
+      const brokerFetch = (
+        server as unknown as {
+          inner: {
+            underlying: {
+              params: {
+                fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+              };
+            };
+          };
+        }
+      ).inner.underlying.params.fetch;
+      const invoke = async (body: unknown) =>
+        await brokerFetch(mcp.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const expectedError = {
+        code: 40_101,
+        message: "Authentication required - a connection link was posted to the session.",
+      };
+
+      const single = await invoke({
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: { name: "create_issue", arguments: {} },
+      });
+      expect(single.status).toBe(200);
+      expect(await single.json()).toEqual({ jsonrpc: "2.0", id: 101, error: expectedError });
+      expect(authNeeded).toHaveLength(1);
+
+      const oneEntryBatch = await invoke([
+        {
+          jsonrpc: "2.0",
+          id: 102,
+          method: "tools/call",
+          params: { name: "create_issue", arguments: {} },
+        },
+      ]);
+      expect(oneEntryBatch.status).toBe(200);
+      expect(await oneEntryBatch.json()).toEqual([
+        { jsonrpc: "2.0", id: 102, error: expectedError },
+      ]);
+      expect(authNeeded).toHaveLength(2);
+
+      const mixedBatch = await invoke([
+        { jsonrpc: "2.0", id: 103, method: "tools/list" },
+        {
+          jsonrpc: "2.0",
+          id: 104,
+          method: "tools/call",
+          params: { name: "create_issue", arguments: {} },
+        },
+      ]);
+      expect(mixedBatch.status).toBe(200);
+      expect(await mixedBatch.json()).toEqual([
+        { jsonrpc: "2.0", id: 103, error: expectedError },
+        { jsonrpc: "2.0", id: 104, error: expectedError },
+      ]);
+      expect(authNeeded).toHaveLength(3);
+      expect(authNeeded).toEqual(
+        Array.from({ length: 3 }, () =>
+          expect.objectContaining({
+            serverId: "cap-batched-auth",
+            toolName: "create_issue",
+            reason: "expired",
+          }),
+        ),
+      );
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("never classifies the MCP SDK request-timeout code as connection auth", async () => {
     let markStarted: (() => void) | null = null;
     let releaseCall: (() => void) | null = null;

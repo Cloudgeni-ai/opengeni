@@ -3634,8 +3634,8 @@ async function authNeededFetchResponse(
     connectionRef,
     suppressSetupAuthNeeded,
   );
-  if (request.method === "tools/call") {
-    return mcpToolAuthNeededResponse(request.id);
+  if (request.toolName) {
+    return mcpToolAuthNeededResponse(request);
   }
   return new Response("Authentication required for MCP server connection", {
     status: 401,
@@ -3650,7 +3650,7 @@ async function publishAuthNeededForRequest(
   connectionRef: McpServerConnectionRef,
   suppressSetupAuthNeeded: boolean,
 ): Promise<void> {
-  if (suppressSetupAuthNeeded && request.method !== "tools/call") {
+  if (suppressSetupAuthNeeded && !request.toolName) {
     return;
   }
   const connectionId = auth.connectionId ?? connectionRef.connectionId;
@@ -3767,16 +3767,14 @@ const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
     "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
-function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
+function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
   return new Response(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: id ?? null,
-      error: {
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, {
         code: MCP_AUTH_NEEDED_ERROR.code,
         message: MCP_AUTH_NEEDED_ERROR.message,
-      },
-    }),
+      }),
+    ),
     {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -4556,11 +4554,10 @@ export class PrefixedMcpServer implements MCPServer {
       // expired/failed connection credential surfacing as a StreamableHTTP
       // "authentication required" 401, a provider 5xx, a network blip) — would
       // otherwise take down an unrelated turn. Drop this server's tools for the
-      // turn instead. An auth failure additionally published tool.auth_needed via
-      // the connection-broker fetch before the throw (so that actionable signal
-      // is preserved), but a non-auth failure has NO such signal — the structured
-      // warn below is its only visibility, so a chronically-dead optional
-      // integration surfaces in logs/metrics rather than being silently swallowed.
+      // turn instead. Optional setup-time auth is intentionally non-conversational;
+      // only a concrete tools/call failure publishes tool.auth_needed. A non-auth
+      // failure has no such signal, so the structured warn below is its visibility
+      // when a chronically-dead optional integration is skipped.
       // Warn once per degraded server per turn (instances are per-turn), so a
       // re-list across model turns does not spam the log.
       if (!this.loggedListToolsFailure) {
