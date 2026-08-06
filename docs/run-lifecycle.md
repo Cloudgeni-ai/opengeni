@@ -803,7 +803,10 @@ wrong one is the classic mistake.
    input is built from this store. It is dual-written as the agent streams
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
-   second conversation-memory read path. Historical inline image and screenshot
+   second conversation-memory read path. At this persistence boundary only,
+   JavaScript SDK object properties whose value is `undefined` are treated as
+   absent, matching their JSON wire meaning; arrays and every other non-JSON
+   graph fail closed with the exact offending path. Historical inline image and screenshot
    items remain backward-compatible model history; `computer_screenshot` does
    not yet create a retained artifact receipt or browser-rendering lifecycle.
 2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
