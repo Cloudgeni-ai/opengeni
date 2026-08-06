@@ -272,7 +272,20 @@ function DetailBody({
         <div className="space-y-3 border-t border-border pt-5">
           {errorMessage ? <Notice tone="failed">{errorMessage}</Notice> : null}
 
-          {plan.mode === "social_oauth" ? (
+          {item.surfaceType === "codex_apps" ? (
+            <div className="space-y-3">
+              <Notice tone={item.runtime.available ? "success" : "waiting"}>
+                {item.runtime.available
+                  ? "Available through the active workspace Apps designation."
+                  : "Unavailable. An active Codex Apps credential must be designated in Workspace Settings before it can be selected."}
+              </Notice>
+              <p className="text-center text-xs text-fg-subtle">
+                {item.runtime.available
+                  ? "Select Codex Apps from a session's Tools picker, or leave the policy at the workspace default."
+                  : "This surface cannot be enabled from the capability catalog; its authorization is managed by the workspace Codex subscription."}
+              </p>
+            </div>
+          ) : plan.mode === "social_oauth" ? (
             <SocialConnectorControls
               item={item}
               provider={plan.provider}

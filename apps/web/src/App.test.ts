@@ -1210,6 +1210,19 @@ describe("buildTools", () => {
           },
         }),
         capabilityItem({
+          id: "mcp:codex_apps",
+          kind: "mcp",
+          name: "Codex Apps",
+          surfaceType: "codex_apps",
+          enabled: true,
+          runtime: {
+            available: true,
+            mcpServerId: "codex_apps",
+            transport: "streamable-http",
+            notes: "Available through the active workspace Apps designation.",
+          },
+        }),
+        capabilityItem({
           id: "mcp:disabled",
           kind: "mcp",
           name: "Disabled MCP",
@@ -1240,7 +1253,10 @@ describe("buildTools", () => {
           enabled: true,
         }),
       ]),
-    ).toEqual([{ id: "cap-ready", name: "Ready MCP" }]);
+    ).toEqual([
+      { id: "cap-ready", name: "Ready MCP" },
+      { id: "codex_apps", name: "Codex Apps" },
+    ]);
   });
 
   test("keeps mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
@@ -1779,6 +1795,25 @@ describe("new-session draft tool policy", () => {
         explicit: true,
       }),
     ).toEqual({ tools: [], toolsProvided: false });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni", "codex_apps"],
+        workspaceDefaultMcpServerIds: ["opengeni", "codex_apps"],
+        catalogReady: true,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni"],
+        workspaceDefaultMcpServerIds: ["opengeni", "codex_apps"],
+        catalogReady: true,
+        explicit: false,
+      }),
+    ).toEqual({
+      tools: [{ kind: "mcp", id: "files" }],
+      toolsProvided: true,
+    });
   });
 });
 

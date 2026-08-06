@@ -85,6 +85,7 @@ export async function buildCapabilityCatalog(input: {
     socialConnections,
     bundledSkills,
     curatedLibrarySkills,
+    codexAppsCredentialId,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
     listCapabilityInstallations(input.db, input.workspaceId),
@@ -93,6 +94,9 @@ export async function buildCapabilityCatalog(input: {
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
     discoverBundledSkills(),
     discoverCuratedSkillLibraryItems(),
+    input.settings.codexConnectedAppsEnabled
+      ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
+      : Promise.resolve(null),
   ]);
   const capabilityInstallationById = new Map(
     capabilityInstallations.map((installation) => [installation.capabilityId, installation]),
@@ -112,7 +116,16 @@ export async function buildCapabilityCatalog(input: {
     ...bundledSkills,
     ...curatedLibrarySkills,
   ];
-  const items = dedupeCatalogItems([...builtIns, ...persistedItems])
+  const codexApps = input.settings.codexConnectedAppsEnabled
+    ? codexAppsCatalogItem(codexAppsCredentialId !== null)
+    : null;
+  const items = dedupeCatalogItems([
+    ...builtIns,
+    ...persistedItems.filter((item) => !isReservedCodexAppsCatalogItem(item)),
+    // Keep the reserved, server-derived item authoritative over any stale
+    // legacy catalog row with the same id.
+    ...(codexApps ? [codexApps] : []),
+  ])
     .map((item) =>
       applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds),
     )
@@ -142,8 +155,9 @@ export async function createCatalogItem(input: {
   }
   if (
     input.payload.kind === "mcp" &&
-    typeof input.payload.metadata.mcpServerId === "string" &&
-    input.payload.metadata.mcpServerId.trim() === CODEX_APPS_MCP_SERVER_ID
+    (id === `mcp:${CODEX_APPS_MCP_SERVER_ID}` ||
+      (typeof input.payload.metadata.mcpServerId === "string" &&
+        input.payload.metadata.mcpServerId.trim() === CODEX_APPS_MCP_SERVER_ID))
   ) {
     throw new HTTPException(422, {
       message: `${CODEX_APPS_MCP_SERVER_ID} is reserved for the canonical Codex Apps service`,
@@ -997,32 +1011,82 @@ function packCatalogItem(
 }
 
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
-  return settings.mcpServers.map((server) =>
-    CapabilityCatalogItem.parse({
-      id: `mcp:${server.id}`,
-      kind: "mcp",
-      source: firstPartyMcpServerIds.has(server.id) ? "built_in" : "configured",
-      name: server.name ?? server.id,
-      description: firstPartyMcpDescription(server.id),
-      category: firstPartyMcpServerIds.has(server.id) ? "platform" : "configured",
-      tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
-      endpointUrl: server.url,
-      tools: [{ kind: "mcp", id: server.id }],
-      runtime: {
-        available: true,
-        mcpServerId: server.id,
-        transport: "streamable-http",
-        notes: firstPartyMcpServerIds.has(server.id)
-          ? "Available from OpenGeni runtime configuration."
-          : "Configured through OPENGENI_MCP_SERVERS.",
-      },
-      metadata: {
-        mcpServerId: server.id,
-        allowedTools: server.allowedTools ?? [],
-        cacheToolsList: server.cacheToolsList,
-      },
-    }),
+  return settings.mcpServers
+    .filter((server) => server.id !== CODEX_APPS_MCP_SERVER_ID)
+    .map((server) =>
+      CapabilityCatalogItem.parse({
+        id: `mcp:${server.id}`,
+        kind: "mcp",
+        source: firstPartyMcpServerIds.has(server.id) ? "built_in" : "configured",
+        name: server.name ?? server.id,
+        description: firstPartyMcpDescription(server.id),
+        category: firstPartyMcpServerIds.has(server.id) ? "platform" : "configured",
+        tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
+        endpointUrl: server.url,
+        tools: [{ kind: "mcp", id: server.id }],
+        runtime: {
+          available: true,
+          mcpServerId: server.id,
+          transport: "streamable-http",
+          notes: firstPartyMcpServerIds.has(server.id)
+            ? "Available from OpenGeni runtime configuration."
+            : "Configured through OPENGENI_MCP_SERVERS.",
+        },
+        metadata: {
+          mcpServerId: server.id,
+          allowedTools: server.allowedTools ?? [],
+          cacheToolsList: server.cacheToolsList,
+        },
+      }),
+    );
+}
+
+function isReservedCodexAppsCatalogItem(item: CapabilityCatalogItem): boolean {
+  return (
+    item.id === `mcp:${CODEX_APPS_MCP_SERVER_ID}` ||
+    (item.kind === "mcp" &&
+      (item.runtime.mcpServerId === CODEX_APPS_MCP_SERVER_ID ||
+        item.metadata.mcpServerId === CODEX_APPS_MCP_SERVER_ID))
   );
+}
+
+/**
+ * The Apps MCP is not a configured server and is not a user-installable
+ * capability. It is a deployment-gated, workspace-designated runtime surface,
+ * so project it into the same catalog the web picker already consumes while
+ * keeping its authorization state server-derived and explicit.
+ */
+export function codexAppsCatalogItem(available: boolean): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: `mcp:${CODEX_APPS_MCP_SERVER_ID}`,
+    kind: "mcp",
+    source: "built_in",
+    name: "Codex Apps",
+    description:
+      "Use the ChatGPT Apps designated for this workspace. Sessions include this surface by default when it is authorized; explicit policies can opt out.",
+    category: "productivity",
+    tags: ["mcp", "codex", "connected-apps"],
+    providerDomain: "chatgpt.com",
+    surfaceType: "codex_apps",
+    transport: "streamable-http",
+    mcpUrl: CODEX_APPS_MCP_URL,
+    authKind: "none",
+    tools: [{ kind: "mcp", id: CODEX_APPS_MCP_SERVER_ID }],
+    runtime: {
+      available,
+      ...(available ? { mcpServerId: CODEX_APPS_MCP_SERVER_ID } : {}),
+      transport: "streamable-http",
+      notes: available
+        ? "Available through the active workspace Apps designation."
+        : "Unavailable until an active Codex Apps credential is designated for this workspace.",
+    },
+    enabled: available,
+    enabledReason: available ? "designated Apps credential" : "no active Apps designation",
+    metadata: {
+      mcpServerId: CODEX_APPS_MCP_SERVER_ID,
+      authorization: "workspace_designation",
+    },
+  });
 }
 
 function platformApiCatalogItems(socialConnections: SocialConnection[]): CapabilityCatalogItem[] {
@@ -1274,6 +1338,12 @@ export function applyCapabilityEnablement(
     // Social connector state is derived from the authoritative workspace
     // connection row while the catalog is built. Being built in means the
     // connector is browseable, not that an account is already connected.
+    return { ...item, connectionRef: null };
+  }
+  if (item.surfaceType === "codex_apps") {
+    // Unlike ordinary built-ins, Apps availability is derived from the exact
+    // active workspace designation above. Do not overwrite it with the
+    // generic source-based "built in" enablement rule.
     return { ...item, connectionRef: null };
   }
   if (item.source === "built_in" || item.source === "configured") {

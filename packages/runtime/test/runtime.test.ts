@@ -5155,18 +5155,94 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
+    const authNeeded: ToolAuthNeededPayload[] = [];
     // Inference authentication is deliberately not consulted as a fallback.
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
-      { mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+      {
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "missing_connection",
+          toolName: null,
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
+    }
+  });
+
+  test("codex_apps: provider 401 publishes an actionable expired-auth signal", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer provider-rejected" },
+    });
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "expired",
+          toolName: null,
+        }),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: transport setup failure is retryable without a false refresh-auth signal", async () => {
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+        [{ kind: "mcp", id: "codex_apps" }],
+        {
+          codexAppsAuth: makeCodexAppsAuth(),
+          mcpFetchImpl: async () => {
+            throw Object.assign(new Error("socket closed with credential-shaped body"), {
+              code: "ECONNRESET",
+            });
+          },
+          onAuthNeeded: (payload) => authNeeded.push(payload),
+        },
+      );
+      try {
+        expect(prepared.mcpServers).toHaveLength(0);
+      } finally {
+        await prepared.close();
+      }
+      expect(authNeeded).toEqual([]);
+      const renderedWarnings = JSON.stringify(warnings);
+      expect(renderedWarnings).toContain('"serverId":"codex_apps"');
+      expect(renderedWarnings).toContain('"retryable":true');
+      expect(renderedWarnings).not.toContain("socket closed with credential-shaped body");
+    } finally {
+      console.warn = originalWarn;
     }
   });
 
@@ -5199,17 +5275,27 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
+    const authNeeded: ToolAuthNeededPayload[] = [];
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
       {
         codexAppsAuth: makeCodexAppsAuth({ tokenError: new Error("needs_relogin") }),
         mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
       },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "refresh_failed",
+          toolName: null,
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
@@ -5289,7 +5375,7 @@ describe("runtime event normalization", () => {
         await prepared.close();
       }
       expect(warnings.length).toBeGreaterThan(0);
-      expect(JSON.stringify(warnings)).not.toContain("geni-notebook");
+      expect(JSON.stringify(warnings)).toContain('"serverId":"geni-notebook"');
       expect(JSON.stringify(warnings)).toContain('"origin":"runtime"');
     } finally {
       console.warn = originalWarn;
@@ -5299,7 +5385,7 @@ describe("runtime event normalization", () => {
 
   test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
-    const registryId = `registry-${sentinel}`;
+    const registryId = "registry-mcp-lifecycle-boundary";
     const exactSourceError = Object.assign(new Error(`connect failed: ${sentinel}`), {
       name: sentinel,
       code: sentinel,
@@ -5355,15 +5441,17 @@ describe("runtime event normalization", () => {
         .flat()
         .filter((value): value is Error => value instanceof Error);
       expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain(registryId);
       expect(lifecycleErrors).toContainEqual(
         expect.objectContaining({
           name: "McpLifecycleError",
           code: "mcp_connect_failed",
+          serverId: registryId,
           status: 503,
+          retryable: true,
           origin: "runtime",
         }),
       );
-      expect(renderedLogs).not.toContain(registryId);
       expect(renderedLogs).not.toContain(sentinel);
       expect(exactSourceError.message).toContain(sentinel);
       expect(exactSourceError.responseBody).toEqual({ sentinel });
@@ -5401,7 +5489,7 @@ describe("runtime event normalization", () => {
         },
         async invalidateToolsCache() {},
       } as MCPServer,
-      `registry-${sentinel}`,
+      "registry-hostile-status-proxy",
     );
     const warnings: unknown[][] = [];
     const errors: unknown[][] = [];
@@ -5422,6 +5510,7 @@ describe("runtime event normalization", () => {
         .map((value) => JSON.stringify(value))
         .join("\n");
       expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain("registry-hostile-status-proxy");
       expect(renderedLogs).not.toContain(sentinel);
       expect(lifecycleErrors).toContainEqual(
         expect.objectContaining({
@@ -5469,7 +5558,7 @@ describe("runtime event normalization", () => {
           },
           async invalidateToolsCache() {},
         } as MCPServer,
-        `registry-${sentinel}-${index}`,
+        `registry-close-boundary-${index}`,
       );
     });
     const warnings: unknown[][] = [];
@@ -5545,6 +5634,127 @@ describe("runtime event normalization", () => {
       console.warn = originalWarn;
       broken.close();
       healthy.close();
+    }
+  });
+
+  test("parallel best-effort setup preserves active/failed registry identities", async () => {
+    const exactSlackError = Object.assign(new Error("provider socket failed"), {
+      code: "ECONNRESET",
+    });
+    const apps = new PrefixedMcpServer(
+      {
+        name: "inner-codex-apps",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      "codex_apps",
+      undefined,
+      true,
+    );
+    const slack = new PrefixedMcpServer(
+      {
+        name: "inner-slack",
+        cacheToolsList: false,
+        async connect() {
+          throw exactSlackError;
+        },
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      "slack",
+      undefined,
+      true,
+      undefined,
+      "slack",
+      true,
+    );
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const connected = await connectMcpServersInBatches([apps, slack], { strict: false });
+      try {
+        expect(connected.active.map(runtimeMcpServerId)).toEqual(["codex_apps"]);
+        expect(connected.failed.map(runtimeMcpServerId)).toEqual(["slack"]);
+        expect(connected.errors.get(slack)).toBe(exactSlackError);
+        expect(apps.name).not.toBe(slack.name);
+        expect(apps.name).toContain("codex_apps");
+        expect(slack.name).toContain("slack");
+        const renderedLogs = JSON.stringify([...warnings, ...errors]);
+        expect(renderedLogs).toContain('"serverId":"slack"');
+        expect(renderedLogs).toContain('"retryable":true');
+        expect(renderedLogs).not.toContain("provider socket failed");
+      } finally {
+        await connected.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("codex_apps survives a parallel best-effort sibling connect failure", async () => {
+    const broken = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
+    const apps = startTestMcpServer({
+      requiredHeaders: {
+        authorization: "Bearer tok-123",
+        "chatgpt-account-id": "acct-9",
+      },
+    });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            CODEX_APPS_ENTRY(),
+            {
+              id: "slack",
+              name: "Slack",
+              url: broken.url,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "codex_apps", optional: true },
+          { kind: "mcp", id: "slack", optional: true },
+        ],
+        {
+          codexAppsAuth: makeCodexAppsAuth(),
+          mcpFetchImpl: codexAppsTestFetch(apps.url),
+        },
+      );
+      try {
+        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["codex_apps"]);
+        const tools = await prepared.mcpServers[0]!.listTools();
+        expect(tools.map((tool) => tool.name)).toContain("codex_apps__search_documents");
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      broken.close();
+      apps.close();
     }
   });
 
@@ -5720,9 +5930,8 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The drop is observable as an allowlisted structural warning. Exact
-      // registry identity remains internal and must not cross the public console
-      // boundary.
+      // The drop is observable as an allowlisted structural warning with the
+      // safe registry identity needed to make recovery actionable.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
@@ -5733,7 +5942,7 @@ describe("runtime event normalization", () => {
         ),
       );
       expect(warned).toBe(true);
-      expect(JSON.stringify(warnings)).not.toContain("cap-expired");
+      expect(JSON.stringify(warnings)).toContain('"serverId":"cap-expired"');
     } finally {
       console.warn = originalWarn;
       expired.close();
@@ -5789,8 +5998,8 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The non-auth degrade is observable without leaking registry identity or
-      // the provider's raw response through the public console boundary.
+      // The non-auth degrade is observable with safe registry identity and
+      // without leaking the provider's raw response through the public boundary.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
@@ -5801,7 +6010,7 @@ describe("runtime event normalization", () => {
         ),
       );
       expect(warned).toBe(true);
-      expect(JSON.stringify(warnings)).not.toContain("flaky");
+      expect(JSON.stringify(warnings)).toContain('"serverId":"flaky"');
     } finally {
       console.warn = originalWarn;
       brokenOptional.close();
@@ -6010,7 +6219,7 @@ describe("runtime event normalization", () => {
         origin: "runtime",
       });
       expect(payload.status).toBeUndefined();
-      expect(JSON.stringify(warnings)).not.toContain("flaky");
+      expect(JSON.stringify(warnings)).toContain('"serverId":"flaky"');
       expect(JSON.stringify(warnings)).not.toContain("search_documents");
       expect(JSON.stringify(warnings)).not.toContain("unauthorized");
     } finally {

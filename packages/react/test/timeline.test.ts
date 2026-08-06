@@ -1702,6 +1702,7 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({
       kind: "auth-needed",
       turnId: "turn-1",
+      serverId: "mcp-linear",
       providerDomain: "linear.app",
       connectionId: "conn-1",
       reason: "refresh_failed",
@@ -1718,6 +1719,24 @@ describe("buildTimeline", () => {
       event("tool.auth_needed", { providerDomain: "supabase.com", reason: "who_knows" }),
     ]);
     expect(items).toEqual([]);
+  });
+
+  test("Codex Apps setup auth remains actionable without a concrete tool name", () => {
+    reset();
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "codex_apps",
+        providerDomain: "chatgpt.com",
+        reason: "refresh_failed",
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      serverId: "codex_apps",
+      providerDomain: "chatgpt.com",
+      toolName: null,
+      reason: "refresh_failed",
+    });
   });
 
   test("credential.auth_needed reuses the reconnect card without inventing a tool", () => {

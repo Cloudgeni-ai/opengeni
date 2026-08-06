@@ -2706,7 +2706,8 @@ function AuthNeededRow({
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const provider = providerLabel(item.providerDomain);
+  const provider =
+    item.serverId === "codex_apps" ? "Codex Apps" : providerLabel(item.providerDomain);
   const unavailable =
     item.reason === "personal_authority_unavailable" ||
     item.reason === "unsupported_auth" ||

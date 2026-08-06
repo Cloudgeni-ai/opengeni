@@ -288,6 +288,8 @@ export type AuthNeededItem = {
   kind: "auth-needed";
   id: string;
   turnId: string | null;
+  /** The runtime surface that requested recovery, when the event is an MCP auth signal. */
+  serverId: string | null;
   /** The connection's registrable domain, e.g. "linear.app". */
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
