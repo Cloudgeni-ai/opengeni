@@ -40,6 +40,7 @@ import {
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
+  completedToolCallFromSdkEvent,
   computerToolModeForTurn,
   createCompactionModelUsageEventState,
   createModelResponseEventState,
@@ -61,6 +62,7 @@ import {
   modelUsageSourceKey,
   modelResponseContextSignal,
   managedSandboxOwnershipForTurn,
+  pendingToolCallFromSdkEvent,
   pointerReconcileReason,
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
@@ -362,6 +364,95 @@ describe("turn exact-content boundaries", () => {
       },
     ]);
     expect(Object.hasOwn(hostedToolCall, "output")).toBe(true);
+  });
+
+  test("normalizes pending SDK tool calls before the lossless receipt write", () => {
+    const rawItem = {
+      type: "function_call",
+      callId: "call_pending_undefined",
+      name: "example_tool",
+      arguments: "{}",
+      status: undefined,
+      providerData: {
+        traceId: "trace-1",
+        optional: undefined,
+      },
+    };
+
+    const pending = pendingToolCallFromSdkEvent({
+      type: "run_item_stream_event",
+      item: { type: "tool_call_item", rawItem },
+    });
+
+    expect(pending).toEqual({
+      callId: "call_pending_undefined",
+      callType: "function_call",
+      callName: "example_tool",
+      callItem: {
+        type: "function_call",
+        callId: "call_pending_undefined",
+        name: "example_tool",
+        arguments: "{}",
+        providerData: { traceId: "trace-1" },
+      },
+    });
+    expect(Object.hasOwn(pending!.callItem, "status")).toBe(false);
+    expect(Object.hasOwn(pending!.callItem.providerData as object, "optional")).toBe(false);
+    expect(Object.hasOwn(rawItem, "status")).toBe(true);
+    expect(Object.hasOwn(rawItem.providerData, "optional")).toBe(true);
+  });
+
+  test("normalizes completed SDK tool results before the lossless receipt write", () => {
+    const rawItem = {
+      type: "function_call_result",
+      callId: "call_result_undefined",
+      status: "completed",
+      output: {
+        type: "text",
+        text: "done",
+        optional: undefined,
+      },
+      providerData: undefined,
+    };
+
+    const completed = completedToolCallFromSdkEvent({
+      type: "run_item_stream_event",
+      item: { type: "tool_call_output_item", rawItem },
+    });
+
+    expect(completed).toEqual({
+      callId: "call_result_undefined",
+      resultItem: {
+        type: "function_call_result",
+        callId: "call_result_undefined",
+        status: "completed",
+        output: { type: "text", text: "done" },
+      },
+    });
+    expect(Object.hasOwn(completed!.resultItem, "providerData")).toBe(false);
+    expect(Object.hasOwn(completed!.resultItem.output as object, "optional")).toBe(false);
+    expect(Object.hasOwn(rawItem, "providerData")).toBe(true);
+    expect(Object.hasOwn(rawItem.output, "optional")).toBe(true);
+  });
+
+  test("keeps non-object undefined values fail-closed at the pending receipt boundary", () => {
+    expect(() =>
+      pendingToolCallFromSdkEvent({
+        type: "run_item_stream_event",
+        item: {
+          type: "tool_call_item",
+          rawItem: {
+            type: "function_call",
+            callId: "call_invalid_array",
+            name: "example_tool",
+            arguments: "{}",
+            providerData: { values: ["ok", undefined] },
+          },
+        },
+      }),
+    ).toThrow(
+      'Protocol JSON value at $["item"]["rawItem"]["providerData"]["values"][1] cannot contain undefined',
+    );
   });
 
   test("public diagnostics exclude arbitrary bodies while internal failure events remain exact", () => {

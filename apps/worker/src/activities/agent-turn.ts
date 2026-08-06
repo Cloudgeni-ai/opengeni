@@ -9168,7 +9168,7 @@ export function codexUsageLimitFailurePayload(
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 
-function pendingToolCallFromSdkEvent(event: unknown): {
+export function pendingToolCallFromSdkEvent(event: unknown): {
   callId: string;
   callType: string;
   callName: string | null;
@@ -9192,15 +9192,16 @@ function pendingToolCallFromSdkEvent(event: unknown): {
   if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {
     return null;
   }
+  const callItem = normalizeProtocolJsonValue(raw, '$["item"]["rawItem"]');
   return {
     callId,
     callType,
     callName: typeof raw.name === "string" ? raw.name : null,
-    callItem: raw,
+    callItem,
   };
 }
 
-function completedToolCallFromSdkEvent(event: unknown): {
+export function completedToolCallFromSdkEvent(event: unknown): {
   callId: string;
   resultItem: Record<string, unknown>;
 } | null {
@@ -9215,7 +9216,11 @@ function completedToolCallFromSdkEvent(event: unknown): {
       ? (item.rawItem as Record<string, unknown>)
       : {};
   const callId = raw.callId ?? raw.call_id ?? item.id;
-  return typeof callId === "string" && callId.length > 0 ? { callId, resultItem: raw } : null;
+  if (typeof callId !== "string" || callId.length === 0) return null;
+  return {
+    callId,
+    resultItem: normalizeProtocolJsonValue(raw, '$["item"]["rawItem"]'),
+  };
 }
 
 /**

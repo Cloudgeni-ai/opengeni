@@ -22,7 +22,7 @@ import {
   getLogger,
   invalidateServerToolsCache,
 } from "@openai/agents";
-import { Usage } from "@openai/agents-core";
+import { RunToolApprovalItem, Usage } from "@openai/agents-core";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
@@ -350,6 +350,38 @@ describe("structured human-input runtime boundary", () => {
         },
       },
     ]);
+  });
+
+  test("normalizes SDK approval items before run-state and event persistence", () => {
+    const rawItem = {
+      type: "function_call",
+      callId: "approval-undefined",
+      name: "dangerous_tool",
+      arguments: "{}",
+      status: undefined,
+      providerData: { traceId: "trace-approval", optional: undefined },
+    };
+    const approval = new RunToolApprovalItem(
+      rawItem as any,
+      { tools: [], toJSON: () => ({ name: "reviewer" }) } as any,
+    );
+
+    expect(serializeApprovals([approval])).toEqual([
+      {
+        type: "tool_approval_item",
+        rawItem: {
+          type: "function_call",
+          callId: "approval-undefined",
+          name: "dangerous_tool",
+          arguments: "{}",
+          providerData: { traceId: "trace-approval" },
+        },
+        agent: { name: "reviewer" },
+        toolName: "dangerous_tool",
+      },
+    ]);
+    expect(Object.hasOwn(rawItem, "status")).toBe(true);
+    expect(Object.hasOwn(rawItem.providerData, "optional")).toBe(true);
   });
 
   test("the built-in tool always interrupts and only returns its injected durable response", async () => {
@@ -1034,21 +1066,51 @@ describe("runtime event normalization", () => {
   });
 
   test("maps tool call stream items into tool events", () => {
+    const rawItem = {
+      callId: "call-1",
+      type: "shell_call",
+      action: { commands: ["terraform version"], optional: undefined },
+      status: undefined,
+    };
     const [event] = normalizeSdkEvent({
       type: "run_item_stream_event",
       item: {
         id: "item-1",
         type: "tool_call_item",
-        rawItem: {
-          callId: "call-1",
-          type: "shell_call",
-          action: { commands: ["terraform version"] },
-        },
+        rawItem,
       },
     } as any);
 
     expect(event?.type).toBe("agent.toolCall.created");
     expect((event?.payload as { id?: string } | undefined)?.id).toBe("call-1");
+    const raw = (event?.payload as { raw?: Record<string, unknown> } | undefined)?.raw;
+    expect(Object.hasOwn(raw!, "status")).toBe(false);
+    expect(Object.hasOwn(raw!.action as object, "optional")).toBe(false);
+    expect(Object.hasOwn(rawItem, "status")).toBe(true);
+    expect(Object.hasOwn(rawItem.action, "optional")).toBe(true);
+  });
+
+  test("normalizes tool outputs before durable event persistence", () => {
+    const output = {
+      type: "text",
+      text: "done",
+      structuredContent: undefined,
+    };
+    const [event] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "item-output-1",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-output-1", type: "function_call_result" },
+        output,
+      },
+    } as any);
+
+    const persistedOutput = (event?.payload as { output?: Record<string, unknown> } | undefined)
+      ?.output;
+    expect(persistedOutput).toEqual({ type: "text", text: "done" });
+    expect(Object.hasOwn(persistedOutput!, "structuredContent")).toBe(false);
+    expect(Object.hasOwn(output, "structuredContent")).toBe(true);
   });
 
   test("compacts a codex computer_screenshot Uint8Array output to a non-retained media fact", () => {
