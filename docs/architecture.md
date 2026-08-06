@@ -250,10 +250,14 @@ manifest, uploads contiguous hash-bound chunks to object storage, finalizes exac
 durable totals, and drives bounded ffmpeg normalization plus persisted provider
 segments. The default server ceiling is two hours / 512 MiB / 8 MiB per chunk
 (hard contract maximum eight hours and 1,000 segments); legacy clients retain the
-existing 25 MiB / 600-second one-shot multipart path. Failed or client-aborted work
-keeps the same recording UUID for local Retry, reload recovery, and same-subject
-cross-browser list/get resume; request/network aborts leave server-owned provider
-work retryable and retain audio objects, while explicit Discard is destructive.
+existing 25 MiB / 600-second one-shot multipart path. Failed work keeps the same
+recording UUID for local Retry, bounded automatic retry/reload recovery, and
+same-subject cross-browser list/get resume; request/network aborts leave
+server-owned provider work retryable and retain audio objects, while explicit
+pause stops automatic recovery and explicit Discard is destructive. Chunk
+reservation/completion retries only its idempotent database transaction on
+serialization/deadlock failures; exhausted persistence failures propagate through
+the typed observable HTTP failure boundary.
 Immediately before a provider call, the server refreshes the durable attempt lease
 origin and persists an absolute 10-minute server-owned deadline. After that
 refresh transaction returns, runtime computes the remaining time from that
@@ -263,8 +267,9 @@ margin even when refresh/commit latency is long. The first provider chosen for a
 persisted privately on that recording, so every segment and retry stays pinned to
 one vendor. Segment text and deterministic final assembly persist server-side only
 for resumable recovery; provider text is also persisted locally before draft
-mutation, and an uncertain handoff becomes an explicit saved-transcript insertion
-action rather than automatic retranscription or append. Completion/discard/terminal
+mutation. Any failed/reloaded attempt may finish transcription automatically but
+forces an explicit saved-transcript insertion, preventing a delayed result from
+mutating an uncertain draft. Completion/discard/terminal
 failure makes audio objects immediately cleanup-eligible; abandoned audio expires
 at the configured retention, reclaimable object claims survive provider failures,
 and expired metadata/transcripts are purged only after every object is confirmed
@@ -706,7 +711,7 @@ The barrel (`index.ts`, 2600+ lines) drives the SDK run: instruction composition
 
 ### 7.10 `sdk` + `react` — published clients
 
-`sdk` must carry **zero runtime deps** (hand-mirrors contract types; pinned by `contract-parity.test.ts`). Streaming is exactly-once/in-order/gap-free anchored on `sequence` (backfill **throws** rather than skip). `SessionEvent.type`/`Permission`/`UsageEventType` are **open unions** — do not narrow. Native voice input retains `OpenGeniClient.transcribeAudio` for one-shot compatibility and adds create/list/get/hash-bound-chunk/finalize/process/discard methods for resumable recordings. The SDK never retries a possibly-started provider request or exposes the server-private provider pin. Legacy host-adapter transcription types remain exported for one compatibility release. `react`'s optional DOM-only peers (noVNC, xterm, Pierre diffs, CodeMirror) **must be lazily imported** so SSR/non-desktop bundles stay clean. Its voice-input hook owns timesliced MediaRecorder capture, persists ordered chunks and integrity metadata in IndexedDB before reporting them saved, selects the resumable path only when both capability and client methods exist, otherwise enforces the 60-second default / 600-second maximum and 25 MiB one-shot ceiling, and caps resumable client capture at eight hours. It uses a reload-stable owner ID guarded by a document Web Lock or BroadcastChannel handshake plus stale manifest heartbeats, exposes every retained local recording oldest-first, retries with the same server UUID without reopening the microphone, creates the cancellation fence before storage enumeration, fences recorder-stop/upload/polling/handoff across workspace generations, and persists provider text before any draft mutation. A reload never auto-retranscribes or auto-appends an uncertain saved result; explicit insertion completes its durable handoff and asks the server to discard the recovery record, while owner-safe retry/GC removes handed-off local audio/results after transient IndexedDB cleanup failures. Connected-machine UI (dashboard, enrollment, status pills, metrics) is carved into the **`@opengeni/react/machines`** subpath (`src/machines.ts`) so the root import is the clean sandbox-only default and machine surfaces are opt-in (the root still re-exports them deprecated for back-compat, #144). The two are version-linked via changesets; the desktop pixel plane is consent-gated (409 until acknowledged).
+`sdk` must carry **zero runtime deps** (hand-mirrors contract types; pinned by `contract-parity.test.ts`). Streaming is exactly-once/in-order/gap-free anchored on `sequence` (backfill **throws** rather than skip). `SessionEvent.type`/`Permission`/`UsageEventType` are **open unions** — do not narrow. Native voice input retains `OpenGeniClient.transcribeAudio` for one-shot compatibility and adds create/list/get/hash-bound-chunk/finalize/process/discard methods for resumable recordings. The SDK never retries a possibly-started provider request or exposes the server-private provider pin. Legacy host-adapter transcription types remain exported for one compatibility release. `react`'s optional DOM-only peers (noVNC, xterm, Pierre diffs, CodeMirror) **must be lazily imported** so SSR/non-desktop bundles stay clean. Its voice-input hook owns timesliced MediaRecorder capture, persists ordered chunks and integrity metadata in IndexedDB before reporting them saved, selects the resumable path only when both capability and client methods exist, otherwise enforces the 60-second default / 600-second maximum and 25 MiB one-shot ceiling, and caps resumable client capture at eight hours. It uses a reload-stable owner ID guarded by a document Web Lock or BroadcastChannel handshake plus stale manifest heartbeats, exposes every retained local recording oldest-first, retries with the same server UUID without reopening the microphone, creates the cancellation fence before storage enumeration, fences recorder-stop/upload/polling/handoff across workspace generations, and persists provider text before any draft mutation. Retryable transport/API/provider failures and interrupted processing reconcile the same durable recording automatically with bounded backoff; reload may resume that work, but every delayed result requires explicit insertion and never auto-appends into an uncertain draft. User cancellation pauses automatic recovery without deleting audio, while explicit insertion completes durable handoff and asks the server to discard the recovery record; owner-safe retry/GC removes handed-off local audio/results after transient IndexedDB cleanup failures. Connected-machine UI (dashboard, enrollment, status pills, metrics) is carved into the **`@opengeni/react/machines`** subpath (`src/machines.ts`) so the root import is the clean sandbox-only default and machine surfaces are opt-in (the root still re-exports them deprecated for back-compat, #144). The two are version-linked via changesets; the desktop pixel plane is consent-gated (409 until acknowledged).
 
 ### 7.11 `agent/` (Rust) + `agent-proto` + the relay
 

@@ -119,6 +119,81 @@ afterEach(() => {
 });
 
 describe("resumable transcription recording routes", () => {
+  test("retries an idempotent chunk reservation and exposes an observable retryable failure", async () => {
+    const chunkBytes = new Uint8Array([1, 2, 3]);
+    const chunkSha256 = createHash("sha256").update(chunkBytes).digest("hex");
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        throw new Error("not used");
+      },
+    };
+    const segmenter: TranscriptionSegmenter = {
+      available: () => true,
+      async *segment() {
+        yield {
+          segmentNumber: 0,
+          startMilliseconds: 0,
+          durationMilliseconds: 1,
+          mimeType: "audio/wav",
+          bytes: new Uint8Array([1]),
+        };
+      },
+    };
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    spyOn(dbModule, "getTranscriptionRecording").mockResolvedValue(
+      response("uploading", {
+        nextChunkNumber: 0,
+        chunkCount: 0,
+        totalBytes: 0,
+        totalDurationMilliseconds: 0,
+      }),
+    );
+    const persistenceFailure = Object.assign(new Error("deadlock detail must stay private"), {
+      name: "PostgresError",
+      code: "40P01",
+    });
+    const reserve = spyOn(dbModule, "reserveTranscriptionRecordingChunk").mockRejectedValue(
+      persistenceFailure,
+    );
+
+    const api = app({ transcription, segmenter, objectStorage: storage() });
+    const result = await api.request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/chunks/0`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: await bearer(),
+          "content-type": "audio/webm",
+          "x-opengeni-correlation-id": CORRELATION_ID,
+          "x-opengeni-chunk-sha256": chunkSha256,
+          "x-opengeni-chunk-start-milliseconds": "0",
+          "x-opengeni-chunk-duration-milliseconds": "1000",
+        },
+        body: chunkBytes,
+      },
+    );
+
+    expect(reserve).toHaveBeenCalledTimes(3);
+    expect(result.status).toBe(503);
+    expect(await result.json()).toEqual({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "Transcription is temporarily unavailable.",
+        retryable: true,
+        requestId: expect.any(String),
+        details: { persistenceCode: "db_deadlock" },
+      },
+    });
+  });
+
   test("segments and persists a 30+ minute recording within the provider bound", async () => {
     const chunkBytes = new Uint8Array([1]);
     const chunkSha256 = createHash("sha256").update(chunkBytes).digest("hex");

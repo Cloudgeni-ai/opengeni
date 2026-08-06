@@ -9,6 +9,8 @@ export type VoiceRecordingUploadState = "pending" | "syncing" | "retrying" | "co
 export type VoiceRecordingTranscriptionState = "pending" | "transcribing" | "retrying" | "complete";
 export type VoiceRecordingFinalizationState = "pending" | "transcript-ready" | "handed-off";
 export type VoiceRecordingChunkUploadState = "pending" | "syncing" | "complete";
+export type VoiceRecordingRecoveryMode = "automatic" | "manual";
+export type VoiceRecordingHandoffMode = "append" | "explicit";
 
 export type VoiceRecordingManifest = {
   version: 1;
@@ -22,6 +24,10 @@ export type VoiceRecordingManifest = {
   uploadState: VoiceRecordingUploadState;
   transcriptionState: VoiceRecordingTranscriptionState;
   finalizationState: VoiceRecordingFinalizationState;
+  /** Whether safe server reconciliation should continue without another user action. */
+  recoveryMode: VoiceRecordingRecoveryMode;
+  /** Delayed/recovered results require explicit insertion instead of mutating an uncertain draft. */
+  handoffMode: VoiceRecordingHandoffMode;
   /** Tab/process lease. A different owner may take over only after this heartbeat is stale. */
   ownerId: string | null;
   ownerHeartbeatAt: string | null;
@@ -91,6 +97,8 @@ export interface VoiceRecordingStore {
         | "ownerId"
         | "ownerHeartbeatAt"
         | "transcriptText"
+        | "recoveryMode"
+        | "handoffMode"
       >
     >,
     updatedAt: string,
@@ -155,6 +163,8 @@ export function createVoiceRecordingManifest(input: {
     uploadState: "pending",
     transcriptionState: "pending",
     finalizationState: "pending",
+    recoveryMode: "automatic",
+    handoffMode: "append",
     ownerId: input.ownerId ?? null,
     ownerHeartbeatAt: input.ownerId ? input.createdAt : null,
     transcriptText: null,
@@ -306,6 +316,7 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
     const updated: VoiceRecordingManifest = {
       ...manifest,
       captureState: manifest.captureState === "capturing" ? "stopped" : manifest.captureState,
+      handoffMode: "explicit",
       ownerId,
       ownerHeartbeatAt: claimedAt,
       updatedAt: claimedAt,
@@ -370,6 +381,8 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
         | "ownerId"
         | "ownerHeartbeatAt"
         | "transcriptText"
+        | "recoveryMode"
+        | "handoffMode"
       >
     >,
     updatedAt: string,
@@ -455,6 +468,8 @@ function normalizeManifest(manifest: VoiceRecordingManifest): VoiceRecordingMani
     ownerId: manifest.ownerId ?? null,
     ownerHeartbeatAt: manifest.ownerHeartbeatAt ?? null,
     transcriptText: manifest.transcriptText ?? null,
+    recoveryMode: manifest.recoveryMode ?? "manual",
+    handoffMode: manifest.handoffMode ?? "explicit",
   };
 }
 

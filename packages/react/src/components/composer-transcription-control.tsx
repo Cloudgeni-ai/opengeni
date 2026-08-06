@@ -35,10 +35,12 @@ export type ComposerTranscriptionMessages = {
   stop: string;
   cancel: string;
   retry: string;
+  pauseRetrying: string;
   requestingPermission: string;
   recording: string;
   saving: string;
   transcribing: string;
+  retrying: string;
   recovered: string;
   recoveredTranscript: string;
   insertRecoveredTranscript: string;
@@ -61,10 +63,12 @@ const defaultMessages: ComposerTranscriptionMessages = {
   stop: "Stop and transcribe",
   cancel: "Cancel recording",
   retry: "Retry voice input",
+  pauseRetrying: "Pause automatic retry",
   requestingPermission: "Requesting microphone…",
   recording: "Recording. Press Escape to cancel.",
   saving: "Saving audio locally…",
   transcribing: "Transcribing…",
+  retrying: "Recording saved. Retrying automatically…",
   recovered: "Recording recovered and saved locally.",
   recoveredTranscript: "Transcript saved locally. Check your draft before inserting.",
   insertRecoveredTranscript: "Insert saved transcript",
@@ -138,6 +142,7 @@ export function ComposerTranscriptionControl({
     createOwnerId,
   });
   const { status } = transcription;
+  const retrying = status === "retrying";
 
   const cancelTranscription = transcription.cancel;
   useEffect(() => {
@@ -153,7 +158,7 @@ export function ComposerTranscriptionControl({
     status === "transcribing";
   const recoverable =
     transcription.hasRecoverableRecording &&
-    (status === "recovered" || status === "transcript-ready" || status === "error");
+    (retrying || status === "recovered" || status === "transcript-ready" || status === "error");
   const savedTranscript = status === "transcript-ready" && transcription.savedTranscript !== null;
   const unavailableMessage = composer.disabled
     ? messages.unavailableDisabled
@@ -175,13 +180,15 @@ export function ComposerTranscriptionControl({
           ? messages.saving
           : status === "transcribing"
             ? messages.transcribing
-            : status === "recovered"
-              ? messages.recovered
-              : status === "transcript-ready"
-                ? messages.recoveredTranscript
-                : status === "error"
-                  ? (errorMessage ?? messages.errorUnknown)
-                  : unavailableMessage;
+            : retrying
+              ? messages.retrying
+              : status === "recovered"
+                ? messages.recovered
+                : status === "transcript-ready"
+                  ? messages.recoveredTranscript
+                  : status === "error"
+                    ? (errorMessage ?? messages.errorUnknown)
+                    : unavailableMessage;
 
   function start(event: MouseEvent<HTMLButtonElement>) {
     if (unavailableMessage) {
@@ -220,20 +227,36 @@ export function ComposerTranscriptionControl({
                   <span className="max-w-44 truncate text-og-xs text-og-fg-muted max-sm:max-w-28">
                     {savedTranscript
                       ? (errorMessage ?? messages.recoveredTranscript)
-                      : status === "error"
-                        ? (errorMessage ?? messages.errorRetryable)
-                        : messages.recovered}
+                      : retrying
+                        ? messages.retrying
+                        : status === "error"
+                          ? (errorMessage ?? messages.errorRetryable)
+                          : messages.recovered}
                   </span>
-                  <Tip tip={savedTranscript ? messages.insertRecoveredTranscript : messages.retry}>
+                  <Tip
+                    tip={
+                      savedTranscript
+                        ? messages.insertRecoveredTranscript
+                        : retrying
+                          ? messages.pauseRetrying
+                          : messages.retry
+                    }
+                  >
                     <button
                       type="button"
                       onClick={() =>
                         savedTranscript
                           ? void transcription.insertSavedTranscript()
-                          : transcription.retry()
+                          : retrying
+                            ? transcription.cancel()
+                            : transcription.retry()
                       }
                       aria-label={
-                        savedTranscript ? messages.insertRecoveredTranscript : messages.retry
+                        savedTranscript
+                          ? messages.insertRecoveredTranscript
+                          : retrying
+                            ? messages.pauseRetrying
+                            : messages.retry
                       }
                       className={cn(
                         "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
@@ -243,6 +266,8 @@ export function ComposerTranscriptionControl({
                     >
                       {savedTranscript ? (
                         <ClipboardPasteIcon className="size-3.5" />
+                      ) : retrying ? (
+                        <SquareIcon className="size-3.5" />
                       ) : (
                         <RefreshCwIcon className="size-3.5" />
                       )}
