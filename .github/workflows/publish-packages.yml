@@ -1,0 +1,148 @@
+name: Publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact versioned main commit to publish"
+        required: true
+        type: string
+      expected_packages:
+        description: "Exact comma-separated package@version set intended for publication"
+        required: true
+        type: string
+      confirm:
+        description: "Publish every unpublished package version at this commit"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: publish-packages-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  publish:
+    if: ${{ inputs.confirm }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      checks: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact versioned main
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -n "$EXPECTED_PACKAGES"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$GITHUB_REF" = "refs/heads/main"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "source_sha must be reachable from current main" >&2
+            exit 1
+          }
+          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
+            echo "Version PR has not consumed every changeset" >&2
+            exit 1
+          fi
+
+      - name: Require successful protected source CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          checks="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100")"
+          for name in "Typecheck and unit tests" "Deployment artifacts" "Workload image builds"; do
+            jq -e \
+              --arg name "$name" \
+              '[.check_runs[]
+                | select(.name == $name and .app.slug == "github-actions")]
+                | if length == 0 then false
+                  else max_by(.id)
+                    | .status == "completed" and .conclusion == "success"
+                  end' \
+              <<<"$checks" >/dev/null || {
+                echo "required exact-source check is not successful: $name" >&2
+                exit 1
+              }
+          done
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+
+      - name: Verify publishable closure
+        run: |
+          bun run typecheck
+          bun run build:packages
+          bun scripts/publish-closure-guard.ts
+          bun run test:publish-consumer
+          bun run test:runtime-embedding-consumer
+
+      - name: Plan exact package publication
+        id: package-plan
+        env:
+          OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_PHASE: plan
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
+        run: bun scripts/verify-release-packages.ts
+
+      - name: Retain pre-publication package plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-publication-plan-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/release-packages-plan.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.package-plan.outputs.needs_publish == 'true'
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish unpublished package versions
+        if: steps.package-plan.outputs.needs_publish == 'true'
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d
+        with:
+          publish: bun run release:publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Reconcile exact registry package identity
+        env:
+          OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_PHASE: verify
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
+        run: bun scripts/verify-release-packages.ts
+
+      - name: Retain verified package identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-publication-verified-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/release-packages-verified.json
+          if-no-files-found: error
+          retention-days: 90

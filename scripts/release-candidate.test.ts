@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   buildReleaseCandidateReceipt,
   deploymentImageDigests,
+  parseReleaseCandidateArgs,
   RELEASE_IMAGE_NAMES,
   RELEASE_IMAGE_ROLES,
   releaseImageNames,
   releaseBomImages,
   validateReleaseCandidateReceipt,
+  verifyReceiptFile,
   type ReleaseCandidateReceipt,
   type ReleaseImageRole,
 } from "./release-candidate";
@@ -36,6 +41,82 @@ const producer = buildReleaseProducerMetadata({
 });
 
 describe("release candidate receipt", () => {
+  test("parses the embedded-distribution package expectation, including an empty plan", () => {
+    expect(
+      parseReleaseCandidateArgs([
+        "--verify",
+        "evidence/release-candidate.json",
+        "--source-sha",
+        sourceSha,
+        "--expected-packages",
+        "@opengeni/react@0.18.0,@opengeni/sdk@0.18.0",
+      ]),
+    ).toEqual({
+      verifyPath: "evidence/release-candidate.json",
+      sourceSha,
+      expectedPackages: "@opengeni/react@0.18.0,@opengeni/sdk@0.18.0",
+    });
+    expect(
+      parseReleaseCandidateArgs([
+        "--verify",
+        "evidence/release-candidate.json",
+        "--source-sha",
+        sourceSha,
+        "--expected-packages",
+        "",
+      ]),
+    ).toEqual({
+      verifyPath: "evidence/release-candidate.json",
+      sourceSha,
+      expectedPackages: "",
+    });
+    expect(() => parseReleaseCandidateArgs(["--expected-packages", ""])).toThrow(
+      "--expected-packages requires --verify",
+    );
+    expect(() =>
+      parseReleaseCandidateArgs([
+        "--verify",
+        "evidence/release-candidate.json",
+        "--source-sha",
+        sourceSha,
+        "--expected-packages",
+      ]),
+    ).toThrow("--expected-packages requires a value");
+  });
+
+  test("binds the CLI package expectation to the receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opengeni-release-candidate-"));
+    const path = join(directory, "release-candidate.json");
+    const receipt = buildReleaseCandidateReceipt({
+      sourceSha,
+      sourceTreeSha,
+      packages,
+      imageDigests,
+      chart,
+      producer,
+    });
+    await writeFile(path, `${JSON.stringify(receipt)}\n`, "utf8");
+
+    try {
+      await expect(
+        verifyReceiptFile({
+          path,
+          sourceSha,
+          expectedPackages: "@opengeni/react@0.18.0,@opengeni/sdk@0.18.0",
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        verifyReceiptFile({
+          path,
+          sourceSha,
+          expectedPackages: "@opengeni/sdk@0.19.0",
+        }),
+      ).rejects.toThrow("package plan");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("uses the product chart version independently of the npm package plan", () => {
     const receipt = buildReleaseCandidateReceipt({
       sourceSha,

@@ -37,7 +37,7 @@ A rig version's `defaultVariableSetIds` are decrypted and merged in listed order
 deployment allowlist < git identity < rig default variable sets < workspace variable set < run-scoped GitHub auth
 ```
 
-A later entry wins on a name collision, so a session's own variable-set attachment always overrides a rig default with the same variable name. See [`variable-sets.md`](variable-sets.md) for the rest of that layering (redaction, reserved names, the managed-sandbox-only scope).
+A later entry wins on a name collision, so a session's own variable-set attachment always overrides a rig default with the same variable name. See [`variable-sets.md`](variable-sets.md) for the rest of that layering (permissioned secret access, exact content, reserved names, and the managed-sandbox-only scope).
 
 ### Agent-visible doctrine
 
@@ -125,7 +125,7 @@ The first-party MCP server exposes rig tools, gated by the same permissions as t
   version/change detail routes above remain the exact retained-detail surface.
 - `rig_propose_change` (`rigs:use`) — propose an additive `setup_append` change (the exact command that already worked in this sandbox) and start verification. On a session-scoped call this attributes the change to `session:<sessionId>` rather than the caller's user subject.
 - `rig_verify` (`rigs:use`) — trigger verification: pass `changeId` to (re-)verify a proposed change, or omit it to re-verify the active version's checks.
-- `rig_promote` (`rigs:manage`) — promote a verified `definition_edit` change to a new active version. **Not registered for a default sandboxed-agent session**: the worker's default first-party delegated token carries `rigs:use` but not `rigs:manage`, so an agent can propose and get changes verified but can never itself promote a `definition_edit` — the same "agents cannot self-escalate" pattern as variable-set management (see [`variable-sets.md`](variable-sets.md#mcp-surface)). A `setup_append` change needs no promote tool at all: a green clean-replay run merges it automatically.
+- `rig_promote` (`rigs:manage`) — promote a verified `definition_edit` change to a new active version. **Not registered for a default sandboxed-agent session**: the worker's default first-party delegated token carries `rigs:use` but not `rigs:manage`, so an agent can propose and get changes verified but cannot itself promote a `definition_edit`. An explicitly scoped owner session may carry `rigs:manage`. A `setup_append` change needs no promote tool at all: a green clean-replay run merges it automatically.
 
 ## Deletion and rollback semantics
 

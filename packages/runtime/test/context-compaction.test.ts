@@ -19,25 +19,37 @@ import {
   USER_MESSAGE_TRUNCATION_MARKER,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  buildRemoteCompactionV2PromptInput,
+  buildRemoteV2ReplacementHistory,
   buildSummaryItem,
+  extractRemoteCompactionV2OutputItem,
+  isRemoteCompactionItem,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
   decideCompaction,
   estimateCompleteModelInput,
+  estimateItemTokenBreakdown,
   estimateItemTokens,
+  estimateOpaqueEncryptedTokens,
+  estimateNativeImageTokens,
   estimateSerializedValueTokens,
   estimateTextTokens,
+  opaqueEncryptedContentLength,
   findCompactionNeededError,
   compactionReplacementFingerprint,
   latestCompactionReplacementFingerprint,
   isCompactionSummary,
-  isEphemeralInternalContext,
   isUserMessage,
   prepareCompactionPromptInput,
   renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
-import { extractResponseOutputText, summarizeForCompaction } from "../src/index";
+import {
+  extractResponseOutputText,
+  requestRemoteCompactionV2,
+  serializedToolsForRemoteCompaction,
+  summarizeForCompaction,
+} from "../src/index";
 import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
 import { testSettings } from "@opengeni/testing";
 
@@ -87,6 +99,44 @@ function hasLoneSurrogate(text: string): boolean {
     }
   }
   return false;
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffff_ffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb8_8320 : 0);
+    }
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
+}
+
+function pngIhdrPrefix(width: number, height: number, trailingBytes = 0): Buffer {
+  const bytes = Buffer.alloc(33 + trailingBytes);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write("IHDR", 12, 4, "ascii");
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  bytes[24] = 8;
+  bytes[25] = 6;
+  bytes.writeUInt32BE(crc32(bytes.subarray(12, 29)), 29);
+  return bytes;
+}
+
+function pngDataUrl(bytes: Uint8Array): string {
+  return `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`;
+}
+
+function expectBoundedPngFallback(bytes: Uint8Array): void {
+  expect(estimateNativeImageTokens({ source: pngDataUrl(bytes), detail: "high" })).toMatchObject({
+    tokens: 4_096,
+    width: null,
+    height: null,
+    detail: "high",
+    reason: "bounded_fallback",
+  });
 }
 
 const WINDOW = 1_050_000;
@@ -174,7 +224,7 @@ describe("single portable compaction threshold", () => {
     ).toBe(750);
   });
 
-  test("never lets a stale provider count hide larger active history", () => {
+  test("does not let a local history estimate override provider accounting", () => {
     const items = [bigUser(1_000_000, "x")];
     const decision = decideCompaction({
       items,
@@ -182,11 +232,11 @@ describe("single portable compaction threshold", () => {
       contextWindowTokens: WINDOW,
       contextReservedOutputTokens: RESERVED_OUTPUT,
     });
-    expect(decision.signalTokens).toBeGreaterThan(1_000_000);
-    expect(decision.shouldCompact).toBe(true);
+    expect(decision.signalTokens).toBe(10);
+    expect(decision.shouldCompact).toBe(false);
   });
 
-  test("uses the conservative local estimate only when there is no provider signal yet", () => {
+  test("waits for a provider result when there is no provider signal yet", () => {
     const items = [bigUser(THRESHOLD + 1, "x")];
     const decision = decideCompaction({
       items,
@@ -194,9 +244,9 @@ describe("single portable compaction threshold", () => {
       contextWindowTokens: WINDOW,
       contextReservedOutputTokens: RESERVED_OUTPUT,
     });
-    expect(decision.signalTokens).toBeGreaterThan(THRESHOLD);
-    expect(decision.shouldCompact).toBe(true);
-    expect(decision.reason).toBe("above_threshold");
+    expect(decision.signalTokens).toBe(0);
+    expect(decision.shouldCompact).toBe(false);
+    expect(decision.reason).toBe("below_threshold");
   });
 
   test("compacts when the token signal reaches the threshold exactly", () => {
@@ -244,18 +294,122 @@ describe("complete outgoing model-input accounting", () => {
     );
   });
 
-  test("counts history, instructions, and tool schemas before a provider anchor exists", () => {
-    const estimate = estimateCompleteModelInput({
-      current: {
-        input: [user("u".repeat(400))],
-        instructionsTokens: 700,
-        toolSchemaTokens: 900,
-      },
+  test("counts opaque compaction blobs with the Codex encrypted heuristic, not JSON size", () => {
+    const blob = "A".repeat(80_000);
+    const item = { type: "compaction", encrypted_content: blob, summary: "optional" };
+    const naive = estimateTextTokens(JSON.stringify(item));
+    const estimate = estimateItemTokenBreakdown(item);
+    // Codex: visible_bytes = len*3/4 - 650; tokens = ceil(bytes/4)
+    const expected = Math.ceil(Math.max(0, Math.floor((80_000 * 3) / 4) - 650) / 4);
+    expect(estimate.totalTokens).toBe(expected);
+    expect(estimate.totalTokens).toBeLessThan(naive);
+    expect(opaqueEncryptedContentLength(item)).toBe(80_000);
+  });
+
+  test("counts opaque reasoning.encrypted_content with the same Codex heuristic", () => {
+    const blob = "B".repeat(10_000);
+    const item = {
+      type: "reasoning",
+      providerData: { encrypted_content: blob },
+    };
+    expect(estimateItemTokens(item)).toBe(estimateOpaqueEncryptedTokens(10_000));
+    expect(estimateItemTokens(item)).toBeLessThan(estimateTextTokens(JSON.stringify(item)));
+  });
+
+  test("counts a 1280x800 typed PNG as a native image instead of base64 text", () => {
+    const image = pngDataUrl(pngIhdrPrefix(1280, 800, 700_000));
+    const item = {
+      type: "function_call_result",
+      callId: "shot-1",
+      output: [{ type: "input_image", image, detail: "high" }],
+    };
+
+    const estimate = estimateItemTokenBreakdown(item);
+    expect(estimate.imageCount).toBe(1);
+    expect(estimate.imageFallbackCount).toBe(0);
+    expect(estimate.imageTokens).toBeGreaterThan(500);
+    expect(estimate.imageTokens).toBeLessThan(5_000);
+    expect(estimate.totalTokens).toBeLessThan(5_500);
+    expect(estimate.totalTokens).toBeLessThan(estimateTextTokens(JSON.stringify(item)));
+  });
+
+  test("trusts PNG geometry when the complete IHDR chunk has a valid CRC32", () => {
+    expect(
+      estimateNativeImageTokens({ source: pngDataUrl(pngIhdrPrefix(1280, 800)), detail: "high" }),
+    ).toMatchObject({
+      width: 1280,
+      height: 800,
+      reason: "dimensions",
     });
-    expect(estimate.source).toBe("complete_estimate");
-    expect(estimate.tokens).toBe(
-      estimate.inputTokens + estimate.instructionsTokens + estimate.toolSchemaTokens,
+  });
+
+  test("base64 length does not linearly change an image estimate with identical geometry/detail", () => {
+    const short = pngDataUrl(pngIhdrPrefix(1280, 800));
+    const long = pngDataUrl(pngIhdrPrefix(1280, 800, 700_000));
+    const shortEstimate = estimateItemTokens({ type: "input_image", image: short, detail: "high" });
+    const longEstimate = estimateItemTokens({ type: "input_image", image: long, detail: "high" });
+
+    expect(longEstimate).toBe(shortEstimate);
+  });
+
+  test("uses the bounded fallback for a PNG with only a partial signature", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.fill(0, 4, 8);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback when the first PNG chunk is not IHDR", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.write("IDAT", 12, 4, "ascii");
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback for a truncated PNG IHDR chunk", () => {
+    expectBoundedPngFallback(pngIhdrPrefix(1280, 800).subarray(0, 32));
+  });
+
+  test("uses the bounded fallback for a corrupt PNG IHDR chunk length", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.writeUInt32BE(0xffff_ffff, 8);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback for the reviewer's complete IHDR with a zero CRC", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.writeUInt32BE(0, 29);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback when an otherwise valid PNG IHDR fixture is corrupted", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes[16] = (bytes[16] ?? 0) ^ 0x01;
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses an explicit bounded fallback for typed image references without geometry", () => {
+    expect(estimateNativeImageTokens({ source: { id: "file_123" }, detail: "auto" })).toMatchObject(
+      {
+        tokens: 4_096,
+        width: null,
+        height: null,
+        detail: "auto",
+        reason: "bounded_fallback",
+      },
     );
+  });
+
+  test("continues to count a data URL as text outside a typed image context", () => {
+    const short = estimateItemTokens({
+      type: "message",
+      role: "user",
+      content: "data:image/png;base64,AAAA",
+    });
+    const long = estimateItemTokens({
+      type: "message",
+      role: "user",
+      content: `data:image/png;base64,${"A".repeat(100_000)}`,
+    });
+    expect(long).toBeGreaterThan(short + 20_000);
   });
 
   test("anchors to provider total tokens and adds every item after the last model output", () => {
@@ -308,16 +462,6 @@ describe("complete outgoing model-input accounting", () => {
       providerRequestFootprint: prior,
     });
     expect(estimate.tokens).toBe(10_100);
-  });
-
-  test("treats an anchor without a model-generated boundary as unbound at the caller", () => {
-    const current = {
-      input: [user("only user input")],
-      instructionsTokens: 10,
-      toolSchemaTokens: 20,
-    };
-    const estimate = estimateCompleteModelInput({ current });
-    expect(estimate.source).toBe("complete_estimate");
   });
 });
 
@@ -400,20 +544,15 @@ describe("codex-parity rebuild", () => {
     expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
   });
 
-  test("ephemeral internal context never becomes permanent user history", () => {
+  test("durable system input participates in the explicit compaction transition", () => {
     const internalContext = {
       type: "message",
       role: "system",
       content: "continue the same inference",
     };
-    expect(isEphemeralInternalContext(internalContext)).toBe(true);
-
-    const rebuilt = buildCompactionReplacementHistory(
-      [user("real request"), internalContext],
-      "summary",
-    );
-    expect(rebuilt).toHaveLength(2);
-    expect(rebuilt[0]).toMatchObject(user("real request"));
+    const prepared = prepareCompactionPromptInput([user("real request"), internalContext], 10_000);
+    expect(prepared.input).toContainEqual(internalContext);
+    expect(prepared.input.at(-1)).toMatchObject({ role: "user", content: COMPACTION_PROMPT });
   });
 
   test("drops images from retained user messages", () => {
@@ -948,5 +1087,206 @@ describe("extractResponseOutputText", () => {
   test("returns empty string for unknown shapes", () => {
     expect(extractResponseOutputText(null)).toBe("");
     expect(extractResponseOutputText({})).toBe("");
+  });
+});
+
+describe("Codex remote compaction v2 helpers", () => {
+  test("appends compaction_trigger via SDK-passthrough unknown item", () => {
+    const input = buildRemoteCompactionV2PromptInput([user("a"), assistant("b")]);
+    expect(input.at(-1)).toEqual({
+      type: "unknown",
+      providerData: { type: "compaction_trigger" },
+    });
+    expect(input.slice(0, -1)).toEqual([user("a"), assistant("b")]);
+  });
+
+  test("extracts exactly one compaction output item", () => {
+    const item = extractRemoteCompactionV2OutputItem({
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+        { type: "compaction", encrypted_content: "opaque-blob" },
+      ],
+    });
+    expect(isRemoteCompactionItem(item)).toBe(true);
+    expect(item.encrypted_content).toBe("opaque-blob");
+  });
+
+  test("rejects missing or multiple compaction items", () => {
+    expect(() => extractRemoteCompactionV2OutputItem({ output: [] })).toThrow(
+      EmptyCompactionSummaryError,
+    );
+    expect(() =>
+      extractRemoteCompactionV2OutputItem({
+        output: [
+          { type: "compaction", encrypted_content: "a" },
+          { type: "compaction", encrypted_content: "b" },
+        ],
+      }),
+    ).toThrow(EmptyCompactionSummaryError);
+  });
+
+  test("builds replacement from retained messages plus compaction item", () => {
+    const history = buildRemoteV2ReplacementHistory(
+      [
+        user("old"),
+        { type: "message", role: "developer", content: "dev" },
+        assistant("drop-me"),
+        user("keep"),
+      ],
+      { type: "compaction", encrypted_content: "blob", summary: "optional" },
+    );
+    expect(history.at(-1)).toEqual({
+      type: "compaction",
+      encrypted_content: "blob",
+      summary: "optional",
+    });
+    expect(history.some((item) => item.role === "assistant")).toBe(false);
+    expect(history.some((item) => item.role === "user" && item.content === "keep")).toBe(true);
+    expect(history.some((item) => item.role === "developer")).toBe(true);
+  });
+
+  test("remote_v2 retain keeps input_image parts (portable strips them)", () => {
+    const withImage = userParts([
+      { type: "input_text", text: "look" },
+      { type: "input_image", image_url: "data:image/png;base64,abc" },
+    ]);
+    const remote = buildRemoteV2ReplacementHistory([withImage], {
+      type: "compaction",
+      encrypted_content: "blob",
+    });
+    expect(remote[0]).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text", text: "look" },
+        { type: "input_image", image_url: "data:image/png;base64,abc" },
+      ],
+    });
+    const portable = buildCompactionReplacementHistory([withImage], "summary");
+    expect((portable[0] as { content?: unknown }).content).toEqual([
+      { type: "input_text", text: "look" },
+    ]);
+  });
+
+  test("remote_v2 retain keeps images when truncating oversized text", () => {
+    const long = "x".repeat(300_000);
+    const history = buildRemoteV2ReplacementHistory(
+      [
+        userParts([
+          { type: "input_text", text: long },
+          { type: "input_image", image_url: "data:image/png;base64,abc" },
+        ]),
+      ],
+      { type: "compaction", encrypted_content: "blob" },
+    );
+    const content = (history[0] as { content?: unknown[] }).content;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content?.some((part) => (part as { type?: string }).type === "input_image")).toBe(true);
+    const textPart = content?.find((part) => (part as { type?: string }).type === "input_text") as
+      | { text?: string }
+      | undefined;
+    expect(typeof textPart?.text).toBe("string");
+    expect((textPart?.text ?? "").length).toBeLessThan(long.length);
+  });
+
+  test("serializedToolsForRemoteCompaction keeps function schemas and uninitialized computer", async () => {
+    const tools = await serializedToolsForRemoteCompaction({
+      getAllTools: async () =>
+        [
+          {
+            type: "function",
+            name: "shell",
+            description: "run",
+            parameters: { type: "object", properties: {} },
+            strict: false,
+            deferLoading: false,
+          },
+          {
+            type: "computer",
+            name: "computer",
+            computer: {},
+          },
+        ] as never,
+    });
+    expect(tools).toEqual([
+      {
+        type: "function",
+        name: "shell",
+        description: "run",
+        parameters: { type: "object", properties: {} },
+        strict: false,
+        deferLoading: false,
+      },
+      { type: "computer", name: "computer" },
+    ]);
+  });
+
+  test("serializedToolsForRemoteCompaction preserves Symbol-backed namespaces", async () => {
+    const namespaced = {
+      type: "function",
+      name: "search",
+      description: "find",
+      parameters: { type: "object", properties: {} },
+      strict: true,
+    };
+    Object.defineProperty(namespaced, Symbol("functionToolNamespace"), {
+      value: "docs",
+      enumerable: false,
+    });
+    Object.defineProperty(namespaced, Symbol("functionToolNamespaceDescription"), {
+      value: "Docs tools",
+      enumerable: false,
+    });
+    const tools = await serializedToolsForRemoteCompaction({
+      getAllTools: async () => [namespaced] as never,
+    });
+    expect(tools).toEqual([
+      {
+        type: "function",
+        name: "search",
+        description: "find",
+        parameters: { type: "object", properties: {} },
+        strict: true,
+        namespace: "docs",
+        namespaceDescription: "Docs tools",
+      },
+    ]);
+  });
+
+  test("requestRemoteCompactionV2 rejects empty system instructions (cache prefix)", async () => {
+    const client = {
+      responses: { create: async () => ({}) },
+    } as unknown as OpenAI;
+    await expect(
+      requestRemoteCompactionV2(testSettings(), [user("hi")], {
+        client,
+        model: "gpt-5.6-sol",
+        systemInstructions: "   ",
+      }),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+  });
+
+  test("requestRemoteCompactionV2 keeps untrimmed instructions bytes", async () => {
+    const padded = "\nkeep me\n";
+    let seenInstructions: unknown;
+    const client = {
+      responses: {
+        create: async (body: { instructions?: unknown }) => {
+          seenInstructions = body.instructions;
+          return {
+            id: "resp_test",
+            status: "completed",
+            output: [{ type: "compaction", encrypted_content: "blob" }],
+          };
+        },
+      },
+    } as unknown as OpenAI;
+    await requestRemoteCompactionV2(testSettings(), [user("hi")], {
+      client,
+      model: "gpt-5.6-sol",
+      systemInstructions: padded,
+    });
+    // Ordinary turns keep leading/trailing whitespace via normalizeInstructions;
+    // compact must not `.trim()` the payload or the cache prefix diverges.
+    expect(seenInstructions).toBe(padded);
   });
 });

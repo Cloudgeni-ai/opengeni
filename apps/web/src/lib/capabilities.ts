@@ -3,44 +3,12 @@ import type {
   CapabilityKind,
   CapabilitySource,
   ConnectionMetadata,
+  ConnectionOwnership,
   CreateCapabilityInput,
+  SocialConnection,
 } from "@/types";
 
 export type CapabilityFilter = "all" | CapabilityKind;
-
-/** Nice labels for the built-in (first-party) MCP servers. */
-const FIRST_PARTY_MCP_LABELS: Record<string, string> = {
-  opengeni: "OpenGeni",
-  files: "Files",
-  docs: "Docs",
-};
-
-// domain-slug suffixes that are really a TLD glued on by the slugifier
-// (linear.app -> "linear-app"); dropped so the chip reads "Linear", not "Linear App".
-const DOMAIN_TLD_SUFFIX = /-(app|com|io|org|dev|ai|co|net|so|xyz|cloud|sh)$/i;
-
-/**
- * Human label for an MCP tool/capability id shown on a message chip. Built-in
- * servers get their proper name; catalog-imported ids
- * (`cap-integrations-sh-linear-app-<hash>-<hash>`) are stripped of their
- * prefix + trailing hash segments and title-cased to the provider ("Linear").
- * Best-effort by design — a value we can't parse is returned as-is rather than
- * shown as raw id soup where avoidable.
- */
-export function capabilityChipLabel(id: string): string {
-  if (FIRST_PARTY_MCP_LABELS[id]) return FIRST_PARTY_MCP_LABELS[id];
-  let slug = id.replace(/^(cap|mcp)-/, "").replace(/^integrations-sh-/, "");
-  // drop the trailing opaque hash segments the id builder appends
-  slug = slug.replace(/(-[a-z0-9]{5,}){1,3}$/i, "");
-  slug = slug.replace(DOMAIN_TLD_SUFFIX, "");
-  const label = slug
-    .split("-")
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ")
-    .trim();
-  return label || id;
-}
 
 // Human copy for every taxonomy value that used to leak enum slugs into the UI
 // (doctrine: no internal taxonomy in user-facing labels). Codes appear at most
@@ -232,10 +200,17 @@ export type RequiredHeaderField = {
 
 export type CapabilityConnectPlan =
   | { mode: "enable" }
+  | { mode: "social_oauth"; provider: "x" | "reddit" }
   | { mode: "oauth"; providerDomain: string; mcpUrl: string | null }
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
+  if (item.surfaceType === "first_party_social") {
+    const provider = stringValue(item.metadata.provider);
+    if (provider === "x" || provider === "reddit") {
+      return { mode: "social_oauth", provider };
+    }
+  }
   // Non-runtime kinds and MCPs with no auth just enable directly.
   if (item.kind !== "mcp") {
     return { mode: "enable" };
@@ -263,9 +238,27 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
 /** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */
 export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
   const plan = capabilityConnectPlan(item);
-  if (plan.mode === "oauth") return "OAuth";
+  if (plan.mode === "oauth" || plan.mode === "social_oauth") return "OAuth";
   if (plan.mode === "api_key") return "API key";
   return null;
+}
+
+export function preferredSocialConnection(
+  connections: SocialConnection[],
+  provider: "x" | "reddit",
+): SocialConnection | null {
+  const statusRank = (status: SocialConnection["status"]): number =>
+    status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
+  return (
+    connections
+      .filter((connection) => connection.provider === provider)
+      .sort(
+        (left, right) =>
+          statusRank(left.status) - statusRank(right.status) ||
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          left.id.localeCompare(right.id),
+      )[0] ?? null
+  );
 }
 
 function headerField(name: string): RequiredHeaderField {
@@ -356,14 +349,13 @@ export type ConnectionHealth =
   | { state: "attention"; connection: ConnectionMetadata | null };
 
 /**
- * Health of an enabled item, resolved BY the installation's connection id (not
- * by domain). `loaded` is whether the connections list actually loaded: no ref →
- * nothing to worry about; ref present but connections did NOT load → unverified
- * (stay neutral, never alarm); loaded and the row is gone or inactive → needs
- * attention (the row may be null if it was deleted); loaded and active → connected.
+ * Health of an enabled item. Workspace bindings resolve by their exact id;
+ * subject bindings intentionally store no id and resolve only among the current
+ * caller's visible personal rows by provider and kind. `loaded` distinguishes a
+ * failed connection-list read from a genuinely missing or inactive row.
  *
  * The `loaded` gate matters because listConnections needs a distinct
- * `connections:read` scope: a grant with catalog access but not that scope 403s,
+ * `connections:read` scope: a grant with catalog access but not that sctracking-403s,
  * and a failed load must not read as "every connection was deleted" and paint
  * healthy integrations amber.
  */
@@ -373,9 +365,18 @@ export function connectionHealth(
   loaded: boolean,
 ): ConnectionHealth {
   const ref = installedConnectionRef(item);
-  if (!ref?.connectionId) return { state: "none" };
+  if (!ref) return { state: "none" };
   if (!loaded) return { state: "unverified" };
-  const connection = connections.find((candidate) => candidate.id === ref.connectionId) ?? null;
+  const connection =
+    ref.subjectScope === "subject"
+      ? (connections.find(
+          (candidate) =>
+            candidate.subjectId !== null &&
+            normalizeProviderDomain(candidate.providerDomain) ===
+              normalizeProviderDomain(ref.providerDomain) &&
+            candidate.kind === ref.kind,
+        ) ?? null)
+      : (connections.find((candidate) => candidate.id === ref.connectionId) ?? null);
   if (!connection || connection.status !== "active") return { state: "attention", connection };
   return { state: "connected", connection };
 }
@@ -388,8 +389,8 @@ export function connectionHealth(
  * surviving row to reuse, or null when it was deleted (repair mints a fresh one).
  */
 export type ReconnectPlan =
-  | { kind: "oauth"; connectionId: string | null }
-  | { kind: "api_key"; connectionId: string | null };
+  | { kind: "oauth"; connectionId: string | null; ownership: ConnectionOwnership }
+  | { kind: "api_key"; connectionId: string | null; ownership: ConnectionOwnership };
 
 export function capabilityReconnectPlan(
   item: CapabilityCatalogItem,
@@ -400,8 +401,16 @@ export function capabilityReconnectPlan(
   if (!ref) return null;
   const connectionId = health.connection?.id ?? null;
   return ref.kind === "oauth2"
-    ? { kind: "oauth", connectionId }
-    : { kind: "api_key", connectionId };
+    ? {
+        kind: "oauth",
+        connectionId,
+        ownership: ref.subjectScope === "subject" ? "personal" : "workspace",
+      }
+    : {
+        kind: "api_key",
+        connectionId,
+        ownership: ref.subjectScope === "subject" ? "personal" : "workspace",
+      };
 }
 
 /** The generic single credential field for an api-key reconnect when the catalog
@@ -442,11 +451,17 @@ export function connectionToReuseForApiKey(
   item: CapabilityCatalogItem,
   connections: ConnectionMetadata[],
   providerDomain: string,
+  ownership: ConnectionOwnership = "workspace",
 ): string | null {
+  const target = normalizeProviderDomain(providerDomain);
+  const matching = connections.find(
+    (connection) =>
+      (ownership === "personal" ? connection.subjectId !== null : connection.subjectId === null) &&
+      connection.kind === "api_key" &&
+      normalizeProviderDomain(connection.providerDomain) === target,
+  );
   return (
-    item.connectionRef?.connectionId ??
-    workspaceConnectionForDomain(connections, providerDomain)?.id ??
-    null
+    (ownership === "workspace" ? item.connectionRef?.connectionId : null) ?? matching?.id ?? null
   );
 }
 
@@ -496,11 +511,60 @@ export function oauthResumeAction(
 ): OAuthResumeAction {
   if (!item) return "missing";
   if (!connectionId) return "no_connection";
-  // An enabled item whose stored ref points at the returned connection was
-  // refreshed in place. A different id (or no stored ref) means the row was
-  // recreated, so re-enable to repoint the installation.
+  // Subject-owned installations are generic by design: whether OAuth refreshed
+  // or recreated the caller's row, the existing provider/kind binding remains
+  // valid and must never be rewritten with a private UUID.
+  if (item.enabled && item.connectionRef?.subjectScope === "subject") return "reconnect";
   if (item.enabled && item.connectionRef?.connectionId === connectionId) return "reconnect";
   return "enable";
+}
+
+/** Generic per-subject OAuth binding; never persist the returned personal row id. */
+export function subjectOAuthConnectionRef(providerDomain: string): {
+  providerDomain: string;
+  kind: "oauth2";
+  subjectScope: "subject";
+} {
+  return { providerDomain, kind: "oauth2", subjectScope: "subject" };
+}
+
+/** Build the capability binding that matches the OAuth row's explicit ownership. */
+export function oauthConnectionRef(
+  ownership: ConnectionOwnership,
+  connectionId: string,
+  providerDomain: string,
+):
+  | ReturnType<typeof subjectOAuthConnectionRef>
+  | {
+      connectionId: string;
+      providerDomain: string;
+      kind: "oauth2";
+      subjectScope: "workspace";
+    } {
+  return ownership === "personal"
+    ? subjectOAuthConnectionRef(providerDomain)
+    : { connectionId, providerDomain, kind: "oauth2", subjectScope: "workspace" };
+}
+
+export function apiKeyConnectionRef(
+  ownership: ConnectionOwnership,
+  connectionId: string,
+  providerDomain: string,
+):
+  | { providerDomain: string; kind: "api_key"; subjectScope: "subject" }
+  | {
+      connectionId: string;
+      providerDomain: string;
+      kind: "api_key";
+      subjectScope: "workspace";
+    } {
+  return ownership === "personal"
+    ? { providerDomain, kind: "api_key", subjectScope: "subject" }
+    : { connectionId, providerDomain, kind: "api_key", subjectScope: "workspace" };
+}
+
+export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {
+  return value === "workspace" || value === "personal" ? value : null;
 }
 
 /** First one or two initials for the logo monogram fallback. */

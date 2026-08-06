@@ -29,8 +29,6 @@ function account(
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
-    connectorNamespaces: null,
-    connectorsCheckedAt: null,
     activeLeaseCount: 0,
     selectionCount: 0,
     lastSelectedAt: null,
@@ -72,6 +70,42 @@ describe("Codex capacity availability diagnostics", () => {
       kind: "available",
       credentialId: "healthy",
       diagnostic: { connectedCount: 3, eligibleCount: 1 },
+    });
+  });
+
+  test("rotation-off capped active account stays unavailable despite a healthy alternate", () => {
+    const resetAt = new Date("2100-01-01T00:00:00.000Z");
+    const context: CodexCapacitySelectionContext = {
+      accounts: [
+        account("active-capped", { primaryUsedPercent: 100, primaryResetAt: resetAt }),
+        account("healthy-alternate"),
+      ],
+      activeCredentialId: "active-capped",
+      rotationEnabled: false,
+      leaseRotationEnabled: false,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "session-rotation-off",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: null,
+    };
+
+    expect(
+      codexCapacityDecision(
+        context,
+        testSettings({
+          codexCredentialLeasingEnabled: true,
+        }),
+      ),
+    ).toMatchObject({
+      kind: "unavailable",
+      earliestResetAt: resetAt,
+      resetKind: "authoritative",
+      diagnostic: { connectedCount: 2, allocatorEnabledCount: 2 },
     });
   });
 

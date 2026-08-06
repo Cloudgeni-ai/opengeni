@@ -7,7 +7,13 @@ import {
   temporalConnectionOptions,
   type Settings,
 } from "@opengeni/config";
-import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  markSessionWorkflowWakeDelivered,
+  type Database,
+  type RuntimeDatabasePostureOptions,
+} from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import {
   createObservability,
@@ -16,6 +22,7 @@ import {
 } from "@opengeni/observability";
 import {
   Connection,
+  isGrpcServiceError,
   ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   Client as TemporalClient,
@@ -30,6 +37,7 @@ import {
   type ActivityDependencies,
 } from "./activities";
 import type {
+  InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
   SignalSessionAttemptQuiesced,
   WakeSessionWorkflowSignal,
@@ -51,7 +59,8 @@ import {
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  turnWorkerConcurrencyLogFields,
+  turnWorkerConcurrencyOptions,
 } from "./concurrency";
 import {
   constructWithOwnedConnection,
@@ -91,6 +100,41 @@ export type WorkerOptions = {
   workflowBundle?: WorkflowBundleOption;
 };
 
+type TemporalActivityLease = {
+  lastHeartbeatTime?: { seconds?: unknown; nanos?: number | null } | null;
+  lastStartedTime?: { seconds?: unknown; nanos?: number | null } | null;
+  activityOptions?: {
+    heartbeatTimeout?: { seconds?: unknown; nanos?: number | null } | null;
+  } | null;
+};
+
+function temporalTimeMs(
+  value: { seconds?: unknown; nanos?: number | null } | null | undefined,
+): number | null {
+  if (value?.seconds === undefined || value.seconds === null) return null;
+  return Number(String(value.seconds)) * 1_000 + Math.floor((value.nanos ?? 0) / 1_000_000);
+}
+
+export function temporalActivityLeaseSettled(
+  pending: TemporalActivityLease | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (!pending) return true;
+  const heartbeatAt =
+    temporalTimeMs(pending.lastHeartbeatTime) ?? temporalTimeMs(pending.lastStartedTime);
+  const heartbeatTimeoutMs = temporalTimeMs(pending.activityOptions?.heartbeatTimeout);
+  return (
+    heartbeatAt !== null && heartbeatTimeoutMs !== null && nowMs >= heartbeatAt + heartbeatTimeoutMs
+  );
+}
+
+/** The exact Temporal workflow run is absent, so it cannot retain an activity. */
+export function temporalWorkflowExecutionNotFound(error: unknown): boolean {
+  // gRPC status code 5 is NOT_FOUND. The typed guard prevents unrelated
+  // provider/HTTP errors carrying a numeric code from proving quiescence.
+  return isGrpcServiceError(error) && error.code === 5;
+}
+
 type WorkerWorkflowDefinition =
   | { workflowBundle: WorkflowBundleOption }
   | { workflowsPath: string };
@@ -129,9 +173,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
     throw new Error("workflowBundle is valid only for the control worker role");
   }
   // Pre-resolve a PRIVATE-registry sandbox image before any turn creates a box.
-  // No-op unless OPENGENI_MODAL_IMAGE_REGISTRY_SECRET + OPENGENI_MODAL_IMAGE_REF are
-  // both set (so non-modal / public-image deployments are byte-unchanged and never
-  // load the modal SDK here). Memoized in the provider, so this runs once per process.
+  // A provider-native OPENGENI_MODAL_IMAGE_ID intentionally bypasses this
+  // registry path and is resolved by ModalImageSelector.fromId at create time.
+  // Otherwise this is a no-op unless the registry secret + logical ref are both
+  // set. Memoized in the provider, so it runs once per process.
   if (options.role === "turn") {
     await retryStartupDependency(
       "Modal private-registry image",
@@ -173,13 +218,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
                 ? { workflowBundle: options.workflowBundle }
                 : resolveOpenGeniWorkflowDefinition()),
               maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+              maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
             }
-          : {}),
+          : turnWorkerConcurrencyOptions(settings)),
         activities,
-        maxConcurrentActivityTaskExecutions:
-          options.role === "turn"
-            ? TURN_WORKER_MAX_CONCURRENT_TURNS
-            : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
         // Cancellation is delivered through an activity heartbeat. The SDK would
         // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
         // making Pause/Steer take roughly a minute even though runAgentTurn emits a
@@ -216,6 +258,7 @@ export async function createWorkerWorkflowSignaler(
 ): Promise<{
   wakeSessionWorkflow: WakeSessionWorkflowSignal;
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
+  inspectSessionAttemptActivity: InspectSessionAttemptActivity;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
@@ -276,6 +319,22 @@ export async function createWorkerWorkflowSignaler(
       // The signalled workflow's DB-only control activity owns committing the
       // receipt and its exact wake revision atomically.
     },
+    inspectSessionAttemptActivity: async ({ workflowId, workflowRunId, activityId }) => {
+      let description;
+      try {
+        description = await connection.workflowService.describeWorkflowExecution({
+          namespace: settings.temporalNamespace,
+          execution: { workflowId, runId: workflowRunId },
+        });
+      } catch (error) {
+        if (temporalWorkflowExecutionNotFound(error)) return "settled";
+        throw error;
+      }
+      const pending = description.pendingActivities?.find(
+        (activity) => activity.activityId === activityId,
+      );
+      return temporalActivityLeaseSettled(pending) ? "settled" : "pending";
+    },
     signalCodexCapacityWorkflow: async ({
       accountId,
       workspaceId,
@@ -307,8 +366,8 @@ export async function createWorkerWorkflowSignaler(
 /**
  * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
  * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
- * sandbox ownership off the activity performs only bounded DB outbox repair;
- * it never reads/terminates sandbox leases.
+ * sandbox ownership off the activity performs bounded DB outbox repair and
+ * read-only observability projections; it never mutates or terminates sandbox leases.
  *
  * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
@@ -472,6 +531,11 @@ export async function registerSessionWorkflowWakeDispatcherSchedule(
 export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependencies"> & {
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
   /**
+   * Exact catalog posture required by the standalone runtime. Embedded hosts
+   * may omit this when they own an equivalent database isolation contract.
+   */
+  databasePosture?: RuntimeDatabasePostureOptions;
+  /**
    * `role-default` registers OpenGeni's internal maintenance schedules on a
    * control worker only. These are engine maintenance schedules, not a host's
    * product-level scheduled-agent jobs. Use `none` when another control worker
@@ -525,6 +589,7 @@ export async function createOpenGeniWorkerService(
     const needsSignaler =
       !options.activityDependencies.wakeSessionWorkflow ||
       !options.activityDependencies.signalSessionAttemptQuiesced ||
+      !options.activityDependencies.inspectSessionAttemptActivity ||
       !options.activityDependencies.signalCodexCapacityWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
@@ -538,10 +603,18 @@ export async function createOpenGeniWorkerService(
     const signalSessionAttemptQuiesced =
       options.activityDependencies.signalSessionAttemptQuiesced ??
       signaler?.signalSessionAttemptQuiesced;
+    const inspectSessionAttemptActivity =
+      options.activityDependencies.inspectSessionAttemptActivity ??
+      signaler?.inspectSessionAttemptActivity;
     const signalCodexCapacityWorkflow =
       options.activityDependencies.signalCodexCapacityWorkflow ??
       signaler?.signalCodexCapacityWorkflow;
-    if (!wakeSessionWorkflow || !signalSessionAttemptQuiesced || !signalCodexCapacityWorkflow) {
+    if (
+      !wakeSessionWorkflow ||
+      !signalSessionAttemptQuiesced ||
+      !inspectSessionAttemptActivity ||
+      !signalCodexCapacityWorkflow
+    ) {
       throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
     }
     workerBundle = await createOpenGeniWorker({
@@ -555,6 +628,7 @@ export async function createOpenGeniWorkerService(
         observability,
         wakeSessionWorkflow,
         signalSessionAttemptQuiesced,
+        inspectSessionAttemptActivity,
         signalCodexCapacityWorkflow,
       },
     });
@@ -588,7 +662,7 @@ export async function createOpenGeniWorkerService(
         settings,
         observability,
         checks: {
-          db: dbReadyCheck(options.activityDependencies.db),
+          db: dbReadyCheck(options.activityDependencies.db, options.databasePosture),
           nats: natsReadyCheck(options.activityDependencies.bus),
           temporal: temporalReadyCheck(workerBundle.connection),
         },
@@ -631,10 +705,14 @@ export async function createOpenGeniWorkerService(
           options.role === "control"
             ? settings.temporalTaskQueue
             : turnTaskQueue(settings.temporalTaskQueue),
-        maxConcurrentActivityTaskExecutions:
-          options.role === "turn"
-            ? TURN_WORKER_MAX_CONCURRENT_TURNS
-            : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+        ...(options.role === "turn"
+          ? turnWorkerConcurrencyLogFields(settings)
+          : {
+              concurrencyMode: "fixed",
+              maxConcurrentTurns: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+              targetCpuUsage: null,
+              targetMemoryUsage: null,
+            }),
         maxConcurrentWorkflowTaskExecutions:
           options.role === "control" ? CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS : 0,
         httpPort: options.http === false ? null : settings.workerHttpPort,
@@ -693,9 +771,19 @@ export async function startWorker() {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
+  const databasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.runtimeDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+  } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   try {
+    await retryStartupDependency(
+      "PostgreSQL runtime posture",
+      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      { ...retryOptions, onRetry },
+    );
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -711,6 +799,7 @@ export async function startWorker() {
     await runOpenGeniWorker({
       role,
       settings,
+      databasePosture,
       activityDependencies: {
         observability,
         db: dbClient.db,

@@ -16,8 +16,8 @@ bun run dev
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
-Typecheck runs on tsgo, not `tsc`. See [`docs/toolchain.md`](docs/toolchain.md) for what runs
-typecheck/lint/format and why.
+Typecheck runs on the pinned stable TypeScript 7 `tsc`. See
+[`docs/toolchain.md`](docs/toolchain.md) for what runs typecheck/lint/format and why.
 
 ## Checks
 
@@ -59,7 +59,7 @@ Release and publishing guidance starts here; executable truth lives in [`package
 Two publish-coherence rules learned the hard way (all versions are 0.x):
 
 - **A minor bump of a package must cascade to its dependents.** Published manifests carry caret ranges (`^0.3.0`), and under 0.x caret semantics a minor bump (0.3.0 → 0.4.0) leaves every dependent's range. Add a patch changeset covering the dependent closure in the same release, or external consumers nest a stale copy of the bumped package.
-- **Publish-mode Release runs only on a Version-Packages-PR merge commit.** Any other push to `main` produces a version-mode run that just refreshes the Version PR. To ship a publish, merge the Version PR deliberately and watch that specific run.
+- **Merging a Version PR only creates versioned source; it does not publish.** Obtain the required native pre-merge review (including a human approval for a bot-authored Version PR), merge deliberately, then run the evidence-bound candidate, acceptance, and release workflows for that exact retained source.
 
 ## Code Style
 

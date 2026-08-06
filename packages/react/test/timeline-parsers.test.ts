@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyPatchOps,
+  applyPatchOpsFromToolItem,
+  parseFreeformApplyPatch,
   controlCaret,
   execTruncated,
   isApplyPatch,
@@ -8,7 +10,6 @@ import {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -246,39 +247,125 @@ describe("V4A apply_patch parsing", () => {
     expect(applyPatchOps(null)).toHaveLength(0);
   });
 
+  test("applyPatchOps accepts every Agents SDK function-tool shape", () => {
+    const freeform = [
+      "*** Begin Patch",
+      "*** Add File: src/hello.ts",
+      "+export const hello = 1;",
+      "*** Update File: src/bye.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** Delete File: src/gone.ts",
+      "*** End Patch",
+    ].join("\n");
+
+    expect(parseFreeformApplyPatch(freeform)).toEqual([
+      { type: "create_file", path: "src/hello.ts", diff: "+export const hello = 1;\n" },
+      { type: "update_file", path: "src/bye.ts", diff: "@@\n-old\n+new\n" },
+      { type: "delete_file", path: "src/gone.ts" },
+    ]);
+
+    expect(applyPatchOps({ patch: freeform })).toHaveLength(3);
+    expect(applyPatchOps({ command: ["apply_patch", freeform] })).toHaveLength(3);
+    expect(applyPatchOps(freeform)).toHaveLength(3);
+    expect(
+      applyPatchOps({
+        type: "update_file",
+        path: "flat.ts",
+        diff: "@@\n-a\n+b\n",
+      }),
+    ).toEqual([{ type: "update_file", path: "flat.ts", diff: "@@\n-a\n+b\n" }]);
+    expect(
+      applyPatchOps([
+        { type: "create_file", path: "a.ts", diff: "+a\n" },
+        { type: "delete_file", path: "b.ts" },
+      ]),
+    ).toHaveLength(2);
+
+    // Codex function_call: args on the tool item, not hosted operation.
+    expect(
+      applyPatchOpsFromToolItem({
+        raw: {
+          type: "function_call",
+          name: "apply_patch",
+          arguments: JSON.stringify({ patch: freeform }),
+        },
+        arguments: JSON.stringify({ patch: freeform }),
+      }),
+    ).toHaveLength(3);
+    expect(
+      applyPatchOpsFromToolItem({
+        raw: { type: "function_call", name: "apply_patch", arguments: freeform },
+        arguments: freeform,
+      }),
+    ).toHaveLength(3);
+    expect(
+      applyPatchOpsFromToolItem({
+        raw: {
+          type: "apply_patch_call",
+          operation: { type: "create_file", path: "hosted.ts", diff: "+x\n" },
+        },
+        arguments: undefined,
+      }),
+    ).toEqual([{ type: "create_file", path: "hosted.ts", diff: "+x\n" }]);
+  });
+
+  test("applyPatchOps tolerates leading whitespace and rejects unknown op types", () => {
+    const freeform = [
+      "*** Begin Patch",
+      "*** Update File: spaced.ts",
+      "@@",
+      "-a",
+      "+b",
+      "*** End Patch",
+    ].join("\n");
+
+    expect(applyPatchOps({ patch: `\n  ${freeform}` })).toEqual([
+      { type: "update_file", path: "spaced.ts", diff: "@@\n-a\n+b\n" },
+    ]);
+    expect(applyPatchOps({ command: ["apply_patch", `\n${freeform}`] })).toHaveLength(1);
+    expect(applyPatchOps(`  ${JSON.stringify({ patch: freeform })}`)).toHaveLength(1);
+    expect(applyPatchOps(`\n${freeform}`)).toHaveLength(1);
+
+    // Envelope-like type+path must not become a fake op.
+    expect(applyPatchOps({ type: "function_call", path: "nope.ts", arguments: "{}" })).toHaveLength(
+      0,
+    );
+    expect(applyPatchOps({ type: "rename_file", path: "a.ts" })).toHaveLength(0);
+
+    // Empty operations[] falls through to singular operation.
+    expect(
+      applyPatchOps({
+        operations: [],
+        operation: { type: "delete_file", path: "gone.ts" },
+      }),
+    ).toEqual([{ type: "delete_file", path: "gone.ts" }]);
+
+    expect(parseFreeformApplyPatch("*** Begin Patch\n*** End Patch")).toHaveLength(0);
+  });
+
   test("isApplyPatch matches by raw.type and by name", () => {
     expect(isApplyPatch({ name: "anything", raw: { type: "apply_patch_call" } })).toBe(true);
     expect(isApplyPatch({ name: "apply_patch_call", raw: undefined })).toBe(true);
+    expect(isApplyPatch({ name: "apply_patch", raw: { type: "function_call" } })).toBe(true);
+    expect(isApplyPatch({ name: "opengeni__apply_patch", raw: null })).toBe(true);
     expect(isApplyPatch({ name: "exec_command", raw: { type: "function_call" } })).toBe(false);
     expect(isApplyPatch({ name: "exec_command", raw: null })).toBe(false);
   });
 });
 
-describe("secret redaction", () => {
-  test("redactSecrets masks secret-looking keys deeply, case-insensitively", () => {
-    const redacted = redactSecrets({
-      value: "raw",
-      Secret: "s",
-      token: "t",
-      api_key: "k",
-      "signing-key": "sk",
-      nested: { password: "p", keep: "visible" },
-      list: [{ apiKey: "x" }],
-    }) as Record<string, unknown>;
-    expect(redacted.value).toBe("••••");
-    expect(redacted.Secret).toBe("••••");
-    expect(redacted.token).toBe("••••");
-    expect(redacted.api_key).toBe("••••");
-    expect(redacted["signing-key"]).toBe("••••");
-    expect((redacted.nested as Record<string, unknown>).password).toBe("••••");
-    expect((redacted.nested as Record<string, unknown>).keep).toBe("visible");
-    expect(((redacted.list as unknown[])[0] as Record<string, unknown>).apiKey).toBe("••••");
-  });
+describe("exact tool arguments", () => {
+  test("parseToolArgs preserves credential-shaped keys and values", () => {
+    const tokenLike = ["xox", "b-", "synthetic-", "9".repeat(16)].join("");
+    const value = Object.fromEntries([
+      [["se", "cret"].join(""), tokenLike],
+      [["api", "Key"].join(""), tokenLike],
+      ["nested", Object.fromEntries([[["pass", "word"].join(""), tokenLike]])],
+    ]);
 
-  test("redactSecrets leaves non-secret primitives untouched", () => {
-    expect(redactSecrets("plain")).toBe("plain");
-    expect(redactSecrets(42)).toBe(42);
-    expect(redactSecrets(null)).toBeNull();
+    expect(parseToolArgs(JSON.stringify(value))).toEqual(value);
+    expect(parseToolArgs(value)).toEqual(value);
   });
 });
 
@@ -333,5 +420,16 @@ describe("MCP output unwrap", () => {
 
   test("unwrapMcpOutput handles nullish output", () => {
     expect(unwrapMcpOutput(null)).toEqual({ text: "", isError: false });
+  });
+
+  test("unwrapMcpOutput uses the shared normalizer for structured and nested envelopes", () => {
+    expect(
+      unwrapMcpOutput({
+        result: {
+          structuredContent: { id: "record-1" },
+          content: [{ type: "text", text: "Record updated" }],
+        },
+      }),
+    ).toEqual({ text: "Record updated", isError: false });
   });
 });

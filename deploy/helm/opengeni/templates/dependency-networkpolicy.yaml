@@ -32,6 +32,10 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: catalog-import
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: temporal
       ports:
         - protocol: TCP
@@ -101,6 +105,10 @@ spec:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: minio-bucket
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: catalog-import
       ports:
         - protocol: TCP
           port: {{ .Values.minio.service.apiPort }}

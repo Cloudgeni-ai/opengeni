@@ -11,6 +11,7 @@ import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
+import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { isAbortError } from "@/lib/session-tools";
 
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
@@ -28,6 +29,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     refreshWorkspaceMcpServers,
   } = context;
   const previousWorkspaceId = useRef<string | null>(null);
+  useGitHubHistoryRefresh(workspaceId, activeWorkspaceId !== null, refreshGitHub);
 
   useEffect(() => {
     if (!activeWorkspaceId) {
@@ -61,20 +63,29 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   ]);
 
   if (!activeWorkspace) {
+    // Still wrap OpenGeniProvider: RailShell mounts SessionList, which needs
+    // the provider. Without it this path hard-crashes the rail (looks like a
+    // "broken server") instead of showing the unavailable panel.
     return (
-      <RailProvider workspaceId={workspaceId}>
-        <RailShell>
-          <ProblemPanel
-            title="Workspace unavailable"
-            description="You don't have access to this workspace."
-            action={
-              <Button asChild type="button" variant="secondary">
-                <Link to="/">Open default workspace</Link>
-              </Button>
-            }
-          />
-        </RailShell>
-      </RailProvider>
+      <OpenGeniProvider
+        client={context.client}
+        workspaceId={workspaceId}
+        onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
+      >
+        <RailProvider workspaceId={workspaceId}>
+          <RailShell>
+            <ProblemPanel
+              title="Workspace unavailable"
+              description="You don't have access to this workspace."
+              action={
+                <Button asChild type="button" variant="secondary">
+                  <Link to="/">Open default workspace</Link>
+                </Button>
+              }
+            />
+          </RailShell>
+        </RailProvider>
+      </OpenGeniProvider>
     );
   }
 

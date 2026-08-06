@@ -12,7 +12,7 @@ import { gitHubTokenMintSelection, gitHubTokenMintSelections } from "../src/acti
 const repo = (overrides: Record<string, unknown>): ResourceRef =>
   ({
     kind: "repository",
-    uri: "github.com/acme/repo",
+    uri: "https://github.com/acme/repo",
     ref: "main",
     ...overrides,
   }) as ResourceRef;

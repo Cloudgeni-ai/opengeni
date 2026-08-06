@@ -14,25 +14,61 @@
 // target lookup), and the selfhosted ControlRpc built over the events bus's NATS
 // request/reply connection.
 
-import type { Settings } from "@opengeni/config";
-import { getSandbox, readActiveSandbox, type Database } from "@opengeni/db";
+import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
+import {
+  advanceWorkspaceGenerationForRetainedProcess,
+  advanceWorkspaceGeneration,
+  getRetainedProcess,
+  retainWorkspaceMutationProcess,
+  retainedProcessSettlementIdentity,
+  settleRetainedProcess,
+  verifyRetainedProcessMutationSettlement,
+  verifyWorkspaceMutationSettlement,
+  getSandbox,
+  markWarmLeaseInstanceLost,
+  readLease,
+  readActiveSandbox,
+  SandboxRetainedProcessPromotionFencedError,
+  type Database,
+  type SandboxWorkspaceMutationAdmission,
+} from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
+  establishSandboxSessionFromEnvelope,
+  isProviderSandboxGoneDuringRoutedOperation,
+  isProviderSandboxNotFoundError,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
+  RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
+  resolveModalCheckpointProviderBindingForSession,
+  sandboxBackendForSdkBackendId,
+  verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
   type RoutableBackendSession,
   type RoutableSandbox,
+  type ResolvedActiveBackend,
+  type RoutingMutationSettlementResult,
+  type RoutingSandboxOperationObserver,
+  type RoutingRetainedProcess,
+  type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
   type SelfhostedRelayConfig,
   type OpStreamJournal,
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime";
+import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
+
+type PersistableMutationAdmission = {
+  admission: SandboxWorkspaceMutationAdmission;
+  providerBinding: Awaited<
+    ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
+  > | null;
+};
 
 export type RoutingWiringServices = {
   db: Database;
@@ -44,16 +80,45 @@ export type RoutingWiringServices = {
   /** The per-op observer wired into every selfhosted session this turn builds
    *  (out-of-band telemetry — op metrics + machine.* events). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
+  /** Every physical routed provider call, across cloud and selfhosted homes. */
+  onSandboxOperation?: RoutingSandboxOperationObserver;
   /** The op-stream durable-resume journal (the Temporal adaptation from
    *  op-journal.ts): attach generation + settled-frontier persistence. Absent ⇒
    *  the runtime defaults (generation "1", no persistence) — tests / non-turn
    *  callers. Only consulted when op-stream is actually enabled for the turn. */
   opJournal?: OpStreamJournal;
+  /** Durable lifecycle notification emitted only by the observer that wins the
+   * exact warm-instance loss CAS. */
+  onHomeSandboxLost?: (input: {
+    sandboxGroupId: string;
+    instanceId: string;
+    leaseEpoch: number;
+  }) => Promise<void>;
+  /** Called when a route repair replaces the worker's original home handle. */
+  onHomeSandboxRebound?: (input: {
+    established: EstablishedSandboxSession;
+    leaseEpoch: number;
+  }) => void;
 };
 
 export type RoutingWiringIds = {
   workspaceId: string;
   sessionId: string;
+  /** Canonical turn-attempt fence used to admit persistable-home mutations.
+   * Omit outside a running worker attempt; mutation hooks then remain disabled. */
+  workspaceMutationFence?: {
+    accountId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  };
+  homeLease?: {
+    accountId: string;
+    sandboxGroupId: string;
+    leaseEpoch: number;
+    instanceId: string;
+    backend: string;
+  };
   /**
    * The run's declared sandbox environment — the SAME object the turn passes to
    * `runtime.buildAgent`'s `sandboxEnvironment` and to `resumeBoxForTurn` (so the
@@ -126,7 +191,473 @@ function selfhostedResolverTimeouts(settings: Settings): {
   selfhostedExecTimeoutMs: number;
 } {
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
-  return { selfhostedTimeoutMs: timeoutMs, selfhostedExecTimeoutMs: execTimeoutMs };
+  return {
+    selfhostedTimeoutMs: timeoutMs,
+    selfhostedExecTimeoutMs: execTimeoutMs,
+  };
+}
+
+type HomeRouteLeaseIdentity = {
+  accountId: string;
+  sandboxGroupId: string;
+  backend: string;
+};
+
+type HomeRouteResolutionIds = HomeRouteLeaseIdentity & {
+  workspaceId: string;
+  sessionId: string;
+};
+
+type HomeRouteRecovery = "pending" | "degraded" | "unrecoverable" | "superseded";
+
+/**
+ * Translate the durable lease/recovery state into the typed disposition the
+ * routing proxy exposes when the home cannot be safely resumed. A route repair
+ * must never fall back to the old in-memory provider handle when the lease is
+ * warming, restoring, unverifiable, or otherwise inconsistent.
+ */
+function homeRouteRecoveryDisposition(
+  lease: Awaited<ReturnType<typeof readLease>>,
+): HomeRouteRecovery {
+  if (!lease) return "unrecoverable";
+  if (lease.liveness === "warming") return "pending";
+  if (lease.liveness === "draining") return "superseded";
+  if (
+    lease.recovery.restore.status === "pending" ||
+    lease.recovery.restore.status === "restoring" ||
+    lease.recovery.restore.status === "verifying"
+  ) {
+    return "pending";
+  }
+  if (
+    lease.recovery.restore.status === "degraded" ||
+    lease.recovery.workspace.status === "degraded" ||
+    lease.recovery.archive.status === "unverified" ||
+    lease.recovery.archive.status === "invalid"
+  ) {
+    return "degraded";
+  }
+  return "unrecoverable";
+}
+
+function homeRouteRecoveryError(
+  lease: Awaited<ReturnType<typeof readLease>>,
+  fallbackEpoch: number,
+): RoutingBackendRecoveryRequiredError {
+  return new RoutingBackendRecoveryRequiredError(
+    "resolve_home_backend",
+    lease?.leaseEpoch ?? fallbackEpoch,
+    homeRouteRecoveryDisposition(lease),
+  );
+}
+
+export function providerIdentityFromResumeState(
+  resumeState: Record<string, unknown>,
+): string | null {
+  const sessionState =
+    resumeState.sessionState && typeof resumeState.sessionState === "object"
+      ? (resumeState.sessionState as Record<string, unknown>)
+      : null;
+  const providerState =
+    sessionState?.providerState && typeof sessionState.providerState === "object"
+      ? (sessionState.providerState as Record<string, unknown>)
+      : null;
+  for (const field of [
+    "sandboxId",
+    "instanceId",
+    "id",
+    "hostId",
+    "containerId",
+    "workspaceRootPath",
+    "agentId",
+  ]) {
+    const value = providerState?.[field];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+/**
+ * Resolve the current durable home identity after the route epoch changes.
+ *
+ * Same-target attach/repair can replace the provider instance while a worker
+ * turn still holds the stable routing proxy. The proxy must therefore resume
+ * the lease's CURRENT identity, not reuse the object captured at turn start.
+ * This seam is deliberately resume-only: lease election/rematerialization is
+ * owned by the API/lease state machine, and a routed tool call must never create
+ * a rival provider or replay an ambiguous mutation.
+ */
+async function resolveCurrentHomeBackend(
+  services: RoutingWiringServices,
+  ids: HomeRouteResolutionIds,
+  established: EstablishedSandboxSession,
+): Promise<ResolvedActiveBackend> {
+  const lease = await readLease(services.db, ids.workspaceId, ids.sandboxGroupId);
+  const fallbackEpoch = lease?.leaseEpoch ?? 0;
+  if (
+    !lease ||
+    lease.liveness !== "warm" ||
+    lease.recovery.provider.status !== "exists" ||
+    lease.instanceId === null ||
+    lease.recovery.provider.instanceId !== lease.instanceId ||
+    lease.recovery.workspace.status !== "ready" ||
+    (lease.recovery.restore.status !== "not_required" && lease.recovery.restore.status !== "ready")
+  ) {
+    throw homeRouteRecoveryError(lease, fallbackEpoch);
+  }
+
+  // A route epoch can advance without a provider replacement. Reuse the exact
+  // established handle only when its identity still equals the durable one.
+  if (lease.instanceId === established.instanceId) {
+    services.onHomeSandboxRebound?.({
+      established,
+      leaseEpoch: lease.leaseEpoch,
+    });
+    return {
+      session: established.session as RoutableBackendSession,
+      sandboxId: null,
+      kind: established.backendId,
+      leaseEpoch: lease.leaseEpoch,
+      providerInstanceId: lease.instanceId,
+    };
+  }
+
+  const resumeState = lease.resumeState;
+  const durableResumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  const resumeBackend = sandboxBackendForSdkBackendId(durableResumeBackend) ?? durableResumeBackend;
+  if (
+    !resumeState ||
+    resumeBackend !== ids.backend ||
+    providerIdentityFromResumeState(resumeState) !== lease.instanceId
+  ) {
+    throw homeRouteRecoveryError(lease, lease.leaseEpoch);
+  }
+
+  let rebound: EstablishedSandboxSession;
+  try {
+    rebound = await establishSandboxSessionFromEnvelope(services.settings, resumeState, {
+      sessionId: ids.sessionId,
+      recovery: "resume-only",
+      backendOverride: resumeBackend as never,
+    });
+    // A resumed handle is not enough evidence for the route to use it. Keep the
+    // same bounded readiness gate used before publishing a Modal lease warm.
+    await verifySandboxExecReadiness(rebound);
+  } catch (error) {
+    if (!isProviderSandboxNotFoundError(resumeBackend, error)) {
+      // The durable identity is present, but a transient resume/provider error
+      // did not prove the box gone. Keep the lease untouched and make the next
+      // independent route operation retry the resume; never use the old handle.
+      throw new RoutingBackendRecoveryRequiredError(
+        "resolve_home_backend",
+        lease.leaseEpoch,
+        "pending",
+      );
+    }
+    const marked = await markWarmLeaseInstanceLost(services.db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      expectedEpoch: lease.leaseEpoch,
+      expectedInstanceId: lease.instanceId,
+      diagnostic: "provider_not_found_during_home_route_rebind",
+    });
+    if (marked.status === "marked") {
+      await services.onHomeSandboxLost?.({
+        sandboxGroupId: ids.sandboxGroupId,
+        instanceId: lease.instanceId,
+        leaseEpoch: marked.lease.leaseEpoch,
+      });
+    }
+    throw new RoutingBackendRecoveryRequiredError(
+      "resolve_home_backend",
+      marked.lease?.leaseEpoch ?? lease.leaseEpoch,
+      marked.status === "stale" ? "superseded" : homeRouteRecoveryDisposition(marked.lease),
+    );
+  }
+
+  // The provider identity must agree with the exact durable lease row before
+  // any caller can publish or route through this rebound handle. A mismatch is
+  // unverifiable local state, not permission to try the old handle.
+  const reboundBackend = sandboxBackendForSdkBackendId(rebound.backendId) ?? rebound.backendId;
+  if (rebound.instanceId !== lease.instanceId || reboundBackend !== resumeBackend) {
+    throw homeRouteRecoveryError(lease, lease.leaseEpoch);
+  }
+  services.onHomeSandboxRebound?.({
+    established: rebound,
+    leaseEpoch: lease.leaseEpoch,
+  });
+  // Keep the resolver's mutable home reference on the latest verified handle so
+  // a later route epoch does not resume the same replacement again. This is only
+  // a worker-side handle update; the SDK-facing RoutingSandboxSession remains the
+  // stable object returned below and is never replaced.
+  Object.assign(established, rebound);
+  return {
+    session: rebound.session as RoutableBackendSession,
+    sandboxId: null,
+    kind: rebound.backendId,
+    leaseEpoch: lease.leaseEpoch,
+    providerInstanceId: lease.instanceId,
+  };
+}
+
+function beforePersistableHomeMutation(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+  home: { accountId: string; sandboxGroupId: string; backend: string } | undefined,
+):
+  | ((input: {
+      op: string;
+      backend: ResolvedActiveBackend;
+    }) => Promise<PersistableMutationAdmission | null>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!home || !fence) return undefined;
+  return async ({ op, backend }) => {
+    // A connected-machine target is intentionally non-persistable: its writes
+    // do not dirty the session home's archive. Exact home identity metadata is
+    // present only on a verified durable home route.
+    if (
+      backend.sandboxId !== null ||
+      backend.leaseEpoch === undefined ||
+      backend.providerInstanceId === undefined
+    ) {
+      return null;
+    }
+    const providerBinding =
+      home.backend === "modal"
+        ? await resolveModalCheckpointProviderBindingForSession(services.settings, backend.session)
+        : null;
+    const admission = await advanceWorkspaceGeneration(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      turnId: fence.turnId,
+      executionGeneration: fence.executionGeneration,
+      attemptId: fence.attemptId,
+      holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+      sandboxGroupId: home.sandboxGroupId,
+      expectedEpoch: backend.leaseEpoch,
+      expectedInstanceId: backend.providerInstanceId,
+      operation: op,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
+    });
+    return { admission, providerBinding };
+  };
+}
+
+function afterPersistableHomeMutation(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+  home: { accountId: string; sandboxGroupId: string; backend: string } | undefined,
+):
+  | ((input: {
+      op: string;
+      backend: ResolvedActiveBackend;
+      admission: unknown;
+      outcome: "resolved" | "rejected";
+      result?: unknown;
+      retainedProcess?: RoutingRetainedProcess;
+    }) => Promise<void | RoutingMutationSettlementResult>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!home || !fence) return undefined;
+  return async ({ op, backend, admission, outcome, retainedProcess }) => {
+    if (
+      backend.sandboxId !== null ||
+      backend.leaseEpoch === undefined ||
+      backend.providerInstanceId === undefined ||
+      !admission ||
+      typeof admission !== "object"
+    ) {
+      return;
+    }
+    const boundAdmission = admission as Partial<PersistableMutationAdmission>;
+    const exactAdmission = boundAdmission.admission;
+    if (
+      !exactAdmission ||
+      typeof exactAdmission.id !== "string" ||
+      typeof exactAdmission.workspaceGeneration !== "number" ||
+      !("providerBinding" in boundAdmission)
+    ) {
+      throw new Error("Persistable home mutation settlement lacked its bound admission");
+    }
+    if (outcome === "resolved" && retainedProcess) {
+      try {
+        await retainWorkspaceMutationProcess(services.db, {
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: ids.sessionId,
+          processId: retainedProcess.id,
+          providerSessionId: retainedProcess.providerSessionId,
+          admissionId: exactAdmission.id,
+          admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
+          operation: op,
+          providerBinding: boundAdmission.providerBinding ?? null,
+          owner: {
+            kind: "turn",
+            turnId: fence.turnId,
+            executionGeneration: fence.executionGeneration,
+            attemptId: fence.attemptId,
+            holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+            sandboxGroupId: home.sandboxGroupId,
+            expectedEpoch: backend.leaseEpoch,
+            expectedInstanceId: backend.providerInstanceId,
+            routeKind: exactAdmission.routeKind,
+            routeTargetId: exactAdmission.routeTargetId,
+            routeEpoch: exactAdmission.routeEpoch,
+          },
+        });
+      } catch (error) {
+        if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
+        const durable = error.process;
+        if (
+          durable.id !== retainedProcess.id ||
+          durable.providerSessionId !== retainedProcess.providerSessionId ||
+          durable.sessionId !== ids.sessionId ||
+          durable.sandboxGroupId !== home.sandboxGroupId ||
+          durable.parentAdmissionId !== exactAdmission.id ||
+          durable.leaseEpoch !== backend.leaseEpoch ||
+          durable.providerInstanceId !== backend.providerInstanceId ||
+          durable.routeKind !== exactAdmission.routeKind ||
+          durable.routeTargetId !== exactAdmission.routeTargetId ||
+          durable.routeEpoch !== exactAdmission.routeEpoch ||
+          durable.state !== "active"
+        ) {
+          throw new Error("Durable retained-process promotion returned a mismatched identity", {
+            cause: error,
+          });
+        }
+        return {
+          status: "retained_process_durable_output_rejected",
+          retainedProcess: {
+            id: durable.id,
+            providerSessionId: durable.providerSessionId,
+          },
+        };
+      }
+      return;
+    }
+    await verifyWorkspaceMutationSettlement(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      turnId: fence.turnId,
+      executionGeneration: fence.executionGeneration,
+      attemptId: fence.attemptId,
+      holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+      sandboxGroupId: home.sandboxGroupId,
+      expectedEpoch: backend.leaseEpoch,
+      expectedInstanceId: backend.providerInstanceId,
+      admission: exactAdmission,
+      operation: op,
+      outcome,
+    });
+  };
+}
+
+function beforeRetainedProcessMutation(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: {
+      op: string;
+      backend: ResolvedActiveBackend;
+      process: RoutingRetainedProcess;
+    }) => Promise<SandboxWorkspaceMutationAdmission>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ op, process }) =>
+    await advanceWorkspaceGenerationForRetainedProcess(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      operation: op,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
+    });
+}
+
+function afterRetainedProcessMutation(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: {
+      op: string;
+      backend: ResolvedActiveBackend;
+      process: RoutingRetainedProcess;
+      admission: unknown;
+      outcome: "resolved" | "rejected";
+      result?: unknown;
+    }) => Promise<void>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ op, process, admission, outcome }) => {
+    if (
+      !admission ||
+      typeof admission !== "object" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).id !== "string" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).workspaceGeneration !==
+        "number"
+    ) {
+      throw new Error("Retained-process mutation settlement lacked its exact admission");
+    }
+    await verifyRetainedProcessMutationSettlement(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      admission: admission as SandboxWorkspaceMutationAdmission,
+      operation: op,
+      outcome,
+    });
+  };
+}
+
+function settleRetainedProcessForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: {
+      backend: ResolvedActiveBackend;
+      process: RoutingRetainedProcess;
+      proof: RoutingRetainedProcessTerminalProof;
+    }) => Promise<void>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ backend, process, proof }) => {
+    const durable = await getRetainedProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    if (
+      !durable ||
+      durable.providerSessionId !== process.providerSessionId ||
+      durable.providerBackend !== backend.kind ||
+      durable.providerInstanceId !== backend.providerInstanceId ||
+      durable.leaseEpoch !== backend.leaseEpoch ||
+      durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
+      durable.routeTargetId !== backend.sandboxId ||
+      durable.routeEpoch !== backend.activeEpoch
+    ) {
+      throw new Error("Retained-process settlement lost its exact durable backend identity");
+    }
+    await settleRetainedProcess(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      expected: retainedProcessSettlementIdentity(durable),
+      outcome: proof.outcome,
+      exitCode: proof.exitCode,
+      reason: proof.reason,
+      idleGraceMs: services.settings.sandboxIdleGraceMs,
+    });
+  };
 }
 
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
@@ -160,6 +691,11 @@ export function wrapTurnBoxWithRouting(
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
+  const beforeMutation = beforePersistableHomeMutation(services, ids, ids.homeLease);
+  const afterMutation = afterPersistableHomeMutation(services, ids, ids.homeLease);
+  const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
+  const afterProcessMutation = afterRetainedProcessMutation(services, ids);
+  const settleProcess = settleRetainedProcessForTurn(services, ids);
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
@@ -210,6 +746,22 @@ export function wrapTurnBoxWithRouting(
     // the pinned machine — passing defaultIsHome:false makes the null branch throw typed
     // `home_unavailable_this_turn` instead. Forward the explicit boolean (including false).
     ...(ids.defaultIsHome !== undefined ? { defaultIsHome: ids.defaultIsHome } : {}),
+    ...(ids.homeLease
+      ? {
+          resolveDefaultBackend: () =>
+            resolveCurrentHomeBackend(
+              services,
+              {
+                workspaceId: ids.workspaceId,
+                sessionId: ids.sessionId,
+                accountId: ids.homeLease!.accountId,
+                sandboxGroupId: ids.homeLease!.sandboxGroupId,
+                backend: ids.homeLease!.backend,
+              },
+              established,
+            ),
+        }
+      : {}),
   });
 
   const proxy = new RoutingSandboxSession({
@@ -223,12 +775,71 @@ export function wrapTurnBoxWithRouting(
       session: established.session as RoutableBackendSession,
       sandboxId: null,
       kind: established.backendId,
+      ...(ids.homeLease
+        ? {
+            leaseEpoch: ids.homeLease.leaseEpoch,
+            providerInstanceId: ids.homeLease.instanceId,
+          }
+        : {}),
     },
     readPointer: async () => {
+      if (!routingEnabled(settings)) {
+        return { activeSandboxId: null, activeEpoch: 0 };
+      }
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(beforeMutation ? { beforeMutation } : {}),
+    ...(afterMutation ? { afterMutation } : {}),
+    ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
+    ...(afterProcessMutation ? { afterProcessMutation } : {}),
+    ...(settleProcess ? { settleProcess } : {}),
+    ...(ids.homeLease
+      ? {
+          onDefaultBackendError: async ({
+            error,
+            backend,
+          }: {
+            error: unknown;
+            backend: ResolvedActiveBackend;
+          }) => {
+            const home = ids.homeLease!;
+            if (!isProviderSandboxGoneDuringRoutedOperation(home.backend, error)) return null;
+            const expectedEpoch = backend.leaseEpoch ?? home.leaseEpoch;
+            const expectedInstanceId = backend.providerInstanceId ?? home.instanceId;
+            const marked = await markWarmLeaseInstanceLost(db, {
+              accountId: home.accountId,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: home.sandboxGroupId,
+              expectedEpoch,
+              expectedInstanceId,
+              diagnostic: "provider_not_found_during_routed_operation",
+            });
+            if (marked.status === "marked") {
+              await services.onHomeSandboxLost?.({
+                sandboxGroupId: home.sandboxGroupId,
+                instanceId: expectedInstanceId,
+                leaseEpoch: marked.lease.leaseEpoch,
+              });
+            }
+            const lease = marked.lease;
+            const restore = lease?.recovery.restore.status;
+            return {
+              leaseEpoch: lease?.leaseEpoch ?? expectedEpoch,
+              recovery:
+                marked.status === "stale"
+                  ? ("superseded" as const)
+                  : restore === "pending"
+                    ? ("pending" as const)
+                    : restore === "degraded"
+                      ? ("degraded" as const)
+                      : ("unrecoverable" as const),
+            };
+          },
+        }
+      : {}),
   });
 
   return { ...established, session: proxy };
@@ -241,10 +852,25 @@ export function wrapLazyTurnBoxWithRouting(
     client: EstablishedSandboxSession["client"];
     backendId: string;
     agentDefaultManifest: unknown;
-    provisioner: { get(): Promise<{ established: EstablishedSandboxSession }> };
+    provisioner: {
+      get(): Promise<{
+        established: EstablishedSandboxSession;
+        leaseEpoch?: number;
+      }>;
+    };
+    homeLeaseIdentity?: {
+      accountId: string;
+      sandboxGroupId: string;
+      backend: string;
+    };
   },
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
+  const beforeMutation = beforePersistableHomeMutation(services, ids, args.homeLeaseIdentity);
+  const afterMutation = afterPersistableHomeMutation(services, ids, args.homeLeaseIdentity);
+  const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
+  const afterProcessMutation = afterRetainedProcessMutation(services, ids);
+  const settleProcess = settleRetainedProcessForTurn(services, ids);
   const syntheticSession: RoutableBackendSession = {
     state: { manifest: args.agentDefaultManifest },
   };
@@ -287,6 +913,19 @@ export function wrapLazyTurnBoxWithRouting(
     resolveActiveBackend: async (pointer) => {
       if (pointer.activeSandboxId === null || !routingEnabled(settings)) {
         const provisioned = await args.provisioner.get();
+        if (args.homeLeaseIdentity && provisioned.leaseEpoch !== undefined) {
+          return resolveCurrentHomeBackend(
+            services,
+            {
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              accountId: args.homeLeaseIdentity.accountId,
+              sandboxGroupId: args.homeLeaseIdentity.sandboxGroupId,
+              backend: args.homeLeaseIdentity.backend,
+            },
+            provisioned.established,
+          );
+        }
         return {
           session: provisioned.established.session as RoutableBackendSession,
           sandboxId: null,
@@ -295,6 +934,57 @@ export function wrapLazyTurnBoxWithRouting(
       }
       return routedResolver(pointer);
     },
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(beforeMutation ? { beforeMutation } : {}),
+    ...(afterMutation ? { afterMutation } : {}),
+    ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
+    ...(afterProcessMutation ? { afterProcessMutation } : {}),
+    ...(settleProcess ? { settleProcess } : {}),
+    ...(args.homeLeaseIdentity
+      ? {
+          onDefaultBackendError: async ({
+            error,
+            backend,
+          }: {
+            error: unknown;
+            backend: ResolvedActiveBackend;
+          }) => {
+            const home = args.homeLeaseIdentity!;
+            if (!isProviderSandboxGoneDuringRoutedOperation(home.backend, error)) return null;
+            if (backend.leaseEpoch === undefined || backend.providerInstanceId === undefined) {
+              return null;
+            }
+            const marked = await markWarmLeaseInstanceLost(db, {
+              accountId: home.accountId,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: home.sandboxGroupId,
+              expectedEpoch: backend.leaseEpoch,
+              expectedInstanceId: backend.providerInstanceId,
+              diagnostic: "provider_not_found_during_routed_operation",
+            });
+            if (marked.status === "marked") {
+              await services.onHomeSandboxLost?.({
+                sandboxGroupId: home.sandboxGroupId,
+                instanceId: backend.providerInstanceId,
+                leaseEpoch: marked.lease.leaseEpoch,
+              });
+            }
+            const lease = marked.lease;
+            const restore = lease?.recovery.restore.status;
+            return {
+              leaseEpoch: lease?.leaseEpoch ?? backend.leaseEpoch,
+              recovery:
+                marked.status === "stale"
+                  ? ("superseded" as const)
+                  : restore === "pending"
+                    ? ("pending" as const)
+                    : restore === "degraded"
+                      ? ("degraded" as const)
+                      : ("unrecoverable" as const),
+            };
+          },
+        }
+      : {}),
   });
 
   return {

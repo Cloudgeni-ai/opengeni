@@ -1,8 +1,8 @@
 import type { SessionEvent } from "@opengeni/contracts";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import { and, asc, eq, sql } from "drizzle-orm";
-import type { Database } from "./index";
-import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
+import type { Database } from "./database";
+import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
 import * as schema from "./schema";
 
 export const TOOL_RESULT_TYPE_BY_CALL_TYPE: Readonly<Record<string, string>> = {
@@ -93,7 +93,7 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
     sessionId: row.sessionId,
     sequence: row.sequence,
     type: row.type as SessionEvent["type"],
-    payload: row.payload,
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
     occurredAt: row.occurredAt.toISOString(),
     clientEventId: row.clientEventId,
     turnId: row.turnId,
@@ -115,7 +115,7 @@ export async function closePendingSessionToolCallsInTransaction(
   tx: Database,
   input: ClosePendingSessionToolCallsInput,
 ): Promise<{ sequence: number; events: SessionEvent[]; closed: number }> {
-  const pending = await tx
+  const pendingRows = await tx
     .select()
     .from(schema.sessionPendingToolCalls)
     .where(
@@ -127,12 +127,21 @@ export async function closePendingSessionToolCallsInTransaction(
     )
     .orderBy(asc(schema.sessionPendingToolCalls.createdAt), asc(schema.sessionPendingToolCalls.id))
     .for("update");
+  const pending = pendingRows.map((row) => ({
+    ...row,
+    callItem: fromPostgresLosslessJson(row.callItem, row.callItemCodecVersion),
+    resultItem:
+      row.resultItem === null
+        ? null
+        : fromPostgresLosslessJson(row.resultItem, row.resultItemCodecVersion),
+  }));
   if (pending.length === 0) return { sequence: input.sequence, events: [], closed: 0 };
 
   const history = await tx
     .select({
       position: schema.sessionHistoryItems.position,
       item: schema.sessionHistoryItems.item,
+      itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
       active: schema.sessionHistoryItems.active,
     })
     .from(schema.sessionHistoryItems)
@@ -144,6 +153,10 @@ export async function closePendingSessionToolCallsInTransaction(
       ),
     )
     .orderBy(asc(schema.sessionHistoryItems.position));
+  const decodedHistory = history.map((row) => ({
+    ...row,
+    item: fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+  }));
   const [{ maxPosition } = { maxPosition: -1 }] = await tx
     .select({ maxPosition: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1)` })
     .from(schema.sessionHistoryItems)
@@ -173,23 +186,23 @@ export async function closePendingSessionToolCallsInTransaction(
   const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [];
   const resolutions = pending.map((call) => {
     const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
-    const existingCall = history.find(
+    const existingCall = decodedHistory.find(
       ({ item }) => historyItemType(item) === call.callType && historyCallId(item) === call.callId,
     );
     const existingResult = resultType
-      ? history.find(
+      ? decodedHistory.find(
           ({ item, position }) =>
             position > (existingCall?.position ?? Number.MAX_SAFE_INTEGER) &&
             historyItemType(item) === resultType &&
             historyCallId(item) === call.callId,
         )
       : undefined;
-    const activeCall = history.find(
+    const activeCall = decodedHistory.find(
       ({ item, active }) =>
         active && historyItemType(item) === call.callType && historyCallId(item) === call.callId,
     );
     const activeResult = resultType
-      ? history.find(
+      ? decodedHistory.find(
           ({ item, active, position }) =>
             active &&
             position > (activeCall?.position ?? Number.MAX_SAFE_INTEGER) &&
@@ -232,7 +245,8 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: sanitizeModelPayload(resolution.call.callItem),
+        item: resolution.call.callItem,
+        itemCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         active: true,
       });
     }
@@ -255,7 +269,11 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: sanitizeModelPayload(boundModelToolOutputItem(resolution.result)),
+        item: boundModelToolOutputItem(
+          resolution.result,
+          resolution.call.modelToolOutputTruncationTokens ?? undefined,
+        ),
+        itemCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         active: true,
       });
     }
@@ -275,7 +293,7 @@ export async function closePendingSessionToolCallsInTransaction(
       turnGeneration: resolution.call.executionGeneration,
       turnAttemptId: resolution.call.attemptId,
       turnAssociation: "current",
-      payload: sanitizeEventPayload({
+      payload: {
         id: resolution.call.callId,
         output: resolution.interrupted
           ? {
@@ -297,7 +315,8 @@ export async function closePendingSessionToolCallsInTransaction(
           unsupportedCallShape:
             resolution.interrupted && (!resolution.result || !resolution.rawCallIsValid),
         },
-      }),
+      },
+      payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       occurredAt: input.now,
     });
   }

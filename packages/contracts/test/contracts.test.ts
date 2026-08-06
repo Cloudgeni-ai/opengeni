@@ -8,6 +8,7 @@ import {
   CapabilityPack,
   ClientConfig,
   ClientModel,
+  WorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateCapabilityCatalogItemRequest,
   CreateKnowledgeMemoryRequest,
@@ -18,26 +19,39 @@ import {
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
+  DocumentSearchResponse,
   EnablePackRequest,
+  ErrorEnvelope,
   GitCredentialBindingId,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  gitRemoteIdentity,
+  gitRemotePathAliases,
+  gitRemoteUriAliases,
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   McpServerConnectionRef,
+  ModelBillingAttributionV1,
+  ModelCredentialReadinessV1,
+  ModelCredentialSourceV1,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
   RequestHumanInputToolInput,
   RepositoryResourceRef,
+  TURN_EXECUTION_POLICY_METADATA_KEY,
   ResourceRef,
   SessionBusMessage,
   SESSION_MCP_APPROVAL_POLICY_MAX_BYTES,
   SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES,
   SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES,
   SESSION_MCP_SERVERS_MAX,
+  Session,
+  SessionGoal,
   SessionMcpServerMetadata,
+  SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
+  TerminalPtyExitedPayload,
   UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
@@ -47,12 +61,235 @@ import {
   ToolAuthNeededPayload,
   CredentialAuthNeededPayload,
   defaultRepositoryMountPath,
+  metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
+  readTurnExecutionPolicyV1,
+  resourceMountPath,
   resourceMountPathCollisionKey,
+  turnExecutionPolicyAuditMetadata,
+  TurnExecutionPolicyV1,
 } from "../src";
 
 describe("contracts", () => {
+  const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+    schemaVersion: 1,
+    productModelId: "xai/grok-4.5",
+    requestedModelId: "grok-4.5",
+    modelSource: "explicit",
+    reasoningEffort: "high",
+    reasoningSource: "explicit",
+    providerId: "xai",
+    upstreamModelId: "grok-4.5",
+    wireApi: "responses",
+    credentialSource: { kind: "deployment", mechanism: "api_key" },
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    definitionVersion: `sha256:${"a".repeat(64)}`,
+  });
+
+  test("accepts the canonical typed HTTP error envelope", () => {
+    expect(
+      ErrorEnvelope.parse({
+        error: {
+          status: 503,
+          code: "upstream_unavailable",
+          message: "OpenGeni is temporarily unavailable — retry.",
+          retryable: true,
+          requestId: "edge-503-safe",
+        },
+      }),
+    ).toEqual({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni is temporarily unavailable — retry.",
+        retryable: true,
+        requestId: "edge-503-safe",
+      },
+    });
+  });
+
+  test("accepts a typed payment admission rejection", () => {
+    expect(
+      ErrorEnvelope.parse({
+        error: {
+          status: 402,
+          code: "payment_required",
+          message: "insufficient OpenGeni credits",
+          retryable: false,
+        },
+      }),
+    ).toEqual({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: "insufficient OpenGeni credits",
+        retryable: false,
+      },
+    });
+  });
+
+  test("distinguishes a lost PTY provider process from an owner departure", () => {
+    const ptyId = "11111111-1111-4111-8111-111111111111";
+    expect(TerminalPtyExitedPayload.parse({ ptyId, exitCode: null, reason: "lost" })).toEqual({
+      ptyId,
+      exitCode: null,
+      reason: "lost",
+    });
+  });
+
+  test("reads and merges a strict secret-safe turn execution policy without disturbing metadata", () => {
+    expect(readTurnExecutionPolicyV1(null)).toEqual({ kind: "absent" });
+    expect(readTurnExecutionPolicyV1({ dispatchRevision: 3 })).toEqual({ kind: "absent" });
+
+    const metadata = metadataWithTurnExecutionPolicyV1(
+      { dispatchRevision: 3, recovery: { generation: 2 } },
+      turnExecutionPolicy,
+    );
+    expect(metadata.dispatchRevision).toBe(3);
+    expect(metadata.recovery).toEqual({ generation: 2 });
+    expect(readTurnExecutionPolicyV1(metadata)).toEqual({
+      kind: "valid",
+      policy: turnExecutionPolicy,
+    });
+    expect(metadata[TURN_EXECUTION_POLICY_METADATA_KEY]).toEqual(turnExecutionPolicy);
+  });
+
+  test("treats only an absent policy key as legacy and reports malformed paths without values", () => {
+    for (const malformed of [null, undefined, { ...turnExecutionPolicy, extra: true }]) {
+      expect(() =>
+        readTurnExecutionPolicyV1({
+          [TURN_EXECUTION_POLICY_METADATA_KEY]: malformed,
+        }),
+      ).toThrow("Malformed turn execution policy metadata");
+    }
+
+    const sensitiveMarker = "do-not-reflect-this-value";
+    let message = "";
+    try {
+      readTurnExecutionPolicyV1({
+        [TURN_EXECUTION_POLICY_METADATA_KEY]: {
+          ...turnExecutionPolicy,
+          definitionVersion: sensitiveMarker,
+        },
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("policy.definitionVersion");
+    expect(message).not.toContain(sensitiveMarker);
+  });
+
+  test("rejects unknown nested execution-policy identity without reflecting sensitive values", () => {
+    const adversarialCases = [
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "deployment",
+          mechanism: "api_key",
+          apiKey: "api-key-do-not-reflect",
+        },
+        sensitiveMarkers: ["api-key-do-not-reflect"],
+      },
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "connected_subscription",
+          provider: "codex",
+          token: "subscription-token-do-not-reflect",
+        },
+        sensitiveMarkers: ["subscription-token-do-not-reflect"],
+      },
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "workspace_connection",
+          mechanism: "api_key",
+          credentialId: "credential-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["credential-id-do-not-reflect"],
+      },
+      {
+        directSchema: ModelBillingAttributionV1,
+        nestedPath: "billing" as const,
+        nestedValue: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountId: "account-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["account-id-do-not-reflect"],
+      },
+      {
+        directSchema: ModelBillingAttributionV1,
+        nestedPath: "billing" as const,
+        nestedValue: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountLabel: "account-label-do-not-reflect",
+          labels: ["private-label-do-not-reflect"],
+        },
+        sensitiveMarkers: ["account-label-do-not-reflect", "private-label-do-not-reflect"],
+      },
+    ];
+
+    for (const testCase of adversarialCases) {
+      expect(testCase.directSchema.safeParse(testCase.nestedValue).success).toBe(false);
+      const malformedPolicy = {
+        ...turnExecutionPolicy,
+        [testCase.nestedPath]: testCase.nestedValue,
+      };
+      expect(TurnExecutionPolicyV1.safeParse(malformedPolicy).success).toBe(false);
+
+      let message = "";
+      try {
+        readTurnExecutionPolicyV1({
+          [TURN_EXECUTION_POLICY_METADATA_KEY]: malformedPolicy,
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain(`policy.${testCase.nestedPath}`);
+      for (const marker of testCase.sensitiveMarkers) {
+        expect(message).not.toContain(marker);
+      }
+    }
+  });
+
+  test("enforces requested-model/source consistency and emits explicit audit identity", () => {
+    expect(() =>
+      TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        requestedModelId: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        modelSource: "session",
+      }),
+    ).toThrow();
+
+    expect(
+      turnExecutionPolicyAuditMetadata(turnExecutionPolicy, crypto.randomUUID()),
+    ).toMatchObject({
+      requestedModelId: "grok-4.5",
+      effectiveModelId: "xai/grok-4.5",
+      modelSource: "explicit",
+      effectiveReasoningEffort: "high",
+      reasoningSource: "explicit",
+      providerId: "xai",
+      credentialSourceKind: "deployment",
+      credentialSourceMechanism: "api_key",
+      billingOwner: "deployment",
+      billingMetering: "opengeni_credits",
+      definitionVersion: turnExecutionPolicy.definitionVersion,
+    });
+  });
+
   const sessionEventFixture = (
     type:
       | "agent.message.completed"
@@ -181,11 +418,152 @@ describe("contracts", () => {
     expect(approvalIdentifier(null)).toBeNull();
   });
 
+  test("accepts the truthful goal continuation projection and keeps it source-compatible", () => {
+    const baseGoal = {
+      id: "00000000-0000-4000-8000-000000000001",
+      accountId: "00000000-0000-4000-8000-000000000002",
+      workspaceId: "00000000-0000-4000-8000-000000000003",
+      sessionId: "00000000-0000-4000-8000-000000000004",
+      status: "active" as const,
+      text: "Keep deploys green",
+      successCriteria: null,
+      evidence: null,
+      rationale: null,
+      pausedReason: null,
+      createdBy: "api" as const,
+      version: 1,
+      autoContinuations: 0,
+      noProgressStreak: 0,
+      maxAutoContinuations: null,
+      metadata: {},
+      createdAt: "2026-07-11T12:00:00.000Z",
+      updatedAt: "2026-07-11T12:00:00.000Z",
+    };
+
+    expect(SessionGoal.parse(baseGoal).continuation).toBeUndefined();
+    expect(
+      SessionGoal.parse({
+        ...baseGoal,
+        continuation: {
+          state: "scheduled",
+          reason: "wake_pending",
+          wakeRevision: 8,
+          observedRevision: 7,
+          nextAttemptAt: "2026-07-11T12:01:00.000Z",
+          lastError: null,
+        },
+      }).continuation,
+    ).toEqual({
+      state: "scheduled",
+      reason: "wake_pending",
+      wakeRevision: 8,
+      observedRevision: 7,
+      nextAttemptAt: "2026-07-11T12:01:00.000Z",
+      lastError: null,
+    });
+    expect(() =>
+      SessionGoal.parse({
+        ...baseGoal,
+        continuation: {
+          state: "running",
+          reason: "goal_turn_running",
+          wakeRevision: -1,
+          observedRevision: 0,
+          nextAttemptAt: null,
+          lastError: null,
+        },
+      }),
+    ).toThrow();
+  });
+
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);
+    expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+  });
+
+  test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "review the release",
+        policyRole: "  Release   Reviewer  ",
+      }).policyRole,
+    ).toBe("release-reviewer");
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "review the release",
+        policyRole: "../../workspace-owner",
+      }).success,
+    ).toBe(false);
+
+    expect(Session.shape.policyRole.parse(undefined)).toBeNull();
+  });
+
+  test("accepts an explicit rig-less session", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      rigId: null,
+    });
+    expect(payload.rigId).toBeNull();
+  });
+
+  test("accepts only an explicit realtime start without an initial message", () => {
+    expect(CreateSessionRequest.parse({ startMode: "realtime" })).toMatchObject({
+      startMode: "realtime",
+      resources: [],
+      tools: [],
+    });
+    expect(CreateSessionRequest.safeParse({}).success).toBe(false);
+    expect(
+      CreateSessionRequest.safeParse({
+        startMode: "realtime",
+        initialMessage: "do not fabricate this turn",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("accepts validated inline session skills", () => {
+    const parsed = CreateSessionRequest.parse({
+      initialMessage: "prepare release",
+      skills: [
+        {
+          name: "release",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n",
+            },
+          ],
+        },
+        {
+          name: "RELEASE",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n",
+            },
+          ],
+        },
+      ],
+    });
+    expect(parsed.skills).toHaveLength(1);
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "prepare release",
+        skills: [{ name: "release", files: [{ path: "../SKILL.md", content: "bad" }] }],
+      }),
+    ).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "prepare release",
+        skills: [
+          { name: "release", files: [{ path: "SKILL.md", content: "# One\n" }] },
+          { name: "RELEASE", files: [{ path: "SKILL.md", content: "# Two\n" }] },
+        ],
+      }),
+    ).toThrow("conflicting session skill definitions");
   });
 
   test("accepts only a UUID as a caller-preallocated session id", () => {
@@ -224,17 +602,17 @@ describe("contracts", () => {
   });
 
   test("derives portable host-aware repository mount paths", () => {
-    expect(defaultRepositoryMountPath("https://github.com/acme/app.git")).toBe(
+    expect(defaultRepositoryMountPath("https://github.com/acme/app.git", "github")).toBe(
       "repos/github.com/acme/app",
     );
-    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git")).toBe(
+    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git", "gitlab")).toBe(
       "repos/gitlab.com/acme/app",
     );
-    expect(defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app")).toBe(
-      "repos/dev.azure.com/acme/project/_git/app",
-    );
+    expect(
+      defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app.git", "azure_devops"),
+    ).toBe("repos/dev.azure.com/acme/project/_git/app.git");
     expect(defaultRepositoryMountPath("https://git.example.com:8443/acme/app.git")).toBe(
-      "repos/git.example.com%3A8443/acme/app",
+      "repos/git.example.com%3A8443/acme/app.git",
     );
     expect(() => defaultRepositoryMountPath("ssh://git.example.com/acme/app.git")).toThrow(
       "invalid repository URI",
@@ -248,11 +626,44 @@ describe("contracts", () => {
     expect(resourceMountPathCollisionKey("repos/example.com/acme/caf\u00e9")).toBe(
       resourceMountPathCollisionKey("repos/example.com/acme/cafe\u0301"),
     );
-    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git")).toThrow(
+    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git", "github")).toThrow(
       "invalid resource mount path",
     );
     expect(normalizeResourceMountPath("repos/github.com/acme/aux-repository")).toBe(
       "repos/github.com/acme/aux-repository",
+    );
+  });
+
+  test("preserves transport paths and applies only provider-declared aliases", () => {
+    expect(normalizeRepositoryTransportUri("https://bot@GIT.EXAMPLE/acme/repo")).toBe(
+      "https://git.example/acme/repo",
+    );
+    expect(gitRemoteUriAliases("https://github.com/acme/repo.git", "github")).toEqual([
+      "https://github.com/acme/repo.git",
+      "https://github.com/acme/repo",
+    ]);
+    expect(gitRemotePathAliases("https://gitlab.com/acme/repo", "gitlab")).toEqual([
+      "acme/repo",
+      "acme/repo.git",
+    ]);
+    expect(
+      gitRemoteUriAliases("https://dev.azure.com/acme/project/_git/repo.git", "azure_devops"),
+    ).toEqual(["https://dev.azure.com/acme/project/_git/repo.git"]);
+    expect(gitRemoteUriAliases("https://git.example/acme/repo.git", null)).toEqual([
+      "https://git.example/acme/repo.git",
+    ]);
+    expect(gitRemoteIdentity("https://github.com/acme/repo.git", "github")).toBe(
+      "https://github.com/acme/repo",
+    );
+    expect(
+      gitRemoteIdentity("https://dev.azure.com/acme/project/_git/repo.git", "azure_devops"),
+    ).toBe("https://dev.azure.com/acme/project/_git/repo.git");
+  });
+
+  test("keeps uploaded files in the private OpenGeni workspace directory by default", () => {
+    expect(resourceMountPath({ kind: "file", fileId: "file-1" })).toBe(".opengeni/files/file-1");
+    expect(resourceMountPath({ kind: "file", fileId: "file-1", mountPath: "inputs/current" })).toBe(
+      "inputs/current",
     );
   });
 
@@ -613,9 +1024,43 @@ describe("contracts", () => {
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
+    expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     // models defaults to [] for back-compat (callers reading only allowedModels
     // are unaffected when the host hasn't populated the richer list).
     expect(payload.models).toEqual([]);
+  });
+
+  test("accepts allowlisted browser analytics providers", () => {
+    const payload = ClientConfig.parse({
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      deploymentRevision: "test-sha",
+      defaultModel: "gpt-5.6-sol",
+      allowedModels: ["gpt-5.6-sol"],
+      defaultReasoningEffort: "high",
+      allowedReasoningEfforts: ["high"],
+      fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
+      productAccessMode: "managed",
+      analytics: {
+        consentRequired: true,
+        providers: {
+          reo: { clientId: "reo_client-1" },
+          posthog: { projectKey: "phc_test", host: "https://eu.i.posthog.com" },
+          ga4: { measurementId: "G-ABC123" },
+        },
+      },
+    });
+
+    expect(payload.analytics.providers.reo?.clientId).toBe("reo_client-1");
+    expect(payload.analytics.providers.ga4?.measurementId).toBe("G-ABC123");
+    expect(() =>
+      ClientConfig.parse({
+        ...payload,
+        analytics: {
+          consentRequired: true,
+          providers: { reo: { clientId: "r".repeat(129) } },
+        },
+      }),
+    ).toThrow();
   });
 
   test("round-trips the provider-grouped models list on client config", () => {
@@ -662,6 +1107,177 @@ describe("contracts", () => {
         api: "grpc",
       }),
     ).toThrow();
+  });
+
+  test("accepts an optional curated shortLabel on ClientModel", () => {
+    const withShort = ClientModel.parse({
+      id: "deepseek-v4-flash-0731",
+      label: "DeepSeek V4 Flash 0731",
+      shortLabel: "V4 Flash",
+      provider: "opengeni-gateway",
+      providerLabel: "OpenGeni Gateway",
+      api: "responses",
+    });
+    expect(withShort.shortLabel).toBe("V4 Flash");
+    const without = ClientModel.parse({
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      api: "responses",
+    });
+    expect(without.shortLabel).toBeUndefined();
+  });
+
+  test("accepts additive normalized model definitions and authenticated availability", () => {
+    const normalized = ClientModel.parse({
+      id: "xai/grok-4.5",
+      label: "Grok 4.5",
+      provider: "xai",
+      providerLabel: "xAI",
+      api: "responses",
+      contextWindowTokens: 500_000,
+      schemaVersion: 1,
+      aliases: ["grok-4.5"],
+      deployment: { upstreamModelId: "grok-4.5", wireApi: "responses" },
+      executionLimits: {
+        contextWindowTokens: 500_000,
+        effectiveContextWindowTokens: null,
+        autoCompactTokenLimit: null,
+        toolOutputTruncationTokens: 10_000,
+      },
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      capabilities: {
+        reasoning: {
+          upstream: "supported",
+          runnable: true,
+          efforts: ["low", "medium", "high"],
+          defaultEffort: "high",
+          required: true,
+        },
+        functionCalling: { upstream: "supported", runnable: true },
+        structuredOutput: { upstream: "supported", runnable: true },
+        hostedTools: {
+          webSearch: { upstream: "supported", runnable: true },
+          xSearch: { upstream: "supported", runnable: false },
+          codeExecution: { upstream: "supported", runnable: false },
+        },
+        inputModalities: ["text", "image"],
+        outputModalities: ["text"],
+        transports: {
+          sse: { upstream: "supported", runnable: true },
+          responsesWebSocket: { upstream: "supported", runnable: false },
+          realtimeAudio: { upstream: "unsupported", runnable: false },
+        },
+        latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+      },
+      pricing: {
+        default: {
+          inputMicrosPerMillionTokens: 2_000_000,
+          cachedInputMicrosPerMillionTokens: 300_000,
+          outputMicrosPerMillionTokens: 6_000_000,
+        },
+        inputTokenTiers: [
+          {
+            minimumInputTokens: 200_000,
+            pricing: {
+              inputMicrosPerMillionTokens: 4_000_000,
+              cachedInputMicrosPerMillionTokens: 600_000,
+              outputMicrosPerMillionTokens: 12_000_000,
+            },
+          },
+        ],
+      },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
+    expect(normalized.deployment?.upstreamModelId).toBe("grok-4.5");
+
+    const catalog = WorkspaceModelCatalogResponse.parse({
+      models: [
+        {
+          ...normalized,
+          credentialReadiness: {
+            status: "ready",
+            reason: null,
+            basis: "configuration",
+            checkedAt: null,
+          },
+          availability: {
+            status: "unknown",
+            selectable: true,
+            reason: null,
+            checkedAt: null,
+          },
+        },
+      ],
+    });
+    expect(catalog.models[0]?.availability.selectable).toBe(true);
+  });
+
+  test("enforces consistent, secret-safe model credential readiness", () => {
+    const ready = {
+      status: "ready",
+      reason: null,
+      basis: "configuration",
+      checkedAt: null,
+    } as const;
+    expect(ModelCredentialReadinessV1.parse(ready)).toEqual(ready);
+    expect(
+      ModelCredentialReadinessV1.parse({
+        status: "not_ready",
+        reason: "needs_reauth",
+        basis: "connection",
+        checkedAt: null,
+      }),
+    ).toEqual({
+      status: "not_ready",
+      reason: "needs_reauth",
+      basis: "connection",
+      checkedAt: null,
+    });
+
+    expect(() =>
+      ModelCredentialReadinessV1.parse({ ...ready, reason: "missing_credential" }),
+    ).toThrow();
+    expect(() => ModelCredentialReadinessV1.parse({ ...ready, status: "not_ready" })).toThrow();
+    expect(() => ModelCredentialReadinessV1.parse({ ...ready, basis: "resolver" })).toThrow();
+    expect(() =>
+      ModelCredentialReadinessV1.parse({
+        ...ready,
+        status: "error",
+        reason: "prerequisites_missing",
+        basis: "resolver",
+        checkedAt: new Date().toISOString(),
+      }),
+    ).toThrow();
+    expect(() =>
+      ModelCredentialReadinessV1.parse({
+        ...ready,
+        status: "not_ready",
+        reason: "resolver_error",
+        basis: "resolver",
+        checkedAt: new Date().toISOString(),
+      }),
+    ).toThrow();
+    expect(() =>
+      ModelCredentialReadinessV1.parse({
+        ...ready,
+        status: "not_ready",
+        reason: "observation_stale",
+        basis: "resolver",
+      }),
+    ).toThrow();
+
+    const sensitiveMarker = "identity-material-must-not-reflect";
+    const rejected = ModelCredentialReadinessV1.safeParse({
+      ...ready,
+      token: sensitiveMarker,
+    });
+    expect(rejected.success).toBe(false);
+    if (!rejected.success) {
+      expect(JSON.stringify(rejected.error.issues)).not.toContain(sensitiveMarker);
+    }
   });
 
   test("accepts checkout requests that use the caller default account", () => {
@@ -773,7 +1389,6 @@ describe("contracts", () => {
           kind: "text",
           prompt: "Anything else?",
           required: false,
-          validation: { maxLength: 200 },
         },
       ],
       allowSkip: true,
@@ -781,6 +1396,19 @@ describe("contracts", () => {
     });
     expect(input.questions[0]).toMatchObject({ required: true, allowOther: false });
     expect(input.questions[1]?.options).toEqual([]);
+
+    // Agent-invented text char bounds are not in the contract — strip on parse.
+    const stripped = RequestHumanInputToolInput.parse({
+      questions: [
+        {
+          id: "notes",
+          kind: "text",
+          prompt: "Notes?",
+          validation: { minLength: 50, maxLength: 200, minSelections: 1 },
+        },
+      ],
+    });
+    expect(stripped.questions[0]?.validation).toEqual({ minSelections: 1 });
 
     const response = SubmitHumanInputResponseRequest.parse({
       outcome: "answered",
@@ -826,7 +1454,7 @@ describe("contracts", () => {
     ).toThrow();
   });
 
-  test("accepts per-turn resources, tools, and model settings on user messages", () => {
+  test("accepts per-turn resources and model settings on user messages", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
     const payload = ClientSessionEvent.parse({
       type: "user.message",
@@ -834,7 +1462,6 @@ describe("contracts", () => {
         text: "use this too",
         turnInstructions: "  Current host context: record 42 is selected.  ",
         resources: [{ kind: "file", fileId }],
-        tools: [{ kind: "mcp", id: "docs" }],
         model: "gpt-5.6-sol",
         reasoningEffort: "xhigh",
       },
@@ -842,7 +1469,6 @@ describe("contracts", () => {
     expect(payload.type).toBe("user.message");
     if (payload.type !== "user.message") throw new Error("expected user.message");
     expect(payload.payload.resources).toEqual([{ kind: "file", fileId }]);
-    expect(payload.payload.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     expect(payload.payload.model).toBe("gpt-5.6-sol");
     expect(payload.payload.reasoningEffort).toBe("xhigh");
     expect(payload.payload.turnInstructions).toBe("Current host context: record 42 is selected.");
@@ -856,7 +1482,21 @@ describe("contracts", () => {
     expect(payload.type).toBe("user.message");
     if (payload.type !== "user.message") throw new Error("expected user.message");
     expect(payload.payload.resources).toEqual([]);
-    expect(payload.payload.tools).toEqual([]);
+  });
+
+  test("rejects the removed one-turn tool override on Send and Steer", () => {
+    expect(
+      ClientSessionEvent.safeParse({
+        type: "user.message",
+        payload: { text: "send", tools: [] },
+      }).success,
+    ).toBe(false);
+    expect(
+      SteerSessionMessageRequest.safeParse({
+        text: "steer",
+        tools: [],
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts full realtime bus messages", () => {
@@ -888,15 +1528,52 @@ describe("contracts", () => {
     expect(
       DocumentSearchRequest.parse({
         query: "network policy",
-        limit: 20,
+        limit: 50,
         mode: "hybrid",
         sourceKinds: ["repository"],
       }),
     ).toEqual({
       query: "network policy",
-      limit: 20,
+      limit: 50,
       mode: "hybrid",
       sourceKinds: ["repository"],
+    });
+    expect(
+      DocumentSearchResponse.parse({
+        results: [
+          {
+            chunkId: "00000000-0000-4000-8000-000000000011",
+            workspaceId: "00000000-0000-4000-8000-000000000012",
+            documentId: "00000000-0000-4000-8000-000000000013",
+            baseId: "00000000-0000-4000-8000-000000000014",
+            fileId,
+            title: "Network policy",
+            text: "Private endpoints require the approved policy.",
+            score: 0.75,
+            matchType: "keyword",
+            vectorScore: null,
+            keywordScore: 0.75,
+            chunkIndex: 0,
+            metadata: {},
+            sourceKind: "repository",
+            sourceUri: "https://example.test/runbook",
+            sourceExternalId: "runbook-1",
+            sourceTitle: "Network policy",
+            sourceAuthor: "Platform",
+            sourceCreatedAt: null,
+            sourceUpdatedAt: null,
+            sourceVersion: "v1",
+            aclTags: ["platform"],
+            authorityKind: "personal",
+            authorityWorkspaceId: "00000000-0000-4000-8000-000000000012",
+            authoritySubjectId: "user:initiator",
+          },
+        ],
+      }).results[0],
+    ).toMatchObject({
+      sourceKind: "repository",
+      authorityKind: "personal",
+      authoritySubjectId: "user:initiator",
     });
   });
 
@@ -926,6 +1603,7 @@ describe("contracts", () => {
     expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
     expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
+    expect(() => DocumentSearchRequest.parse({ query: "boundary", limit: 51 })).toThrow();
     expect(() => CreateKnowledgeMemoryRequest.parse({ text: "", confidence: 1.1 })).toThrow();
   });
 
@@ -979,6 +1657,7 @@ describe("capability pack runtime manifest fields", () => {
   test("packs without runtime fields keep their existing shape", () => {
     const pack = CapabilityPack.parse(baseManifest);
     expect(pack.sandboxImage).toBeUndefined();
+    expect(pack.sandboxProviderImages).toBeUndefined();
     expect(pack.skills).toEqual([]);
   });
 
@@ -995,6 +1674,32 @@ describe("capability pack runtime manifest fields", () => {
       "SKILL.md",
       "references/runbook.md",
     ]);
+  });
+
+  test("binds a digest-pinned logical image to an immutable Modal image ID", () => {
+    const pack = CapabilityPack.parse({
+      ...baseManifest,
+      sandboxImage:
+        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sandboxProviderImages: {
+        modal: { imageId: "im-1234567890123456789012" },
+      },
+    });
+    expect(pack.sandboxProviderImages?.modal?.imageId).toBe("im-1234567890123456789012");
+  });
+
+  test("rejects a Modal image ID without digest-pinned logical provenance", () => {
+    for (const sandboxImage of [undefined, "example.com/infra-sandbox:latest"]) {
+      expect(() =>
+        CapabilityPack.parse({
+          ...baseManifest,
+          ...(sandboxImage ? { sandboxImage } : {}),
+          sandboxProviderImages: {
+            modal: { imageId: "im-1234567890123456789012" },
+          },
+        }),
+      ).toThrow();
+    }
   });
 
   test("requires every skill to include a top-level SKILL.md", () => {

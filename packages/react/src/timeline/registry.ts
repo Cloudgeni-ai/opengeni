@@ -1,4 +1,5 @@
 import type { ComponentType } from "react";
+import { mcpToolLeaf } from "./tool-display-name";
 import type { ToolCallItem } from "./types";
 
 /* ----------------------------------------------------------------------------
@@ -11,7 +12,8 @@ import type { ToolCallItem } from "./types";
    Resolution order (most → least specific):
      1. exact match on `raw.type`        (e.g. "apply_patch_call", "computer_call")
      2. exact match on the tool `name`   (e.g. "exec_command", "web_search_call")
-     3. the registry's generic fallback
+     3. leaf match after MCP `__` prefix (e.g. opengeni__environment_set_variable)
+     4. the registry's generic fallback
 
    A consumer extends the defaults without forking by passing overrides to
    `createToolRegistry` — e.g. a custom renderer for their own MCP tool, or a
@@ -89,7 +91,18 @@ export function createToolRegistry(
         return byType;
       }
     }
-    return byName.get(item.name) ?? fallback;
+    const exact = byName.get(item.name);
+    if (exact) {
+      return exact;
+    }
+    const leaf = mcpToolLeaf(item.name);
+    if (leaf !== item.name) {
+      const byLeaf = byName.get(leaf);
+      if (byLeaf) {
+        return byLeaf;
+      }
+    }
+    return fallback;
   };
 
   return { resolve, fallback };

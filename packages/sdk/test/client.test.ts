@@ -1,7 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
-import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "../src/errors";
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
+import {
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+  OpenGeniSessionListCursorError,
+} from "../src/errors";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  type Session,
+  OPENGENI_CORRELATION_HEADER,
+  type ComposerDraft,
+  type SaveComposerDraftRequest,
+} from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 type RecordedRequest = {
@@ -114,6 +125,7 @@ describe("OpenGeniClient", () => {
       initialMessage: "hello",
       turnInstructions: "Host context for the initial turn.",
       sandboxBackend: "none",
+      expectedNewSessionDraftRevision: 4,
     });
     expect(created).toEqual(session as never);
     expect(requests).toHaveLength(1);
@@ -127,6 +139,51 @@ describe("OpenGeniClient", () => {
       initialMessage: "hello",
       turnInstructions: "Host context for the initial turn.",
       sandboxBackend: "none",
+      expectedNewSessionDraftRevision: 4,
+    });
+  });
+
+  test("gets and saves the actor-private new-session draft", async () => {
+    const draft = {
+      revision: 3,
+      text: "recover me",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      options: { sandboxBackend: "none" },
+      updatedAt: "2026-07-20T01:02:03.000Z",
+    };
+    const { client, requests } = makeClient(() => jsonResponse(draft));
+
+    expect(await client.getNewSessionDraft(WORKSPACE_ID)).toEqual(draft as never);
+    expect(
+      await client.saveNewSessionDraft(WORKSPACE_ID, {
+        expectedRevision: 2,
+        text: draft.text,
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: draft.model,
+        reasoningEffort: "medium",
+        options: { sandboxBackend: "none" },
+      }),
+    ).toEqual(draft as never);
+
+    expect(requests.map((request) => [request.method, request.url])).toEqual([
+      ["GET", `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+      ["PUT", `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+    ]);
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      expectedRevision: 2,
+      text: "recover me",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      options: { sandboxBackend: "none" },
     });
   });
 
@@ -149,6 +206,78 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[1]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10&compact=1`,
+    );
+  });
+
+  test("coalesces simultaneous identical session projection reads", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input) => {
+        requests += 1;
+        await gate;
+        return jsonResponse(
+          String(input).endsWith("/lineage")
+            ? { ancestors: [], children: [] }
+            : { id: SESSION_ID, workspaceId: WORKSPACE_ID },
+        );
+      },
+    });
+    const sessionReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+    ];
+    const lineageReads = [
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+    ];
+    const queueReads = [
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+    ];
+    const goalReads = [
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(4);
+    release();
+    await Promise.all([...sessionReads, ...lineageReads, ...queueReads, ...goalReads]);
+    expect(requests).toBe(4);
+  });
+
+  test("queues one fresh session read behind an existing projection read", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await gate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+    const initial = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const freshReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    release();
+    expect(((await initial) as Session & { request: number }).request).toBe(1);
+    const reconciled = await Promise.all(freshReads);
+    expect(requests).toBe(2);
+    expect(reconciled.map((session) => (session as Session & { request: number }).request)).toEqual(
+      [2, 2],
     );
   });
 
@@ -178,6 +307,52 @@ describe("OpenGeniClient", () => {
     );
     expect(JSON.parse(requests[0]!.body!)).toEqual({
       requireApproval: ["write_record"],
+    });
+  });
+
+  test("updates an existing session tool policy through the dedicated route", async () => {
+    const response = { id: SESSION_ID, toolPolicyVersion: 2 } as unknown as Session;
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(
+      await client.updateSessionToolPolicy(WORKSPACE_ID, SESSION_ID, {
+        mode: "explicit",
+        tools: [],
+        firstPartyMcpTools: [],
+        expectedVersion: 1,
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("PUT");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/tool-policy`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      mode: "explicit",
+      tools: [],
+      firstPartyMcpTools: [],
+      expectedVersion: 1,
+    });
+  });
+
+  test("opts an existing session back in to workspace-default tools", async () => {
+    const response = {
+      id: SESSION_ID,
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+      toolPolicyVersion: 4,
+    } as unknown as Session;
+    const { client, requests } = makeClient(() => jsonResponse(response));
+
+    expect(
+      await client.updateSessionToolPolicy(WORKSPACE_ID, SESSION_ID, {
+        mode: "workspace_default",
+        expectedVersion: 3,
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("PUT");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      mode: "workspace_default",
+      expectedVersion: 3,
     });
   });
 
@@ -348,11 +523,15 @@ describe("OpenGeniClient", () => {
     });
   });
 
-  test("pause uses atomic control while approval posts a typed event", async () => {
+  test("pause and terminal cancel use atomic control while approval posts a typed event", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ event: makeEvent(5, "user.pause") }, 202),
     );
     await client.pauseSession(WORKSPACE_ID, SESSION_ID, { reason: "pause" });
+    await client.cancelSession(WORKSPACE_ID, SESSION_ID, {
+      reason: "host deleted",
+      clientEventId: "cancel-1",
+    });
     await client.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, {
       approvalId: "ap-1",
       decision: "approve",
@@ -363,6 +542,11 @@ describe("OpenGeniClient", () => {
     });
     expect(JSON.parse(requests[0]!.body!).clientEventId).toEqual(expect.any(String));
     expect(JSON.parse(requests[1]!.body!)).toEqual({
+      action: "cancel",
+      reason: "host deleted",
+      clientEventId: "cancel-1",
+    });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
     });
@@ -486,7 +670,36 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(requests[0]!.body!)).toEqual({});
   });
 
-  test("non-2xx responses raise OpenGeniApiError with status and body", async () => {
+  test("mutation transport failures become typed outcome-unknown errors without raw details", async () => {
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        throw new TypeError("PRIVATE proxy body and bearer secret");
+      },
+    });
+    const error = await client
+      .sendMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "preserve this operation",
+        clientEventId: "same-id-on-retry",
+      })
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({
+      status: 0,
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      body: "",
+    });
+    expect((error as Error).message).toMatch(
+      /^OpenGeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
+    );
+    expect((error as Error).message).not.toContain("PRIVATE");
+    expect((error as Error).message).not.toContain("bearer");
+  });
+
+  test("non-JSON error responses discard the body instead of surfacing proxy text", async () => {
     const { client } = makeClient(() => new Response("workspace not found", { status: 404 }));
     const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(
       () => null,
@@ -494,7 +707,216 @@ describe("OpenGeniClient", () => {
     );
     expect(error).toBeInstanceOf(OpenGeniApiError);
     expect((error as OpenGeniApiError).status).toBe(404);
-    expect((error as OpenGeniApiError).body).toBe("workspace not found");
+    expect((error as OpenGeniApiError).body).toBe("");
+    expect((error as OpenGeniApiError).code).toBeUndefined();
+    expect((error as OpenGeniApiError).message).toMatch(
+      /^OpenGeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
+    );
+  });
+
+  test("decodes structured API error code/message while retaining the raw body", async () => {
+    const body = JSON.stringify({
+      code: "INVALID_SESSION_CREATE_REQUEST",
+      message: "Invalid session create request: initialMessage failed schema validation",
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 422, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client.createSession(WORKSPACE_ID, { initialMessage: "private text" }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({
+      status: 422,
+      code: "INVALID_SESSION_CREATE_REQUEST",
+      body,
+    });
+    expect((error as Error).message).toMatch(
+      /^OpenGeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
+    );
+  });
+
+  test("decodes the canonical nested error envelope", async () => {
+    const body = JSON.stringify({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni is temporarily unavailable — retry.",
+        retryable: true,
+        requestId: "api-safe-503",
+      },
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 503, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: true,
+      correlationId: "api-safe-503",
+      outcomeUnknown: false,
+      body,
+      message: "OpenGeni is temporarily unavailable — retry. Reference: api-safe-503.",
+    });
+  });
+
+  test("preserves an actionable canonical 503 message instead of masking it as retryable", async () => {
+    const body = JSON.stringify({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message:
+          "X connection is not configured. An operator must add X OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON.",
+        retryable: false,
+        requestId: "social-oauth-config-missing",
+        details: { oauthReason: "operator_oauth_app_missing", provider: "x" },
+      },
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 503, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: false,
+      correlationId: "social-oauth-config-missing",
+      outcomeUnknown: false,
+      details: { oauthReason: "operator_oauth_app_missing", provider: "x" },
+      message:
+        "X connection is not configured. An operator must add X OAuth credentials to OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON. Reference: social-oauth-config-missing.",
+    });
+  });
+
+  test("raw nginx 502/503/504 responses stay bounded across composer request classes", async () => {
+    const draft: ComposerDraft = {
+      revision: 3,
+      text: "draft stays local",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const save: SaveComposerDraftRequest = {
+      expectedRevision: 3,
+      text: draft.text,
+      resources: [],
+      model: draft.model,
+      reasoningEffort: draft.reasoningEffort,
+    };
+    const operations = [
+      {
+        name: "draft load",
+        mutation: false,
+        run: async (client: OpenGeniClient) =>
+          await client.getComposerDraft(WORKSPACE_ID, SESSION_ID),
+      },
+      {
+        name: "draft save",
+        mutation: true,
+        run: async (client: OpenGeniClient) =>
+          await client.saveComposerDraft(WORKSPACE_ID, SESSION_ID, save),
+      },
+      {
+        name: "send",
+        mutation: true,
+        run: async (client: OpenGeniClient) =>
+          await client.sendMessage(WORKSPACE_ID, SESSION_ID, {
+            text: draft.text,
+            clientEventId: "safe-send-id",
+          }),
+      },
+      {
+        name: "steer",
+        mutation: true,
+        run: async (client: OpenGeniClient) =>
+          await client.steerMessage(WORKSPACE_ID, SESSION_ID, {
+            text: draft.text,
+            clientEventId: "safe-steer-id",
+          }),
+      },
+    ];
+
+    for (const status of [502, 503, 504]) {
+      for (const operation of operations) {
+        const correlationId = `edge-${status}-${operation.name.replace(" ", "-")}`;
+        const html = `<html><body><h1>${status} PRIVATE-UPSTREAM-BODY</h1>${"x".repeat(32_000)}</body></html>`;
+        const { client, requests } = makeClient(
+          () =>
+            new Response(html, {
+              status,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                [OPENGENI_CORRELATION_HEADER]: correlationId,
+              },
+            }),
+        );
+        const error = await operation.run(client).catch((caught) => caught);
+
+        expect(error, `${operation.name} ${status}`).toBeInstanceOf(OpenGeniApiError);
+        expect(error).toMatchObject({
+          status,
+          code: "upstream_unavailable",
+          retryable: true,
+          correlationId,
+          outcomeUnknown: operation.mutation,
+          body: "",
+        });
+        expect((error as Error).message).toBe(
+          `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+        );
+        expect((error as Error).message).not.toContain("PRIVATE-UPSTREAM-BODY");
+        expect(requests[0]!.headers[OPENGENI_CORRELATION_HEADER]).toMatch(/^[0-9a-f-]{36}$/);
+      }
+    }
+  });
+
+  test("an unexpected successful HTML mutation is outcome-unknown and body-free", async () => {
+    const { client } = makeClient(
+      () =>
+        new Response("<html>PRIVATE SUCCESS BODY</html>", {
+          status: 200,
+          headers: { "content-type": "text/html", [OPENGENI_CORRELATION_HEADER]: "edge-200" },
+        }),
+    );
+    const error = await client
+      .sendMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "preserve me",
+        clientEventId: "same-id-on-retry",
+      })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      status: 502,
+      code: "upstream_unavailable",
+      retryable: true,
+      correlationId: "edge-200",
+      outcomeUnknown: true,
+      body: "",
+    });
+    expect((error as Error).message).not.toContain("PRIVATE SUCCESS BODY");
+  });
+
+  test("oversized JSON errors are discarded rather than partially retained", async () => {
+    const body = JSON.stringify({ message: `PRIVATE-${"x".repeat(20_000)}` });
+    const { client } = makeClient(
+      () =>
+        new Response(body, {
+          status: 503,
+          headers: { "content-type": "application/json", "content-length": String(body.length) },
+        }),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).catch((caught) => caught);
+    expect(error).toMatchObject({ status: 503, body: "", retryable: true });
+    expect((error as Error).message).not.toContain("PRIVATE");
+    expect((error as Error).message.length).toBeLessThan(256);
   });
 
   test("JSON and void requests fail closed when the API response contract differs", async () => {
@@ -556,6 +978,7 @@ describe("OpenGeniClient", () => {
       cursor: "opaque-cursor",
       search: "  pinned work  ",
     });
+    await client.listSessionPage(WORKSPACE_ID, { pinsOnly: true });
     await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`,
@@ -567,7 +990,80 @@ describe("OpenGeniClient", () => {
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=7&cursor=opaque-cursor&search=pinned+work`,
     );
     expect(requests[3]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&pinsOnly=true`,
+    );
+    expect(requests[4]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
+    );
+  });
+
+  test("listSessionPage falls back to an older server's array endpoint", async () => {
+    const legacy = [
+      { id: SESSION_ID, workspaceId: WORKSPACE_ID },
+    ] as unknown as import("../src/types").Session[];
+    const { client, requests } = makeClient(() => jsonResponse(legacy));
+    await expect(client.listSessionPage(WORKSPACE_ID, { limit: 5 })).resolves.toEqual({
+      pinned: [],
+      sessions: legacy,
+      nextCursor: null,
+    });
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=5`,
+    ]);
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, { cursor: "unsupported-on-legacy" }),
+    ).rejects.toThrow("does not support stable session-page cursors");
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
+    ).rejects.toThrow("does not support session search");
+    await expect(
+      client.listSessions(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
+    ).rejects.toThrow("does not support session search");
+    await expect(client.listSessionPage(WORKSPACE_ID, { pinsOnly: true })).rejects.toThrow(
+      "does not support pins-only session lists",
+    );
+  });
+
+  test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
+    const expired = makeClient(() => new Response("snapshot expired", { status: 410 })).client;
+    const unavailable = makeClient(
+      () => new Response("temporarily unavailable", { status: 500 }),
+    ).client;
+    const invalid = makeClient(() => new Response("cursor invalid", { status: 400 })).client;
+
+    const expiredError = await expired
+      .listSessionPage(WORKSPACE_ID, { cursor: "expired" })
+      .catch((error: unknown) => error);
+    expect(expiredError).toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(expiredError).toMatchObject({ status: 410, body: "" });
+
+    const invalidError = await invalid
+      .listSessionPage(WORKSPACE_ID, { cursor: "tampered" })
+      .catch((error: unknown) => error);
+    expect(invalidError).toBeInstanceOf(OpenGeniApiError);
+    expect(invalidError).not.toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(invalidError).toMatchObject({ status: 400, body: "" });
+
+    const unavailableError = await unavailable
+      .listSessionPage(WORKSPACE_ID, { cursor: "still-valid" })
+      .catch((error: unknown) => error);
+    expect(unavailableError).toBeInstanceOf(OpenGeniApiError);
+    expect(unavailableError).not.toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(unavailableError).toMatchObject({ status: 500, body: "" });
+  });
+
+  test("listSessions search flattens the pin-aware page without losing section order", async () => {
+    const pinned = { id: "pinned" } as unknown as import("../src/types").Session;
+    const ordinary = { id: "ordinary" } as unknown as import("../src/types").Session;
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ pinned: [pinned], sessions: [ordinary], nextCursor: "next" }),
+    );
+
+    await expect(client.listSessions(WORKSPACE_ID, { search: "  exact match  " })).resolves.toEqual(
+      [pinned, ordinary],
+    );
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&search=exact+match`,
     );
   });
 
@@ -615,7 +1111,6 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[1]!.url).toBe(requests[0]!.url);
   });
-
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
     const wire = [makeEvent(1), makeEvent(2)].map(sseBlock).join("");
     const { client, requests } = makeClient((request) => {

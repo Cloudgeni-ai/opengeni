@@ -15,6 +15,7 @@ import type {
   CapabilityPack,
   ClientConfig,
   ComposerDraft,
+  CreateSessionRequest,
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
   CreateRigRequest,
@@ -75,11 +76,13 @@ import type {
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceRegisteredPack,
+  WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
-import type { SessionClientLike } from "../src/index";
-import type { MachinesResponse } from "../src/machines";
+import type { SessionClientLike } from "@opengeni/react";
+import type { MachinesResponse } from "@opengeni/react/machines";
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
@@ -164,6 +167,8 @@ export class MockOpenGeniClient implements SessionClientLike {
   private pausedSessions = new Set<string>();
   private drafts = new Map<string, ComposerDraft>();
   private scripted = false;
+  private managerScript: Promise<void> | null = null;
+  private responseQueues = new Map<string, Promise<void>>();
 
   bus(sessionId: string): SessionBus {
     let bus = this.buses.get(sessionId);
@@ -176,6 +181,76 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async getClientConfig(): Promise<ClientConfig> {
     return CLIENT_CONFIG;
+  }
+
+  async getWorkspaceModelCatalog(_workspaceId: string) {
+    return {
+      models: (CLIENT_CONFIG.models ?? []).map((model) => ({
+        ...model,
+        credentialReadiness: {
+          status: "ready" as const,
+          reason: null,
+          basis: "configuration" as const,
+          checkedAt: null,
+        },
+        availability: {
+          status: "available" as const,
+          selectable: true,
+          reason: null,
+          checkedAt: null,
+        },
+      })),
+    };
+  }
+
+  async getWorkspaceRealtimeModelCatalog(
+    _workspaceId: string,
+  ): Promise<WorkspaceRealtimeModelCatalogResponse> {
+    return {
+      models: [
+        {
+          id: "opengeni-gateway/openai/gpt-realtime-2.1",
+          label: "GPT Realtime 2.1",
+          provider: "OpenGeni",
+          description: "Best overall voice intelligence",
+          available: true,
+          unavailableReason: null,
+          recommended: true,
+        },
+        {
+          id: "gpt-live-1-boulder-alpha",
+          label: "Codex Live",
+          provider: "Connected Codex",
+          description: "Deep session integration",
+          available: true,
+          unavailableReason: null,
+          recommended: false,
+        },
+        {
+          id: "workspace-gateway/openai/gpt-realtime-mini",
+          label: "GPT Realtime Mini",
+          provider: "Your Gateway",
+          description: "Faster, lighter live voice",
+          available: true,
+          unavailableReason: null,
+          recommended: false,
+        },
+      ],
+    };
+  }
+
+  async createSession(
+    _workspaceId: string,
+    request: CreateSessionRequest,
+  ): Promise<Session & { initialTurnId: string | null }> {
+    const sessionId = request.requestedSessionId ?? demoUuid();
+    const bus = this.bus(sessionId);
+    bus.setStatus("idle");
+    return {
+      ...this.fabricateSession(sessionId, "idle", "Realtime-first demo session"),
+      createIdempotencyKey: request.idempotencyKey ?? null,
+      initialTurnId: null,
+    };
   }
 
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
@@ -297,8 +372,22 @@ export class MockOpenGeniClient implements SessionClientLike {
   ): Promise<SessionEvent> {
     const bus = this.bus(sessionId);
     const text = typeof message === "string" ? message : message.text;
+    // The managed API accepts the message and clears the matching durable
+    // composer draft atomically. Mirror that ordering before publishing the
+    // user.message invalidation so a reconciliation read cannot resurrect the
+    // just-submitted text and leave the Send action enabled.
+    const currentDraft = await this.getComposerDraft(_workspaceId, sessionId);
+    this.drafts.set(sessionId, {
+      ...currentDraft,
+      revision: currentDraft.revision + 1,
+      text: "",
+      resources: [],
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
     const event = bus.append("user.message", { text });
-    void this.respond(bus, text);
+    this.queueResponse(bus, text);
     return event;
   }
 
@@ -326,7 +415,16 @@ export class MockOpenGeniClient implements SessionClientLike {
     const bus = this.bus(sessionId);
     if (sessionId === MANAGER_SESSION_ID && !this.scripted) {
       this.scripted = true;
-      void runOpsChannelScript(bus);
+      const script = runOpsChannelScript(bus);
+      this.managerScript = script;
+      void script.then(
+        () => {
+          if (this.managerScript === script) this.managerScript = null;
+        },
+        () => {
+          if (this.managerScript === script) this.managerScript = null;
+        },
+      );
     }
     options.onStateChange?.("live");
     return bus.stream(options.after ?? 0, options.signal);
@@ -404,7 +502,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       revision: 1,
       text: turn.prompt,
       resources: turn.resources,
-      tools: turn.tools,
       model: turn.model,
       reasoningEffort: turn.reasoningEffort,
       sourceTurnId: turn.id,
@@ -436,7 +533,6 @@ export class MockOpenGeniClient implements SessionClientLike {
         revision: 0,
         text: "",
         resources: [],
-        tools: [],
         model: "gpt-5.2",
         reasoningEffort: "medium",
         sourceTurnId: null,
@@ -477,8 +573,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     return {
       version: this.queueVersions.get(sessionId) ?? 0,
       effectiveControl: this.effectiveControl(sessionId),
+      activePersonalConnections: [],
       stoppingPreviousAttempt: false,
       items: this.sessionTurns(sessionId).filter((turn) => turn.status === "queued"),
+      pendingInputs: [],
+      pendingInputAttachment: null,
     };
   }
 
@@ -559,6 +658,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       effectiveControl: this.effectiveControl(sessionId),
       interruptionCount: 0,
       wakeCount: 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
     };
   }
 
@@ -625,7 +726,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     sessionId: string,
   ): Promise<{ status: "completed" | "noop"; message: string }> {
-    this.bus(sessionId).append("session.context.compacted", { trigger: "operator" });
+    this.bus(sessionId).append("session.context.compaction.started", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+    });
+    this.bus(sessionId).append("session.context.compacted", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+      estimatedTokensAfter: 24_000,
+    });
     return { status: "completed", message: "Context compacted." };
   }
 
@@ -671,6 +780,24 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async listVariableSets(): Promise<VariableSet[]> {
     return await this.listEnvironments();
+  }
+
+  async getVariableSetVariable(
+    _workspaceId: string,
+    variableSetId: string,
+    name: string,
+  ): Promise<VariableSetSecret> {
+    const variableSet = this.environments.find((candidate) => candidate.id === variableSetId);
+    const variable = variableSet?.variables.find((candidate) => candidate.name === name);
+    if (!variableSet || !variable) {
+      throw new Error("variable set variable not found");
+    }
+    return {
+      variableSetId,
+      name,
+      version: variable.version,
+      value: "demo-secret-value",
+    };
   }
 
   async createEnvironment(
@@ -1135,6 +1262,9 @@ export class MockOpenGeniClient implements SessionClientLike {
       os: "linux",
       liveness: "warm",
       leaseEpoch: 1,
+      workspaceGeneration: null,
+      archiveGeneration: null,
+      archiveComplete: false,
       viewerHeartbeatIntervalMs: 30_000,
       FileSystem: {
         available: true,
@@ -1184,6 +1314,9 @@ export class MockOpenGeniClient implements SessionClientLike {
       sandboxGroupId: "00000000-0000-4000-8000-0000000000aa",
       liveness: "cold",
       leaseEpoch: 0,
+      workspaceGeneration: null,
+      archiveGeneration: null,
+      archiveComplete: false,
       viewerHeartbeatIntervalMs: 30_000,
       dataPlaneUrl: null,
       streamToken: null,
@@ -1474,6 +1607,9 @@ export class MockOpenGeniClient implements SessionClientLike {
           name: "Cloud sandbox",
           kind: "modal",
           state: "online",
+          workspaceGeneration: null,
+          archiveGeneration: null,
+          archiveComplete: false,
           active: true,
           isSessionGroup: true,
           os: "linux",
@@ -1531,6 +1667,31 @@ export class MockOpenGeniClient implements SessionClientLike {
     };
   }
 
+  /** Keep the scripted narrative and interactive turns ordered per session. */
+  private queueResponse(bus: SessionBus, text: string): void {
+    const previous = this.responseQueues.get(bus.sessionId) ?? Promise.resolve();
+    const script = bus.sessionId === MANAGER_SESSION_ID ? this.managerScript : null;
+    const queued = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await script?.catch(() => undefined);
+        await this.respond(bus, text);
+      });
+    this.responseQueues.set(bus.sessionId, queued);
+    void queued.then(
+      () => {
+        if (this.responseQueues.get(bus.sessionId) === queued) {
+          this.responseQueues.delete(bus.sessionId);
+        }
+      },
+      () => {
+        if (this.responseQueues.get(bus.sessionId) === queued) {
+          this.responseQueues.delete(bus.sessionId);
+        }
+      },
+    );
+  }
+
   /** Canned manager acknowledgment for anything typed into the composer. */
   private async respond(bus: SessionBus, text: string): Promise<void> {
     bus.setStatus("running");
@@ -1560,13 +1721,18 @@ export class MockOpenGeniClient implements SessionClientLike {
       title: null,
       titleSource: null,
       instructions: null,
+      policyRole: null,
       resources: [],
+      skills: [],
       tools: [],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      toolPolicyVersion: 1,
       metadata: { title },
       createdBy: { kind: "subject", subjectId: "user:demo" },
       createdByContext: {},
       model: "gpt-5.2",
       sandboxBackend: "modal",
+      workingDir: null,
       sandboxOs: "linux",
       sandboxGroupId: sessionId,
       activeSandboxId: null,
@@ -1576,8 +1742,15 @@ export class MockOpenGeniClient implements SessionClientLike {
       rigId: null,
       rigVersionId: null,
       firstPartyMcpPermissions: null,
+      firstPartyMcpTools: [],
       mcpServers: [],
       parentSessionId: sessionId === WORKER_SESSION_ID ? MANAGER_SESSION_ID : null,
+      rootSessionId: sessionId === WORKER_SESSION_ID ? MANAGER_SESSION_ID : sessionId,
+      nestedAgentDepth: sessionId === WORKER_SESSION_ID ? 1 : 0,
+      maxNestedAgentDepthOverride: null,
+      effectiveMaxNestedAgentDepth: 3,
+      nestedAgentDepthPolicySource: "default",
+      nestedAgentDepthPolicySessionId: null,
       createIdempotencyKey: null,
       temporalWorkflowId: null,
       activeTurnId: null,
@@ -1586,6 +1759,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       queueTailPosition: 0,
       effectiveControl: this.effectiveControl(sessionId),
       lastSequence: this.bus(sessionId).events.length,
+      codexCompactionMode: "portable",
       pinned: false,
       pinnedAt: null,
       pinVersion: 0,
@@ -1841,7 +2015,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-07-turn-instructions-v1",
+  apiContractRevision: "2026-07-workspace-artifacts-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [
@@ -1862,11 +2036,12 @@ const CLIENT_CONFIG: ClientConfig = {
     },
   ],
   defaultReasoningEffort: "medium",
-  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
   fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
   productAccessMode: "managed",
   auth: { mode: "none" },
+  analytics: { consentRequired: true, providers: {} },
   structuredServices: { fileSystem: true, git: true, terminalEvents: true },
 };
 
@@ -1884,8 +2059,10 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     prompt,
     resources: [],
     tools: [],
+    toolsProvided: false,
     model: "gpt-5.2",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     sandboxOs: "linux",
     metadata: {},
@@ -1921,6 +2098,14 @@ function fabricateGoal(sessionId: string): SessionGoal {
     noProgressStreak: 0,
     maxAutoContinuations: 25,
     metadata: {},
+    continuation: {
+      state: "running",
+      reason: "goal_turn_running",
+      wakeRevision: 2,
+      observedRevision: 2,
+      nextAttemptAt: null,
+      lastError: null,
+    },
     createdAt: now,
     updatedAt: now,
   };
@@ -1957,10 +2142,10 @@ function fabricatePack(manifest: RegisterCapabilityPackRequest): CapabilityPack 
     category: manifest.category,
     version: manifest.version,
     skills: (manifest.skills ?? []).map((skill) => ({ name: skill.name, files: skill.files })),
-    tools: manifest.tools ?? [],
     connectors: [],
     knowledge: [],
     scheduledTaskTemplates: [],
+    tools: manifest.tools ?? [],
     metadata: manifest.metadata ?? {},
   };
 }

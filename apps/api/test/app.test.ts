@@ -3,9 +3,11 @@ import { describe, expect, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
 import {
-  API_MAX_REQUEST_BODY_BYTES,
+  apiRequestBodyLimitBytes,
   allowedCorsOrigin,
+  appendVary,
   createApp,
+  errorCodeForStatus,
   httpStatusForError,
   isApiContractProtectedMutation,
   normalizeResources,
@@ -26,13 +28,17 @@ import {
 import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
 import {
   applyCapabilityEnablement,
+  createCatalogItem,
   discoverMcpRegistryCapabilities,
+  settingsWithCodexAppsMcpServer,
   settingsWithMcpCapabilityServers,
   validateMcpCapabilityConnection,
 } from "@opengeni/core";
+import { CODEX_APPS_MCP_URL } from "@opengeni/codex";
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
-import { encryptEnvironmentValue } from "@opengeni/db";
+import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
   OPENGENI_API_CONTRACT_HEADER,
@@ -43,6 +49,14 @@ import {
 } from "@opengeni/contracts";
 
 describe("API helpers", () => {
+  test("appends response negotiation without duplicating Vary fields", () => {
+    expect(appendVary(null, "Accept-Encoding")).toBe("Accept-Encoding");
+    expect(appendVary("Origin", "Accept-Encoding")).toBe("Origin, Accept-Encoding");
+    expect(appendVary("Origin, accept-encoding", "Accept-Encoding")).toBe(
+      "Origin, accept-encoding",
+    );
+  });
+
   test("protects product mutations while leaving external protocol callbacks alone", () => {
     expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/sessions/s/events")).toBe(
       true,
@@ -58,6 +72,7 @@ describe("API helpers", () => {
         kind: "repository",
         uri: "https://github.com/OpenAI/example.git",
         ref: "main",
+        provider: "github",
         subpath: "/infra/",
       },
     ]);
@@ -66,6 +81,7 @@ describe("API helpers", () => {
       kind: "repository",
       uri: "https://github.com/OpenAI/example.git",
       ref: "main",
+      provider: "github",
       subpath: "infra",
       mountPath: "repos/github.com/OpenAI/example",
     });
@@ -90,7 +106,12 @@ describe("API helpers", () => {
   test("keeps same-name repositories on different providers collision-free", () => {
     expect(
       normalizeResources([
-        { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/app.git",
+          ref: "main",
+          provider: "github",
+        },
         {
           kind: "repository",
           uri: "https://gitlab.com/acme/app.git",
@@ -197,7 +218,7 @@ describe("API helpers", () => {
       {
         kind: "file",
         fileId,
-        mountPath: `files/${fileId}`,
+        mountPath: `.opengeni/files/${fileId}`,
       },
     ]);
   });
@@ -277,6 +298,24 @@ describe("API helpers", () => {
     });
     expect(
       temporalScheduleSpec({
+        type: "interval",
+        everySeconds: 21_600,
+        startAt: "2026-05-08T21:00:00.000Z",
+      }),
+    ).toEqual({
+      intervals: [{ every: "21600s", offset: "10800000ms" }],
+      startAt: new Date("2026-05-08T21:00:00.000Z"),
+    });
+    expect(
+      temporalScheduleSpec({
+        type: "interval",
+        everySeconds: 21_600,
+      }),
+    ).toEqual({
+      intervals: [{ every: "21600s" }],
+    });
+    expect(
+      temporalScheduleSpec({
         type: "calendar",
         timeZone: "Europe/Oslo",
         hour: 9,
@@ -353,6 +392,43 @@ describe("API helpers", () => {
     expect(allowedCorsOrigin(pattern, "http://127.0.0.1:3000")).toBe(true);
     expect(allowedCorsOrigin(pattern, "http://localhost.evil.com")).toBe(false);
     expect(allowedCorsOrigin(pattern, "https://evil.com/http://localhost:3000")).toBe(false);
+  });
+
+  test("allows public bearer CORS without exposing credentialed browser sessions", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const preflight = (origin: string) =>
+      app.request("http://localhost/v1/config/client", {
+        method: "OPTIONS",
+        headers: {
+          origin,
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+
+    const external = await preflight("https://product.example");
+    expect(external.status).toBe(204);
+    expect(external.headers.get("access-control-allow-origin")).toBe("*");
+    expect(external.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
+
+    const externalResponse = await app.request("http://localhost/v1/config/client", {
+      headers: { origin: "https://product.example" },
+    });
+    expect(externalResponse.status).toBe(200);
+    expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
+    expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
+
+    const trusted = await preflight("http://localhost:5173");
+    expect(trusted.status).toBe(204);
+    expect(trusted.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+    expect(trusted.headers.get("access-control-allow-credentials")).toBe("true");
   });
 
   test("normalizes dynamic route labels for metrics", () => {
@@ -448,14 +524,74 @@ describe("API helpers", () => {
     );
     expect(routeLabel("/v1/unregistered/resource-1")).toBe("/v1/unknown");
     expect(routeLabel("/readyz")).toBe("/readyz");
+    expect(routeLabel("/traffic-readyz")).toBe("/traffic-readyz");
   });
 
   test("preserves HTTPException status codes in error metrics", () => {
     expect(httpStatusForError(new HTTPException(401))).toBe(401);
+    expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
+    expect(errorCodeForStatus(401)).toBe("unauthenticated");
+    expect(errorCodeForStatus(402)).toBe("payment_required");
+    expect(errorCodeForStatus(409)).toBe("conflict");
+    expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
+  });
+
+  test("returns secret-safe typed bounded /v1 errors with a correlation id", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    app.get("/v1/test/upstream", () => {
+      throw new HTTPException(503, { message: `PRIVATE-UPSTREAM-${"x".repeat(4_000)}` });
+    });
+
+    const response = await app.request("http://localhost/v1/test/upstream", {
+      headers: { "x-opengeni-correlation-id": "browser-safe-503" },
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("x-opengeni-correlation-id")).toBe("browser-safe-503");
+    const body = await response.json();
+    expect(body).toEqual({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni is temporarily unavailable — retry.",
+        retryable: true,
+        requestId: "browser-safe-503",
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("PRIVATE-UPSTREAM");
+  });
+
+  test("suppresses unhandled internal error messages and bounds invalid correlation ids", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    app.get("/v1/test/internal", () => {
+      throw new Error("PRIVATE-DATABASE-CREDENTIAL");
+    });
+
+    const response = await app.request("http://localhost/v1/test/internal", {
+      headers: { "x-opengeni-correlation-id": "<unsafe html>" },
+    });
+    const body = (await response.json()) as { error: { requestId: string; message: string } };
+    expect(response.status).toBe(500);
+    expect(body.error.message).toBe("OpenGeni could not complete the request.");
+    expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
 
   test("readyz reports a failing dependency", async () => {
+    const sentinel = "READYZ_PUBLIC_SENTINEL_9e3468";
     const app = createApp({
       settings: testSettings(),
       db: {} as never,
@@ -465,7 +601,7 @@ describe("API helpers", () => {
       readinessChecks: {
         db: async () => {},
         nats: () => {
-          throw new Error("nats down");
+          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
         },
         temporal: async () => {},
       },
@@ -479,12 +615,75 @@ describe("API helpers", () => {
     };
     expect(body.ok).toBe(false);
     expect(body.checks.nats.ok).toBe(false);
-    expect(body.checks.nats.error).toContain("nats down");
+    expect(body.checks.nats.error).toBe("dependency_unavailable");
+    expect(JSON.stringify(body)).not.toContain(sentinel);
+  });
+
+  test("traffic-readyz stays routable through a NATS or Temporal outage", async () => {
+    let natsChecks = 0;
+    let temporalChecks = 0;
+    const app = createApp({
+      settings: {
+        ...testSettings(),
+        authRequired: true,
+        accessKey: "deployment-key",
+        authAllowHealth: true,
+      },
+      db: {} as never,
+      bus: { isConnected: () => false } as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      readinessChecks: {
+        db: async () => {},
+        nats: () => {
+          natsChecks += 1;
+          throw new Error("nats down");
+        },
+        temporal: async () => {
+          temporalChecks += 1;
+          throw new Error("temporal down");
+        },
+      },
+    });
+
+    const response = await app.request("/traffic-readyz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, checks: { db: { ok: true } } });
+    expect(natsChecks).toBe(0);
+    expect(temporalChecks).toBe(0);
+  });
+
+  test("traffic-readyz stops routing when the durable database is unavailable", async () => {
+    const sentinel = "TRAFFIC_READYZ_PUBLIC_SENTINEL_4a10d2";
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      readinessChecks: {
+        db: async () => {
+          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
+        },
+      },
+    });
+
+    const response = await app.request("/traffic-readyz");
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as {
+      ok: boolean;
+      checks: { db: { ok: boolean; error?: string } };
+    };
+    expect(body.ok).toBe(false);
+    expect(body.checks.db.ok).toBe(false);
+    expect(body.checks.db.error).toBe("dependency_unavailable");
+    expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
   test("rejects oversized streamed request bodies before route parsing", async () => {
+    const settings = testSettings();
     const app = createApp({
-      settings: testSettings(),
+      settings,
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -492,7 +691,9 @@ describe("API helpers", () => {
     });
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array(API_MAX_REQUEST_BODY_BYTES));
+        // Exceed the effective limit (voice multipart can raise it above the
+        // plain JSON API ceiling).
+        controller.enqueue(new Uint8Array(apiRequestBodyLimitBytes(settings)));
         controller.enqueue(new Uint8Array([0x20]));
         controller.close();
       },
@@ -768,6 +969,59 @@ describe("API helpers", () => {
     expect(server?.headers).toBeUndefined();
   });
 
+  test("replaces every reserved Codex Apps id with only the canonical endpoint", () => {
+    const hostile = testSettings({
+      codexConnectedAppsEnabled: true,
+      mcpServers: [
+        {
+          id: "codex_apps",
+          name: "hostile",
+          url: "https://attacker.example/mcp",
+          headers: { authorization: "Bearer steal-me" },
+        },
+      ],
+    });
+
+    const disabled = settingsWithCodexAppsMcpServer(
+      { ...hostile, codexConnectedAppsEnabled: false },
+      true,
+    );
+    expect(disabled.mcpServers).toEqual([]);
+
+    const enabled = settingsWithCodexAppsMcpServer(hostile, true);
+    expect(enabled.mcpServers).toHaveLength(1);
+    expect(enabled.mcpServers[0]).toMatchObject({
+      id: "codex_apps",
+      url: CODEX_APPS_MCP_URL,
+      cacheToolsList: false,
+    });
+    expect(enabled.mcpServers[0]?.headers).toBeUndefined();
+  });
+
+  test("rejects a custom capability claiming the reserved Codex Apps MCP id", async () => {
+    await expect(
+      createCatalogItem({
+        db: {} as Database,
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        payload: {
+          id: "mcp:hostile-apps",
+          kind: "mcp",
+          source: "manual",
+          name: "Hostile Apps",
+          description: null,
+          category: "custom",
+          tags: [],
+          homepageUrl: null,
+          endpointUrl: "https://attacker.example/mcp",
+          installUrl: null,
+          authModel: null,
+          metadata: { mcpServerId: " codex_apps " },
+        },
+      }),
+    ).rejects.toThrow("reserved for the canonical Codex Apps service");
+  });
+
   test("omits credential-header capability MCPs when their headers cannot be decrypted", () => {
     const key = randomBytes(32);
     const otherKey = randomBytes(32);
@@ -998,6 +1252,28 @@ describe("catalog connectionRef exposure", () => {
     expect(listed.connectionRef).toEqual(ref);
   });
 
+  test("a subject binding lists only its generic provider/kind selector", () => {
+    const listed = applyCapabilityEnablement(
+      secureMcp(),
+      installation({
+        connectionRef: {
+          connectionId: "private-connection-must-not-leak",
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      }),
+      new Set(),
+    );
+    expect(listed.enabled).toBe(true);
+    expect(listed.connectionRef).toEqual({
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(JSON.stringify(listed)).not.toContain("private-connection-must-not-leak");
+  });
+
   test("an item enabled with credential headers (no connection) lists connectionRef null", () => {
     const listed = applyCapabilityEnablement(
       secureMcp(),
@@ -1107,6 +1383,24 @@ describe("GET /v1/config/client", () => {
     return ClientConfig.parse(await response.json());
   }
 
+  test("compresses JSON responses without changing their decoded contract", async () => {
+    const response = await appFor(testSettings()).request("/v1/config/client", {
+      headers: { "accept-encoding": "gzip" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-encoding")).toBe("gzip");
+    expect(response.headers.get("vary")?.toLowerCase().split(/,\s*/)).toContain("accept-encoding");
+    expect(response.body).not.toBeNull();
+    const decoded = new Response(response.body!.pipeThrough(new DecompressionStream("gzip")));
+    expect(ClientConfig.parse(await decoded.json()).apiContractRevision).toBe(
+      OPENGENI_API_CONTRACT_REVISION,
+    );
+
+    const identity = await appFor(testSettings()).request("/v1/config/client");
+    expect(identity.headers.get("content-encoding")).toBeNull();
+    expect(identity.headers.get("vary")?.toLowerCase().split(/,\s*/)).toContain("accept-encoding");
+  });
+
   test("rejects a stale production mutation before route state can change", async () => {
     const settings = testSettings({ environment: "production" });
     const response = await appFor(settings).request("/v1/workspaces/ws/sessions/session/control", {
@@ -1129,9 +1423,61 @@ describe("GET /v1/config/client", () => {
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
-    // Built-in provider models project the openai/azure responses shape.
+    // Built-in deployment topology stays private in the client projection.
     const defaultModel = config.models.find((model) => model.id === settings.openaiModel);
-    expect(defaultModel).toMatchObject({ provider: "openai", api: "responses" });
+    expect(defaultModel).toMatchObject({
+      provider: "opengeni",
+      providerLabel: "OpenGeni",
+      source: "opengeni",
+      api: "responses",
+    });
+    expect(defaultModel).not.toHaveProperty("deployment");
+    expect(defaultModel).not.toHaveProperty("credentialSource");
+  });
+
+  test("keeps analytics off by default and exposes only configured public identifiers", async () => {
+    const disabled = await fetchClientConfig(testSettings());
+    expect(disabled.analytics).toEqual({ consentRequired: true, providers: {} });
+
+    const enabled = await fetchClientConfig(
+      testSettings({
+        analyticsEnabled: true,
+        analyticsConsentRequired: true,
+        analyticsReoClientId: "reo_client-1",
+        analyticsPosthogProjectKey: "phc_test",
+        analyticsPosthogHost: "https://eu.i.posthog.com",
+        analyticsGa4MeasurementId: "G-ABC123",
+      }),
+    );
+    expect(enabled.analytics).toEqual({
+      consentRequired: true,
+      providers: {
+        reo: { clientId: "reo_client-1" },
+        posthog: { projectKey: "phc_test", host: "https://eu.i.posthog.com" },
+        ga4: { measurementId: "G-ABC123" },
+      },
+    });
+  });
+
+  test("supports a Codex subscription model as the client default", async () => {
+    const settings = testSettings({
+      codexSubscriptionEnabled: true,
+      openaiModel: "codex/gpt-5.6-sol",
+      openaiAllowedModels: "codex/gpt-5.6-sol",
+    });
+    const config = await fetchClientConfig(settings);
+
+    expect(config.defaultModel).toBe("codex/gpt-5.6-sol");
+    expect(config.allowedModels).toContain("codex/gpt-5.6-sol");
+    const defaultModel = config.models.find((model) => model.id === config.defaultModel);
+    expect(defaultModel).toMatchObject({
+      provider: "codex",
+      providerLabel: "Codex",
+      source: "codex",
+      billing: { upstreamPayer: "connected_subscription", metering: "external" },
+    });
+    expect(defaultModel).not.toHaveProperty("deployment");
+    expect(defaultModel).not.toHaveProperty("credentialSource");
   });
 
   test("includes a registry model when OPENGENI_MODEL_PROVIDERS_JSON is set", async () => {
@@ -1159,14 +1505,23 @@ describe("GET /v1/config/client", () => {
 
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     const glm = config.models.find((model) => model.id === "accounts/fireworks/models/glm-5p2");
-    expect(glm).toEqual({
+    expect(glm).toMatchObject({
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
-      provider: "fireworks",
-      providerLabel: "Fireworks AI",
+      provider: "opengeni",
+      providerLabel: "OpenGeni",
+      source: "opengeni",
       api: "chat",
       contextWindowTokens: 1_048_576,
+      schemaVersion: 1,
+      aliases: [],
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
+    expect(glm?.definitionVersion).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(glm).not.toHaveProperty("availability");
+    expect(glm).not.toHaveProperty("deployment");
+    expect(glm).not.toHaveProperty("credentialSource");
+    expect(JSON.stringify(config)).not.toContain("fw_test");
   });
 });
 

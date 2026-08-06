@@ -14,32 +14,40 @@ import type {
   SetOrganizationRecoveryPolicyRequest,
 } from "@opengeni/contracts";
 import {
+  acceptOrganizationRecoveryCustodian,
   approveOrganizationRecovery,
   cancelOrganizationRecoveryOperation,
   createOrganizationRecoveryOperation,
   finalizeOrganizationRecovery,
   getOrganizationGovernance,
+  isAcceptedOrganizationRecoveryCustodian,
   lockOrganizationGovernance,
   OrganizationGovernanceError,
   revokeOrganizationRecoveryApproval,
   setOrganizationRecoveryPolicy,
   type Database,
 } from "@opengeni/db";
+import { directManagedSessionEvidenceFor, type DirectManagedSessionEvidence } from "../access";
 import { HTTPException } from "hono/http-exception";
 
-type GovernanceDeps = { db: Database; settings: Settings };
+type GovernanceDeps = { db: Database; governanceDb?: Database; settings: Settings };
+
+function governanceDatabase(deps: GovernanceDeps): Database {
+  return deps.governanceDb ?? deps.db;
+}
 
 export async function requireOrganizationGovernanceAdmin(
   deps: GovernanceDeps,
   context: AccessContext,
   accountId: string,
 ): Promise<OrganizationGovernance> {
+  requireOrganizationGovernanceEnabled(deps.settings);
   requireManagedGovernanceMode(context);
   const grant = context.accountGrants.find((candidate) => candidate.accountId === accountId);
   if (!grant?.permissions.includes("account:admin")) {
     throw new HTTPException(403, { message: "organization access denied" });
   }
-  const governance = await getOrganizationGovernance(deps.db, accountId);
+  const governance = await getOrganizationGovernance(governanceDatabase(deps), accountId);
   if (!governance) throw new HTTPException(404, { message: "organization not found" });
   if (governance.state !== "active") {
     throw new HTTPException(423, { message: "organization governance is locked" });
@@ -58,8 +66,9 @@ export async function requireOrganizationGovernanceAdminOrLockedReplay(
   context: AccessContext,
   accountId: string,
 ): Promise<OrganizationGovernance> {
+  requireOrganizationGovernanceEnabled(deps.settings);
   requireManagedGovernanceMode(context);
-  const governance = await getOrganizationGovernance(deps.db, accountId);
+  const governance = await getOrganizationGovernance(governanceDatabase(deps), accountId);
   if (!governance) throw new HTTPException(404, { message: "organization not found" });
   if (governance.state === "active") {
     return await requireOrganizationGovernanceAdmin(deps, context, accountId);
@@ -78,6 +87,7 @@ export async function requireOrganizationRecoveryCustodian(
   context: AccessContext,
   accountId: string,
 ): Promise<OrganizationGovernance> {
+  requireOrganizationGovernanceEnabled(deps.settings);
   const governance = await requireOrganizationRecoveryCustodianIdentity(deps, context, accountId);
   if (governance.state !== "governance_locked") {
     throw new HTTPException(409, { message: "organization is not governance locked" });
@@ -95,6 +105,7 @@ export async function requireOrganizationRecoveryCustodianOrReplay(
   context: AccessContext,
   accountId: string,
 ): Promise<OrganizationGovernance> {
+  requireOrganizationGovernanceEnabled(deps.settings);
   return await requireOrganizationRecoveryCustodianIdentity(deps, context, accountId);
 }
 
@@ -106,24 +117,26 @@ async function requireOrganizationRecoveryCustodianIdentity(
   // A user-shaped delegated bearer is still a non-human credential and may be
   // held by an agent. Exceptional recovery therefore requires a direct
   // managed-auth session, not merely a user:* subject string.
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const evidence = directManagedSessionEvidenceFor(context);
   const directlyAuthenticatedHuman =
     context.mode === "managed" &&
-    context.subjectId.startsWith("user:") &&
-    context.accountGrants.some(
-      (grant) => grant.subjectId === context.subjectId && grant.metadata?.authType === "managed",
-    );
-  if (!directlyAuthenticatedHuman) {
+    evidence !== null &&
+    context.subjectId === `user:${evidence.userId}`;
+  if (!directlyAuthenticatedHuman || !evidence) {
     throw new HTTPException(403, { message: "human recovery custodian required" });
   }
-  const governance = await getOrganizationGovernance(deps.db, accountId);
-  if (!governance) throw new HTTPException(404, { message: "organization not found" });
   if (
-    !governance.recoveryPolicy?.custodians.some(
-      (custodian) => custodian.subjectId === context.subjectId,
-    )
+    !(await isAcceptedOrganizationRecoveryCustodian(
+      governanceDatabase(deps),
+      accountId,
+      evidence.userId,
+    ))
   ) {
     throw new HTTPException(403, { message: "organization recovery access denied" });
   }
+  const governance = await getOrganizationGovernance(governanceDatabase(deps), accountId);
+  if (!governance) throw new HTTPException(404, { message: "organization not found" });
   return governance;
 }
 
@@ -132,7 +145,8 @@ export async function readOrganizationGovernance(
   context: AccessContext,
   accountId: string,
 ): Promise<OrganizationGovernance> {
-  const governance = await getOrganizationGovernance(deps.db, accountId);
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const governance = await getOrganizationGovernance(governanceDatabase(deps), accountId);
   if (!governance) throw new HTTPException(404, { message: "organization not found" });
   if (governance.state === "governance_locked") {
     await requireOrganizationRecoveryCustodian(deps, context, accountId);
@@ -150,14 +164,17 @@ export async function enrollOrganizationRecoveryPolicy(
 ): Promise<OrganizationGovernance> {
   await requireOrganizationGovernanceAdmin(deps, context, accountId);
   return await mapGovernanceError(() =>
-    setOrganizationRecoveryPolicy(deps.db, {
+    setOrganizationRecoveryPolicy(governanceDatabase(deps), {
       accountId,
       actorSubjectId: context.subjectId,
+      actorUserId: context.subjectId.slice("user:".length),
+      ...(directManagedSessionEvidenceFor(context)
+        ? { directSessionEvidence: directManagedSessionEvidenceFor(context)! }
+        : {}),
       expectedGovernanceRevision: request.expectedGovernanceRevision,
       quorum: request.quorum,
       custodians: request.custodians.map((custodian) => ({
         subjectId: custodian.subjectId,
-        ...(custodian.subjectLabel ? { subjectLabel: custodian.subjectLabel } : {}),
       })),
       idempotencyKey: request.idempotencyKey,
     }),
@@ -170,12 +187,34 @@ export async function lockOrganizationForRecovery(
   accountId: string,
   request: LockOrganizationGovernanceRequest,
 ): Promise<OrganizationGovernance> {
+  requireOrganizationGovernanceEnabled(deps.settings);
   await requireOrganizationGovernanceAdminOrLockedReplay(deps, context, accountId);
   return await mapGovernanceError(() =>
-    lockOrganizationGovernance(deps.db, {
+    lockOrganizationGovernance(governanceDatabase(deps), {
       accountId,
       actorSubjectId: context.subjectId,
+      actorUserId: requireDirectManagedUserId(context),
+      directSessionEvidence: requireDirectManagedEvidence(context),
       ...request,
+    }),
+  );
+}
+
+export async function acceptOrganizationRecoveryCustodianForRequest(
+  deps: GovernanceDeps,
+  context: AccessContext,
+  accountId: string,
+): Promise<OrganizationGovernance> {
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const evidence = requireDirectManagedEvidence(context);
+  const userId = requireDirectManagedUserId(context);
+  return await mapGovernanceError(() =>
+    acceptOrganizationRecoveryCustodian(governanceDatabase(deps), {
+      accountId,
+      actorSubjectId: `user:${userId}`,
+      actorUserId: userId,
+      directSessionEvidence: evidence,
+      idempotencyKey: `policy-${accountId}-accept-${userId}`,
     }),
   );
 }
@@ -186,11 +225,16 @@ export async function beginOrganizationRecovery(
   accountId: string,
   request: CreateOrganizationRecoveryOperationRequest,
 ): Promise<OrganizationRecoveryOperation> {
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const evidence = requireDirectManagedEvidence(context);
+  const userId = requireDirectManagedUserId(context);
   await requireOrganizationRecoveryCustodianOrReplay(deps, context, accountId);
   return await mapGovernanceError(() =>
-    createOrganizationRecoveryOperation(deps.db, {
+    createOrganizationRecoveryOperation(governanceDatabase(deps), {
       accountId,
       actorSubjectId: context.subjectId,
+      actorUserId: userId,
+      directSessionEvidence: evidence,
       idempotencyKey: request.idempotencyKey,
     }),
   );
@@ -203,14 +247,19 @@ export async function approveOrganizationRecoveryForRequest(
   operationId: string,
   request: ApproveOrganizationRecoveryRequest,
 ): Promise<OrganizationRecoveryOperation> {
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const evidence = requireDirectManagedEvidence(context);
+  const userId = requireDirectManagedUserId(context);
   await requireOrganizationRecoveryCustodianOrReplay(deps, context, accountId);
   const encryptionKey = requireOrganizationEvidenceEncryption(deps.settings);
   const receiptIdentitySecret = requireOrganizationReceiptIdentitySecret(deps.settings);
   return await mapGovernanceError(() =>
-    approveOrganizationRecovery(deps.db, {
+    approveOrganizationRecovery(governanceDatabase(deps), {
       accountId,
       operationId,
       actorSubjectId: context.subjectId,
+      actorUserId: userId,
+      directSessionEvidence: evidence,
       evidence: request.evidence,
       encryptionKey,
       receiptIdentitySecret,
@@ -226,12 +275,17 @@ export async function revokeOrganizationRecoveryForRequest(
   operationId: string,
   request: OrganizationRecoveryCommandRequest,
 ): Promise<OrganizationRecoveryOperation> {
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const evidence = requireDirectManagedEvidence(context);
+  const userId = requireDirectManagedUserId(context);
   await requireOrganizationRecoveryCustodianOrReplay(deps, context, accountId);
   return await mapGovernanceError(() =>
-    revokeOrganizationRecoveryApproval(deps.db, {
+    revokeOrganizationRecoveryApproval(governanceDatabase(deps), {
       accountId,
       operationId,
       actorSubjectId: context.subjectId,
+      actorUserId: userId,
+      directSessionEvidence: evidence,
       idempotencyKey: request.idempotencyKey,
     }),
   );
@@ -244,12 +298,17 @@ export async function cancelOrganizationRecoveryForRequest(
   operationId: string,
   request: OrganizationRecoveryCommandRequest,
 ): Promise<OrganizationRecoveryOperation> {
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const evidence = requireDirectManagedEvidence(context);
+  const userId = requireDirectManagedUserId(context);
   await requireOrganizationRecoveryCustodianOrReplay(deps, context, accountId);
   return await mapGovernanceError(() =>
-    cancelOrganizationRecoveryOperation(deps.db, {
+    cancelOrganizationRecoveryOperation(governanceDatabase(deps), {
       accountId,
       operationId,
       actorSubjectId: context.subjectId,
+      actorUserId: userId,
+      directSessionEvidence: evidence,
       idempotencyKey: request.idempotencyKey,
     }),
   );
@@ -262,13 +321,18 @@ export async function finalizeOrganizationRecoveryForRequest(
   operationId: string,
   request: OrganizationRecoveryCommandRequest,
 ): Promise<OrganizationRecoveryOperation> {
+  requireOrganizationGovernanceEnabled(deps.settings);
+  const evidence = requireDirectManagedEvidence(context);
+  const userId = requireDirectManagedUserId(context);
   await requireOrganizationRecoveryCustodianOrReplay(deps, context, accountId);
   const encryptionKey = requireOrganizationEvidenceEncryption(deps.settings);
   return await mapGovernanceError(() =>
-    finalizeOrganizationRecovery(deps.db, {
+    finalizeOrganizationRecovery(governanceDatabase(deps), {
       accountId,
       operationId,
       actorSubjectId: context.subjectId,
+      actorUserId: userId,
+      directSessionEvidence: evidence,
       encryptionKey,
       idempotencyKey: request.idempotencyKey,
     }),
@@ -295,6 +359,24 @@ function requireManagedGovernanceMode(context: AccessContext): void {
   if (context.mode !== "managed") {
     throw new HTTPException(403, { message: "organization governance requires managed access" });
   }
+}
+
+function requireOrganizationGovernanceEnabled(settings: Settings): void {
+  if (!settings.organizationGovernanceEnabled) {
+    throw new HTTPException(404, { message: "organization governance is unavailable" });
+  }
+}
+
+function requireDirectManagedEvidence(context: AccessContext): DirectManagedSessionEvidence {
+  const evidence = directManagedSessionEvidenceFor(context);
+  if (!evidence || context.mode !== "managed" || context.subjectId !== `user:${evidence.userId}`) {
+    throw new HTTPException(403, { message: "human recovery custodian required" });
+  }
+  return evidence;
+}
+
+function requireDirectManagedUserId(context: AccessContext): string {
+  return requireDirectManagedEvidence(context).userId;
 }
 
 async function mapGovernanceError<T>(fn: () => Promise<T>): Promise<T> {

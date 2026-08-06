@@ -23,7 +23,15 @@ const external = [
 ];
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/composer.ts", "src/session.ts", "src/machines.ts"],
+  entry: [
+    "src/index.ts",
+    "src/composer.ts",
+    "src/session.ts",
+    "src/session-ui.ts",
+    "src/machines.ts",
+    "src/model-policy.ts",
+    "src/realtime.ts",
+  ],
   format: ["esm"],
   target: "es2022",
   dts: true,

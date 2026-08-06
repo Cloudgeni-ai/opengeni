@@ -8,6 +8,8 @@ import {
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogResponse,
   WorkspaceInferenceControlRequest,
   Workspace,
   WorkspaceMember,
@@ -35,6 +37,8 @@ import {
   updateWorkspace,
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
+  workspaceCodexSubscriptionActive,
+  workspaceVercelAiGatewayConnectionActive,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
@@ -50,6 +54,23 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { sseWorkspaceControlStream } from "../http/sse";
+import { buildWorkspaceModelCatalog } from "../model-catalog";
+import {
+  AI_GATEWAY_REALTIME_MODELS,
+  CODEX_REALTIME_MODEL_ID,
+  canonicalizeConfiguredModelId,
+  type Settings,
+} from "@opengeni/config";
+
+export function canonicalWorkspacePolicyModelIds(
+  settings: Settings,
+  modelIds: string[] | null | undefined,
+): string[] | null {
+  if (modelIds === null || modelIds === undefined) {
+    return null;
+  }
+  return [...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId)))];
+}
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/access/me", async (c) => {
@@ -143,7 +164,78 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Per-workspace model/provider availability policy (the HARD blocker over
   // which providers/models may serve a turn at all). Absent row reads as
-  // unrestricted {null, null}.
+  // unrestricted {null, null}. No Azure AD credential resolver is wired here,
+  // so bearer/federated definitions intentionally fail closed as not ready.
+  app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [policy, codexSubscriptionActive, workspaceGatewayConnectionActive] = await Promise.all([
+      getWorkspaceModelPolicy(deps.db, workspaceId),
+      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
+    ]);
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      WorkspaceModelCatalogResponse.parse(
+        buildWorkspaceModelCatalog({
+          settings: deps.settings,
+          policy,
+          codexSubscriptionActive,
+          workspaceGatewayConnectionActive,
+        }),
+      ),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [codexConnected, workspaceGatewayConnected] = await Promise.all([
+      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
+    ]);
+    const availability = (
+      credentialReady: boolean,
+      credentialReason: string,
+    ): { available: boolean; unavailableReason: string | null } => {
+      return credentialReady
+        ? { available: true, unavailableReason: null }
+        : { available: false, unavailableReason: credentialReason };
+    };
+    const gatewayModels = Object.values(AI_GATEWAY_REALTIME_MODELS);
+    const models = [
+      ...gatewayModels.map((model, index) => ({
+        id: model.managedModelId,
+        label: model.label,
+        provider: "OpenGeni" as const,
+        description: model.description,
+        ...availability(
+          Boolean(deps.settings.vercelAiGatewayApiKey),
+          "OpenGeni Gateway voice is not configured",
+        ),
+        recommended: index === 0,
+      })),
+      {
+        id: CODEX_REALTIME_MODEL_ID,
+        label: "Codex Live",
+        provider: "Connected Codex" as const,
+        description: "Deep session integration",
+        ...availability(codexConnected, "Connect Codex to use this voice model"),
+        recommended: false,
+      },
+      ...gatewayModels.map((model) => ({
+        id: model.workspaceModelId,
+        label: model.label,
+        provider: "Your Gateway" as const,
+        description: model.description,
+        ...availability(workspaceGatewayConnected, "Connect a workspace AI Gateway key"),
+        recommended: false,
+      })),
+    ];
+    c.header("cache-control", "private, no-store");
+    return c.json(WorkspaceRealtimeModelCatalogResponse.parse({ models }));
+  });
+
   app.get("/v1/workspaces/:workspaceId/model-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
@@ -166,7 +258,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       allowedProviders: payload.allowedProviders ?? null,
-      allowedModels: payload.allowedModels ?? null,
+      allowedModels: canonicalWorkspacePolicyModelIds(deps.settings, payload.allowedModels),
     });
     return c.json(policy);
   });

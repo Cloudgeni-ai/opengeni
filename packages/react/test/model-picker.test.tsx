@@ -55,6 +55,7 @@ function makeComposer(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     value: "hello",
     setValue: () => {},
+    hasDraftContent: () => true,
     send: async () => true,
     steer: async () => true,
     sending: false,
@@ -134,6 +135,102 @@ describe("ModelPicker", () => {
   test("renders nothing when no models are exposed", async () => {
     const container = await mount(<ModelPicker models={[]} onChange={() => {}} />);
     expect(picker(container)).toBeNull();
+  });
+
+  test("codexOnly keeps non-Codex options visible but disabled", async () => {
+    const models: ClientModel[] = [
+      ...MODELS,
+      {
+        id: "codex/gpt-5.6-luna",
+        label: "gpt-5.6-luna",
+        provider: "codex-subscription",
+        providerLabel: "Codex (ChatGPT subscription)",
+        api: "responses",
+      },
+    ];
+    const container = await mount(
+      <ModelPicker models={models} value="codex/gpt-5.6-luna" codexOnly onChange={() => {}} />,
+    );
+    const select = picker(container)!;
+    expect(select.value).toBe("codex/gpt-5.6-luna");
+    const options = [...select.querySelectorAll("option")];
+    expect(options.map((option) => option.value)).toContain("gpt-5.6-sol");
+    expect(options.find((option) => option.value === "gpt-5.6-sol")?.disabled).toBe(true);
+    expect(options.find((option) => option.value === "codex/gpt-5.6-luna")?.disabled).toBe(false);
+  });
+
+  test("prefers catalog rows grouped by billing class and disables unavailable options", async () => {
+    const rows = [
+      {
+        id: "gpt-5.6-sol",
+        label: "Sol",
+        billingClass: "opengeni_credits" as const,
+        billingClassLabel: "OpenGeni",
+        selectable: true,
+        unavailableReason: null,
+        provider: "openai",
+        providerLabel: "OpenAI",
+        catalog: {
+          id: "gpt-5.6-sol",
+          label: "Sol",
+          provider: "openai",
+          providerLabel: "OpenAI",
+          api: "responses" as const,
+          credentialReadiness: {
+            status: "ready" as const,
+            reason: null,
+            basis: "configuration" as const,
+            checkedAt: null,
+          },
+          availability: {
+            status: "available" as const,
+            selectable: true,
+            reason: null,
+            checkedAt: null,
+          },
+        },
+      },
+      {
+        id: "blocked",
+        label: "Blocked",
+        billingClass: "byok" as const,
+        billingClassLabel: "Bring your own key",
+        selectable: false,
+        unavailableReason: "Blocked by workspace policy",
+        provider: "xai",
+        providerLabel: "xAI",
+        catalog: {
+          id: "blocked",
+          label: "Blocked",
+          provider: "xai",
+          providerLabel: "xAI",
+          api: "responses" as const,
+          credentialReadiness: {
+            status: "not_ready" as const,
+            reason: "missing_credential" as const,
+            basis: "connection" as const,
+            checkedAt: null,
+          },
+          availability: {
+            status: "unavailable" as const,
+            selectable: false,
+            reason: "policy_blocked" as const,
+            checkedAt: null,
+          },
+        },
+      },
+    ];
+    const container = await mount(
+      <ModelPicker rows={rows} value="gpt-5.6-sol" onChange={() => {}} />,
+    );
+    const select = picker(container)!;
+    const groups = [...select.querySelectorAll("optgroup")];
+    expect(groups.map((group) => group.label)).toEqual(["OpenGeni", "Bring your own key"]);
+    const blocked = [...select.querySelectorAll("option")].find(
+      (option) => option.value === "blocked",
+    );
+    expect(blocked?.disabled).toBe(true);
+    expect(blocked?.textContent).toContain("Blocked by workspace policy");
   });
 });
 

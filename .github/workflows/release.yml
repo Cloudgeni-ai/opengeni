@@ -37,11 +37,6 @@ on:
         description: Exact 40-character source SHA that passed acceptance; dispatch this workflow from that same ref.
         required: true
         type: string
-      expected_packages:
-        description: Exact comma-separated package set, or empty when this release publishes no npm package changes.
-        required: false
-        default: ""
-        type: string
       candidate_run_id:
         description: Completed run ID of the canonical release-candidate workflow for source_sha.
         required: true
@@ -57,8 +52,13 @@ on:
         type: boolean
 
 concurrency:
-  group: release-${{ github.event_name }}
-  cancel-in-progress: false
+  # Version-PR generation is a latest-main projection, not an immutable release
+  # phase. Rapid pushes therefore collapse to one run; the surviving run
+  # deterministically resets the Changesets branch from its exact main SHA.
+  # Explicit publication is immutable source work and must never be cancelled
+  # by a later push or a different source.
+  group: ${{ github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha) }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read
@@ -89,25 +89,11 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # ---- Version-PR gate. This job has no npm publication command. ----
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Build publishable packages
-        run: bun run build:packages
-
-      - name: SDK contract-parity test
-        run: cd packages/sdk && bun test test/contract-parity.test.ts
-
-      - name: Publish closure guard
-        run: bun scripts/publish-closure-guard.ts
-
-      - name: Runtime embedding consumer
-        run: bun run test:runtime-embedding-consumer
-
-      - name: Portable ogtool package
-        run: bun run test:ogtool-package
-
+      # This job only projects mutable main into the one Changesets Version PR.
+      # The exact generated head immediately enters ci.yml, which owns every
+      # expensive correctness/build/consumer gate. Duplicating those gates here
+      # would make the projection stale under rapid merges and then rerun the
+      # same work against a head that is already obsolete.
       - name: Detect versionable changesets
         id: release_plan
         shell: bash
@@ -244,7 +230,7 @@ jobs:
             --output-prefix acceptance
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Verify exact-head approval provenance
+      - name: Verify provider-proved merge and exact-head approval provenance
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
@@ -254,6 +240,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download and validate the complete acceptance bundle
+        id: acceptance-bundle
         env:
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -263,7 +250,6 @@ jobs:
           ACCEPTANCE_ARTIFACT_ID: ${{ steps.preflight.outputs.acceptance_artifact_id }}
           ACCEPTANCE_ARTIFACT_DIGEST: ${{ steps.preflight.outputs.acceptance_artifact_digest }}
           ACCEPTANCE_ARTIFACT_URL: ${{ steps.preflight.outputs.acceptance_artifact_url }}
-          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
         run: |
           set -euo pipefail
           mkdir -p evidence .release/candidate-artifact .release/acceptance-artifact
@@ -312,8 +298,10 @@ jobs:
             evidence/release-candidate.json >/dev/null
           bun scripts/release-candidate.ts \
             --verify evidence/release-candidate.json \
-            --source-sha "$SOURCE_SHA" \
-            --expected-packages "$EXPECTED_PACKAGES"
+            --source-sha "$SOURCE_SHA"
+          expected_packages="$(jq -r '.packages | map(.name + "@" + .version) | join(",")' \
+            evidence/release-candidate.json)"
+          echo "expected_packages=$expected_packages" >> "$GITHUB_OUTPUT"
           bun scripts/verify-workbench-acceptance-bundle.ts \
             --bundle evidence/workbench-acceptance.json \
             --source-sha "$SOURCE_SHA" \
@@ -344,10 +332,14 @@ jobs:
         id: package-plan
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ steps.acceptance-bundle.outputs.expected_packages }}
           OPENGENI_RELEASE_PACKAGE_PHASE: plan
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
-        run: bun scripts/verify-release-packages.ts
+        run: |
+          bun scripts/verify-release-packages.ts
+          jq -e --slurpfile candidate evidence/release-candidate.json \
+            '(.packages | map({name, version})) == $candidate[0].packages' \
+            evidence/release-packages-plan.json >/dev/null
 
       - name: Write pre-publication release plan
         env:
@@ -433,7 +425,7 @@ jobs:
         id: registry
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ steps.acceptance-bundle.outputs.expected_packages }}
           OPENGENI_RELEASE_PACKAGE_PHASE: verify
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
         run: bun scripts/verify-release-packages.ts
@@ -514,7 +506,6 @@ jobs:
           CANDIDATE_ARTIFACT_URL: ${{ needs.publish.outputs.candidateArtifactUrl }}
           CANDIDATE_SOURCE_TREE_SHA: ${{ needs.publish.outputs.candidateSourceTreeSha }}
           SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
-          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
         run: |
           set -euo pipefail
           mkdir -p evidence .release/candidate-artifact
@@ -541,8 +532,7 @@ jobs:
           [ "$chart_sha256" = "$(jq -er '.chart.bytesSha256' evidence/release-candidate.json)" ]
           bun scripts/release-candidate.ts \
             --verify evidence/release-candidate.json \
-            --source-sha "$SOURCE_SHA" \
-            --expected-packages "$EXPECTED_PACKAGES"
+            --source-sha "$SOURCE_SHA"
           release_version="$(jq -er '.releaseVersion' evidence/release-candidate.json)"
           source_release_version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"
           [ "$release_version" = "$source_release_version" ] || {
@@ -604,11 +594,12 @@ jobs:
           printf '%s  %s\n' "$expected_bytes" "$chart_path" | sha256sum --check --strict -
           rm -rf .release/chart-pull
           mkdir -p .release/chart-pull
-          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}"
+          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
+          chart_pull_oci="${chart_oci}/opengeni"
           resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            helm pull "$chart_oci" \
+            helm pull "$chart_pull_oci" \
               --version "$RELEASE_VERSION" \
               --destination .release/chart-pull
             cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz" || {
@@ -617,8 +608,16 @@ jobs:
             }
           else
             helm push "$chart_path" "$chart_oci"
-            resolved_manifest="$(docker buildx imagetools inspect \
-              "$chart_ref" --format '{{.Manifest.Digest}}')"
+            resolved_manifest=""
+            for attempt in $(seq 1 10); do
+              resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+              if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                break
+              fi
+              if [ "$attempt" -lt 10 ]; then
+                sleep 2
+              fi
+            done
             [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
               echo "official OCI chart manifest digest was not resolved" >&2
               exit 1
@@ -626,7 +625,7 @@ jobs:
           fi
           rm -rf .release/chart-pull
           mkdir -p .release/chart-pull
-          helm pull "$chart_oci" \
+          helm pull "$chart_pull_oci" \
             --version "$RELEASE_VERSION" \
             --destination .release/chart-pull
           cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz"
@@ -635,7 +634,7 @@ jobs:
             --arg manifestDigest "$resolved_manifest" \
             --arg bytesSha256 "$expected_bytes" \
             --arg artifact "opengeni-${RELEASE_VERSION}.tgz" \
-            --arg reference "$chart_oci" \
+            --arg reference "$chart_pull_oci" \
             '{reference:$reference,version:$version,manifestDigest:$manifestDigest,bytesSha256:$bytesSha256,artifact:$artifact}')"
           echo "manifest_digest=$resolved_manifest" >> "$GITHUB_OUTPUT"
           {
@@ -741,14 +740,13 @@ jobs:
           done
           helm registry logout "$REGISTRY"
           mkdir -p .release/anonymous-chart
-          helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni" \
+          helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni" \
             --version "$RELEASE_VERSION" \
             --destination .release/anonymous-chart
           cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
             ".release/anonymous-chart/opengeni-${RELEASE_VERSION}.tgz"
-          chart_digest="$(docker buildx imagetools inspect \
-            "${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}" \
-            --format '{{.Manifest.Digest}}')"
+          chart_digest="$(bun scripts/resolve-optional-oci-manifest.ts \
+            "${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}")"
           expected_chart_digest="${{ steps.release-chart.outputs.manifest_digest }}"
           [ "$chart_digest" = "$expected_chart_digest" ] || {
             echo "anonymous chart manifest resolved to ${chart_digest}, expected ${expected_chart_digest}" >&2

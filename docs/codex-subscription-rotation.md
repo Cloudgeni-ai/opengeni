@@ -41,8 +41,8 @@ When `OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED=true`, every Codex turn calls
    transaction remains held.
 3. Reap expired workspace leases and read all workspace credentials plus the
    count of unexpired leases held by other turns.
-4. Offer a live same-turn lease or validated frozen run-state credential to the
-   pure strategy against the complete workspace rows. Only if this is a new
+4. Offer an exact live same-turn lease to the pure strategy against the complete
+   workspace rows. A saved approval RunState does not own a credential. Only if this is a new
    allocation may an optional downstream policy filter the candidate rows. Run
    the strategy and revalidate its chosen id against that resulting set.
 5. Upsert the unique `(workspace_id, turn_id)` lease and increment the selected
@@ -75,8 +75,8 @@ wait. A `policy` pin is a sharded cache-affinity home and may be re-sharded over
 eligible candidates when that home caps. Policy pin writes use an observed-state
 CAS inside the rotation-row-first capacity-mutation transaction, so a stale
 sharding decision cannot overwrite a concurrent manual pin. Policy pins are
-ignored and lazily cleared outside the active `sharded` strategy. A live/frozen
-same-turn holder is reused before either pin policy or future membership
+ignored and lazily cleared outside the active `sharded` strategy. A live
+same-turn lease is reused before either pin policy or future membership
 filtering, so cache policy never moves in-flight work. `rotation_enabled=false`
 and `drain_then_next` remain explicit sticky product policies.
 
@@ -90,7 +90,7 @@ transaction. The filter chooses candidates from exactly one resolved primary or
 fallback scope and may return downstream-owned per-pool unavailable/reset
 diagnostics; credential allocator never union-ranks memberships and stores no pool table or
 membership rule. `CodexCredentialLeaseResult<T, TUnavailableDiagnostic>` returns
-those diagnostics. The new-allocation filter runs only after exact live/frozen
+those diagnostics. The new-allocation filter runs only after exact live
 same-turn reuse, so a later membership/default change cannot move an already
 accepted holder.
 
@@ -98,8 +98,8 @@ accepted holder.
 new-allocation gate (default `true`); it is not credential health. Setting it
 false excludes the row from new automatic, pinned, proactive, and reactive
 selection without changing `status`, encrypted credentials, refresh behavior,
-or quota history. An exact same-turn live lease or frozen approval/preemption
-checkpoint may continue on that healthy row; reconnect and token refresh never
+or quota history. An exact same-turn live lease may continue on that healthy
+row; reconnect and token refresh never
 flip allocator eligibility. account eligibility policy owns toggle OCC/audit and product controls.
 
 ## Quota overview, allocator control, and reset-credit redemption
@@ -122,7 +122,7 @@ Codex quota adds three deliberately separate product seams:
   a stale expected version; a conflicting stale transition returns the current
   version. One real change and one audit row share a transaction. Credential
   token `version`, health, connection, cooldown, quota history, active leases,
-  and frozen turns remain independent; reconnect, refresh and redemption never
+  and accepted turns remain independent; reconnect, refresh and redemption never
   auto-enable the row.
 - **Reset redemption** has no SDK method, MCP/Toolspace tool, worker activity,
   scheduled/background hook, or allocator/rotation call. Its REST mutation
@@ -192,19 +192,23 @@ provider reset timestamp has elapsed becomes eligible immediately; an all-capped
 pool performs one bounded live usage refresh before idling. Unknown reset data
 always yields a positive bounded delay, never a zero-delay loop.
 
-If no healthy candidate exists for an active goal, `armCodexCapacityWait`
-atomically marks the blocked turn failed once, releases its credential lease,
-idles the session with reason `codex_capacity`, writes the audit events, and
-creates or advances one `codex_capacity_waiters` row. The common lock order is
-workspace rotation row → `workspace_inference_controls FOR SHARE` → actual
-workspace `FOR KEY SHARE` → session → exact turn → exact attempt → goal → live
-credential lease (when reactive) → waiter. Arming re-evaluates effective control
-under that shared control lock and becomes an event-free stale no-op if Pause or
-an unsettled control interruption won. A reactive arm must still own the exact
-holder/generation and worker-redispatch fence. The row records goal/control
-generation, accepted `policyHash`, the earliest authoritative reset (when known),
-bounded-refresh state, and `wakeRevision`/`observedWakeRevision`; it stores no
-credential material or provider body.
+If no healthy candidate exists for the currently admitted Codex turn,
+`armCodexCapacityWait` atomically closes its exact attempt with outcome
+`waiting_capacity`, releases the exact credential lease when reactively armed,
+preserves the same nonterminal blocked turn plus the session's active-turn
+pointer, writes the audit events, and creates or advances one
+`codex_capacity_waiters` row. This applies to goal-bearing and goalless prompts.
+The arming lock order is workspace rotation row →
+`workspace_inference_controls FOR SHARE` → actual workspace `FOR KEY SHARE` →
+session → exact turn → exact attempt → optional goal → live credential lease
+(when reactive) → waiter. Arming re-evaluates effective control under that
+shared control lock and becomes an event-free stale no-op if Pause or an
+unsettled control interruption won. A reactive arm must still own the exact
+holder/generation and worker-redispatch fence. The row records the blocked turn
+generation, an optional active-goal id/version fence, accepted `policyHash`, the
+earliest authoritative reset (when known), bounded-refresh state, and
+`wakeRevision`/`observedWakeRevision`; it stores no credential material or
+provider body.
 
 `reconcileCodexCapacityWait` runs the normal metadata-only allocator decision
 under the same rotation-row transaction. It accepts the same opaque
@@ -213,31 +217,39 @@ pool policy can return per-pool diagnostics without union ranking or duplicating
 the waiter. Unavailable decisions return `earliestResetAt`, `resetKind`
 (`authoritative` or `bounded_refresh`), and optional secret-safe diagnostics;
 unknown resets exponentially back off from one to fifteen minutes without
-running a model. Availability commits one system
-`goal.continuation` event and one queued turn, preserving model, reasoning,
-resources, tools, and sandbox policy from the blocked turn. It does not create a
-`user.message` or replay the failed turn row. The new turn resets execution-local
-worker-death and credential-failover counters rather than inheriting budgets
-consumed by the blocked turn. A second timer/signal observes the waiter as
-resumed/stale and enqueues nothing.
+running a model. Availability atomically marks the waiter resumed and moves the
+exact blocked turn and session from `waiting_capacity` to `recovering`, keeping
+the same turn id and active pointer. The workflow's ordinary admission path
+then creates a new attempt for that turn. It creates no `user.message`, system
+update, usage event, goal continuation, or queued turn, and it does not perform
+a competing terminal settlement/requeue. A second timer/signal observes the
+waiter as resumed/stale and performs no work.
 
 `withCodexCapacityMutation` is the same-transaction mutation/outbox seam for any
 eligibility or future pool membership/default write: it locks the workspace
 rotation row first, applies the mutation, increments matching waiter wake
 revisions only when truth changed, and returns secret-safe signal targets.
+Refreshing only `usage_checked_at` or reset-credit display metadata is not a
+capacity-truth change; an identical quota snapshot must not advance waiter or
+workflow wake revisions. With rotation disabled, an unpinned turn considers only
+the workspace active pointer: a capped pointer enters the same durable wait and
+never becomes “available” merely because it remains connected, while healthy
+alternate subscriptions remain unused until rotation is explicitly enabled.
 `listPendingCodexCapacityWakeTargets` repairs commit→signal loss. The session
 workflow's `codexCapacityChanged` signal is only a nudge; the Postgres revision
 is authoritative. The workflow snapshots its wake counters before dispatching a
 turn, so a signal delivered after waiter commit but before the activity result
 returns causes immediate reconciliation instead of being baselined away. It
 reconstructs pending timers on worker/Temporal restart and `continueAsNew`.
-`reconcileCodexCapacityWait` takes the same shared control/workspace prefix and
-atomically rechecks human queue, effective Pause or unsettled control, goal,
-policy, blocked-turn identity, and duplicate-work fences before recording the
-typed capacity-resume update. If Pause committed first, the waiter is superseded
-without a continuation; if reconciliation committed first, a later Pause still
-fences ordinary attempt claim before provider/model/tool/billing work starts.
-Reset/boost entitlement redemption is never automatic.
+`reconcileCodexCapacityWait` takes the same rotation/control/workspace prefix
+and atomically rechecks effective Pause, optional goal, accepted policy, active
+pointer, blocked-turn generation, and duplicate-work fences before the
+same-turn `recovering` transition; ordinary queued prompts remain behind that
+current turn, and ordinary attempt claim repeats admission before
+provider/model/tool/billing work starts. Pause returns without mutating the
+waiter so Resume can reconstruct it. Steer, cancellation, or another semantic
+fence change supersedes the waiter/blocked turn rather than letting a stale wake
+run. Reset/boost entitlement redemption is never automatic.
 
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:
@@ -331,19 +343,102 @@ credentials (critical) or one eligible credential (warning). Operators should
 correlate those alerts with `codex.credential.selected`,
 `codex.account.switched`, and `turn.recovery.requested`/`turn.failed` events.
 
+### Adaptive-fleet shadow and deterministic replay
+
+The adaptive fleet shadow adds a second, deliberately more private decision-observability path. It
+is independently default-off behind
+`OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED=false` and runs **after** the allocator has
+authoritatively selected or reused a lease. Shadow v1 cannot filter candidates,
+change the selected credential, move a fenced turn, pace live work, alter a
+capacity waiter, or trigger failover. Disabling the switch produces no shadow
+payload or event and requires no schema rollback.
+
+When enabled, `publishCodexFleetShadowDecisionV1` builds one bounded
+`codex.fleet.decision` session event and appends it through the exact current
+turn-attempt fence. Ordinary build/size/append faults return a bounded,
+secret-safe failure classification and the turn continues on the allocator's existing
+lease. `TurnAttemptFencedError` and Temporal cancellation are authoritative
+lifecycle signals and are rethrown; swallowing either could let a superseded
+activity continue mutating after the observer returned.
+
+The durable replay record is designed for offline shadow simulation:
+
+- At most 32 candidates and 34 KiB of UTF-8 JSON are retained. Candidate keys
+  are event-local `c00`-style aliases assigned by HMAC-SHA-256 ordering with a
+  fresh per-event seed; the seed and raw credential ids are never persisted.
+  Unlike `codex.credential.selected`, these aliases are intentionally not stable
+  account audit identities.
+- Canonical policy, normalized input **including its truncation count**, and
+  recorded decision each carry lowercase SHA-256 fingerprints. The strict
+  reader rejects unknown envelope/decision fields, lossy normalization,
+  malformed outcomes/scores, weak digests, and inconsistent admission or
+  selection shapes before deterministic reevaluation.
+- Quota windows are observations, not entitlement authority. Missing, partial,
+  or stale windows lose confidence and cannot masquerade as pristine quota;
+  only complete non-stale windows can enforce a new-placement ceiling.
+  Workspace-local observed burn and confidence-labeled inferred unexplained
+  burn are separate per-window percentage rates. For each complete, fresh quota
+  window, runway pressure compares confidence-bounded exhaustion time with that
+  window's own reset horizon and conservatively uses the highest bounded risk;
+  an already-reset window is risk-free. Missing or stale reset/burn evidence is
+  uncertainty, not fabricated usage. Unexplained/external burn is never
+  relabeled as provider or tenant truth. Until typed producers exist, both
+  per-window rates remain explicitly unknown in the worker snapshot.
+- Cache affinity uses `unknown | healthy | collapsed` state with minimum token
+  support, freshness, collapse/recovery dwell, and a higher recovery threshold.
+  A single low sample cannot collapse affinity. The worker currently records
+  cache input as unknown rather than deriving account truth from aggregate
+  existing metrics.
+
+The pure evaluator models later rollout phases without activating them. Default
+policy keeps admission pacing, manager priority, the emergency fuse, and named
+overlays independently disabled. Normal policy is adaptive and
+work-conserving: pressure/runway, active leases, uncertainty, measured cache
+affinity, and switch hysteresis rank **new** placements; it has no static hard
+per-account slots and performs no preemption. Standard work borrows idle
+capacity when no manager backlog exists. Manager priority may pace only new
+standard work while queued manager demand consumes available capacity, with a
+starvation bound. The emergency fuse also applies only to new work.
+
+Named `prefer` overlays apply a bounded score benefit and always allow healthy
+outside capacity to be borrowed. Explicit `isolate` is the only non-borrowing
+mode: it is opt-in, reversible, reports the count of otherwise-eligible stranded
+candidates, and never changes an in-flight fenced turn. These evaluator
+semantics are not authorization or allocator lease/wait/failover state; a future
+live integration must use the accepted-turn scope/filter seams and provider accounting's
+read-only quota/freshness observations rather than mutating either owner's
+state.
+
+New Prometheus counters use fixed enum labels only: decision series are bounded
+to 288 and error series to 6, with no workspace/account/tenant dimension. The
+workspace-RLS durable event is exposed through the SDK's typed event mirror;
+React projects only fixed enums, bounded numbers, and event-local aliases, drops
+malformed/identity-shaped payloads, and labels the UI as shadow-only. Production
+acceptance must preserve the measured prompt-cache baseline and compare
+aggregate shadow outcomes before any independent live-policy switch is enabled;
+the presence of shadow records alone is not evidence of adaptive benefit.
+
 ## Verification
 
 - Pure unit/property coverage:
   `apps/worker/test/codex-rotation.test.ts`,
   `apps/worker/test/codex-usage-limit.test.ts`, and
-  `packages/codex/test/fetch.test.ts`.
+  `packages/codex/test/fetch.test.ts`. Adaptive replay/policy and worker privacy,
+  lifecycle, payload, and metric bounds are covered by
+  `packages/contracts/test/codex-fleet-policy.test.ts` and
+  `apps/worker/test/codex-fleet-shadow.test.ts`.
 - Real Postgres concurrency/RLS/failure injection:
   `packages/db/test/codex-credential-leases.test.ts` and
-  `packages/db/test/codex-capacity-waiters.test.ts`. Codex quota redemption-specific
+  `packages/db/test/codex-capacity-waiters.test.ts`; fleet event ordering,
+  multi-replica attempt fencing, replay, and FORCE RLS are covered by
+  `packages/db/test/codex-fleet-shadow-events.test.ts`.
+- Browser desktop/mobile overflow, keyboard, secret-safety, and WCAG-AA
+  acceptance: `test/e2e/fleet-policy.browser.e2e.ts`.
+ - Codex quota redemption-specific
   FORCE-RLS/OCC/idempotency coverage lives in
   `packages/db/test/codex-subscription-overview.test.ts` and
   `apps/api/test/codex-redemption-routes.test.ts`.
-- Authenticated desktop/mobile/a11y/browser-session recovery evidence:
+ - Authenticated desktop/mobile/a11y/browser-session recovery evidence:
   `test/e2e/codex-overview.e2e.ts`; the mutation-surface denylist is
   `test/codex-quota-redemption-surface.test.ts`.
 - Real Temporal signal/timer/restart/continue-as-new coverage:

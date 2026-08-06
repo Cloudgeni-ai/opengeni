@@ -1,16 +1,18 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { environmentsEncryptionKeyBytes, type McpServerConfig } from "@opengeni/config";
 import {
   prefixedMcpToolName,
   type AccessGrant,
+  type McpPersonalConnectionDelegation,
   type SessionTurn,
   type ToolRef,
 } from "@opengeni/contracts";
 import {
   hasPermission,
+  withFrozenPersonalConnectionDelegations,
   settingsWithEnabledCapabilityMcpServers,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -18,8 +20,9 @@ import {
   buildConnectionTokenResolver,
   buildHostConnectionTokenResolver,
   clearPendingSessionToolspaceCall,
+  getActiveSessionTurnForExecution,
   getSessionRootId,
-  getSessionTurnForAttempt,
+  getWorkspaceGrant,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
   registerPendingSessionToolCall,
@@ -28,6 +31,26 @@ import {
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
+import { undiciFetch, type FetchLike } from "@opengeni/network";
+import {
+  MCP_MAX_AGGREGATE_TOOL_LIST_BYTES,
+  MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES,
+  MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  MCP_MAX_TOOL_RESULT_BYTES,
+  McpAggregateToolListBudget,
+  McpPayloadTooLargeError,
+  assertMcpPayloadWithinBytes,
+  assertMcpServerSelectionWithinBounds,
+  assertMcpToolListWithinBounds,
+  boundedParallelMap,
+  cancelMcpResponseBody,
+  guardedMcpFetch,
+  mcpJsonRpcErrorPayloadForRequest,
+  mcpRequestReplayInfo,
+  mcpSerializedSizeBytes,
+  type McpRequestReplayInfo,
+} from "@opengeni/runtime/mcp-network";
+import { Buffer } from "node:buffer";
 
 export type ToolspaceCallResult = CallToolResult;
 
@@ -58,16 +81,27 @@ type McpTool = {
 };
 
 const APPROVAL_REQUIRED_MESSAGE = "requires approval - invoke via the agent";
-const TOOLSPACE_AUTH_NEEDED_ERROR_CODE = -32001;
-const TOOLSPACE_AUTH_NEEDED_MESSAGE =
-  "Authentication required - a connection link was posted to the session.";
+const TOOLSPACE_AUTH_NEEDED_ERROR = {
+  // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
+  // collide with MCP SDK transport errors such as RequestTimeout (-32001).
+  code: 40_101,
+  message: "Authentication required - a connection link was posted to the session.",
+} as const;
+const TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR = {
+  code: 40_102,
+  message:
+    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+} as const;
 const TOOLSPACE_NO_ACTIVE_TURN_MESSAGE =
   "no active turn - toolspace calls require an in-flight turn";
 // First-party OpenGeni MCP proxies (files/docs) route back through the same
 // /mcp mount. They are excluded from the toolspace surface by construction so a
 // toolspace principal can never re-enter /mcp as a first-party caller, even if
 // a future grant carried files:read / documents:search (see docs invariants).
-const FIRST_PARTY_PROXY_IDS = new Set(["files", "docs"]);
+// Codex Apps is also excluded: its dynamic designated-owner authorization and
+// wire sanitizer live on the model MCP path and must never degrade into static
+// Toolspace headers.
+const FIRST_PARTY_PROXY_IDS = new Set(["files", "docs", "codex_apps"]);
 // In-process cache of the per-session upstream tool listing. Keyed on the set of
 // proxyable server ids + their credential versions, so a credential rotation
 // busts the entry; a short TTL bounds staleness for everything else. This is
@@ -75,16 +109,94 @@ const FIRST_PARTY_PROXY_IDS = new Set(["files", "docs"]);
 // to every upstream on every call.
 const TOOLSPACE_TOOL_LIST_TTL_MS = 30_000;
 const TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES = 2_000;
-const toolListCache = new Map<string, { expiresAt: number; entries: ToolListingEntry[] }>();
+const TOOLSPACE_TOOL_LIST_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
-type ToolListingEntry = {
+export type ToolListingEntry = {
   serverId: string;
   tool: McpTool;
   requireApproval: McpServerConfig["requireApproval"];
 };
 
+type ToolListCacheValue = {
+  expiresAt: number;
+  entries: ToolListingEntry[];
+  sizeBytes: number;
+};
+
+/** Deterministic LRU bounded by both key count and serialized retained bytes. */
+export class ToolspaceToolListCache {
+  private readonly values = new Map<string, ToolListCacheValue>();
+  private retainedBytes = 0;
+
+  constructor(
+    private readonly maxEntries = TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES,
+    private readonly maxBytes = TOOLSPACE_TOOL_LIST_CACHE_MAX_BYTES,
+    private readonly ttlMs = TOOLSPACE_TOOL_LIST_TTL_MS,
+  ) {
+    if (maxEntries < 1 || maxBytes < 1 || ttlMs < 1) {
+      throw new Error("toolspace cache limits must be positive");
+    }
+  }
+
+  read(key: string, now = Date.now()): ToolListingEntry[] | null {
+    const hit = this.values.get(key);
+    if (!hit) return null;
+    if (hit.expiresAt <= now) {
+      this.delete(key);
+      return null;
+    }
+    this.values.delete(key);
+    this.values.set(key, hit);
+    return hit.entries;
+  }
+
+  write(key: string, entries: ToolListingEntry[], now = Date.now()): boolean {
+    const sizeBytes = Buffer.byteLength(key) + mcpSerializedSizeBytes(entries);
+    if (sizeBytes > this.maxBytes) return false;
+    // A rejected replacement is a no-op: preserve the current safe value
+    // until the candidate has passed its own size check.
+    this.delete(key);
+    for (const [existingKey, value] of this.values) {
+      if (value.expiresAt <= now) this.delete(existingKey);
+    }
+    while (this.values.size >= this.maxEntries || this.retainedBytes + sizeBytes > this.maxBytes) {
+      const oldestKey = this.values.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      this.delete(oldestKey);
+    }
+    this.values.set(key, { expiresAt: now + this.ttlMs, entries, sizeBytes });
+    this.retainedBytes += sizeBytes;
+    return true;
+  }
+
+  clear(): void {
+    this.values.clear();
+    this.retainedBytes = 0;
+  }
+
+  snapshot(): { entries: number; bytes: number; keys: string[] } {
+    return {
+      entries: this.values.size,
+      bytes: this.retainedBytes,
+      keys: [...this.values.keys()],
+    };
+  }
+
+  private delete(key: string): void {
+    const existing = this.values.get(key);
+    if (!existing) return;
+    this.values.delete(key);
+    this.retainedBytes -= existing.sizeBytes;
+  }
+}
+
+const toolListCache = new ToolspaceToolListCache();
+
 type ToolspaceAuthority = {
   sessionId: string;
+};
+
+type ToolspaceAttemptAuthority = ToolspaceAuthority & {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
@@ -92,17 +204,7 @@ type ToolspaceAuthority = {
 
 function toolspaceAuthorityForGrant(grant: AccessGrant): ToolspaceAuthority | null {
   const sessionId = grant.metadata?.sessionId;
-  const turnId = grant.metadata?.turnId;
-  const attemptId = grant.metadata?.attemptId;
-  const executionGeneration = grant.metadata?.executionGeneration;
-  return typeof sessionId === "string" &&
-    typeof turnId === "string" &&
-    typeof attemptId === "string" &&
-    typeof executionGeneration === "number" &&
-    Number.isSafeInteger(executionGeneration) &&
-    executionGeneration > 0
-    ? { sessionId, turnId, attemptId, executionGeneration }
-    : null;
+  return typeof sessionId === "string" ? { sessionId } : null;
 }
 
 export function isToolspaceGrant(settings: ApiRouteDeps["settings"], grant: AccessGrant): boolean {
@@ -126,7 +228,21 @@ export async function prepareToolspaceMcpSurface(input: {
     return null;
   }
   const { sessionId } = authority;
+  const activeTurn = await getActiveSessionTurnForExecution(deps.db, grant.workspaceId, sessionId);
+  // Recovering/waiting-capacity attempts retain ownership pointers, but they
+  // are not currently executing model code. Do not even enumerate upstream
+  // tools until the turn has returned to the running state.
+  if (!activeTurn?.activeAttemptId || activeTurn.status !== "running") {
+    return emptyToolspaceSurface(sessionId, grant.subjectId);
+  }
+  const attemptAuthority: ToolspaceAttemptAuthority = {
+    sessionId,
+    turnId: activeTurn.id,
+    attemptId: activeTurn.activeAttemptId,
+    executionGeneration: activeTurn.executionGeneration,
+  };
   const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+  const personalConnectionDelegations = activeTurn.personalConnectionDelegations;
   let rootSessionId = sessionId;
   if (deps.connectionCredentials?.mcpCredentials) {
     const resolvedRootSessionId = await getSessionRootId(deps.db, grant.workspaceId, sessionId);
@@ -142,23 +258,10 @@ export async function prepareToolspaceMcpSurface(input: {
   // Proxyable ids: everything selected except the first-party OpenGeni tool
   // server and the first-party MCP proxies, both of which would re-enter /mcp.
   const proxyableIds = [...selectedIds].filter((id) => toolspaceCanProxyServerId(id));
+  assertMcpServerSelectionWithinBounds(proxyableIds);
   if (proxyableIds.length === 0) {
     return emptyToolspaceSurface(sessionId, grant.subjectId);
   }
-  const activeTurn = await getSessionTurnForAttempt(
-    deps.db,
-    grant.workspaceId,
-    sessionId,
-    authority.attemptId,
-  );
-  if (
-    !activeTurn ||
-    activeTurn.id !== authority.turnId ||
-    activeTurn.executionGeneration !== authority.executionGeneration
-  ) {
-    return emptyToolspaceSurface(sessionId, grant.subjectId);
-  }
-
   // The registry (decrypted session servers + capability/pack expansion) is a
   // handful of DB reads with no upstream dials. Build it at most once per
   // request, and only when we actually need it (a cache-miss listing or a real
@@ -181,10 +284,19 @@ export async function prepareToolspaceMcpSurface(input: {
     rootSessionId,
     proxyableIds,
     activeTurn,
-    getRegistry: () => getRegistry(authority.attemptId),
+    personalConnectionDelegations,
+    getRegistry: () => getRegistry(attemptAuthority.attemptId),
   });
   const tools = listing.map((entry) =>
-    toolspaceToolFor({ deps, grant, authority, rootSessionId, entry, getRegistry }),
+    toolspaceToolFor({
+      deps,
+      grant,
+      authority: attemptAuthority,
+      rootSessionId,
+      entry,
+      personalConnectionDelegations,
+      getRegistry,
+    }),
   );
 
   return {
@@ -234,9 +346,19 @@ async function resolveToolListing(input: {
   rootSessionId: string;
   proxyableIds: string[];
   activeTurn: SessionTurn;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
   getRegistry: () => Promise<Map<string, McpServerConfig>>;
 }): Promise<ToolListingEntry[]> {
-  const { deps, grant, sessionId, rootSessionId, proxyableIds, activeTurn, getRegistry } = input;
+  const {
+    deps,
+    grant,
+    sessionId,
+    rootSessionId,
+    proxyableIds,
+    activeTurn,
+    personalConnectionDelegations,
+    getRegistry,
+  } = input;
   // Host credentials can be initiator-specific. A prior turn's tool list must
   // never be reused under a different frozen authority in the same session.
   const cacheKey = await toolListCacheKey(
@@ -251,11 +373,21 @@ async function resolveToolListing(input: {
     return cached;
   }
   const registry = await getRegistry();
+  const aggregateBudget = new McpAggregateToolListBudget(
+    "aggregate Toolspace tool list",
+    MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES,
+    MCP_MAX_AGGREGATE_TOOL_LIST_BYTES,
+  );
   const entries: ToolListingEntry[] = [];
-  for (const serverId of proxyableIds) {
+  // Each mapper commits its source contribution synchronously immediately
+  // after the upstream result is bounded. No per-provider result arrays are
+  // retained by boundedParallelMap, and a failed aggregate replacement never
+  // reaches the cache or the exposed MCP surface.
+  await boundedParallelMap(proxyableIds, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (serverId) => {
     const config = registry.get(serverId);
     if (!config || !toolspaceCanProxyServer(config)) {
-      continue;
+      aggregateBudget.replace(serverId, []);
+      return;
     }
     const connection = await connectToolspaceServer({
       deps,
@@ -264,24 +396,52 @@ async function resolveToolListing(input: {
       sessionId,
       rootSessionId,
       turn: activeTurn,
-    }).catch(() => null);
+      personalConnectionDelegations,
+    }).catch((error) => {
+      deps.observability?.warn(
+        "toolspace upstream connection failed",
+        toolspacePublicErrorFields(error),
+      );
+      return null;
+    });
     if (!connection) {
-      continue;
+      aggregateBudget.replace(serverId, []);
+      return;
     }
     try {
       const listed = await connection.client
         .listTools(undefined, toolspaceRequestOptions(config))
-        .catch(() => ({ tools: [] }));
-      for (const tool of listed.tools as McpTool[]) {
-        if (!tool?.name || !allowedByConfig(config, tool.name)) {
-          continue;
-        }
-        entries.push({ serverId, tool, requireApproval: config.requireApproval });
+        .catch((error) => {
+          deps.observability?.warn(
+            "toolspace upstream tool list failed",
+            toolspacePublicErrorFields(error),
+          );
+          return { tools: [] };
+        });
+      let boundedTools: readonly McpTool[];
+      try {
+        boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
+      } catch (error) {
+        deps.observability?.warn(
+          "toolspace upstream tool list exceeded safety limit",
+          toolspacePublicErrorFields(error, "tool_list_too_large"),
+        );
+        aggregateBudget.replace(serverId, []);
+        return;
       }
+      const sourceEntries = boundedTools
+        .filter((tool) => Boolean(tool?.name) && allowedByConfig(config, tool.name))
+        .map((tool) => ({
+          serverId,
+          tool,
+          requireApproval: config.requireApproval,
+        }));
+      aggregateBudget.replace(serverId, sourceEntries);
+      entries.push(...sourceEntries);
     } finally {
       await connection.close();
     }
-  }
+  });
   writeToolListCache(cacheKey, entries);
   return entries;
 }
@@ -310,30 +470,11 @@ async function toolListCacheKey(
 }
 
 function readToolListCache(key: string): ToolListingEntry[] | null {
-  const hit = toolListCache.get(key);
-  if (!hit) {
-    return null;
-  }
-  if (hit.expiresAt <= Date.now()) {
-    toolListCache.delete(key);
-    return null;
-  }
-  return hit.entries;
+  return toolListCache.read(key);
 }
 
 function writeToolListCache(key: string, entries: ToolListingEntry[]): void {
-  if (toolListCache.size >= TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES) {
-    const now = Date.now();
-    for (const [existingKey, value] of toolListCache) {
-      if (value.expiresAt <= now) {
-        toolListCache.delete(existingKey);
-      }
-    }
-    if (toolListCache.size >= TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES) {
-      toolListCache.clear();
-    }
-  }
-  toolListCache.set(key, { expiresAt: Date.now() + TOOLSPACE_TOOL_LIST_TTL_MS, entries });
+  toolListCache.write(key, entries);
 }
 
 async function settingsWithSessionMcpServersForToolspace(
@@ -394,10 +535,23 @@ async function connectToolspaceServer(input: {
   sessionId: string;
   rootSessionId: string;
   turn: SessionTurn;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
 }): Promise<ConnectedToolspaceServer> {
+  // npm Undici's dispatcher transport is not reliable under Bun. The worker's
+  // model-visible MCP path already uses Bun's native fetch while retaining the
+  // same pre-request destination-policy check; Toolspace must do the same or an
+  // embedded Bun API can expose a server to the model while silently dropping
+  // that exact server from `ogtool list`.
+  const useBunNativeFetch = !!process.versions.bun;
+  const mcpFetchImpl: FetchLike = useBunNativeFetch
+    ? globalThis.fetch.bind(globalThis)
+    : undiciFetch;
+  const guardedFetch = guardedMcpFetch(input.deps.settings, mcpFetchImpl, {
+    ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
+  });
   const baseFetch: FetchLike = input.config.connectionRef
-    ? connectionBrokerFetch(globalThis.fetch, input)
-    : globalThis.fetch;
+    ? connectionBrokerFetch(guardedFetch, input)
+    : guardedFetch;
   const client = new Client(
     { name: `opengeni-toolspace-${input.config.id}`, version: "1.0.0" },
     { capabilities: {} },
@@ -408,7 +562,12 @@ async function connectToolspaceServer(input: {
       headers: toolspaceServerHeaders(input.config),
     },
   });
-  await client.connect(transport as unknown as Transport, toolspaceRequestOptions(input.config));
+  try {
+    await client.connect(transport as unknown as Transport, toolspaceRequestOptions(input.config));
+  } catch (error) {
+    await client.close().catch(() => undefined);
+    throw error;
+  }
   return {
     config: input.config,
     client,
@@ -421,12 +580,21 @@ async function connectToolspaceServer(input: {
 function toolspaceToolFor(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
-  authority: ToolspaceAuthority;
+  authority: ToolspaceAttemptAuthority;
   rootSessionId: string;
   entry: ToolListingEntry;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
   getRegistry: (attemptId: string) => Promise<Map<string, McpServerConfig>>;
 }): ToolspaceRegisteredTool {
-  const { deps, grant, authority, rootSessionId, entry, getRegistry } = input;
+  const {
+    deps,
+    grant,
+    authority,
+    rootSessionId,
+    entry,
+    personalConnectionDelegations,
+    getRegistry,
+  } = input;
   const { sessionId } = authority;
   const { serverId, tool } = entry;
   const name = prefixedMcpToolName(serverId, tool.name);
@@ -460,16 +628,19 @@ function toolspaceToolFor(input: {
       if (mcpToolRequiresApproval(config.requireApproval, tool.name)) {
         return mcpError(APPROVAL_REQUIRED_MESSAGE);
       }
-      const connection = await connectToolspaceServer({
-        deps,
-        grant,
-        config,
-        sessionId,
-        rootSessionId,
-        turn: reservation.turn,
-      }).catch(() => null);
-      if (!connection) {
-        return mcpError(`upstream tool failed: ${name}`);
+      let connection: ConnectedToolspaceServer;
+      try {
+        connection = await connectToolspaceServer({
+          deps,
+          grant,
+          config,
+          sessionId,
+          rootSessionId,
+          turn: reservation.turn,
+          personalConnectionDelegations,
+        });
+      } catch (error) {
+        return mcpError(exactErrorMessage(error));
       }
       try {
         const callId = crypto.randomUUID();
@@ -573,7 +744,7 @@ async function callRemoteTool(
   args: Record<string, unknown>,
 ): Promise<ToolspaceCallResult> {
   try {
-    return (await server.client.callTool(
+    const output = (await server.client.callTool(
       {
         name: toolName,
         arguments: args,
@@ -581,20 +752,72 @@ async function callRemoteTool(
       undefined,
       toolspaceRequestOptions(server.config),
     )) as ToolspaceCallResult;
+    assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+    return output;
   } catch (error) {
-    if (isToolspaceAuthNeededError(error)) {
-      return mcpError(TOOLSPACE_AUTH_NEEDED_MESSAGE);
+    if (error instanceof McpPayloadTooLargeError) {
+      deps.observability?.warn(
+        "toolspace upstream tool result exceeded safety limit",
+        toolspacePublicErrorFields(error, "tool_result_too_large"),
+      );
+      return mcpError("upstream tool result exceeded the safety limit");
     }
-    // The raw upstream error can carry provider-specific detail; log it
-    // server-side and return only a generic result to the sandbox so no header
-    // or credential material can ride the message back out.
-    deps.observability?.warn("toolspace upstream tool call failed", {
-      serverId: server.config.id,
-      toolName,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return mcpError(`upstream tool failed: ${prefixedMcpToolName(server.config.id, toolName)}`);
+    if (isToolspaceAuthNeededError(error)) {
+      return mcpError(TOOLSPACE_AUTH_NEEDED_ERROR.message);
+    }
+    if (isToolspaceOutcomeUncertainError(error)) {
+      return mcpError(TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message);
+    }
+    const message = exactErrorMessage(error);
+    // The exact provider diagnostic remains the internal/model-facing tool
+    // result. Public observability receives only allowlisted metadata.
+    deps.observability?.warn(
+      "toolspace upstream tool call failed",
+      toolspacePublicErrorFields(error),
+    );
+    return mcpError(message);
   }
+}
+
+function exactErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export type ToolspacePublicErrorFields = {
+  errorClass: "ToolspaceOperationError";
+  errorCode: ToolspacePublicFailureCode;
+  status?: number;
+  origin: "toolspace";
+};
+
+type ToolspacePublicFailureCode =
+  | "toolspace_operation_failed"
+  | "tool_list_too_large"
+  | "tool_result_too_large";
+
+/** Allowlisted projection for public telemetry; product data stays exact. */
+export function toolspacePublicErrorFields(
+  error: unknown,
+  errorCode: ToolspacePublicFailureCode = "toolspace_operation_failed",
+): ToolspacePublicErrorFields {
+  const fields: ToolspacePublicErrorFields = {
+    errorClass: "ToolspaceOperationError",
+    errorCode,
+    origin: "toolspace",
+  };
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public telemetry is best-effort. A hostile getter/proxy must never
+    // replace the exact Toolspace failure with a projection failure.
+  }
+  return fields;
 }
 
 type ToolspaceReservation =
@@ -605,7 +828,7 @@ type ToolspaceReservation =
 async function reserveExactAttemptCall(
   deps: ApiRouteDeps,
   grant: AccessGrant,
-  authority: ToolspaceAuthority,
+  authority: ToolspaceAttemptAuthority,
 ): Promise<ToolspaceReservation> {
   const reservation = await reserveToolspaceCallForAttempt(deps.db, {
     accountId: grant.accountId,
@@ -635,9 +858,9 @@ function selectedMcpServerIds(tools: ToolRef[], sessionServerIds: string[]): Set
 }
 
 // Whether a selected server id may enter the toolspace proxy at all. The
-// first-party OpenGeni tool server and the files/docs proxies are excluded by
-// construction: they route back through /mcp, so admitting them would let a
-// toolspace principal re-enter as a first-party caller (recursion guard).
+// The first-party OpenGeni tool server and files/docs proxies are excluded by
+// construction because they route back through /mcp (recursion guard). Codex
+// Apps is excluded because Toolspace does not own its dynamic authorization.
 export function toolspaceCanProxyServerId(serverId: string): boolean {
   return serverId !== "opengeni" && !FIRST_PARTY_PROXY_IDS.has(serverId);
 }
@@ -686,13 +909,11 @@ function toolspaceRequestOptions(config: McpServerConfig): {
   return config.timeoutMs ? { timeout: config.timeoutMs, maxTotalTimeout: config.timeoutMs } : {};
 }
 
-type McpRequestInfo = {
-  method?: string;
-  id?: string | number | null;
-  toolName?: string;
-};
+function mcpRequestDestinationUrl(input: string | URL | Request): string {
+  return new URL(input instanceof Request ? input.url : input.toString()).toString();
+}
 
-function connectionBrokerFetch(
+export function connectionBrokerFetch(
   baseFetch: FetchLike,
   input: {
     deps: ApiRouteDeps;
@@ -701,14 +922,16 @@ function connectionBrokerFetch(
     sessionId: string;
     rootSessionId: string;
     turn: SessionTurn;
+    personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   },
 ): FetchLike {
   const connectionRef = input.config.connectionRef;
   if (!connectionRef) {
     return baseFetch;
   }
-  const resolveCredential = input.deps.connectionCredentials?.mcpCredentials
-    ? buildHostConnectionTokenResolver(input.deps.connectionCredentials.mcpCredentials, {
+  const hostCredentialPort = input.deps.connectionCredentials?.mcpCredentials;
+  const rawResolveCredential = hostCredentialPort
+    ? buildHostConnectionTokenResolver(hostCredentialPort, {
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         sessionId: input.sessionId,
@@ -721,16 +944,43 @@ function connectionBrokerFetch(
         surface: "toolspace",
       })
     : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
+  const personalDelegations = input.personalConnectionDelegations ?? [];
+  const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
+  const delegatedOwnerHasMembership = async (subjectId: string): Promise<boolean> => {
+    const existing = delegatedMembershipChecks.get(subjectId);
+    if (existing) return await existing;
+    const check = getWorkspaceGrant(input.deps.db, subjectId, input.grant.workspaceId).then(
+      Boolean,
+    );
+    delegatedMembershipChecks.set(subjectId, check);
+    return await check;
+  };
+  const resolveCredential = withFrozenPersonalConnectionDelegations({
+    resolveCredential: rawResolveCredential,
+    settings: { mcpServers: [input.config] },
+    personalConnectionDelegations: personalDelegations,
+    ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
+  });
   return async (requestInput, init) => {
-    const request = await mcpRequestInfo(requestInput, init);
-    const first = await resolveCredential({
-      workspaceId: input.grant.workspaceId,
-      serverId: input.config.id,
-      connectionRef,
-      forceRefresh: false,
-      ...(request.toolName ? { toolName: request.toolName } : {}),
-      subjectId: input.grant.subjectId,
-    });
+    const request = await mcpRequestReplayInfo(requestInput, init);
+    const destinationUrl = mcpRequestDestinationUrl(requestInput);
+    const resolverSubjectId =
+      connectionRef.subjectScope !== "subject" && hostCredentialPort
+        ? input.grant.subjectId
+        : undefined;
+    const resolve = async (forceRefresh: boolean) => {
+      const result = await resolveCredential({
+        workspaceId: input.grant.workspaceId,
+        serverId: input.config.id,
+        connectionRef,
+        destinationUrl,
+        forceRefresh,
+        ...(request.toolName ? { toolName: request.toolName } : {}),
+        ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
+      });
+      return result;
+    };
+    const first = await resolve(false);
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(input, request, first);
     }
@@ -739,23 +989,47 @@ function connectionBrokerFetch(
       withConnectionHeaders(requestInput, init, first.headers),
     );
     if (response.status === 401) {
-      const refreshed = await resolveCredential({
-        workspaceId: input.grant.workspaceId,
-        serverId: input.config.id,
-        connectionRef,
-        forceRefresh: true,
-        ...(request.toolName ? { toolName: request.toolName } : {}),
-        subjectId: input.grant.subjectId,
-      });
+      await cancelMcpResponseBody(response);
+      let refreshed: ResolveConnectionCredentialResult;
+      try {
+        refreshed = await resolve(true);
+      } catch {
+        refreshed = authNeededFromStatus(input.config, first, "refresh_failed");
+      }
       if (refreshed.status === "auth_needed") {
+        if (!request.replaySafeAfter401) {
+          await publishToolspaceAuthNeeded(input, request, refreshed);
+          return toolspaceMcpOutcomeUncertainResponse(request);
+        }
         return await authNeededFetchResponse(input, request, refreshed);
       }
-      return await baseFetch(
+      if (!request.replaySafeAfter401) {
+        return toolspaceMcpOutcomeUncertainResponse(request);
+      }
+      const retry = await baseFetch(
         fetchInputForAttempt(requestInput),
         withConnectionHeaders(requestInput, init, refreshed.headers),
       );
+      if (retry.status === 401) {
+        await cancelMcpResponseBody(retry);
+        return await authNeededFetchResponse(
+          input,
+          request,
+          authNeededFromStatus(input.config, refreshed, "expired"),
+        );
+      }
+      if (retry.status === 403) {
+        await cancelMcpResponseBody(retry);
+        return await authNeededFetchResponse(
+          input,
+          request,
+          authNeededFromStatus(input.config, refreshed, "insufficient_scope"),
+        );
+      }
+      return retry;
     }
     if (response.status === 403) {
+      await cancelMcpResponseBody(response);
       return await authNeededFetchResponse(
         input,
         request,
@@ -777,7 +1051,7 @@ function authNeededFromStatus(
     reason,
     providerDomain: connectionRef.providerDomain,
     ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
-    connectionId: first.connectionId,
+    ...(connectionRef.subjectScope === "subject" ? {} : { connectionId: first.connectionId }),
     ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
     ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
     ...(connectionRef.selectedResources
@@ -794,9 +1068,27 @@ async function authNeededFetchResponse(
     sessionId: string;
     turn: SessionTurn;
   },
-  request: McpRequestInfo,
+  request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
 ): Promise<Response> {
+  await publishToolspaceAuthNeeded(input, request, auth);
+  if (request.method === "tools/call") {
+    return toolspaceMcpErrorResponse(request.id, TOOLSPACE_AUTH_NEEDED_ERROR);
+  }
+  return new Response("Authentication required for MCP server connection", { status: 401 });
+}
+
+async function publishToolspaceAuthNeeded(
+  input: {
+    deps: ApiRouteDeps;
+    grant: AccessGrant;
+    config: McpServerConfig;
+    sessionId: string;
+    turn: SessionTurn;
+  },
+  request: McpRequestReplayInfo,
+  auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+): Promise<void> {
   await appendAndPublishEvents(
     input.deps.db,
     input.deps.bus,
@@ -822,75 +1114,77 @@ async function authNeededFetchResponse(
       },
     ],
   ).catch(() => undefined);
-  if (request.method === "tools/call") {
-    return new Response(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: request.id ?? null,
-        error: {
-          code: TOOLSPACE_AUTH_NEEDED_ERROR_CODE,
-          message: TOOLSPACE_AUTH_NEEDED_MESSAGE,
-        },
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    );
-  }
-  return new Response("Authentication required for MCP server connection", { status: 401 });
 }
 
-async function mcpRequestInfo(_input: string | URL, init?: RequestInit): Promise<McpRequestInfo> {
-  const body = typeof init?.body === "string" ? init.body : "";
-  if (!body) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(body) as {
-      id?: unknown;
-      method?: unknown;
-      params?: { name?: unknown };
-    };
-    const method = typeof parsed.method === "string" ? parsed.method : undefined;
-    const id =
-      typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null
-        ? parsed.id
-        : undefined;
-    const toolName =
-      method === "tools/call" && typeof parsed.params?.name === "string"
-        ? parsed.params.name
-        : undefined;
-    return {
-      ...(method ? { method } : {}),
-      ...(id !== undefined ? { id } : {}),
-      ...(toolName ? { toolName } : {}),
-    };
-  } catch {
-    return {};
-  }
+function toolspaceMcpErrorResponse(
+  id: string | number | null | undefined,
+  error: { code: number; message: string },
+): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: id ?? null,
+      error,
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+function toolspaceMcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
+  return new Response(
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR),
+    ),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
 }
 
 function withConnectionHeaders(
-  _input: string | URL,
+  input: string | URL | Request,
   init: RequestInit | undefined,
   authHeaders: Record<string, string>,
 ): RequestInit {
-  const headers = new Headers(init?.headers);
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
   for (const [name, value] of Object.entries(authHeaders)) {
     headers.set(name, value);
   }
   return { ...init, headers };
 }
 
-function fetchInputForAttempt(input: string | URL): string | URL {
-  return input;
+function fetchInputForAttempt(input: string | URL | Request): string | URL | Request {
+  return input instanceof Request ? input.clone() : input;
 }
 
 function isToolspaceAuthNeededError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
   return (
-    error instanceof Error &&
-    ((error as { code?: unknown }).code === TOOLSPACE_AUTH_NEEDED_ERROR_CODE ||
-      error.message.includes(TOOLSPACE_AUTH_NEEDED_MESSAGE))
+    code === TOOLSPACE_AUTH_NEEDED_ERROR.code &&
+    (error.message === TOOLSPACE_AUTH_NEEDED_ERROR.message ||
+      error.message ===
+        `MCP error ${TOOLSPACE_AUTH_NEEDED_ERROR.code}: ${TOOLSPACE_AUTH_NEEDED_ERROR.message}`)
+  );
+}
+
+function isToolspaceOutcomeUncertainError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.code &&
+    (error.message === TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message ||
+      error.message ===
+        `MCP error ${TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.code}: ${TOOLSPACE_TOOL_OUTCOME_UNCERTAIN_ERROR.message}`)
   );
 }

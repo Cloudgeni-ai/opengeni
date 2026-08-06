@@ -13,6 +13,10 @@ export type CommandResult = {
 
 type OwnedProcess = ChildProcess | ReturnType<typeof Bun.spawn>;
 
+export function isMissingProcessLookup(error: unknown): boolean {
+  return ["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "");
+}
+
 export async function runCommand(
   args: string[],
   options: {
@@ -327,7 +331,7 @@ function ownedDescendantPids(rootPid: number): number[] {
       const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
       processes.set(Number(entry), { state: fields[0] ?? "", parentPid: Number(fields[1]) });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      if (!isMissingProcessLookup(error)) {
         throw error;
       }
     }
@@ -375,7 +379,7 @@ function processIsAlive(pid: number): boolean {
     }
     return true;
   } catch (error) {
-    if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+    if (isMissingProcessLookup(error)) {
       return false;
     }
     throw error;
@@ -434,7 +438,7 @@ function ownedProcessGroupIsAlive(proc: OwnedProcess): boolean {
           return true;
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        if (!isMissingProcessLookup(error)) {
           throw error;
         }
       }

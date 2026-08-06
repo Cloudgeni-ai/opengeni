@@ -51,6 +51,7 @@ describe("organization governance recovery routes", () => {
       workspaceId,
       subjectId: "configured:admin",
       permissions: ["account:admin"],
+      principalKind: "service",
       exp: Math.floor(Date.now() / 1_000) + 60,
     });
     const app = new Hono();
@@ -115,6 +116,19 @@ describe("organization governance recovery routes", () => {
     expect(authorizeAt).toBeGreaterThan(authenticateAt);
     expect(tlsAt).toBeGreaterThan(authorizeAt);
     expect(parseAt).toBeGreaterThan(tlsAt);
+  });
+
+  test("exposes exactly one body-minimal custodian self-accept route", () => {
+    expect((routesSource.match(/recovery-policy\/self-accept/g) ?? []).length).toBe(1);
+    const start = routesSource.indexOf(
+      '"/v1/accounts/:accountId/governance/recovery-policy/self-accept"',
+    );
+    const end = routesSource.indexOf('app.post("/v1/accounts/:accountId/governance/lock"', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const handler = routesSource.slice(start, end);
+    expect(handler).not.toContain("c.req.json()");
+    expect(handler).toContain("acceptOrganizationRecoveryCustodianForRequest");
   });
 
   test("requires HTTPS in production while allowing local test transport", () => {

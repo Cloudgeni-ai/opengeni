@@ -1,5 +1,10 @@
 import type { Settings } from "@opengeni/config";
-import { dbSql, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  dbSql,
+  type Database,
+  type RuntimeDatabasePostureOptions,
+} from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 
@@ -67,7 +72,7 @@ export function createWorkerHttpHandler(
               checks: Object.fromEntries(
                 (Object.keys(checks) as ReadinessCheckName[]).map((name) => [
                   name,
-                  { ok: false, error: `worker is ${state}` },
+                  { ok: false, error: "worker_not_ready" },
                 ]),
               ) as ReadinessResult["checks"],
             }
@@ -96,11 +101,8 @@ export async function runReadinessChecks(
         try {
           await withTimeout(Promise.resolve().then(check), timeoutMs);
           return [name, { ok: true }] as const;
-        } catch (error) {
-          return [
-            name,
-            { ok: false, error: error instanceof Error ? error.message : String(error) },
-          ] as const;
+        } catch {
+          return [name, { ok: false, error: "dependency_unavailable" }] as const;
         }
       },
     ),
@@ -112,8 +114,15 @@ export async function runReadinessChecks(
   };
 }
 
-export function dbReadyCheck(db: Database): () => Promise<void> {
+export function dbReadyCheck(
+  db: Database,
+  posture?: RuntimeDatabasePostureOptions,
+): () => Promise<void> {
   return async () => {
+    if (posture) {
+      await assertRuntimeDatabasePosture(db, posture);
+      return;
+    }
     await db.execute(dbSql`select 1`);
   };
 }

@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Database } from "./index";
+import { databaseTargetSchemaFor, rawRows } from "./database";
 import * as schema from "./schema";
 import {
   decryptIdentityEvidence,
@@ -74,15 +75,20 @@ export class OrganizationGovernanceError extends Error {
 type AccountRow = typeof schema.managedAccounts.$inferSelect;
 type GovernanceTx = Database;
 
-export type OrganizationGovernanceStatus = Pick<
-  OrganizationGovernance,
-  | "accountId"
-  | "kind"
-  | "state"
-  | "governanceRevision"
-  | "authoritySubjectId"
-  | "authorizationInvalidatedAt"
->;
+export type OrganizationGovernanceStatus = {
+  accountId: string;
+  kind: OrganizationGovernance["kind"];
+  state: OrganizationGovernance["state"];
+  governanceRevision: number;
+  /** Internal-only authority pointer; never included in public projections. */
+  authoritySubjectId: string | null;
+  authorizationInvalidatedAt: string | null;
+};
+
+export interface DirectManagedSessionEvidence {
+  userId: string;
+  sessionId: string;
+}
 
 export async function getOrganizationGovernanceStatus(
   db: Database,
@@ -128,71 +134,154 @@ export async function setOrganizationRecoveryPolicy(
   input: {
     accountId: string;
     actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence?: DirectManagedSessionEvidence;
     expectedGovernanceRevision: number;
     quorum: number;
     custodians: Array<{ subjectId: string; subjectLabel?: string }>;
     idempotencyKey: string;
   },
 ): Promise<OrganizationGovernance> {
-  return await withGovernanceTx(db, input.accountId, async (tx) => {
-    const account = await lockAccount(tx, input.accountId);
-    const request = {
-      expectedGovernanceRevision: input.expectedGovernanceRevision,
-      quorum: input.quorum,
-      custodians: input.custodians.map((custodian) => ({
-        subjectId: custodian.subjectId,
-        subjectLabel: custodian.subjectLabel ?? null,
-      })),
-    };
-    const replay = await commandReplay<OrganizationGovernance>(tx, input, "policy.set", request);
-    if (replay) return OrganizationGovernanceContract.parse(replay);
-    if (account.governanceState !== "active") fail("active_required");
-    if (account.governanceRevision !== input.expectedGovernanceRevision) {
-      fail("revision_conflict");
-    }
-    validatePolicy(account, input.custodians, input.quorum);
-
-    const now = new Date();
-    const policyRevision = account.recoveryPolicyRevision + 1;
-    const governanceRevision = account.governanceRevision + 1;
-    await tx
-      .delete(schema.organizationRecoveryCustodians)
-      .where(eq(schema.organizationRecoveryCustodians.accountId, input.accountId));
-    await tx.insert(schema.organizationRecoveryCustodians).values(
-      input.custodians.map((custodian) => ({
-        accountId: input.accountId,
-        subjectId: custodian.subjectId,
-        subjectLabel: custodian.subjectLabel ?? null,
-        policyRevision,
-        enrolledAt: now,
-      })),
-    );
-    const [updated] = await tx
-      .update(schema.managedAccounts)
-      .set({
-        recoveryPolicyRevision: policyRevision,
-        recoveryQuorum: input.quorum,
-        governanceRevision,
-        updatedAt: now,
-      })
-      .where(eq(schema.managedAccounts.id, input.accountId))
-      .returning();
-    if (!updated) fail("not_found");
-    await appendAudit(tx, {
-      accountId: input.accountId,
-      subjectId: input.actorSubjectId,
-      action: "recovery_policy.enrolled",
-      metadata: {
-        policyRevision,
-        governanceRevision,
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = {
+        expectedGovernanceRevision: input.expectedGovernanceRevision,
         quorum: input.quorum,
-        custodianCount: input.custodians.length,
-      },
-    });
-    const result = await governanceProjection(tx, updated!);
-    await recordCommand(tx, input, "policy.set", request, result);
-    return result;
-  });
+        custodians: input.custodians.map((custodian) => custodian.subjectId),
+      };
+      const replay = await commandReplay<OrganizationGovernance>(tx, input, "policy.set", request);
+      if (replay) return OrganizationGovernanceContract.parse(replay);
+      if (account.governanceState !== "active") fail("active_required");
+      if (account.governanceRevision !== input.expectedGovernanceRevision) {
+        fail("revision_conflict");
+      }
+      const resolvedCustodians = await resolveRequestedCustodians(
+        tx,
+        input.custodians,
+        databaseTargetSchemaFor(db),
+      );
+      validatePolicy(account, input.custodians, input.quorum, resolvedCustodians);
+
+      const now = new Date();
+      const policyRevision = account.recoveryPolicyRevision + 1;
+      const governanceRevision = account.governanceRevision + 1;
+      await tx
+        .delete(schema.organizationRecoveryCustodians)
+        .where(eq(schema.organizationRecoveryCustodians.accountId, input.accountId));
+      await tx.insert(schema.organizationRecoveryCustodians).values(
+        input.custodians.map((custodian) => ({
+          accountId: input.accountId,
+          subjectId: custodian.subjectId,
+          subjectLabel: resolvedCustodians.get(custodian.subjectId)?.label ?? null,
+          canonicalUserId: resolvedCustodians.get(custodian.subjectId)?.userId ?? null,
+          enrollmentState: "pending",
+          acceptedAt: null,
+          policyRevision,
+          enrolledAt: now,
+        })),
+      );
+      const [updated] = await tx
+        .update(schema.managedAccounts)
+        .set({
+          recoveryPolicyRevision: policyRevision,
+          recoveryQuorum: input.quorum,
+          governanceRevision,
+          updatedAt: now,
+        })
+        .where(eq(schema.managedAccounts.id, input.accountId))
+        .returning();
+      if (!updated) fail("not_found");
+      await appendAudit(tx, {
+        accountId: input.accountId,
+        subjectId: input.actorSubjectId,
+        action: "recovery_policy.enrolled",
+        metadata: {
+          policyRevision,
+          governanceRevision,
+          quorum: input.quorum,
+          custodianCount: input.custodians.length,
+        },
+      });
+      const result = await governanceProjection(tx, updated!);
+      await recordCommand(tx, input, "policy.set", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
+}
+
+export async function acceptOrganizationRecoveryCustodian(
+  db: Database,
+  input: {
+    accountId: string;
+    actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence: DirectManagedSessionEvidence;
+    idempotencyKey: string;
+  },
+): Promise<OrganizationGovernance> {
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = { policyRevision: account.recoveryPolicyRevision };
+      const replay = await commandReplay<OrganizationGovernance>(
+        tx,
+        input,
+        "custodian.accept",
+        request,
+      );
+      if (replay) return OrganizationGovernanceContract.parse(replay);
+      if (account.governanceState !== "active") fail("active_required");
+      const [custodian] = await tx
+        .update(schema.organizationRecoveryCustodians)
+        .set({ enrollmentState: "accepted", acceptedAt: new Date() })
+        .where(
+          and(
+            eq(schema.organizationRecoveryCustodians.accountId, input.accountId),
+            eq(
+              schema.organizationRecoveryCustodians.policyRevision,
+              account.recoveryPolicyRevision,
+            ),
+            eq(schema.organizationRecoveryCustodians.canonicalUserId, input.actorUserId),
+            eq(schema.organizationRecoveryCustodians.enrollmentState, "pending"),
+          ),
+        )
+        .returning();
+      if (!custodian) {
+        const [alreadyAccepted] = await tx
+          .select({ id: schema.organizationRecoveryCustodians.id })
+          .from(schema.organizationRecoveryCustodians)
+          .where(
+            and(
+              eq(schema.organizationRecoveryCustodians.accountId, input.accountId),
+              eq(
+                schema.organizationRecoveryCustodians.policyRevision,
+                account.recoveryPolicyRevision,
+              ),
+              eq(schema.organizationRecoveryCustodians.canonicalUserId, input.actorUserId),
+              eq(schema.organizationRecoveryCustodians.enrollmentState, "accepted"),
+            ),
+          )
+          .limit(1);
+        if (!alreadyAccepted) fail("forbidden");
+      }
+      await appendAudit(tx, {
+        accountId: input.accountId,
+        subjectId: input.actorSubjectId,
+        action: "recovery_custodian.accepted",
+        metadata: { policyRevision: account.recoveryPolicyRevision },
+      });
+      const result = await governanceProjection(tx, account);
+      await recordCommand(tx, input, "custodian.accept", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
 }
 
 export async function lockOrganizationGovernance(
@@ -200,136 +289,159 @@ export async function lockOrganizationGovernance(
   input: {
     accountId: string;
     actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence?: DirectManagedSessionEvidence;
     expectedGovernanceRevision: number;
     reason: string;
     idempotencyKey: string;
   },
 ): Promise<OrganizationGovernance> {
-  return await withGovernanceTx(db, input.accountId, async (tx) => {
-    const account = await lockAccount(tx, input.accountId);
-    const request = {
-      expectedGovernanceRevision: input.expectedGovernanceRevision,
-      reason: input.reason,
-    };
-    const replay = await commandReplay<OrganizationGovernance>(
-      tx,
-      input,
-      "governance.lock",
-      request,
-    );
-    if (replay) return OrganizationGovernanceContract.parse(replay);
-    if (account.governanceState !== "active") fail("active_required");
-    if (account.governanceRevision !== input.expectedGovernanceRevision) {
-      fail("revision_conflict");
-    }
-    if (account.recoveryPolicyRevision <= 0 || account.recoveryQuorum === null) {
-      fail("policy_required");
-    }
-    const [custodianCount] = await tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(schema.organizationRecoveryCustodians)
-      .where(
-        and(
-          eq(schema.organizationRecoveryCustodians.accountId, input.accountId),
-          eq(schema.organizationRecoveryCustodians.policyRevision, account.recoveryPolicyRevision),
-        ),
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = {
+        expectedGovernanceRevision: input.expectedGovernanceRevision,
+        reason: input.reason,
+      };
+      const replay = await commandReplay<OrganizationGovernance>(
+        tx,
+        input,
+        "governance.lock",
+        request,
       );
-    if ((custodianCount?.count ?? 0) < account.recoveryQuorum) fail("policy_required");
-    const now = new Date();
-    const governanceRevision = account.governanceRevision + 1;
-    const [updated] = await tx
-      .update(schema.managedAccounts)
-      .set({
-        governanceState: "governance_locked",
-        governanceRevision,
-        updatedAt: now,
-      })
-      .where(eq(schema.managedAccounts.id, input.accountId))
-      .returning();
-    if (!updated) fail("not_found");
-    await appendAudit(tx, {
-      accountId: input.accountId,
-      subjectId: input.actorSubjectId,
-      action: "governance.locked",
-      metadata: { governanceRevision, reason: input.reason },
-    });
-    const result = await governanceProjection(tx, updated!);
-    await recordCommand(tx, input, "governance.lock", request, result);
-    return result;
-  });
+      if (replay) return OrganizationGovernanceContract.parse(replay);
+      if (account.governanceState !== "active") fail("active_required");
+      if (account.governanceRevision !== input.expectedGovernanceRevision) {
+        fail("revision_conflict");
+      }
+      if (account.recoveryPolicyRevision <= 0 || account.recoveryQuorum === null) {
+        fail("policy_required");
+      }
+      const [custodianCount] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(schema.organizationRecoveryCustodians)
+        .where(
+          and(
+            eq(schema.organizationRecoveryCustodians.accountId, input.accountId),
+            eq(
+              schema.organizationRecoveryCustodians.policyRevision,
+              account.recoveryPolicyRevision,
+            ),
+            eq(schema.organizationRecoveryCustodians.enrollmentState, "accepted"),
+            sql`${schema.organizationRecoveryCustodians.canonicalUserId} is not null`,
+          ),
+        );
+      if ((custodianCount?.count ?? 0) < account.recoveryQuorum) fail("policy_required");
+      const now = new Date();
+      const governanceRevision = account.governanceRevision + 1;
+      const [updated] = await tx
+        .update(schema.managedAccounts)
+        .set({
+          governanceState: "governance_locked",
+          governanceRevision,
+          updatedAt: now,
+        })
+        .where(eq(schema.managedAccounts.id, input.accountId))
+        .returning();
+      if (!updated) fail("not_found");
+      await appendAudit(tx, {
+        accountId: input.accountId,
+        subjectId: input.actorSubjectId,
+        action: "governance.locked",
+        metadata: { governanceRevision, reason: input.reason },
+      });
+      const result = await governanceProjection(tx, updated!);
+      await recordCommand(tx, input, "governance.lock", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
 }
 
 export async function createOrganizationRecoveryOperation(
   db: Database,
-  input: { accountId: string; actorSubjectId: string; idempotencyKey: string },
+  input: {
+    accountId: string;
+    actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence?: DirectManagedSessionEvidence;
+    idempotencyKey: string;
+  },
 ): Promise<OrganizationRecoveryOperation> {
-  return await withGovernanceTx(db, input.accountId, async (tx) => {
-    const account = await lockAccount(tx, input.accountId);
-    const request = {};
-    const replay = await commandReplay<OrganizationRecoveryOperation>(
-      tx,
-      input,
-      "recovery.create",
-      request,
-    );
-    if (replay) return OrganizationRecoveryOperationContract.parse(replay);
-    await requireLockedCustodian(tx, account, input.actorSubjectId);
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = {};
+      const replay = await commandReplay<OrganizationRecoveryOperation>(
+        tx,
+        input,
+        "recovery.create",
+        request,
+      );
+      if (replay) return OrganizationRecoveryOperationContract.parse(replay);
+      await requireLockedCustodian(tx, account, input.actorUserId);
 
-    const now = new Date();
-    const [pending] = await tx
-      .select()
-      .from(schema.organizationRecoveryOperations)
-      .where(
-        and(
-          eq(schema.organizationRecoveryOperations.accountId, input.accountId),
-          eq(schema.organizationRecoveryOperations.state, "pending"),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    if (pending && pending.expiresAt.getTime() > now.getTime()) fail("operation_conflict");
-    if (pending) {
-      await tx
-        .update(schema.organizationRecoveryOperations)
-        .set({ state: "cancelled", cancelledAt: now })
-        .where(eq(schema.organizationRecoveryOperations.id, pending.id));
-      await destroyOrganizationRecoveryEvidence(tx, pending.id, now, "revoked");
+      const now = new Date();
+      const [pending] = await tx
+        .select()
+        .from(schema.organizationRecoveryOperations)
+        .where(
+          and(
+            eq(schema.organizationRecoveryOperations.accountId, input.accountId),
+            eq(schema.organizationRecoveryOperations.state, "pending"),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (pending && pending.expiresAt.getTime() > now.getTime()) fail("operation_conflict");
+      if (pending) {
+        await tx
+          .update(schema.organizationRecoveryOperations)
+          .set({ state: "cancelled", cancelledAt: now })
+          .where(eq(schema.organizationRecoveryOperations.id, pending.id));
+        await destroyOrganizationRecoveryEvidence(tx, pending.id, now, "revoked");
+        await appendAudit(tx, {
+          accountId: input.accountId,
+          operationId: pending.id,
+          subjectId: input.actorSubjectId,
+          action: "recovery.expired",
+          metadata: {},
+        });
+      }
+      const [operation] = await tx
+        .insert(schema.organizationRecoveryOperations)
+        .values({
+          accountId: input.accountId,
+          governanceRevision: account.governanceRevision,
+          policyRevision: account.recoveryPolicyRevision,
+          quorum: account.recoveryQuorum!,
+          requestedBySubjectId: input.actorSubjectId,
+          expiresAt: new Date(now.getTime() + RECOVERY_OPERATION_TTL_MS),
+          createdAt: now,
+        })
+        .returning();
+      if (!operation) fail("operation_conflict");
       await appendAudit(tx, {
         accountId: input.accountId,
-        operationId: pending.id,
+        operationId: operation!.id,
         subjectId: input.actorSubjectId,
-        action: "recovery.expired",
-        metadata: {},
+        action: "recovery.created",
+        metadata: {
+          governanceRevision: account.governanceRevision,
+          policyRevision: account.recoveryPolicyRevision,
+          quorum: account.recoveryQuorum,
+        },
       });
-    }
-    const [operation] = await tx
-      .insert(schema.organizationRecoveryOperations)
-      .values({
-        accountId: input.accountId,
-        governanceRevision: account.governanceRevision,
-        policyRevision: account.recoveryPolicyRevision,
-        quorum: account.recoveryQuorum!,
-        requestedBySubjectId: input.actorSubjectId,
-        expiresAt: new Date(now.getTime() + RECOVERY_OPERATION_TTL_MS),
-        createdAt: now,
-      })
-      .returning();
-    if (!operation) fail("operation_conflict");
-    await appendAudit(tx, {
-      accountId: input.accountId,
-      operationId: operation!.id,
-      subjectId: input.actorSubjectId,
-      action: "recovery.created",
-      metadata: {
-        governanceRevision: account.governanceRevision,
-        policyRevision: account.recoveryPolicyRevision,
-        quorum: account.recoveryQuorum,
-      },
-    });
-    const result = await operationProjection(tx, operation!);
-    await recordCommand(tx, input, "recovery.create", request, result);
-    return result;
-  });
+      const result = await operationProjection(tx, operation!);
+      await recordCommand(tx, input, "recovery.create", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
 }
 
 export async function approveOrganizationRecovery(
@@ -338,85 +450,94 @@ export async function approveOrganizationRecovery(
     accountId: string;
     operationId: string;
     actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence?: DirectManagedSessionEvidence;
     evidence: string;
     encryptionKey: Uint8Array;
     receiptIdentitySecret: Uint8Array;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
-  return await withGovernanceTx(db, input.accountId, async (tx) => {
-    const account = await lockAccount(tx, input.accountId);
-    const request = {
-      operationId: input.operationId,
-      evidenceReceiptIdentity: identityEvidenceReceiptIdentityHash(
-        input.receiptIdentitySecret,
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = {
+        operationId: input.operationId,
+        evidenceReceiptIdentity: identityEvidenceReceiptIdentityHash(
+          input.receiptIdentitySecret,
+          input.evidence,
+        ),
+      };
+      const replay = await commandReplay<OrganizationRecoveryOperation>(
+        tx,
+        input,
+        "recovery.approve",
+        request,
+      );
+      if (replay) return OrganizationRecoveryOperationContract.parse(replay);
+      await requireLockedCustodian(tx, account, input.actorUserId);
+      const operation = await lockPendingOperation(tx, account, input.operationId);
+      const now = new Date();
+      const evidenceExpiresAt = new Date(
+        Math.min(operation.expiresAt.getTime(), now.getTime() + IDENTITY_EVIDENCE_MAX_TTL_MS),
+      );
+      if (evidenceExpiresAt.getTime() <= now.getTime()) fail("operation_expired");
+      const encrypted = encryptIdentityEvidence(
+        input.encryptionKey,
+        {
+          accountId: input.accountId,
+          operationId: input.operationId,
+          subjectId: input.actorSubjectId,
+          audience: IDENTITY_EVIDENCE_AUDIENCE,
+          purpose: IDENTITY_EVIDENCE_PURPOSE,
+          expiresAt: evidenceExpiresAt,
+        },
         input.evidence,
-      ),
-    };
-    const replay = await commandReplay<OrganizationRecoveryOperation>(
-      tx,
-      input,
-      "recovery.approve",
-      request,
-    );
-    if (replay) return OrganizationRecoveryOperationContract.parse(replay);
-    await requireLockedCustodian(tx, account, input.actorSubjectId);
-    const operation = await lockPendingOperation(tx, account, input.operationId);
-    const now = new Date();
-    const evidenceExpiresAt = new Date(
-      Math.min(operation.expiresAt.getTime(), now.getTime() + IDENTITY_EVIDENCE_MAX_TTL_MS),
-    );
-    if (evidenceExpiresAt.getTime() <= now.getTime()) fail("operation_expired");
-    const encrypted = encryptIdentityEvidence(
-      input.encryptionKey,
-      {
-        accountId: input.accountId,
-        operationId: input.operationId,
-        subjectId: input.actorSubjectId,
-        audience: IDENTITY_EVIDENCE_AUDIENCE,
-        purpose: IDENTITY_EVIDENCE_PURPOSE,
-        expiresAt: evidenceExpiresAt,
-      },
-      input.evidence,
-    );
-    await tx
-      .insert(schema.organizationRecoveryApprovals)
-      .values({
-        accountId: input.accountId,
-        operationId: input.operationId,
-        subjectId: input.actorSubjectId,
-        evidenceCiphertext: encrypted.ciphertext,
-        evidenceKeyVersion: encrypted.keyVersion,
-        evidenceExpiresAt,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: [
-          schema.organizationRecoveryApprovals.operationId,
-          schema.organizationRecoveryApprovals.subjectId,
-        ],
-        set: {
+      );
+      await tx
+        .insert(schema.organizationRecoveryApprovals)
+        .values({
+          accountId: input.accountId,
+          operationId: input.operationId,
+          subjectId: input.actorSubjectId,
+          canonicalUserId: input.actorUserId,
           evidenceCiphertext: encrypted.ciphertext,
           evidenceKeyVersion: encrypted.keyVersion,
           evidenceExpiresAt,
-          revokedAt: null,
-          consumedAt: null,
           createdAt: now,
           updatedAt: now,
-        },
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.organizationRecoveryApprovals.operationId,
+            schema.organizationRecoveryApprovals.subjectId,
+          ],
+          set: {
+            canonicalUserId: input.actorUserId,
+            evidenceCiphertext: encrypted.ciphertext,
+            evidenceKeyVersion: encrypted.keyVersion,
+            evidenceExpiresAt,
+            revokedAt: null,
+            consumedAt: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      await appendAudit(tx, {
+        accountId: input.accountId,
+        operationId: input.operationId,
+        subjectId: input.actorSubjectId,
+        action: "recovery.approved",
+        metadata: { evidenceExpiresAt: evidenceExpiresAt.toISOString() },
       });
-    await appendAudit(tx, {
-      accountId: input.accountId,
-      operationId: input.operationId,
-      subjectId: input.actorSubjectId,
-      action: "recovery.approved",
-      metadata: { evidenceExpiresAt: evidenceExpiresAt.toISOString() },
-    });
-    const result = await operationProjection(tx, operation);
-    await recordCommand(tx, input, "recovery.approve", request, result);
-    return result;
-  });
+      const result = await operationProjection(tx, operation);
+      await recordCommand(tx, input, "recovery.approve", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
 }
 
 export async function revokeOrganizationRecoveryApproval(
@@ -425,52 +546,59 @@ export async function revokeOrganizationRecoveryApproval(
     accountId: string;
     operationId: string;
     actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence?: DirectManagedSessionEvidence;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
-  return await withGovernanceTx(db, input.accountId, async (tx) => {
-    const account = await lockAccount(tx, input.accountId);
-    const request = { operationId: input.operationId };
-    const replay = await commandReplay<OrganizationRecoveryOperation>(
-      tx,
-      input,
-      "recovery.approval.revoke",
-      request,
-    );
-    if (replay) return OrganizationRecoveryOperationContract.parse(replay);
-    await requireLockedCustodian(tx, account, input.actorSubjectId);
-    const operation = await lockPendingOperation(tx, account, input.operationId);
-    const now = new Date();
-    const [approval] = await tx
-      .update(schema.organizationRecoveryApprovals)
-      .set({
-        evidenceCiphertext: DESTROYED_IDENTITY_EVIDENCE,
-        evidenceKeyVersion: DESTROYED_IDENTITY_EVIDENCE,
-        revokedAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.organizationRecoveryApprovals.accountId, input.accountId),
-          eq(schema.organizationRecoveryApprovals.operationId, input.operationId),
-          eq(schema.organizationRecoveryApprovals.subjectId, input.actorSubjectId),
-          sql`${schema.organizationRecoveryApprovals.revokedAt} is null`,
-          sql`${schema.organizationRecoveryApprovals.consumedAt} is null`,
-        ),
-      )
-      .returning();
-    if (!approval) fail("evidence_invalid");
-    await appendAudit(tx, {
-      accountId: input.accountId,
-      operationId: input.operationId,
-      subjectId: input.actorSubjectId,
-      action: "recovery.approval_revoked",
-      metadata: {},
-    });
-    const result = await operationProjection(tx, operation);
-    await recordCommand(tx, input, "recovery.approval.revoke", request, result);
-    return result;
-  });
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = { operationId: input.operationId };
+      const replay = await commandReplay<OrganizationRecoveryOperation>(
+        tx,
+        input,
+        "recovery.approval.revoke",
+        request,
+      );
+      if (replay) return OrganizationRecoveryOperationContract.parse(replay);
+      await requireLockedCustodian(tx, account, input.actorUserId);
+      const operation = await lockPendingOperation(tx, account, input.operationId);
+      const now = new Date();
+      const [approval] = await tx
+        .update(schema.organizationRecoveryApprovals)
+        .set({
+          evidenceCiphertext: DESTROYED_IDENTITY_EVIDENCE,
+          evidenceKeyVersion: DESTROYED_IDENTITY_EVIDENCE,
+          revokedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.organizationRecoveryApprovals.accountId, input.accountId),
+            eq(schema.organizationRecoveryApprovals.operationId, input.operationId),
+            eq(schema.organizationRecoveryApprovals.subjectId, input.actorSubjectId),
+            sql`${schema.organizationRecoveryApprovals.revokedAt} is null`,
+            sql`${schema.organizationRecoveryApprovals.consumedAt} is null`,
+          ),
+        )
+        .returning();
+      if (!approval) fail("evidence_invalid");
+      await appendAudit(tx, {
+        accountId: input.accountId,
+        operationId: input.operationId,
+        subjectId: input.actorSubjectId,
+        action: "recovery.approval_revoked",
+        metadata: {},
+      });
+      const result = await operationProjection(tx, operation);
+      await recordCommand(tx, input, "recovery.approval.revoke", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
 }
 
 export async function cancelOrganizationRecoveryOperation(
@@ -479,39 +607,46 @@ export async function cancelOrganizationRecoveryOperation(
     accountId: string;
     operationId: string;
     actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence?: DirectManagedSessionEvidence;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
-  return await withGovernanceTx(db, input.accountId, async (tx) => {
-    const account = await lockAccount(tx, input.accountId);
-    const request = { operationId: input.operationId };
-    const replay = await commandReplay<OrganizationRecoveryOperation>(
-      tx,
-      input,
-      "recovery.cancel",
-      request,
-    );
-    if (replay) return OrganizationRecoveryOperationContract.parse(replay);
-    await requireLockedCustodian(tx, account, input.actorSubjectId);
-    const operation = await lockPendingOperation(tx, account, input.operationId);
-    const now = new Date();
-    const [cancelled] = await tx
-      .update(schema.organizationRecoveryOperations)
-      .set({ state: "cancelled", cancelledAt: now })
-      .where(eq(schema.organizationRecoveryOperations.id, operation.id))
-      .returning();
-    await destroyOrganizationRecoveryEvidence(tx, operation.id, now, "revoked");
-    await appendAudit(tx, {
-      accountId: input.accountId,
-      operationId: operation.id,
-      subjectId: input.actorSubjectId,
-      action: "recovery.cancelled",
-      metadata: {},
-    });
-    const result = await operationProjection(tx, cancelled!);
-    await recordCommand(tx, input, "recovery.cancel", request, result);
-    return result;
-  });
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = { operationId: input.operationId };
+      const replay = await commandReplay<OrganizationRecoveryOperation>(
+        tx,
+        input,
+        "recovery.cancel",
+        request,
+      );
+      if (replay) return OrganizationRecoveryOperationContract.parse(replay);
+      await requireLockedCustodian(tx, account, input.actorUserId);
+      const operation = await lockPendingOperation(tx, account, input.operationId);
+      const now = new Date();
+      const [cancelled] = await tx
+        .update(schema.organizationRecoveryOperations)
+        .set({ state: "cancelled", cancelledAt: now })
+        .where(eq(schema.organizationRecoveryOperations.id, operation.id))
+        .returning();
+      await destroyOrganizationRecoveryEvidence(tx, operation.id, now, "revoked");
+      await appendAudit(tx, {
+        accountId: input.accountId,
+        operationId: operation.id,
+        subjectId: input.actorSubjectId,
+        action: "recovery.cancelled",
+        metadata: {},
+      });
+      const result = await operationProjection(tx, cancelled!);
+      await recordCommand(tx, input, "recovery.cancel", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
 }
 
 export async function finalizeOrganizationRecovery(
@@ -520,185 +655,207 @@ export async function finalizeOrganizationRecovery(
     accountId: string;
     operationId: string;
     actorSubjectId: string;
+    actorUserId: string;
+    directSessionEvidence?: DirectManagedSessionEvidence;
     encryptionKey: Uint8Array;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
-  return await withGovernanceTx(db, input.accountId, async (tx) => {
-    const account = await lockAccount(tx, input.accountId);
-    const request = { operationId: input.operationId };
-    const replay = await commandReplay<OrganizationRecoveryOperation>(
-      tx,
-      input,
-      "recovery.finalize",
-      request,
-    );
-    if (replay) return OrganizationRecoveryOperationContract.parse(replay);
-    await requireLockedCustodian(tx, account, input.actorSubjectId);
-    const operation = await lockPendingOperation(tx, account, input.operationId);
-    const now = new Date();
-    const approvals = await tx
-      .select()
-      .from(schema.organizationRecoveryApprovals)
-      .where(
-        and(
-          eq(schema.organizationRecoveryApprovals.accountId, input.accountId),
-          eq(schema.organizationRecoveryApprovals.operationId, operation.id),
-          sql`${schema.organizationRecoveryApprovals.revokedAt} is null`,
-          sql`${schema.organizationRecoveryApprovals.consumedAt} is null`,
-          gt(schema.organizationRecoveryApprovals.evidenceExpiresAt, now),
-        ),
-      )
-      .orderBy(asc(schema.organizationRecoveryApprovals.createdAt));
-    const activeKeyVersion = identityEvidenceKeyVersion(input.encryptionKey);
-    const authenticatedSubjects = new Set<string>();
-    let rejectedEvidence = false;
-    for (const approval of approvals) {
-      if (approval.evidenceKeyVersion !== activeKeyVersion) {
-        rejectedEvidence = true;
-        continue;
-      }
-      try {
-        const plaintext = decryptIdentityEvidence(
-          input.encryptionKey,
-          {
-            accountId: input.accountId,
-            operationId: operation.id,
-            subjectId: approval.subjectId,
-            audience: IDENTITY_EVIDENCE_AUDIENCE,
-            purpose: IDENTITY_EVIDENCE_PURPOSE,
-            expiresAt: approval.evidenceExpiresAt,
-          },
-          approval.evidenceCiphertext,
-          approval.evidenceKeyVersion,
-        );
-        if (plaintext.length === 0) {
+  return await withGovernanceTx(
+    db,
+    input.accountId,
+    async (tx) => {
+      const account = await lockAccount(tx, input.accountId);
+      const request = { operationId: input.operationId };
+      const replay = await commandReplay<OrganizationRecoveryOperation>(
+        tx,
+        input,
+        "recovery.finalize",
+        request,
+      );
+      if (replay) return OrganizationRecoveryOperationContract.parse(replay);
+      await requireLockedCustodian(tx, account, input.actorUserId);
+      const operation = await lockPendingOperation(tx, account, input.operationId);
+      const now = new Date();
+      const approvals = await tx
+        .select()
+        .from(schema.organizationRecoveryApprovals)
+        .where(
+          and(
+            eq(schema.organizationRecoveryApprovals.accountId, input.accountId),
+            eq(schema.organizationRecoveryApprovals.operationId, operation.id),
+            sql`${schema.organizationRecoveryApprovals.revokedAt} is null`,
+            sql`${schema.organizationRecoveryApprovals.consumedAt} is null`,
+            gt(schema.organizationRecoveryApprovals.evidenceExpiresAt, now),
+          ),
+        )
+        .orderBy(asc(schema.organizationRecoveryApprovals.createdAt));
+      const activeKeyVersion = identityEvidenceKeyVersion(input.encryptionKey);
+      const authenticatedUsers = new Set<string>();
+      let rejectedEvidence = false;
+      for (const approval of approvals) {
+        if (approval.evidenceKeyVersion !== activeKeyVersion) {
           rejectedEvidence = true;
           continue;
         }
-        authenticatedSubjects.add(approval.subjectId);
-      } catch {
-        rejectedEvidence = true;
+        try {
+          const plaintext = decryptIdentityEvidence(
+            input.encryptionKey,
+            {
+              accountId: input.accountId,
+              operationId: operation.id,
+              subjectId: approval.subjectId,
+              audience: IDENTITY_EVIDENCE_AUDIENCE,
+              purpose: IDENTITY_EVIDENCE_PURPOSE,
+              expiresAt: approval.evidenceExpiresAt,
+            },
+            approval.evidenceCiphertext,
+            approval.evidenceKeyVersion,
+          );
+          if (plaintext.length === 0) {
+            rejectedEvidence = true;
+            continue;
+          }
+          if (!approval.canonicalUserId) {
+            rejectedEvidence = true;
+            continue;
+          }
+          authenticatedUsers.add(approval.canonicalUserId);
+        } catch {
+          rejectedEvidence = true;
+        }
       }
-    }
-    if (authenticatedSubjects.size < operation.quorum) {
-      fail(rejectedEvidence ? "evidence_invalid" : "quorum_not_met");
-    }
-    // The human receiving restored team authority must have supplied one of
-    // the fresh, authenticated approvals. Custodian enrollment alone cannot
-    // let a non-approving finalizer take ownership from an approved quorum.
-    if (!authenticatedSubjects.has(input.actorSubjectId)) fail("quorum_not_met");
-    if (
-      account.organizationKind === "personal" &&
-      (!account.governanceAuthoritySubjectId ||
-        !authenticatedSubjects.has(account.governanceAuthoritySubjectId))
-    ) {
-      fail("quorum_not_met");
-    }
-
-    const governanceRevision = account.governanceRevision + 1;
-    const invalidatedAt = new Date();
-    const recoveredAuthority =
-      account.organizationKind === "personal"
-        ? account.governanceAuthoritySubjectId!
-        : input.actorSubjectId;
-
-    // Same-transaction recovery: restore active state and explicit human
-    // authority, consume evidence, revoke machine/API credentials, replace all
-    // workspace memberships, and append invalidation + audit evidence.
-    await tx
-      .update(schema.organizationRecoveryApprovals)
-      .set({
-        evidenceCiphertext: DESTROYED_IDENTITY_EVIDENCE,
-        evidenceKeyVersion: DESTROYED_IDENTITY_EVIDENCE,
-        consumedAt: invalidatedAt,
-        updatedAt: invalidatedAt,
-      })
-      .where(
-        and(
-          eq(schema.organizationRecoveryApprovals.accountId, input.accountId),
-          eq(schema.organizationRecoveryApprovals.operationId, operation.id),
-          sql`${schema.organizationRecoveryApprovals.revokedAt} is null`,
-          sql`${schema.organizationRecoveryApprovals.consumedAt} is null`,
-        ),
+      const liveCanonicalUsers = await canonicalUsersPresent(
+        tx,
+        databaseTargetSchemaFor(db),
+        authenticatedUsers,
       );
-    await tx
-      .update(schema.apiKeys)
-      .set({ revokedAt: invalidatedAt, updatedAt: invalidatedAt })
-      .where(
-        and(
-          eq(schema.apiKeys.accountId, input.accountId),
-          sql`${schema.apiKeys.revokedAt} is null`,
-        ),
-      );
-    await tx
-      .delete(schema.workspaceMemberships)
-      .where(eq(schema.workspaceMemberships.accountId, input.accountId));
-    const workspaces = await tx
-      .select({ id: schema.workspaces.id })
-      .from(schema.workspaces)
-      .where(eq(schema.workspaces.accountId, input.accountId));
-    if (workspaces.length > 0) {
-      await tx.insert(schema.workspaceMemberships).values(
-        workspaces.map((workspace) => ({
-          accountId: input.accountId,
-          workspaceId: workspace.id,
-          subjectId: recoveredAuthority,
-          role: "owner",
-          permissions: [...RECOVERED_WORKSPACE_PERMISSIONS],
-          createdAt: invalidatedAt,
+      for (const userId of authenticatedUsers) {
+        if (!liveCanonicalUsers.has(userId)) {
+          authenticatedUsers.delete(userId);
+          rejectedEvidence = true;
+        }
+      }
+      if (authenticatedUsers.size < operation.quorum) {
+        fail(rejectedEvidence ? "evidence_invalid" : "quorum_not_met");
+      }
+      // The human receiving restored team authority must have supplied one of
+      // the fresh, authenticated approvals. Custodian enrollment alone cannot
+      // let a non-approving finalizer take ownership from an approved quorum.
+      if (!authenticatedUsers.has(input.actorUserId)) fail("quorum_not_met");
+      if (account.organizationKind === "personal") {
+        const authorityUserId = canonicalUserIdFromSubject(account.governanceAuthoritySubjectId);
+        if (!authorityUserId || !authenticatedUsers.has(authorityUserId)) {
+          fail("quorum_not_met");
+        }
+      }
+
+      const governanceRevision = account.governanceRevision + 1;
+      const invalidatedAt = new Date();
+      const recoveredAuthority =
+        account.organizationKind === "personal"
+          ? account.governanceAuthoritySubjectId!
+          : `user:${input.actorUserId}`;
+
+      // Same-transaction recovery: restore active state and explicit human
+      // authority, consume evidence, revoke machine/API credentials, replace all
+      // workspace memberships, and append invalidation + audit evidence.
+      await tx
+        .update(schema.organizationRecoveryApprovals)
+        .set({
+          evidenceCiphertext: DESTROYED_IDENTITY_EVIDENCE,
+          evidenceKeyVersion: DESTROYED_IDENTITY_EVIDENCE,
+          consumedAt: invalidatedAt,
           updatedAt: invalidatedAt,
-        })),
-      );
-    }
-    const [finalized] = await tx
-      .update(schema.organizationRecoveryOperations)
-      .set({ state: "finalized", finalizedAt: invalidatedAt })
-      .where(eq(schema.organizationRecoveryOperations.id, operation.id))
-      .returning();
-    const [restored] = await tx
-      .update(schema.managedAccounts)
-      .set({
-        governanceState: "active",
+        })
+        .where(
+          and(
+            eq(schema.organizationRecoveryApprovals.accountId, input.accountId),
+            eq(schema.organizationRecoveryApprovals.operationId, operation.id),
+            sql`${schema.organizationRecoveryApprovals.revokedAt} is null`,
+            sql`${schema.organizationRecoveryApprovals.consumedAt} is null`,
+          ),
+        );
+      await tx
+        .update(schema.apiKeys)
+        .set({ revokedAt: invalidatedAt, updatedAt: invalidatedAt })
+        .where(
+          and(
+            eq(schema.apiKeys.accountId, input.accountId),
+            sql`${schema.apiKeys.revokedAt} is null`,
+          ),
+        );
+      await tx
+        .delete(schema.workspaceMemberships)
+        .where(eq(schema.workspaceMemberships.accountId, input.accountId));
+      const workspaces = await tx
+        .select({ id: schema.workspaces.id })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.accountId, input.accountId));
+      if (workspaces.length > 0) {
+        await tx.insert(schema.workspaceMemberships).values(
+          workspaces.map((workspace) => ({
+            accountId: input.accountId,
+            workspaceId: workspace.id,
+            subjectId: recoveredAuthority,
+            role: "owner",
+            permissions: [...RECOVERED_WORKSPACE_PERMISSIONS],
+            createdAt: invalidatedAt,
+            updatedAt: invalidatedAt,
+          })),
+        );
+      }
+      const [finalized] = await tx
+        .update(schema.organizationRecoveryOperations)
+        .set({ state: "finalized", finalizedAt: invalidatedAt })
+        .where(eq(schema.organizationRecoveryOperations.id, operation.id))
+        .returning();
+      const [restored] = await tx
+        .update(schema.managedAccounts)
+        .set({
+          governanceState: "active",
+          governanceRevision,
+          governanceAuthoritySubjectId: recoveredAuthority,
+          authorizationInvalidatedAt: invalidatedAt,
+          updatedAt: invalidatedAt,
+        })
+        .where(eq(schema.managedAccounts.id, input.accountId))
+        .returning();
+      if (!finalized || !restored) fail("operation_conflict");
+      await tx.insert(schema.organizationAuthorizationInvalidations).values({
+        accountId: input.accountId,
+        operationId: operation.id,
         governanceRevision,
-        governanceAuthoritySubjectId: recoveredAuthority,
-        authorizationInvalidatedAt: invalidatedAt,
-        updatedAt: invalidatedAt,
-      })
-      .where(eq(schema.managedAccounts.id, input.accountId))
-      .returning();
-    if (!finalized || !restored) fail("operation_conflict");
-    await tx.insert(schema.organizationAuthorizationInvalidations).values({
-      accountId: input.accountId,
-      operationId: operation.id,
-      governanceRevision,
-      reason: "governance_recovery",
-      invalidatedAt,
-    });
-    await appendAudit(tx, {
-      accountId: input.accountId,
-      operationId: operation.id,
-      subjectId: input.actorSubjectId,
-      action: "recovery.finalized",
-      metadata: {
-        governanceRevision,
-        policyRevision: operation.policyRevision,
-        quorum: operation.quorum,
-        approvalCount: authenticatedSubjects.size,
-        authorityRestored: true,
-        authorizationInvalidated: true,
-      },
-    });
-    const result = await operationProjection(tx, finalized!);
-    await recordCommand(tx, input, "recovery.finalize", request, result);
-    return result;
-  });
+        reason: "governance_recovery",
+        invalidatedAt,
+      });
+      await appendAudit(tx, {
+        accountId: input.accountId,
+        operationId: operation.id,
+        subjectId: input.actorSubjectId,
+        action: "recovery.finalized",
+        metadata: {
+          governanceRevision,
+          policyRevision: operation.policyRevision,
+          quorum: operation.quorum,
+          approvalCount: authenticatedUsers.size,
+          authorityRestored: true,
+          authorizationInvalidated: true,
+        },
+      });
+      const result = await operationProjection(tx, finalized!);
+      await recordCommand(tx, input, "recovery.finalize", request, result);
+      return result;
+    },
+    input.directSessionEvidence,
+  );
 }
 
 async function withGovernanceTx<T>(
   db: Database,
   accountId: string,
   fn: (tx: GovernanceTx) => Promise<T>,
+  directSessionEvidence?: DirectManagedSessionEvidence,
 ): Promise<T> {
   return await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as GovernanceTx;
@@ -713,8 +870,37 @@ async function withGovernanceTx<T>(
     if ((rows[0]?.account_id ?? "") !== accountId) {
       throw new Error("organization governance RLS context was not applied");
     }
+    if (directSessionEvidence) {
+      await assertDirectManagedSession(tx, directSessionEvidence, databaseTargetSchemaFor(db));
+    }
     return await fn(tx);
   });
+}
+
+async function assertDirectManagedSession(
+  tx: GovernanceTx,
+  evidence: DirectManagedSessionEvidence,
+  targetSchema: string,
+): Promise<void> {
+  const authUsers = qualifiedTable(targetSchema, "auth_users");
+  const authSessions = qualifiedTable(targetSchema, "auth_sessions");
+  const rows = await rawRows<{ user_id: string; session_id: string }>(
+    tx,
+    sql`select u.id as user_id, s.id as session_id
+        from ${authUsers} u
+        inner join ${authSessions} s on s.user_id = u.id
+        where u.id = ${evidence.userId}
+          and s.id = ${evidence.sessionId}
+          and s.expires_at > now()
+        for update of u, s`,
+  );
+  if (
+    rows.length !== 1 ||
+    rows[0]?.user_id !== evidence.userId ||
+    rows[0]?.session_id !== evidence.sessionId
+  ) {
+    fail("forbidden");
+  }
 }
 
 async function lockAccount(tx: GovernanceTx, accountId: string): Promise<AccountRow> {
@@ -746,17 +932,19 @@ async function governanceProjection(tx: GovernanceTx, account: AccountRow) {
           .orderBy(asc(schema.organizationRecoveryCustodians.enrolledAt))
       : [];
   return OrganizationGovernanceContract.parse({
-    ...mapStatus(account),
+    accountId: account.id,
+    kind: account.organizationKind,
+    state: account.governanceState,
+    governanceRevision: account.governanceRevision,
+    authorizationInvalidatedAt: account.authorizationInvalidatedAt?.toISOString() ?? null,
     recoveryPolicy:
       account.recoveryPolicyRevision > 0 && account.recoveryQuorum !== null
         ? {
             revision: account.recoveryPolicyRevision,
             quorum: account.recoveryQuorum,
             custodians: custodians.map((custodian) => ({
-              subjectId: custodian.subjectId,
-              subjectLabel: custodian.subjectLabel,
-              policyRevision: custodian.policyRevision,
-              enrolledAt: custodian.enrolledAt.toISOString(),
+              enrollmentState: custodian.enrollmentState as "pending" | "accepted",
+              acceptedAt: custodian.acceptedAt?.toISOString() ?? null,
             })),
           }
         : null,
@@ -823,13 +1011,14 @@ function validatePolicy(
   account: AccountRow,
   custodians: Array<{ subjectId: string }>,
   quorum: number,
+  resolvedCustodians: Map<string, { userId: string; label: string }>,
 ): void {
   const subjects = new Set(custodians.map((custodian) => custodian.subjectId));
   if (subjects.size !== custodians.length || quorum < 1 || quorum > subjects.size) {
     fail("policy_required");
   }
   for (const subject of subjects) {
-    if (!subject.startsWith("user:")) fail("policy_required");
+    if (!resolvedCustodians.has(subject)) fail("policy_required");
   }
   if (account.organizationKind === "personal") {
     if (
@@ -848,9 +1037,9 @@ function validatePolicy(
 async function requireLockedCustodian(
   tx: GovernanceTx,
   account: AccountRow,
-  subjectId: string,
+  actorUserId: string,
 ): Promise<void> {
-  if (!subjectId.startsWith("user:")) fail("forbidden");
+  if (!actorUserId.trim()) fail("forbidden");
   if (account.governanceState !== "governance_locked") fail("locked_required");
   if (account.recoveryPolicyRevision <= 0 || account.recoveryQuorum === null) {
     fail("policy_required");
@@ -862,11 +1051,101 @@ async function requireLockedCustodian(
       and(
         eq(schema.organizationRecoveryCustodians.accountId, account.id),
         eq(schema.organizationRecoveryCustodians.policyRevision, account.recoveryPolicyRevision),
-        eq(schema.organizationRecoveryCustodians.subjectId, subjectId),
+        eq(schema.organizationRecoveryCustodians.canonicalUserId, actorUserId),
+        eq(schema.organizationRecoveryCustodians.enrollmentState, "accepted"),
       ),
     )
     .limit(1);
   if (!custodian) fail("forbidden");
+}
+
+export async function isAcceptedOrganizationRecoveryCustodian(
+  db: Database,
+  accountId: string,
+  userId: string,
+): Promise<boolean> {
+  return await withGovernanceTx(db, accountId, async (tx) => {
+    const [custodian] = await tx
+      .select({ id: schema.organizationRecoveryCustodians.id })
+      .from(schema.organizationRecoveryCustodians)
+      .innerJoin(
+        schema.managedAccounts,
+        eq(schema.organizationRecoveryCustodians.accountId, schema.managedAccounts.id),
+      )
+      .where(
+        and(
+          eq(schema.organizationRecoveryCustodians.accountId, accountId),
+          eq(schema.organizationRecoveryCustodians.canonicalUserId, userId),
+          eq(schema.organizationRecoveryCustodians.enrollmentState, "accepted"),
+          eq(
+            schema.organizationRecoveryCustodians.policyRevision,
+            schema.managedAccounts.recoveryPolicyRevision,
+          ),
+        ),
+      )
+      .limit(1);
+    return Boolean(custodian);
+  });
+}
+
+async function resolveRequestedCustodians(
+  tx: GovernanceTx,
+  custodians: Array<{ subjectId: string }>,
+  targetSchema: string,
+): Promise<Map<string, { userId: string; label: string }>> {
+  const requested = new Map<string, string>();
+  for (const custodian of custodians) {
+    const userId = canonicalUserIdFromSubject(custodian.subjectId);
+    if (!userId || requested.has(custodian.subjectId)) fail("policy_required");
+    requested.set(custodian.subjectId, userId);
+  }
+  const predicates = [...requested.values()].map((userId) => sql`u.id = ${userId}`);
+  const authUsers = qualifiedTable(targetSchema, "auth_users");
+  const rows = await rawRows<{ id: string; email: string; name: string }>(
+    tx,
+    sql`select u.id, u.email, u.name
+        from ${authUsers} u
+        where ${sql.join(predicates, sql` or `)}
+        for share`,
+  );
+  const byId = new Map(
+    rows.map((row) => [row.id, { userId: row.id, label: row.email || row.name }]),
+  );
+  if (byId.size !== requested.size) fail("policy_required");
+  return new Map([...requested].map(([subjectId, userId]) => [subjectId, byId.get(userId)!]));
+}
+
+function qualifiedTable(targetSchema: string, table: string) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(targetSchema)) {
+    throw new Error("organization governance target schema is invalid");
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+    throw new Error("organization governance table is invalid");
+  }
+  return sql.raw(`"${targetSchema}"."${table}"`);
+}
+
+async function canonicalUsersPresent(
+  tx: GovernanceTx,
+  targetSchema: string,
+  userIds: Set<string>,
+): Promise<Set<string>> {
+  if (userIds.size === 0) return new Set();
+  const predicates = [...userIds].map((userId) => sql`u.id = ${userId}`);
+  const rows = await rawRows<{ id: string }>(
+    tx,
+    sql`select u.id
+        from ${qualifiedTable(targetSchema, "auth_users")} u
+        where ${sql.join(predicates, sql` or `)}
+        for share`,
+  );
+  return new Set(rows.map((row) => row.id));
+}
+
+function canonicalUserIdFromSubject(subjectId: string | null): string | null {
+  if (!subjectId || !subjectId.startsWith("user:")) return null;
+  const userId = subjectId.slice("user:".length).trim();
+  return userId.length > 0 ? userId : null;
 }
 
 async function lockPendingOperation(tx: GovernanceTx, account: AccountRow, operationId: string) {

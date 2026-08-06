@@ -7,7 +7,6 @@ import {
 import postgres from "postgres";
 import {
   chooseRotationActive,
-  selectCodexCredentialLeaseForTurn,
   type RotationDecision,
 } from "../../../apps/worker/src/activities/codex-rotation";
 import * as schema from "../src/schema";
@@ -99,10 +98,11 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status
+      sandbox_backend, sandbox_group_id, status, tool_policy
     ) values (
       ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'test',
-      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running'
+      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running',
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
     )`;
   await admin.begin(async (transaction) => {
     await transaction`
@@ -594,91 +594,6 @@ describe("credential allocator atomic Codex credential allocation", () => {
         disabledTurn,
         disabledSelection.holderId!,
         disabledSelection.generation!,
-      ),
-    ).toBe(true);
-
-    // Approval/preemption checkpoints release their live lease between worker
-    // activities. The exact frozen credential is still a same-turn continuation
-    // exception, not a new automatic allocation. An unpersisted caller claim is
-    // rejected before the durable checkpoint is present.
-    const frozenTurn = await seedTurn(ws!, 3);
-    await expect(
-      acquireCodexCredentialLease(
-        dbA,
-        {
-          accountId: ws!.accountId,
-          workspaceId: ws!.workspaceId,
-          turnId: frozenTurn,
-          holderId: "unpersisted-continuation-must-fail",
-          advanceActivePointer: true,
-          continuationCredentialId: toggledCredential,
-        },
-        () => ({
-          credentialId: toggledCredential,
-          decision: {
-            kind: "active" as const,
-            credentialId: toggledCredential,
-            moved: false,
-          },
-        }),
-      ),
-    ).rejects.toThrow("disabled for new allocations");
-    await admin`
-      insert into agent_run_states (
-        account_id, workspace_id, session_id, turn_id, state_version,
-        serialized_run_state, pending_approvals, frozen_codex_credential_id
-      )
-      select account_id, workspace_id, session_id, id, 1,
-             '{}', '[]'::jsonb, ${toggledCredential}
-      from session_turns where id = ${frozenTurn}`;
-    await admin`
-      update session_turns
-      set metadata = jsonb_build_object(
-        'codexCredentialPolicyHash', 'policy-v2',
-        'privateAcceptedScope', jsonb_build_object(
-          'primaryPoolId', 'pool-b',
-          'fallbackPoolIds', jsonb_build_array()
-        )
-      )
-      where id = ${frozenTurn}`;
-    let frozenFilterCalls = 0;
-    const frozen = await acquireCodexCredentialLease<RotationDecision, PrivateAcceptedScope>(
-      dbA,
-      {
-        accountId: ws!.accountId,
-        workspaceId: ws!.workspaceId,
-        turnId: frozenTurn,
-        holderId: "temporary-disable-frozen-resume",
-        advanceActivePointer: true,
-        continuationCredentialId: toggledCredential,
-        resolvePolicyScope: resolvePrivateAcceptedScope,
-        filterNewAllocationCandidates: ({ accounts }) => {
-          frozenFilterCalls += 1;
-          return accounts.filter((account) => account.id === alternateCredential);
-        },
-      },
-      (context) =>
-        selectCodexCredentialLeaseForTurn({
-          context: { ...context, policyScope: null },
-          leasingEnabled: true,
-          sessionId: "session-test",
-          sessionPinSource: null,
-          sessionPinnedCredentialId: null,
-          sessionLastCredentialId: toggledCredential,
-          continuationCredentialId: toggledCredential,
-          now: new Date(),
-        }),
-    );
-    expect(frozen.credentialId).toBe(toggledCredential);
-    expect(frozenFilterCalls).toBe(0);
-    expect(
-      await releaseCodexCredentialLease(
-        dbA,
-        ws!.accountId,
-        ws!.workspaceId,
-        frozenTurn,
-        frozen.holderId!,
-        frozen.generation!,
       ),
     ).toBe(true);
 

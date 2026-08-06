@@ -10,11 +10,20 @@ type ManifestEntry = {
 
 const kib = 1024;
 const budgets = {
-  initialRaw: 750 * kib,
-  initialGzip: 210 * kib,
+  // Shared consent, connector, and response-deduplication code remains in the
+  // application shell while provider SDKs stay lazy. The Workspace hub densifies
+  // rail + settings against the session graph; a dedicated Radix vendor chunk
+  // keeps Popper scopes intact (otherwise /settings crashes). The shared
+  // composer also carries the tiny app-action slot used by realtime voice.
+  // Human-input surface + session chrome polish grew the initial graph; keep
+  // modest measured headroom above CI's observed 1223/343 KiB raw/gzip.
+  initialRaw: 1260 * kib,
+  initialGzip: 360 * kib,
   initialFileGzip: 70 * kib,
+  initialFiles: 16,
   directSessionRaw: 1900 * kib,
-  directSessionGzip: 540 * kib,
+  directSessionGzip: 552 * kib,
+  directSessionFiles: 18,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 30 * kib,
@@ -130,8 +139,10 @@ function enforce(label: string, actual: number, limit: number): void {
 enforce("initial raw graph", initialTotal.raw, budgets.initialRaw);
 enforce("initial gzip graph", initialTotal.gzip, budgets.initialGzip);
 enforce("largest initial gzip asset", largestInitial.gzip, budgets.initialFileGzip);
+enforce("initial graph file count", initialMetrics.length, budgets.initialFiles);
 enforce("direct session raw graph", directSessionTotal.raw, budgets.directSessionRaw);
 enforce("direct session gzip graph", directSessionTotal.gzip, budgets.directSessionGzip);
+enforce("direct session graph file count", directSessionMetrics.length, budgets.directSessionFiles);
 enforce("largest lazy raw chunk", largestLazyRaw.raw, budgets.lazyChunkRaw);
 enforce("largest lazy gzip chunk", largestLazyGzip.gzip, budgets.lazyChunkGzip);
 enforce("largest CSS gzip asset", largestCss.gzip, budgets.cssGzip);

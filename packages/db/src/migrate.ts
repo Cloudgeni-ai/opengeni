@@ -4,6 +4,10 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
 const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni";
+const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
+const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
+const batchedBackfillDirective =
+  /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
 const concurrentIndexDirective = /^-- opengeni:concurrent-index lock-timeout=(\d+(?:ms|s|min))$/;
 const concurrentIndexStatement =
   /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:(IF\s+NOT\s+EXISTS)\s+)?(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s+ON\b/is;
@@ -23,6 +27,15 @@ export interface ConcurrentIndexMigration {
   skipWhenValid: boolean;
   statement: string;
 }
+
+export type MigrationRuntimeOptions = {
+  maxNestedAgentDepth?: number;
+};
+
+type DeploymentDepthPolicy = {
+  maxNestedAgentDepth: number;
+  source: "deployment" | "default";
+};
 
 /** A bare Postgres identifier (schema/role name) safe to interpolate into DDL. */
 function assertIdentifier(name: string, value: string): string {
@@ -95,14 +108,80 @@ export function parseConcurrentIndexMigration(
   };
 }
 
+function parseBatchedBackfillMigration(
+  file: string,
+  sqlText: string,
+): { batchSize: number; lockTimeout: string; statementTimeout: string; statement: string } | null {
+  const lines = sqlText.replaceAll("\r\n", "\n").split("\n");
+  const directiveIndex = /^-- deployment-mode: (?:rolling|maintenance)$/.test(
+    lines[0]?.trim() ?? "",
+  )
+    ? 1
+    : 0;
+  const directive = batchedBackfillDirective.exec(lines[directiveIndex]?.trim() ?? "");
+  if (!directive) return null;
+  const statement = lines
+    .slice(directiveIndex + 1)
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n")
+    .trim();
+  const withoutTrailingSemicolon = statement.endsWith(";")
+    ? statement.slice(0, -1).trimEnd()
+    : statement;
+  const batchSize = Number(directive[1]!);
+  if (
+    !Number.isSafeInteger(batchSize) ||
+    batchSize < 1 ||
+    batchSize > 10_000 ||
+    !/^WITH\b/is.test(withoutTrailingSemicolon) ||
+    !/\bUPDATE\b/is.test(withoutTrailingSemicolon) ||
+    !/\bRETURNING\b/is.test(withoutTrailingSemicolon) ||
+    !new RegExp(`\\bLIMIT\\s+${batchSize}\\b`, "i").test(withoutTrailingSemicolon) ||
+    withoutTrailingSemicolon.includes(";")
+  ) {
+    throw new Error(
+      `${file}: opengeni:batched-backfill requires one bounded WITH ... UPDATE ... RETURNING statement whose LIMIT matches batch-size`,
+    );
+  }
+  return {
+    batchSize,
+    lockTimeout: directive[2]!,
+    statementTimeout: directive[3]!,
+    statement,
+  };
+}
+
 async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
 ): Promise<void> {
+  const batchedBackfill = parseBatchedBackfillMigration(file, sqlText);
+  if (batchedBackfill) {
+    await sql`select set_config('lock_timeout', ${batchedBackfill.lockTimeout}, false)`;
+    await sql`select set_config('statement_timeout', ${batchedBackfill.statementTimeout}, false)`;
+    try {
+      for (;;) {
+        const result = await sql.unsafe(batchedBackfill.statement);
+        if (result.length === 0) break;
+      }
+    } finally {
+      await sql`select set_config('statement_timeout', '0', false)`;
+      await sql`select set_config('lock_timeout', '0', false)`;
+    }
+    return;
+  }
   const concurrentIndex = parseConcurrentIndexMigration(file, sqlText);
   if (!concurrentIndex) {
-    await sql.unsafe(sqlText);
+    // Migration SQL is the only writer allowed to cross protocol generations.
+    // Keep the authority transaction-local and inside the same PostgreSQL simple
+    // query as the migration body: setting it in a prior statement would end
+    // that implicit transaction and silently lose the LOCAL value. This also
+    // makes a fresh database capable of applying maintenance migration 0138
+    // without a process-global PGOPTIONS escape hatch.
+    await sql.unsafe(
+      `SELECT pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);\n${sqlText}`,
+    );
     return;
   }
 
@@ -125,6 +204,53 @@ async function executeMigrationFile(
   } finally {
     await sql`select set_config('lock_timeout', '0', false)`;
   }
+}
+
+function deploymentDepthPolicy(
+  options: MigrationRuntimeOptions | undefined,
+): DeploymentDepthPolicy {
+  const raw =
+    options === undefined
+      ? process.env.OPENGENI_MAX_NESTED_AGENT_DEPTH?.trim() || undefined
+      : options.maxNestedAgentDepth;
+  if (raw === undefined) {
+    return { maxNestedAgentDepth: DEFAULT_MAX_NESTED_AGENT_DEPTH, source: "default" };
+  }
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_NESTED_AGENT_DEPTH ||
+    (typeof raw === "string" && !/^(0|[1-9][0-9]*)$/.test(raw))
+  ) {
+    throw new Error(
+      `OPENGENI_MAX_NESTED_AGENT_DEPTH must be a non-negative 32-bit integer: ${raw}`,
+    );
+  }
+  return { maxNestedAgentDepth: value, source: "deployment" };
+}
+
+async function persistDeploymentDepthPolicy(
+  sql: postgres.Sql,
+  policy: DeploymentDepthPolicy,
+): Promise<void> {
+  const [relation] = await sql<{ exists: boolean }[]>`
+    select to_regclass('nested_agent_depth_configuration') is not null as exists
+  `;
+  if (!relation?.exists) return;
+  await sql`
+    insert into "nested_agent_depth_configuration" (
+      "singleton", "max_nested_agent_depth", "policy_source", "updated_at"
+    ) values (true, ${policy.maxNestedAgentDepth}, ${policy.source}, now())
+    on conflict ("singleton") do update
+    set "max_nested_agent_depth" = excluded."max_nested_agent_depth",
+        "policy_source" = excluded."policy_source",
+        "updated_at" = now()
+    where "nested_agent_depth_configuration"."max_nested_agent_depth"
+            is distinct from excluded."max_nested_agent_depth"
+       or "nested_agent_depth_configuration"."policy_source"
+            is distinct from excluded."policy_source"
+  `;
 }
 
 /**
@@ -160,9 +286,11 @@ export async function migrate(
     process.env.OPENGENI_DATABASE_URL ??
     DEFAULT_DATABASE_URL,
   schema: string | undefined = process.env.OPENGENI_DB_SCHEMA?.trim() || undefined,
+  runtimeOptions?: MigrationRuntimeOptions,
 ): Promise<void> {
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
+  const depthPolicy = deploymentDepthPolicy(runtimeOptions);
   const sql = postgres(databaseUrl, { max: 1 });
   try {
     // Serialize concurrent migrate() runs; the session-level lock is released
@@ -177,6 +305,8 @@ export async function migrate(
       await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS "opengeni_private"`);
       await sql.unsafe(`SET search_path = "${schema}", "opengeni_private", "public"`);
     }
+    await sql`select set_config('opengeni.max_nested_agent_depth', ${String(depthPolicy.maxNestedAgentDepth)}, false)`;
+    await sql`select set_config('opengeni.nested_agent_depth_policy_source', ${depthPolicy.source}, false)`;
     await sql.unsafe(
       `CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`,
     );
@@ -190,6 +320,9 @@ export async function migrate(
       await executeMigrationFile(sql, file, sqlText);
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
     }
+    // Reconcile even when all migration names were already recorded. This is
+    // the only supported way to change deployment policy in a live database.
+    await persistDeploymentDepthPolicy(sql, depthPolicy);
   } finally {
     await sql.end();
   }
@@ -203,8 +336,12 @@ export async function migrate(
  * `targetSchema` undefined → `public` → standalone behavior. Thin wrapper over
  * `migrate` so there is one migration engine.
  */
-export async function runMigrations(adminConnection: string, targetSchema?: string): Promise<void> {
-  await migrate(adminConnection, targetSchema);
+export async function runMigrations(
+  adminConnection: string,
+  targetSchema?: string,
+  runtimeOptions?: MigrationRuntimeOptions,
+): Promise<void> {
+  await migrate(adminConnection, targetSchema, runtimeOptions);
 }
 
 if (import.meta.main) {

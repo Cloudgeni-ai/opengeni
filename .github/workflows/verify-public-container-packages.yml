@@ -1,0 +1,30 @@
+name: Verify public container packages
+
+# GHCR package visibility is organization/package configuration, not a mutable
+# release-workflow property. This audit proves the configured distribution path
+# works without a registry credential.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify anonymous OpenGeni image access
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify anonymous image discovery
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          for role in api worker web relay sandbox; do
+            token_response="$(curl -fsSL \
+              "https://ghcr.io/token?scope=repository:${owner}/opengeni-${role}:pull&service=ghcr.io")"
+            token="$(jq -er '.token' <<<"$token_response")"
+            curl -fsSL \
+              -H "Authorization: Bearer ${token}" \
+              "https://ghcr.io/v2/${owner}/opengeni-${role}/tags/list" |
+              jq -e '.tags | length > 0' >/dev/null
+          done

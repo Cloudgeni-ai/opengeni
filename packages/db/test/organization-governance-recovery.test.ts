@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { eq } from "drizzle-orm";
 import {
+  acceptOrganizationRecoveryCustodian,
   approveOrganizationRecovery,
   createDb,
   createOrganizationRecoveryOperation,
@@ -42,6 +43,19 @@ beforeAll(async () => {
     ) values ('other', 'team', 'user:other-owner') returning id`;
   accountId = account!.id;
   otherAccountId = other!.id;
+  await shared.admin`
+    insert into auth_users (id, name, email) values
+      ('owner', 'Owner', 'owner@example.test'),
+      ('a', 'Custodian A', 'a@example.test'),
+      ('b', 'Custodian B', 'b@example.test'),
+      ('c', 'Custodian C', 'c@example.test')
+    on conflict (id) do nothing`;
+  await shared.admin`
+    insert into auth_sessions (id, user_id, token, expires_at) values
+      ('session-a', 'a', 'token-a', now() + interval '1 hour'),
+      ('session-b', 'b', 'token-b', now() + interval '1 hour'),
+      ('session-c', 'c', 'token-c', now() + interval '1 hour')
+    on conflict (id) do update set expires_at = excluded.expires_at`;
   const [workspace] = await shared.admin<Array<{ id: string }>>`
     insert into workspaces (account_id, name) values (${accountId}, 'team workspace') returning id`;
   workspaceId = workspace!.id;
@@ -64,7 +78,7 @@ beforeAll(async () => {
       ${accountId}, ${workspaceId}, 'old key', 'og_test', 'old-governance-key',
       '["workspace:admin"]'::jsonb
     )`;
-  client = createDb(shared.appUrl);
+  client = createDb(shared.governanceAppUrl ?? shared.appUrl);
   db = client.db;
 }, 180_000);
 
@@ -79,6 +93,7 @@ describe("organization governance recovery persistence", () => {
     const policyInput = {
       accountId,
       actorSubjectId: "user:owner",
+      actorUserId: "owner",
       expectedGovernanceRevision: 0,
       quorum: 2,
       custodians: [{ subjectId: "user:a" }, { subjectId: "user:b" }, { subjectId: "user:c" }],
@@ -91,6 +106,15 @@ describe("organization governance recovery persistence", () => {
       recoveryPolicy: { revision: 1, quorum: 2 },
     });
     expect(await setOrganizationRecoveryPolicy(db, policyInput)).toEqual(policy);
+    for (const userId of ["a", "b", "c"]) {
+      await acceptOrganizationRecoveryCustodian(db, {
+        accountId,
+        actorSubjectId: `user:${userId}`,
+        actorUserId: userId,
+        directSessionEvidence: { userId, sessionId: `session-${userId}` },
+        idempotencyKey: `accept-${userId}`,
+      });
+    }
     await expect(
       setOrganizationRecoveryPolicy(db, {
         ...policyInput,
@@ -101,6 +125,7 @@ describe("organization governance recovery persistence", () => {
     const locked = await lockOrganizationGovernance(db, {
       accountId,
       actorSubjectId: "user:owner",
+      actorUserId: "owner",
       expectedGovernanceRevision: 1,
       reason: "owner identity unavailable",
       idempotencyKey: "lock-1",
@@ -113,6 +138,7 @@ describe("organization governance recovery persistence", () => {
       await lockOrganizationGovernance(db, {
         accountId,
         actorSubjectId: "user:owner",
+        actorUserId: "owner",
         expectedGovernanceRevision: 1,
         reason: "owner identity unavailable",
         idempotencyKey: "lock-1",
@@ -122,6 +148,7 @@ describe("organization governance recovery persistence", () => {
     const operation = await createOrganizationRecoveryOperation(db, {
       accountId,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       idempotencyKey: "operation-1",
     });
     expect(operation).toMatchObject({
@@ -152,6 +179,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       evidence: "identity-proof-a",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -172,6 +200,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       evidence: "identity-proof-a-lost-response",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -181,6 +210,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       evidence: "identity-proof-a-lost-response",
       encryptionKey: keyB,
       receiptIdentitySecret,
@@ -192,6 +222,7 @@ describe("organization governance recovery persistence", () => {
         accountId,
         operationId: operation.id,
         actorSubjectId: "user:a",
+        actorUserId: "a",
         evidence: "identity-proof-a-changed-request",
         encryptionKey: keyB,
         receiptIdentitySecret,
@@ -203,6 +234,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       idempotencyKey: "revoke-a-1",
     });
     expect(revoked.approvalCount).toBe(0);
@@ -210,6 +242,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       evidence: "identity-proof-a-fresh",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -220,6 +253,7 @@ describe("organization governance recovery persistence", () => {
         accountId,
         operationId: operation.id,
         actorSubjectId: "user:a",
+        actorUserId: "a",
         encryptionKey: keyA,
         idempotencyKey: "finalize-too-early",
       }),
@@ -229,6 +263,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:b",
+      actorUserId: "b",
       evidence: "identity-proof-b",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -239,6 +274,7 @@ describe("organization governance recovery persistence", () => {
         accountId,
         operationId: operation.id,
         actorSubjectId: "user:c",
+        actorUserId: "c",
         encryptionKey: keyA,
         idempotencyKey: "finalize-unapproved-custodian",
       }),
@@ -247,6 +283,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:c",
+      actorUserId: "c",
       evidence: "identity-proof-c-before-rotation",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -257,6 +294,7 @@ describe("organization governance recovery persistence", () => {
         accountId,
         operationId: operation.id,
         actorSubjectId: "user:a",
+        actorUserId: "a",
         encryptionKey: keyB,
         idempotencyKey: "finalize-rotated-key",
       }),
@@ -269,6 +307,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       evidence: "identity-proof-a-after-rotation",
       encryptionKey: keyB,
       receiptIdentitySecret,
@@ -278,6 +317,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:b",
+      actorUserId: "b",
       evidence: "identity-proof-b-after-rotation",
       encryptionKey: keyB,
       receiptIdentitySecret,
@@ -287,6 +327,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       operationId: operation.id,
       actorSubjectId: "user:a",
+      actorUserId: "a",
       encryptionKey: keyB,
       idempotencyKey: "finalize-success",
     });
@@ -296,6 +337,7 @@ describe("organization governance recovery persistence", () => {
         accountId,
         operationId: operation.id,
         actorSubjectId: "user:a",
+        actorUserId: "a",
         encryptionKey: keyB,
         idempotencyKey: "finalize-success",
       }),
@@ -305,7 +347,6 @@ describe("organization governance recovery persistence", () => {
     expect(restored).toMatchObject({
       state: "active",
       governanceRevision: 3,
-      authoritySubjectId: "user:a",
     });
     expect(restored?.authorizationInvalidatedAt).not.toBeNull();
 

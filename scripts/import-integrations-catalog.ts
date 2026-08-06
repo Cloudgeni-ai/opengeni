@@ -5,6 +5,7 @@ import { dbSearchPath, getSettings } from "@opengeni/config";
 import {
   createDb,
   createImportBatch,
+  findCompletedImportBatch,
   markStaleRegistryCatalogItems,
   updateImportBatchCounts,
   upsertRegistryCapabilityCatalogItem,
@@ -18,11 +19,10 @@ const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
   "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
 const MAX_LOGO_BYTES = 512 * 1024;
-// Catalog endpoints are committed and probed without an operator present. Query
-// strings, fragments, and opaque path segments are rejected because URL-borne
-// credentials cannot be proven public.
-// Credential setup navigation in credentialFacts is metadata, never probed or
-// sent to an MCP server, so ordinary public dashboard query/fragment links remain.
+
+// Bump deliberately whenever normalization or import semantics can change
+// persisted output without changing the reviewed snapshot bytes.
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 1;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -76,6 +76,7 @@ export type CatalogTier = "verified" | "community";
 export type CatalogIntegrationRow = {
   domain: string;
   name: string;
+  description?: string;
   mcpUrl: string;
   transport: "streamable-http";
   authKind: CatalogAuthKind;
@@ -84,13 +85,25 @@ export type CatalogIntegrationRow = {
   tier: CatalogTier;
   provenance: string;
   logoSourceUrl: string | null;
+  homepageUrl?: string;
+  installUrl?: string;
+  documentationUrl?: string;
+  registryName?: string;
+  registryVersion?: string;
+  registryStatus?: string;
+  registryIsLatest?: boolean;
+  registryPublishedAt?: string;
+  repositorySource?: string;
+  repositoryUrl?: string;
+  sourceCommit?: string;
   probe?: Record<string, unknown>;
+  authContract?: Record<string, unknown>;
 };
 
 export type NormalizedCatalogSnapshot = {
   generatedAt: string | null;
   rows: CatalogIntegrationRow[];
-  skipped: Array<{ domain: string | null; mcpUrl: null; reason: string }>;
+  skipped: Array<{ domain: string | null; mcpUrl: string | null; reason: string }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
   cleaning: {
     inputRows: number;
@@ -98,9 +111,108 @@ export type NormalizedCatalogSnapshot = {
     skippedRows: number;
     quarantinedRows: number;
     duplicateDomainNameRows: number;
+    duplicateEndpointRows: number;
+    unverifiedRows: number;
     controlCharacterFields: number;
   };
 };
+
+const brandedNamesByMcpUrl = new Map([["https://mcp.linear.app/mcp", "Linear"]]);
+
+/**
+ * Reviewed first-party contracts override weaker registry metadata. Keep this
+ * list deliberately small: each entry must be backed by the provider's own
+ * current MCP documentation, not inferred from an aggregator.
+ */
+const officialCatalogContractsByMcpUrl = new Map<
+  string,
+  Pick<CatalogIntegrationRow, "name" | "tier" | "provenance" | "authKind" | "scopesHint"> &
+    Partial<
+      Pick<
+        CatalogIntegrationRow,
+        | "description"
+        | "logoSourceUrl"
+        | "homepageUrl"
+        | "installUrl"
+        | "documentationUrl"
+        | "registryName"
+        | "registryVersion"
+        | "registryStatus"
+        | "registryIsLatest"
+        | "registryPublishedAt"
+        | "repositorySource"
+        | "repositoryUrl"
+        | "sourceCommit"
+      >
+    >
+>([
+  [
+    "https://mcp.slack.com/mcp",
+    {
+      name: "Slack",
+      tier: "verified",
+      provenance: "official:docs.slack.dev/ai/slack-mcp-server",
+      authKind: "oauth2",
+      // Slack's tools/list is grant-dependent. These are the complete scopes
+      // advertised by its official OAuth protected-resource metadata.
+      scopesHint: [
+        "search:read.public",
+        "search:read.private",
+        "search:read.mpim",
+        "search:read.im",
+        "search:read.files",
+        "search:read.users",
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "mpim:history",
+        "im:history",
+        "canvases:read",
+        "canvases:write",
+        "users:read",
+        "users:read.email",
+        "reactions:write",
+        "reactions:read",
+        "emoji:read",
+        "files:read",
+        "channels:write",
+        "groups:write",
+        "im:write",
+        "mpim:write",
+        "channels:read",
+        "groups:read",
+        "mpim:read",
+      ],
+    },
+  ],
+  [
+    "https://api.mobbin.com/mcp",
+    {
+      name: "Mobbin",
+      description:
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      tier: "verified",
+      provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
+      authKind: "oauth2",
+      scopesHint: ["openid"],
+      // Mobbin has not published a reusable logo license with its MCP
+      // listing. Keep the catalog's calm monogram rather than copying an
+      // unlicensed vendor asset.
+      logoSourceUrl: null,
+      homepageUrl: "https://mobbin.com/mcp",
+      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
+      documentationUrl: "https://docs.mobbin.com/mcp/introduction",
+      registryName: "com.mobbin/mobbin",
+      registryVersion: "1.0.1",
+      registryStatus: "active",
+      registryIsLatest: true,
+      registryPublishedAt: "2026-06-03T10:01:47.928592Z",
+      repositorySource: "github",
+      repositoryUrl: "https://github.com/mobbin/mobbin-mcp-server",
+      sourceCommit: "bbee2a6be34d251c580ba80bb8b407c87587aba7",
+    },
+  ],
+]);
 
 export type LogoStorageResult =
   | { ok: true; path: string; sourceUrl: string; contentType: string; sizeBytes: number }
@@ -152,7 +264,10 @@ export async function writeCleanCatalogSnapshot(
   return normalized;
 }
 
-export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSnapshot {
+export function normalizeCatalogSnapshot(
+  snapshot: unknown,
+  options: { allowUnprobedCandidates?: boolean } = {},
+): NormalizedCatalogSnapshot {
   const controlCharacters = { count: 0 };
   const cleanedSnapshot = stripControlCharacters(snapshot, controlCharacters);
   const root = asRecord(cleanedSnapshot);
@@ -163,10 +278,12 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
   const candidatesByDomainName = new Map<string, CatalogIntegrationRow>();
   const seen = new Set<string>();
   let duplicateDomainNameRows = 0;
+  let duplicateEndpointRows = 0;
+  let unverifiedRows = 0;
 
   for (const candidate of candidates) {
     const domain = normalizeDomain(candidate.domain);
-    const mcpUrl = stringValue(candidate.mcpUrl);
+    const rawMcpUrl = stringValue(candidate.mcpUrl);
     if (!domain) {
       skipped.push({ domain: null, mcpUrl: null, reason: "missing_domain" });
       continue;
@@ -175,51 +292,132 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       skipped.push({ domain, mcpUrl: null, reason: "dead_demo_domain" });
       continue;
     }
-    if (!mcpUrl) {
+    if (!rawMcpUrl) {
       skipped.push({ domain, mcpUrl: null, reason: "missing_url" });
       continue;
     }
-    const rejectionReason = catalogMcpUrlRejection(mcpUrl);
+    const rejectionReason = catalogMcpUrlRejection(rawMcpUrl);
     if (rejectionReason) {
-      skipped.push({
-        domain,
-        mcpUrl: null,
-        reason: rejectionReason,
-      });
+      skipped.push({ domain, mcpUrl: null, reason: rejectionReason });
       continue;
     }
+    const mcpUrl = canonicalMcpUrl(rawMcpUrl);
     const transport = normalizeTransport(candidate.transport ?? candidate.transports);
     if (!transport) {
       skipped.push({ domain, mcpUrl: null, reason: "transport_not_streamable_http" });
       continue;
     }
     const key = `${domain}\n${mcpUrl}`;
-    if (seen.has(key)) {
-      skipped.push({ domain, mcpUrl: null, reason: "duplicate_surface" });
+    const provenance = normalizeProvenance(candidate.provenance ?? asRecord(candidate.basis)?.via);
+    const probe = asRecord(candidate.probe);
+    const probeStatus = stringValue(probe?.status);
+    if (probeStatus !== "real") {
+      // Production imports require probe evidence. Tests and offline cleaning
+      // may explicitly opt into preserving pre-probe candidates, but an
+      // observed unverified/junk result is never promoted by that option.
+      if (probeStatus || !options.allowUnprobedCandidates) {
+        unverifiedRows += 1;
+        skipped.push({
+          domain,
+          mcpUrl: null,
+          reason: probeStatus
+            ? `probe_${probeStatus}:${stringValue(probe?.reason) ?? "unknown"}`
+            : "probe_missing",
+        });
+        continue;
+      }
+    }
+    const official = officialCatalogContractsByMcpUrl.get(mcpUrl);
+    const authKind = official?.authKind ?? normalizeAuthKind(candidate.authKind);
+    if (authKind === "unknown") {
+      skipped.push({ domain, mcpUrl: null, reason: "auth_unknown" });
       continue;
     }
-    seen.add(key);
-    const provenance = normalizeProvenance(candidate.provenance ?? asRecord(candidate.basis)?.via);
+    const authContract = normalizeAuthContract(
+      candidate.authContract ?? asRecord(candidate.metadata)?.authContract,
+    );
+    const logoSourceUrl =
+      official?.logoSourceUrl !== undefined
+        ? official.logoSourceUrl
+        : candidate.logoSourceUrl === null
+          ? null
+          : (safeCatalogUrl(candidate.logoAsset) ??
+            safeCatalogUrl(candidate.logoSourceUrl) ??
+            `https://integrations.sh/logo/${domain}`);
+    const registryIsLatest = official?.registryIsLatest ?? candidate.registryIsLatest;
     const row: CatalogIntegrationRow = {
       domain,
-      name: stringValue(candidate.name) ?? domain,
+      name:
+        official?.name ?? brandedNamesByMcpUrl.get(mcpUrl) ?? stringValue(candidate.name) ?? domain,
+      ...optionalString("description", official?.description ?? stringValue(candidate.description)),
       mcpUrl,
       transport: "streamable-http",
-      authKind: normalizeAuthKind(candidate.authKind),
-      scopesHint: stringArray(candidate.scopesHint),
+      authKind,
+      scopesHint: official?.scopesHint ?? stringArray(candidate.scopesHint),
       credentialFacts: recordArray(candidate.credentialFacts),
-      tier: provenance === "detected" ? "verified" : "community",
-      provenance,
-      logoSourceUrl:
-        stringValue(candidate.logoAsset) ??
-        stringValue(candidate.logoSourceUrl) ??
-        `https://integrations.sh/logo/${domain}`,
+      tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
+      provenance: official?.provenance ?? provenance,
+      logoSourceUrl,
+      ...optionalString(
+        "homepageUrl",
+        official?.homepageUrl ?? safeCatalogUrl(candidate.homepageUrl),
+      ),
+      ...optionalString("installUrl", official?.installUrl ?? safeCatalogUrl(candidate.installUrl)),
+      ...optionalString(
+        "documentationUrl",
+        official?.documentationUrl ?? safeCatalogUrl(candidate.documentationUrl),
+      ),
+      ...optionalString(
+        "registryName",
+        official?.registryName ?? stringValue(candidate.registryName),
+      ),
+      ...optionalString(
+        "registryVersion",
+        official?.registryVersion ?? stringValue(candidate.registryVersion),
+      ),
+      ...optionalString(
+        "registryStatus",
+        official?.registryStatus ?? stringValue(candidate.registryStatus),
+      ),
+      ...(typeof registryIsLatest === "boolean" ? { registryIsLatest } : {}),
+      ...optionalString(
+        "registryPublishedAt",
+        official?.registryPublishedAt ?? stringValue(candidate.registryPublishedAt),
+      ),
+      ...optionalString(
+        "repositorySource",
+        official?.repositorySource ?? stringValue(candidate.repositorySource),
+      ),
+      ...optionalString(
+        "repositoryUrl",
+        official?.repositoryUrl ?? safeCatalogUrl(candidate.repositoryUrl),
+      ),
+      ...optionalString(
+        "sourceCommit",
+        official?.sourceCommit ?? stringValue(candidate.sourceCommit),
+      ),
+      ...(probe ? { probe } : {}),
+      ...(authContract ? { authContract } : {}),
     };
     const suspiciousReason = suspiciousSurfaceUrls.get(key);
     if (suspiciousReason) {
       quarantined.push({ row, reason: suspiciousReason });
       continue;
     }
+    if (authKind === "api_key" && !authContract) {
+      // Credential prose is not a machine-actionable runtime contract. Keep
+      // the row out of the registry rather than exposing a server that cannot
+      // be connected safely.
+      skipped.push({ domain, mcpUrl: null, reason: "api_key_metadata_unactionable" });
+      continue;
+    }
+    // Only accepted rows claim their normalized surface key. A missing or
+    // failed probe must not shadow a later alias carrying usable evidence.
+    if (seen.has(key)) {
+      skipped.push({ domain, mcpUrl: null, reason: "duplicate_surface" });
+      continue;
+    }
+    seen.add(key);
     const domainNameKey = `${row.domain}\n${normalizeNameForDedupe(row.name)}`;
     const existing = candidatesByDomainName.get(domainNameKey);
     if (!existing) {
@@ -233,7 +431,22 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
     skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_domain_name" });
   }
 
-  const rows = [...candidatesByDomainName.values()].sort(
+  const candidatesByEndpoint = new Map<string, CatalogIntegrationRow>();
+  for (const row of candidatesByDomainName.values()) {
+    const endpointKey = canonicalMcpUrl(row.mcpUrl);
+    const existing = candidatesByEndpoint.get(endpointKey);
+    if (!existing) {
+      candidatesByEndpoint.set(endpointKey, row);
+      continue;
+    }
+    duplicateEndpointRows += 1;
+    const winner = bestCatalogRow(existing, row);
+    const loser = winner === existing ? row : existing;
+    candidatesByEndpoint.set(endpointKey, winner);
+    skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_endpoint" });
+  }
+
+  const rows = [...candidatesByEndpoint.values()].sort(
     (left, right) =>
       left.domain.localeCompare(right.domain) ||
       left.name.localeCompare(right.name) ||
@@ -251,6 +464,8 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       skippedRows: skipped.length,
       quarantinedRows: quarantined.length,
       duplicateDomainNameRows,
+      duplicateEndpointRows,
+      unverifiedRows,
       controlCharacterFields: controlCharacters.count,
     },
   };
@@ -290,7 +505,7 @@ export async function importIntegrationsCatalog(input: {
 
   for (const row of normalized.rows) {
     let logoAssetPath: string | null = null;
-    if (input.storeLogos !== false) {
+    if (input.storeLogos !== false && row.logoSourceUrl) {
       const logo = await storeLogoForRow(row, {
         storage: input.storage ?? null,
         fetchImpl: input.fetchImpl ?? fetch,
@@ -366,6 +581,7 @@ export function catalogRowToDbInput(
     id: catalogCapabilityId(row.domain, row.mcpUrl),
     providerDomain: row.domain,
     name: row.name,
+    description: row.description ?? null,
     mcpUrl: row.mcpUrl,
     transport: row.transport,
     authKind: row.authKind,
@@ -375,12 +591,35 @@ export function catalogRowToDbInput(
     logoAssetPath: input.logoAssetPath ?? null,
     importBatchId: input.importBatchId,
     scopesHint: row.scopesHint,
-    homepageUrl: `https://${row.domain}`,
+    homepageUrl: row.homepageUrl ?? `https://${row.domain}`,
+    installUrl: row.installUrl ?? row.homepageUrl ?? `https://${row.domain}`,
     tags: ["mcp", "integration", row.tier, row.authKind],
     metadata: {
-      logoSource: row.logoSourceUrl ? "integrations.sh" : "missing",
+      logoSource: row.logoSourceUrl ? "integrations.sh" : "generic_monogram",
       originalLogoUrl: row.logoSourceUrl,
+      ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
+      ...(row.registryName
+        ? {
+            officialMcpRegistry: {
+              name: row.registryName,
+              ...(row.registryVersion ? { version: row.registryVersion } : {}),
+              ...(row.registryStatus ? { status: row.registryStatus } : {}),
+              ...(row.registryIsLatest !== undefined ? { isLatest: row.registryIsLatest } : {}),
+              ...(row.registryPublishedAt ? { publishedAt: row.registryPublishedAt } : {}),
+              ...(row.repositoryUrl
+                ? {
+                    repository: {
+                      ...(row.repositorySource ? { source: row.repositorySource } : {}),
+                      url: row.repositoryUrl,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      ...(row.sourceCommit ? { sourceCommit: row.sourceCommit } : {}),
       ...(row.probe ? { mcpProbe: row.probe } : {}),
+      ...(row.authContract ? { authContract: row.authContract } : {}),
     },
   };
 }
@@ -392,7 +631,10 @@ export async function storeLogoForRow(
     fetchImpl: LogoFetch;
   },
 ): Promise<LogoStorageResult> {
-  const sourceUrl = row.logoSourceUrl ?? `https://integrations.sh/logo/${row.domain}`;
+  const sourceUrl = row.logoSourceUrl;
+  if (!sourceUrl) {
+    return { ok: false, sourceUrl: null, reason: "logo_source_not_published" };
+  }
   if (!input.storage) {
     return { ok: false, sourceUrl, reason: "object_storage_unavailable" };
   }
@@ -465,12 +707,14 @@ function rawSurfaceRows(root: UnknownRecord | null): UnknownRecord[] {
         continue;
       }
       const credentialFacts = credentialFactsForSurface(surfaceRecord, credentials);
+      const authContract = deriveAuthContract(surfaceRecord);
       rows.push({
         domain,
         name: stringValue(flat?.name) ?? stringValue(surfaceRecord.name) ?? domain,
         mcpUrl: stringValue(surfaceRecord.url),
         transport: surfaceRecord.transports ?? surfaceRecord.transport,
         authKind: deriveAuthKind(surfaceRecord, credentialFacts),
+        ...(authContract ? { authContract } : {}),
         scopesHint: scopesHintForSurface(surfaceRecord),
         credentialFacts,
         provenance: asRecord(surfaceRecord.basis)?.via ?? surfaceRecord.provenance,
@@ -597,6 +841,16 @@ function deriveAuthKind(
   return "unknown";
 }
 
+function deriveAuthContract(surface: UnknownRecord): Record<string, unknown> | null {
+  const auth = asRecord(surface.auth);
+  return normalizeAuthContract(surface.authContract ?? auth?.authContract ?? auth?.headerContract);
+}
+
+/**
+ * Reject URL forms whose authority cannot be proven public during catalog
+ * import. Query strings, opaque path segments, and credentials must never be
+ * persisted as an MCP endpoint or retained in a rejected diagnostic.
+ */
 export function catalogMcpUrlRejection(value: string | null | undefined): string | null {
   if (!value) {
     return "missing_url";
@@ -639,6 +893,36 @@ function normalizeDomain(value: unknown): string | null {
   return raw || null;
 }
 
+export function canonicalMcpUrl(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  url.hostname = url.hostname.toLowerCase();
+  if (
+    (url.protocol === "https:" && url.port === "443") ||
+    (url.protocol === "http:" && url.port === "80")
+  ) {
+    url.port = "";
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+  return url.toString();
+}
+
+function normalizeAuthContract(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const headerName = stringValue(record.headerName);
+  const scheme = stringValue(record.scheme);
+  if (!headerName || !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(headerName) || !scheme) {
+    return null;
+  }
+  return {
+    headerName,
+    scheme,
+  };
+}
+
 function normalizeAuthKind(value: unknown): CatalogAuthKind {
   const raw = stringValue(value);
   return raw === "oauth2" || raw === "api_key" || raw === "none" || raw === "unknown"
@@ -669,6 +953,15 @@ function bestCatalogRow(
 
 function catalogRowQualityScore(row: CatalogIntegrationRow): number {
   let score = 0;
+  try {
+    const endpointHost = new URL(row.mcpUrl).hostname.toLowerCase();
+    if (endpointHost === row.domain || endpointHost.endsWith(`.${row.domain}`)) {
+      score += 8;
+    }
+  } catch {
+    // URL validity was already checked. Keep scoring total if a future caller
+    // constructs a row directly in a test.
+  }
   if (row.logoSourceUrl) {
     score += 4;
   }
@@ -746,6 +1039,32 @@ function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function optionalString<Key extends string>(
+  key: Key,
+  value: string | null | undefined,
+): { [Property in Key]?: string } {
+  return value ? ({ [key]: value } as { [Property in Key]?: string }) : {};
+}
+
+function safeCatalogUrl(value: unknown): string | null {
+  const raw = stringValue(value);
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username ||
+      parsed.password ||
+      parsed.hash
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 function stringArray(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
@@ -797,11 +1116,13 @@ function parseArgs(argv: string[]): {
   snapshotPath: string;
   dryRun: boolean;
   skipLogos: boolean;
+  ifChanged: boolean;
   snapshotRef?: string;
 } {
   let snapshotPath = "";
   let dryRun = false;
   let skipLogos = false;
+  let ifChanged = false;
   let snapshotRef: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
@@ -811,6 +1132,8 @@ function parseArgs(argv: string[]): {
       dryRun = true;
     } else if (arg === "--skip-logos") {
       skipLogos = true;
+    } else if (arg === "--if-changed") {
+      ifChanged = true;
     } else if (arg === "--snapshot-ref") {
       snapshotRef = argv[++index];
     } else if (!arg.startsWith("--") && !snapshotPath) {
@@ -825,13 +1148,62 @@ function parseArgs(argv: string[]): {
   if (!snapshotPath) {
     throw new Error("missing --snapshot <path>");
   }
-  return { snapshotPath, dryRun, skipLogos, ...(snapshotRef ? { snapshotRef } : {}) };
+  return { snapshotPath, dryRun, skipLogos, ifChanged, ...(snapshotRef ? { snapshotRef } : {}) };
 }
 
 function printUsage(): void {
   console.log(
-    "Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--snapshot-ref <label>]",
+    "Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--if-changed] [--snapshot-ref <label>]",
   );
+}
+
+export async function catalogImportFingerprint(input: {
+  snapshotPath: string;
+  snapshotRef?: string;
+  skipLogos?: boolean;
+  semanticVersion?: number;
+}): Promise<string> {
+  const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
+  if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
+    throw new Error("catalog import semantic version must be an integer between 1 and 9999");
+  }
+  const snapshotSha256 = createHash("sha256")
+    .update(await readFile(input.snapshotPath))
+    .digest("hex");
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        importerSemanticVersion: semanticVersion,
+        skipLogos: input.skipLogos === true,
+        snapshotRef: input.snapshotRef ?? null,
+        snapshotSha256,
+      }),
+    )
+    .digest("hex");
+  return `catalog-import-v${semanticVersion}@sha256:${digest}`;
+}
+
+export async function resolveIfChangedCatalogImport<T>(
+  input: {
+    snapshotPath: string;
+    snapshotRef?: string;
+    skipLogos?: boolean;
+    importedCount: number;
+    semanticVersion?: number;
+  },
+  findCompleted: (input: {
+    source: string;
+    snapshotRef: string;
+    importedCount: number;
+  }) => Promise<T | null>,
+): Promise<{ snapshotRef: string; completedBatch: T | null }> {
+  const snapshotRef = await catalogImportFingerprint(input);
+  const completedBatch = await findCompleted({
+    source: SOURCE,
+    snapshotRef,
+    importedCount: input.importedCount,
+  });
+  return { snapshotRef, completedBatch };
 }
 
 if (import.meta.main) {
@@ -863,11 +1235,42 @@ if (import.meta.main) {
     rlsStrategy: settings.rlsStrategy,
   });
   try {
+    const importDecision = args.ifChanged
+      ? await resolveIfChangedCatalogImport(
+          {
+            snapshotPath: args.snapshotPath,
+            ...(args.snapshotRef ? { snapshotRef: args.snapshotRef } : {}),
+            skipLogos: args.skipLogos,
+            importedCount: normalized.rows.length,
+          },
+          (input) => findCompletedImportBatch(dbClient.db, input),
+        )
+      : {
+          snapshotRef: args.snapshotRef ?? basename(args.snapshotPath),
+          completedBatch: null,
+        };
+    const { snapshotRef, completedBatch } = importDecision;
+    if (completedBatch) {
+      console.log(
+        JSON.stringify(
+          {
+            unchanged: true,
+            batchId: completedBatch.id,
+            imported: completedBatch.importedCount,
+            snapshotRef,
+          },
+          null,
+          2,
+        ),
+      );
+      await dbClient.close();
+      process.exit(0);
+    }
     const storage = args.skipLogos ? null : createObjectStorage(settings);
     const result = await importIntegrationsCatalog({
       db: dbClient.db,
       snapshot,
-      snapshotRef: args.snapshotRef ?? basename(args.snapshotPath),
+      snapshotRef,
       storage,
       storeLogos: !args.skipLogos,
     });

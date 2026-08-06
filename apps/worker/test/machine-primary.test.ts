@@ -2,11 +2,11 @@
 //
 // Covers the three load-bearing seams a real hosted turn would otherwise be the
 // only witness to:
-//   (B)  sandboxEnvironmentForRun skips the (inert) GitHub App token mint when the
-//        turn's EFFECTIVE backend is a connected machine, and STILL mints for cloud.
+//   (B)  sandboxEnvironmentForRun skips platform Git and Toolspace credential
+//        delivery when the turn's EFFECTIVE backend is a connected machine.
 //   (D1) establishSelfhostedTurnSession binds the live machine session DIRECTLY —
 //        no Modal box, env threaded into the manifest (env-parity), agent id + cwd
-//        bound — so a machine-primary turn never establishes/leases a phantom box.
+//        bound — so a machine-primary turn never establishes or leases a phantom box.
 //   (warm-rate) the warm meter, keyed off the EFFECTIVE backend, accrues ZERO
 //        cost for selfhosted even when a cloud rate is configured (the money bug).
 
@@ -19,7 +19,7 @@ import { establishSelfhostedTurnSession } from "../src/sandbox-routing";
 
 const repoResource = (): ResourceRef => ({
   kind: "repository",
-  uri: "github.com/acme/repo",
+  uri: "https://github.com/acme/repo",
   ref: "main",
   githubInstallationId: 123,
   githubRepositoryId: 456,
@@ -33,7 +33,7 @@ const cloudSettings = () =>
   });
 
 describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn", () => {
-  test("a repo-attached turn SKIPS the GitHub token mint when skipGitHubToken (machine-effective)", async () => {
+  test("a repo-attached machine turn skips platform Git and Toolspace credentials", async () => {
     const settings = cloudSettings();
     // A repo resource normally triggers the run-scoped GitHub App token mint. With
     // skipGitHubToken (the effective backend is a connected machine) the mint is
@@ -44,13 +44,16 @@ describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn
       settings,
       [repoResource()],
       {},
-      { skipGitHubToken: true },
+      { skipGitHubToken: true, skipToolspace: true },
     );
     expect(gitToken).toBeUndefined();
     expect(env.GH_TOKEN).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.GIT_ASKPASS).toBeUndefined();
     expect(env.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(env.OPENGENI_TOOLSPACE_URL).toBeUndefined();
+    expect(env.OPENGENI_TOOLSPACE_TOKEN_FILE).toBeUndefined();
+    expect(env.OPENGENI_OGTOOL_PACKAGE_SPEC).toBeUndefined();
     // The stable base (git identity + HOME) is intact — the SAME object feeds the
     // box manifest + the agent, so env-parity holds.
     expect(env.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");

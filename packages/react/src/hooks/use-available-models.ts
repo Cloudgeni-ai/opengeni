@@ -1,5 +1,6 @@
-import type { ClientModel } from "@opengeni/sdk";
+import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback } from "react";
+import { projectPickerRows, sortPickerRows, type PickerModelRow } from "../model-policy";
 import { useOpenGeniClient, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
@@ -10,9 +11,22 @@ export type UseAvailableModelsOptions = Pick<ClientOverride, "client"> & {
 };
 
 export type UseAvailableModelsResult = {
-  /** The provider-grouped models the host exposes (empty until loaded). */
-  models: ClientModel[];
-  /** The deployment's default model id, null until loaded. */
+  models: import("@opengeni/sdk").ClientModel[];
+  defaultModel: string | null;
+  loading: boolean;
+  error: Error | null;
+  refresh: () => Promise<void>;
+};
+
+export type UseWorkspaceModelCatalogOptions = Pick<ClientOverride, "client"> & {
+  workspaceId: string | null;
+  pollIntervalMs?: number | undefined;
+  enabled?: boolean | undefined;
+};
+
+export type UseWorkspaceModelCatalogResult = {
+  models: WorkspaceModelCatalogModel[];
+  rows: PickerModelRow[];
   defaultModel: string | null;
   loading: boolean;
   error: Error | null;
@@ -36,6 +50,39 @@ export function useAvailableModels(
   });
   return {
     models: state.data?.models ?? [],
+    defaultModel: state.data?.defaultModel ?? null,
+    loading: state.loading,
+    error: state.error,
+    refresh: state.refresh,
+  };
+}
+
+/** Workspace-scoped catalog with selectability and billing-class picker rows. */
+export function useWorkspaceModelCatalog(
+  options: UseWorkspaceModelCatalogOptions,
+): UseWorkspaceModelCatalogResult {
+  const client = useOpenGeniClient(options);
+  const load = useCallback(async () => {
+    if (!options.workspaceId) {
+      return { models: [], defaultModel: null };
+    }
+    const [catalog, config] = await Promise.all([
+      client.getWorkspaceModelCatalog(options.workspaceId),
+      client.getClientConfig(),
+    ]);
+    return {
+      models: catalog.models,
+      defaultModel: config.defaultModel,
+    };
+  }, [client, options.workspaceId]);
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled !== false && Boolean(options.workspaceId),
+  });
+  const rows = sortPickerRows(projectPickerRows(state.data?.models ?? []));
+  return {
+    models: state.data?.models ?? [],
+    rows,
     defaultModel: state.data?.defaultModel ?? null,
     loading: state.loading,
     error: state.error,

@@ -107,7 +107,7 @@ short-lived `ogd_` token during environment preparation:
 {
   accountId,
   workspaceId,
-  subjectId: `sandbox:${runId}`,
+  subjectId: `sandbox:${sessionId}`,
   subjectLabel: "sandbox toolspace",
   permissions: ["toolspace:call"],
   sessionId,
@@ -116,10 +116,15 @@ short-lived `ogd_` token during environment preparation:
 ```
 
 Each bearer has a one-hour TTL. After the initial seed reaches a real sandbox
-session, the worker proactively re-signs the same account/workspace/session/run
+session, the worker proactively re-signs the same account/workspace/session
 authority and atomically replaces the file on a bounded cadence. Renewal is
 single-flight, retries transient write failures, and is stopped and drained at
-attempt finalization so a settled attempt cannot land a late replacement.
+attempt finalization so a settled attempt cannot land a late replacement. The
+bearer itself remains session-bound: each Toolspace request resolves the
+currently active turn, then uses that turn's exact attempt fence for budgeting,
+credential resolution, events, and late-output rejection. A later turn can use
+the same still-valid bearer; a session with no active turn cannot dial or call
+an upstream.
 Delivery mirrors `OPENGENI_GIT_TOKEN_FILE`: the token value is
 written into a sandbox file and the environment exposes only one stable legacy
 `OPENGENI_TOOLSPACE_TOKEN_FILE` pointer plus `OPENGENI_TOOLSPACE_URL`. That
@@ -128,37 +133,19 @@ per-session file beside it and overrides the pointer on every agent or
 Channel-A command. The token value must not appear in the sandbox manifest, env
 delta, event log, run state, or logs.
 
-### Every backend, including selfhosted
+### Managed sandboxes only
 
-The token is minted and delivered on **every** compute backend, including a
-connected machine (selfhosted). This is a deliberate departure from platform git
-provider tokens, which are skipped on selfhosted because they are inert there — the
-machine uses its own git credentials. That reasoning does not transfer to the
-toolspace token: it is the machine's *only* path to programmatic tool calling,
-and refusing to deliver it would silently downgrade selfhosted agents.
+Automatic Toolspace delivery is limited to managed sandboxes. A Connected
+Machine receives no Toolspace mint, seed, renewal, prompt, token-file pointer,
+URL, package hint, or command environment. OpenGeni also runs no platform setup
+hook against the user's machine before the model starts. This keeps machine
+availability outside turn admission: an offline machine operation becomes
+typed tool output and the model loop can continue.
 
-On a selfhosted turn the token seed is written to the derived per-session file
-selected by `OPENGENI_TOOLSPACE_TOKEN_FILE` over the machine's existing exec
-channel (the same NATS-backed `exec` the agent runs commands through), reusing
-the identical off-manifest seed hook the docker path uses — the value never
-rides the manifest. The other platform setup hooks
-(repository clone, `az login`) and file materialization still do **not** run
-against the user's real computer; the toolspace token seed is the single piece of
-per-turn material that crosses to it.
-
-There is one accepted delta from the docker path. On docker the manifest
-environment is exported into the box shell, so `ogtool` reads
-`OPENGENI_TOOLSPACE_URL` / `OPENGENI_TOOLSPACE_TOKEN_FILE` straight from `env`. A
-selfhosted machine owns its own shell and does **not** consume the manifest env
-wholesale (pushing `HOME`, `GIT_*`, etc. onto a real computer would clobber it),
-so selfhosted `exec` exports a strict two-key allowlist — exactly
-`OPENGENI_TOOLSPACE_URL` and `OPENGENI_TOOLSPACE_TOKEN_FILE`, both non-secret
-pointers — into every command's environment. That is enough for `ogtool` (and the
-seed hook) to find the tool surface and the token file; the token VALUE is never
-in that env. `OPENGENI_TOOLSPACE_URL` resolves to the public, sandbox-routable API
-base (`OPENGENI_MCP_URL`) the machine enrolled against — the same URL every remote
-backend uses — never a loopback or cluster-internal address the machine could not
-reach.
+An operator may manually provision an ordinary API credential on their own
+machine. That credential is machine-owned and intentionally outside this design;
+OpenGeni does not create, rotate, store, or deliver it through the Connected
+Machine lifecycle.
 
 When the flag is off, behavior is byte-identical to the current tree: no
 permission is minted, no file path appears, no URL appears, and no toolspace
@@ -174,7 +161,7 @@ as stable, non-secret compatibility metadata only.
 Initial seed and renewal instead write
 `<legacy-directory>/toolspace-tokens/<sha256(sessionId)>`. They atomically
 replace only that session's file and delete a stale bearer at the legacy path.
-Every SDK-owned, externally owned, lazy, routed selfhosted, and API-direct
+Every SDK-owned, externally owned, lazy, and API-direct managed-sandbox
 Channel-A command exports its session-specific file before executing. Concurrent
 sibling turns therefore cannot accidentally overwrite or select one another's
 pointer, and a warm manifest never changes.
@@ -235,14 +222,9 @@ cannot re-enter `/mcp` as a toolspace principal.
 - No credential exposure to the sandbox: third-party MCP headers are decrypted
   or broker-resolved only inside the API proxy path and are never returned to the
   sandbox.
-- No over-authority on a user machine: **no credential crosses to a connected
-  (selfhosted) machine that grants more than the machine owner's own authority.**
-  The toolspace token satisfies this — it carries `toolspace:call` only, is bound
-  to its own session, expires at turn TTL, is per-turn budgeted, and cannot invoke
-  approval-required tools — so it is safe to deliver to the machine, whereas the
-  platform git provider token (which could grant repo access beyond the owner)
-  is not, and stays off it. This invariant, not the git-token precedent, is what
-  decides which per-turn credentials may reach a selfhosted box.
+- No platform credential on a user machine: OpenGeni does not mint, seed, renew,
+  advertise, or export Toolspace credentials on Connected Machines. Operator-
+  provisioned credentials remain outside the platform lifecycle.
 - SSRF posture: proxy targets come only from validated persisted rows and
   enabled pack/capability refs, not from sandbox-supplied URLs.
 - Human approval is not bypassed: approval-required tools are excluded or return
@@ -288,12 +270,12 @@ directive uses `OPENGENI_OGTOOL_PACKAGE_SPEC` only when the deployment supplied
 an exact stable version and npm is available. It never guesses a version or
 installs `latest`; direct MCP JSON-RPC remains the dependency-free fallback.
 
-The directive is appended **only when a toolspace token was minted for this turn**
-— the exact condition that gates the sandbox mint (feature enabled), surfaced to
-the runtime as the per-turn toolspace token seed. The mint happens on every
-backend including selfhosted, so the directive appears on a connected machine too;
-a turn with no minted token has no Toolspace URL/token, so it never advertises a
-capability that is not there. In the instruction composition order
+The directive is appended **only when a toolspace token was minted for this
+managed-sandbox turn** — the exact condition that gates the sandbox mint
+(feature enabled), surfaced to the runtime as the per-turn toolspace token seed.
+A Connected Machine has no mint and receives no directive. A turn with no minted
+token has no Toolspace URL/token, so it never advertises a capability that is not
+there. In the instruction composition order
 the directive sits **after** the workspace persona + non-bypassable CORE and
 **before** the per-session instructions, so host- and session-specific guidance
 still refines it.

@@ -8,10 +8,13 @@ import {
   type AccessContext,
   type GetWorkspaceCaptureResponse,
   type Session,
+  type SessionEvent,
   type WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
 import { assertScreenshotPainted } from "@opengeni/testing";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
+
+import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
 
 const WORKBENCH_CANARY_PERMISSIONS = [
   "workspace:read",
@@ -31,6 +34,25 @@ const OBSERVABILITY_PROBE_PERMISSIONS = [
 ] as const;
 const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
+const CAPTURE_FILE_PATH = /\/sessions\/[^/]+\/workspace\/capture\/file$/;
+const OPTIONAL_ANALYTICS_CHUNK_PATH = /^\/assets\/analytics-consent-[A-Za-z0-9_-]+\.js$/;
+const MANAGED_SESSION_PATH = /^\/v1\/auth\/get-session$/;
+const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
+const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
+const FILE_TREE_READY_SELECTOR =
+  '[role="tree"][aria-activedescendant]:not([aria-activedescendant=""])';
+const FILE_TREE_MAX_NAVIGATION_STEPS = 4_096;
+const FILE_TREE_MAX_DIAGNOSTIC_ROWS = 8;
+const FILE_TREE_DIAGNOSTIC_FIELD_LENGTH = 80;
+const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
+const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
+  "performance.capture-usable-workbench",
+  "p95",
+);
+const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
+  "performance.control-cancellation",
+  "worst",
+);
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -47,6 +69,43 @@ export type LiveAcceptanceArgs = {
   repetitions: number;
   sessionTimeoutMs: number;
   coldTimeoutMs: number;
+  captureApiRegionProbeCommand: string;
+  captureApiRegion: string;
+  captureApiImage: string;
+};
+
+export type CaptureApiRegionalProbeRequest = {
+  schemaVersion: "opengeni/workbench-capture-api-regional-probe-request/v1";
+  apiUrl: string;
+  environment: "staging" | "production";
+  sourceSha: string;
+  runId: string;
+  workspaceId: string;
+  sessionId: string;
+  captureRevision: number;
+  captureTurnId: string;
+  repetitions: number;
+  region: string;
+  apiImage: string;
+  cookieHeader: string;
+};
+
+export type CaptureApiRegionalProbeResult = {
+  schemaVersion: "opengeni/workbench-capture-api-regional-probe/v1";
+  apiOrigin: string;
+  environment: "staging" | "production";
+  sourceSha: string;
+  runId: string;
+  workspaceId: string;
+  sessionId: string;
+  captureRevision: number;
+  captureTurnId: string;
+  sampleCount: number;
+  region: string;
+  apiImage: string;
+  decodedBytes: number;
+  contentEncoding: "gzip";
+  samplesMs: number[];
 };
 
 type Check = {
@@ -87,6 +146,10 @@ type LiveReceipt = {
   sessionId: string;
   captureRevision: number;
   captureStats: WorkspaceCaptureManifest["stats"];
+  captureApiRegionProbe: Omit<
+    CaptureApiRegionalProbeResult,
+    "workspaceId" | "sessionId" | "captureRevision" | "samplesMs"
+  >;
   checks: Check[];
   measurements: {
     captureApiResponse: Measurement;
@@ -124,6 +187,9 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
     "--repetitions",
     "--session-timeout-ms",
     "--cold-timeout-ms",
+    "--capture-api-region-probe-command",
+    "--capture-api-region",
+    "--capture-api-image",
   ]);
   for (const flag of values.keys()) if (!allowed.has(flag)) throw new Error(`unknown flag ${flag}`);
 
@@ -142,6 +208,18 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
   const backend = values.get("--backend") ?? "modal";
   if (backend !== "modal") throw new Error("live workbench acceptance requires --backend modal");
   const repetitions = integer(values.get("--repetitions") ?? "100", "--repetitions", 100);
+  const captureApiRegionProbeCommand = required(values, "--capture-api-region-probe-command");
+  if (/\0|[\r\n]/.test(captureApiRegionProbeCommand)) {
+    throw new Error("--capture-api-region-probe-command is invalid");
+  }
+  const captureApiRegion = required(values, "--capture-api-region");
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(captureApiRegion)) {
+    throw new Error("--capture-api-region must be a lowercase deployment region");
+  }
+  const captureApiImage = required(values, "--capture-api-image");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$/.test(captureApiImage)) {
+    throw new Error("--capture-api-image must be a digest-pinned image reference");
+  }
   return {
     apiUrl,
     webUrl,
@@ -163,6 +241,9 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
       "--cold-timeout-ms",
       60_000,
     ),
+    captureApiRegionProbeCommand: resolve(captureApiRegionProbeCommand),
+    captureApiRegion,
+    captureApiImage,
   };
 }
 
@@ -208,21 +289,6 @@ export function parseCookieHeader(header: string): Array<{ name: string; value: 
     });
   if (cookies.length === 0) throw new Error("acceptance cookie header is empty");
   return cookies;
-}
-
-export function sanitizeDiagnostic(value: string): string {
-  return value
-    .replace(/https?:\/\/[^\s"')]+/gi, (url) => {
-      try {
-        const parsed = new URL(url);
-        return `${parsed.origin}${parsed.pathname}`;
-      } catch {
-        return "[url-redacted]";
-      }
-    })
-    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\b(sig|signature|token|se|sp|sv)=[^&\s]+/gi, "$1=[redacted]")
-    .slice(0, 500);
 }
 
 async function main(): Promise<void> {
@@ -275,6 +341,9 @@ async function main(): Promise<void> {
     reasoningEffort: "low",
     sandboxBackend: args.backend,
     sandbox: "new",
+    // Acceptance owns its complete execution fixture and must not inherit a
+    // mutable workspace-default rig with unrelated setup work.
+    rigId: null,
     idempotencyKey: `workbench-acceptance:${args.environment}:${args.sourceSha}:${args.runId}`,
     metadata: {
       origin: "workbench-live-acceptance",
@@ -291,6 +360,8 @@ async function main(): Promise<void> {
   if (settled.status !== "idle") {
     throw new Error(`acceptance fixture turn ended in ${settled.status}`);
   }
+  const fixtureToolOutputs = await listAllToolOutputEvents(cookieClient, workspaceId, session.id);
+  assertFixtureToolOutput(fixtureToolOutputs, marker);
   pass(checks, "functional.real-turn", "A real authenticated Modal turn settled successfully.");
 
   const captureResponse = await waitForCapture(
@@ -317,15 +388,28 @@ async function main(): Promise<void> {
   await waitForCold(cookieClient, workspaceId, session.id, args.coldTimeoutMs);
   pass(checks, "functional.real-cold-lease", "The real Modal lease reached cold before UI review.");
 
-  const captureApiSamples = await measureCaptureApi(
-    cookieClient,
-    workspaceId,
-    session.id,
-    args.repetitions,
+  const captureApiRegionProbe = await runCaptureApiRegionalProbe(
+    args.captureApiRegionProbeCommand,
+    {
+      schemaVersion: "opengeni/workbench-capture-api-regional-probe-request/v1",
+      apiUrl: args.apiUrl,
+      environment: args.environment,
+      sourceSha: args.sourceSha,
+      runId: args.runId,
+      workspaceId,
+      sessionId: session.id,
+      captureRevision: manifest.revision,
+      captureTurnId: manifest.turnId,
+      repetitions: args.repetitions,
+      region: args.captureApiRegion,
+      apiImage: args.captureApiImage,
+      cookieHeader,
+    },
   );
+  const captureApiSamples = captureApiRegionProbe.samplesMs;
   const captureApiResponse = measurement(captureApiSamples);
-  if (captureApiResponse.p95 > 200) {
-    throw new Error(`capture API p95 ${captureApiResponse.p95}ms exceeds 200ms`);
+  if (captureApiResponse.p95 > CAPTURE_API_P95_MS) {
+    throw new Error(`capture API p95 ${captureApiResponse.p95}ms exceeds ${CAPTURE_API_P95_MS}ms`);
   }
 
   const browser = await chromium.launch();
@@ -345,15 +429,15 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+      await assertChangesDefaultVisible(page);
       navigationSamples.push(performance.now() - started);
       assertNoProblems(problems, true);
       await context.close();
     }
     captureUsableWorkbench = measurement(navigationSamples);
-    if (captureUsableWorkbench.p95 > 500) {
+    if (captureUsableWorkbench.p95 > CAPTURE_USABLE_WORKBENCH_P95_MS) {
       throw new Error(
-        `capture-backed usable workbench p95 ${captureUsableWorkbench.p95}ms exceeds 500ms`,
+        `capture-backed usable workbench p95 ${captureUsableWorkbench.p95}ms exceeds ${CAPTURE_USABLE_WORKBENCH_P95_MS}ms`,
       );
     }
 
@@ -374,7 +458,7 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+      await assertChangesDefaultVisible(page);
       await assertColdReview(page, marker);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
@@ -385,8 +469,7 @@ async function main(): Promise<void> {
       await assertScreenshotPainted(page, filesPng, `${device.name} cold Files`);
       artifacts.push(await artifact(filesScreenshot, args.outputDir));
 
-      await page.getByRole("tab", { name: /Changes/ }).click();
-      await page.locator("[data-workbench-changes-layout]").waitFor();
+      await selectChangesTab(page);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
       assertNoProblems(problems, true);
@@ -442,6 +525,19 @@ async function main(): Promise<void> {
     sessionId: session.id,
     captureRevision: manifest.revision,
     captureStats: manifest.stats,
+    captureApiRegionProbe: {
+      schemaVersion: captureApiRegionProbe.schemaVersion,
+      apiOrigin: captureApiRegionProbe.apiOrigin,
+      environment: captureApiRegionProbe.environment,
+      sourceSha: captureApiRegionProbe.sourceSha,
+      runId: captureApiRegionProbe.runId,
+      captureTurnId: captureApiRegionProbe.captureTurnId,
+      sampleCount: captureApiRegionProbe.sampleCount,
+      region: captureApiRegionProbe.region,
+      apiImage: captureApiRegionProbe.apiImage,
+      decodedBytes: captureApiRegionProbe.decodedBytes,
+      contentEncoding: captureApiRegionProbe.contentEncoding,
+    },
     checks,
     measurements: { captureApiResponse, captureUsableWorkbench, controlCancellation },
     artifacts,
@@ -454,6 +550,19 @@ async function main(): Promise<void> {
   process.stdout.write(
     `${JSON.stringify({ status: "passed", receipt: receiptPath, sha256: receiptArtifact.sha256 })}\n`,
   );
+}
+
+function maximumMillisecondBudget(requirementId: string, statistic: "p95" | "worst"): number {
+  const budget = NUMERIC_PERFORMANCE_BUDGETS[requirementId];
+  if (
+    !budget ||
+    budget.direction !== "maximum" ||
+    budget.unit !== "ms" ||
+    budget.statistic !== statistic
+  ) {
+    throw new Error(`missing maximum millisecond budget for ${requirementId}`);
+  }
+  return budget.limit;
 }
 
 export function fixturePrompt(marker: string): string {
@@ -614,6 +723,39 @@ async function waitForCapture(
     await Bun.sleep(1_000);
   }
   throw new Error("capture did not become available before timeout");
+}
+
+async function listAllToolOutputEvents(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionEvent[]> {
+  const collected: SessionEvent[] = [];
+  let cursor = 0;
+  while (true) {
+    const page = await client.listEvents(workspaceId, sessionId, {
+      after: cursor,
+      limit: 500,
+      mode: "forensic",
+      payloadMode: "full",
+      includeTypes: ["agent.toolCall.output"],
+    });
+    collected.push(...page);
+    const lastSequence = page.at(-1)?.sequence;
+    if (lastSequence !== undefined) cursor = lastSequence;
+    if (page.length < 500) return collected;
+  }
+}
+
+export function assertFixtureToolOutput(events: readonly SessionEvent[], marker: string): void {
+  const observed = events.some(
+    (event) =>
+      event.type === "agent.toolCall.output" &&
+      JSON.stringify(event.payload ?? {}).includes(marker),
+  );
+  if (!observed) {
+    throw new Error("acceptance fixture command did not emit its exact marker");
+  }
 }
 
 async function loadManifest(
@@ -838,19 +980,45 @@ async function verifySignedFileExpiry(
     throw new Error("refreshed capture bytes failed integrity check");
 }
 
+export async function waitForSandboxLiveness(
+  client: Pick<OpenGeniClient, "getStreamCapabilities">,
+  workspaceId: string,
+  sessionId: string,
+  accepted: ReadonlySet<string>,
+  timeoutMs: number,
+  pollIntervalMs = 2_000,
+  requestTimeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastTransportError: string | undefined;
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    try {
+      const capabilities = await client.getStreamCapabilities(workspaceId, sessionId, {
+        signal: AbortSignal.timeout(Math.max(1, Math.min(requestTimeoutMs, remainingMs))),
+      });
+      lastTransportError = undefined;
+      if (accepted.has(capabilities.liveness)) return;
+    } catch (error) {
+      lastTransportError =
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    }
+    const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));
+    if (sleepMs > 0) await Bun.sleep(sleepMs);
+  }
+  throw new Error(
+    `sandbox did not reach ${[...accepted].join("/")} before timeout` +
+      (lastTransportError ? ` (last transport error: ${lastTransportError})` : ""),
+  );
+}
+
 async function waitForCold(
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
   timeoutMs: number,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const capabilities = await client.getStreamCapabilities(workspaceId, sessionId);
-    if (capabilities.liveness === "cold") return;
-    await Bun.sleep(2_000);
-  }
-  throw new Error("real sandbox did not drain to cold before timeout");
+  await waitForSandboxLiveness(client, workspaceId, sessionId, new Set(["cold"]), timeoutMs);
 }
 
 async function waitForWarm(
@@ -859,13 +1027,14 @@ async function waitForWarm(
   sessionId: string,
   timeoutMs = 90_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const capabilities = await client.getStreamCapabilities(workspaceId, sessionId);
-    if (capabilities.liveness === "warm" || capabilities.liveness === "draining") return;
-    await Bun.sleep(1_000);
-  }
-  throw new Error("explicit live intent did not warm the sandbox before timeout");
+  await waitForSandboxLiveness(
+    client,
+    workspaceId,
+    sessionId,
+    new Set(["warm", "draining"]),
+    timeoutMs,
+    1_000,
+  );
 }
 
 async function runLiveWorkspaceFlow(input: {
@@ -891,7 +1060,7 @@ async function runLiveWorkspaceFlow(input: {
       timeout: 45_000,
     });
     await openWorkspaceIfCollapsed(page);
-    await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+    await assertChangesDefaultVisible(page);
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     await selectTreeFile(page, "api", "base.txt");
     await page.getByText("On machine", { exact: true }).waitFor();
@@ -1105,7 +1274,7 @@ async function runLiveWorkspaceFlow(input: {
     pass(
       checks,
       "performance.control-cancellation",
-      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget 2000ms).`,
+      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
     );
 
     assertNoProblems(problems, false);
@@ -1248,16 +1417,18 @@ async function proveLiveSteerCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
-    "replacement turn start inside the 2s physical-cancellation budget",
+    "replacement turn start inside the physical-cancellation budget",
   );
   const controlCancellationMs = controlCancellationDurationMs(
     committedAt,
     Date.parse(replacementStarted.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
-    throw new Error(`Steer replacement took ${controlCancellationMs}ms; budget is 2000ms`);
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
+    throw new Error(
+      `Steer replacement took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+    );
   }
   const renderedStoppingState = await stoppingVisible;
   if (controlCancellationMs > 100 && !renderedStoppingState) {
@@ -1439,7 +1610,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.control.paused" &&
       isRecord(event.payload) &&
@@ -1451,7 +1622,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     pauseRequested.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.queue.changed" &&
       event.turnId === predecessorTurnId &&
@@ -1463,9 +1634,9 @@ async function proveLivePauseCancellation(input: {
     committedAt,
     Date.parse(quiesced.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
-      `Pause physical cancellation took ${controlCancellationMs}ms; budget is 2000ms`,
+      `Pause physical cancellation took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
   const renderedStoppingState = await stoppingState;
@@ -1647,20 +1818,165 @@ async function waitForCaptureTurn(
   throw new Error("replacement turn capture did not become authoritative before timeout");
 }
 
-async function measureCaptureApi(
-  client: OpenGeniClient,
-  workspaceId: string,
-  sessionId: string,
-  repetitions: number,
-): Promise<number[]> {
-  const samples: number[] = [];
-  for (let index = 0; index < repetitions; index += 1) {
-    const started = performance.now();
-    const response = await client.getWorkspaceCapture(workspaceId, sessionId);
-    samples.push(performance.now() - started);
-    if (!response.available) throw new Error(`capture disappeared during repetition ${index}`);
+export async function runCaptureApiRegionalProbe(
+  command: string,
+  request: CaptureApiRegionalProbeRequest,
+): Promise<CaptureApiRegionalProbeResult> {
+  const child = Bun.spawn([process.execPath, command], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: captureApiRegionalProbeEnvironment(process.env),
+  });
+  const timeout = setTimeout(() => child.kill(), 300_000);
+  timeout.unref();
+  child.stdin.write(JSON.stringify(request));
+  child.stdin.end();
+  let stdout: string;
+  let stderr: string;
+  let exitCode: number;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      readBoundedText(child.stdout, 256 * 1024, "capture API regional probe output"),
+      readBoundedText(child.stderr, 256 * 1024, "capture API regional probe diagnostics"),
+      child.exited,
+    ]);
+  } catch (error) {
+    child.kill();
+    await child.exited.catch(() => undefined);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return samples;
+  if (exitCode !== 0) {
+    const detail = maskKnownPublicEvidenceValues(stderr, [request.cookieHeader])
+      .trim()
+      .slice(0, 2_048);
+    throw new Error(
+      `capture API regional probe failed with exit code ${exitCode}${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    throw new Error("capture API regional probe did not return one JSON object");
+  }
+  return validateCaptureApiRegionalProbeResult(value, request);
+}
+
+/**
+ * Mask exact values already known to this public CI/release evidence sink.
+ * This intentionally does not scan arbitrary OpenGeni content for patterns.
+ */
+export function maskKnownPublicEvidenceValues(
+  value: string,
+  knownSecretValues: readonly string[],
+): string {
+  const secrets = [...new Set(knownSecretValues.filter((candidate) => candidate.length > 0))].sort(
+    (left, right) => right.length - left.length,
+  );
+  return secrets.reduce(
+    (result, knownSecretValue) => result.replaceAll(knownSecretValue, "[masked]"),
+    value,
+  );
+}
+
+export function captureApiRegionalProbeEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && !entry[0].startsWith("OPENGENI_ACCEPTANCE_"),
+    ),
+  );
+}
+
+async function readBoundedText(
+  stream: ReadableStream<Uint8Array>,
+  maximumBytes: number,
+  label: string,
+): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > maximumBytes) throw new Error(`${label} exceeded 256 KiB`);
+      text += decoder.decode(next.value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export function validateCaptureApiRegionalProbeResult(
+  value: unknown,
+  request: CaptureApiRegionalProbeRequest,
+): CaptureApiRegionalProbeResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("capture API regional probe result is not an object");
+  }
+  const result = value as Record<string, unknown>;
+  const expectedKeys = [
+    "apiImage",
+    "apiOrigin",
+    "captureRevision",
+    "captureTurnId",
+    "contentEncoding",
+    "decodedBytes",
+    "environment",
+    "region",
+    "runId",
+    "sampleCount",
+    "samplesMs",
+    "schemaVersion",
+    "sessionId",
+    "sourceSha",
+    "workspaceId",
+  ];
+  if (JSON.stringify(Object.keys(result).sort()) !== JSON.stringify(expectedKeys)) {
+    throw new Error("capture API regional probe result fields are invalid");
+  }
+  const exact: Array<[keyof CaptureApiRegionalProbeResult, unknown]> = [
+    ["schemaVersion", "opengeni/workbench-capture-api-regional-probe/v1"],
+    ["apiOrigin", new URL(request.apiUrl).origin],
+    ["environment", request.environment],
+    ["sourceSha", request.sourceSha],
+    ["runId", request.runId],
+    ["workspaceId", request.workspaceId],
+    ["sessionId", request.sessionId],
+    ["captureRevision", request.captureRevision],
+    ["captureTurnId", request.captureTurnId],
+    ["sampleCount", request.repetitions],
+    ["region", request.region],
+    ["apiImage", request.apiImage],
+    ["contentEncoding", "gzip"],
+  ];
+  for (const [key, expected] of exact) {
+    if (result[key] !== expected) throw new Error(`capture API regional probe ${key} mismatch`);
+  }
+  if (!Number.isSafeInteger(result.decodedBytes) || Number(result.decodedBytes) < 1) {
+    throw new Error("capture API regional probe decoded byte count is invalid");
+  }
+  if (!Array.isArray(result.samplesMs) || result.samplesMs.length !== request.repetitions) {
+    throw new Error("capture API regional probe sample count mismatch");
+  }
+  if (
+    result.samplesMs.some(
+      (sample) =>
+        typeof sample !== "number" || !Number.isFinite(sample) || sample <= 0 || sample > 60_000,
+    )
+  ) {
+    throw new Error("capture API regional probe samples are invalid");
+  }
+  return result as CaptureApiRegionalProbeResult;
 }
 
 async function expectApiRejection(
@@ -1672,7 +1988,7 @@ async function expectApiRejection(
     await operation();
   } catch (error) {
     if (error instanceof OpenGeniApiError && error.status === status) return;
-    throw new Error(`${label} failed unexpectedly: ${sanitizeDiagnostic(String(error))}`, {
+    throw new Error(`${label} failed unexpectedly: ${String(error)}`, {
       cause: error,
     });
   }
@@ -1710,21 +2026,35 @@ function observePage(page: Page): BrowserProblems {
   };
   page.on("console", (message) => {
     if (message.type() === "warning" || message.type() === "error") {
-      problems.console.push(sanitizeDiagnostic(message.text()));
+      problems.console.push(message.text());
     }
   });
-  page.on("pageerror", (error) => problems.page.push(sanitizeDiagnostic(String(error))));
+  page.on("pageerror", (error) => problems.page.push(String(error)));
   page.on("request", (request) => {
     const path = safePath(request.url());
     if (CHANNEL_A_PATH.test(path)) problems.channelA.push(path);
   });
-  page.on("requestfailed", (request) => problems.failedRequests.push(safePath(request.url())));
+  page.on("requestfailed", (request) => {
+    const path = safePath(request.url());
+    const errorText = request.failure()?.errorText ?? "unknown request failure";
+    if (isExpectedBrowserCancellation(path, errorText)) return;
+    problems.failedRequests.push(`${errorText} ${path}`);
+  });
   page.on("response", (response) => {
     if (response.status() >= 400) {
       problems.badResponses.push(`${response.status()} ${safePath(response.url())}`);
     }
   });
   return problems;
+}
+
+export function isExpectedBrowserCancellation(path: string, errorText: string): boolean {
+  if (errorText !== "net::ERR_ABORTED") return false;
+  return (
+    CAPTURE_FILE_PATH.test(path) ||
+    OPTIONAL_ANALYTICS_CHUNK_PATH.test(path) ||
+    MANAGED_SESSION_PATH.test(path)
+  );
 }
 
 function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolean): void {
@@ -1737,26 +2067,249 @@ function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolea
   }
 }
 
-async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
-  const open = page.getByTitle("Open workspace");
-  if ((await open.count()) > 0 && (await open.first().isVisible())) await open.first().click();
+export async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
+  const workspace = page.locator(WORKSPACE_SURFACE_SELECTOR);
+  if (await workspace.isVisible()) return;
+
+  // The standalone SDK dock owns an "Open workspace" control. The hosted app
+  // controls the same collapsed state from its session header instead, so the
+  // dock intentionally omits that duplicate button. Acceptance must exercise
+  // whichever public affordance the mounted surface exposes.
+  const open = page
+    .getByRole("button", { name: "Show session panel" })
+    .or(page.getByTitle("Open workspace"))
+    .first();
+  await open.waitFor({ state: "visible", timeout: 20_000 });
+  await open.click();
 }
 
-async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
-  const directoryItem = page.getByRole("treeitem").filter({ hasText: directory }).first();
-  const directoryButton = directoryItem.getByRole("button").first();
-  if ((await directoryButton.getAttribute("aria-expanded")) !== "true") {
-    await directoryButton.click();
+export async function assertChangesDefaultVisible(page: Page): Promise<void> {
+  const changes = page.getByRole("tab", { name: /Changes/ });
+  await changes.waitFor({ state: "visible", timeout: 20_000 });
+  await page
+    .locator('[role="tab"][aria-selected="true"]')
+    .filter({ hasText: /Changes/ })
+    .waitFor({ state: "visible", timeout: 20_000 });
+
+  await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
+    state: "visible",
+    timeout: 20_000,
+  });
+}
+
+async function selectChangesTab(page: Page): Promise<void> {
+  await page.getByRole("tab", { name: /Changes/ }).click();
+  await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
+    state: "visible",
+    timeout: 20_000,
+  });
+}
+
+type FileTreeObservation = {
+  id: string;
+  label: string;
+  level: number | null;
+  expanded: boolean | null;
+};
+
+function normalizeFileTreeLabel(value: string | null): string {
+  return (value ?? "").replace(/\s+/g, " ").trim().slice(0, FILE_TREE_DIAGNOSTIC_FIELD_LENGTH);
+}
+
+async function readActiveFileTreeItem(
+  page: Page,
+  tree: Locator,
+): Promise<{ activeId: string; item: Locator; observation: FileTreeObservation } | undefined> {
+  const activeId = await tree.getAttribute("aria-activedescendant");
+  if (!activeId) return undefined;
+
+  const item = page.locator(`[id=${JSON.stringify(activeId)}]`);
+  await item.waitFor({ state: "visible", timeout: 2_000 });
+  const rawLevel = await item.getAttribute("aria-level");
+  const level = Number(rawLevel);
+  const rawExpanded = await item.getAttribute("aria-expanded");
+  return {
+    activeId,
+    item,
+    observation: {
+      id: activeId.slice(0, FILE_TREE_DIAGNOSTIC_FIELD_LENGTH),
+      label: normalizeFileTreeLabel(await item.textContent()),
+      level: Number.isInteger(level) && level >= 1 ? level : null,
+      expanded: rawExpanded === null ? null : rawExpanded === "true",
+    },
+  };
+}
+
+function rememberFileTreeObservation(
+  observations: FileTreeObservation[],
+  observation: FileTreeObservation,
+): void {
+  const previous = observations[observations.length - 1];
+  if (
+    previous?.id === observation.id &&
+    previous.label === observation.label &&
+    previous.level === observation.level &&
+    previous.expanded === observation.expanded
+  ) {
+    return;
   }
-  await page.getByRole("treeitem").filter({ hasText: file }).first().getByRole("button").click();
+  observations.push(observation);
+  if (observations.length > FILE_TREE_MAX_DIAGNOSTIC_ROWS) observations.shift();
+}
+
+function fileTreeSelectionError(
+  directory: string,
+  file: string,
+  reason: string,
+  observations: readonly FileTreeObservation[],
+): Error {
+  return new Error(
+    `file tree could not select ${directory}/${file}: ${reason}; observations=${JSON.stringify(observations)}`,
+  );
+}
+
+export async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
+  const directoryItem = page.getByRole("treeitem").filter({ hasText: directory }).first();
+  const directoryVisible = await directoryItem.isVisible();
+  if (directoryVisible && (await directoryItem.getAttribute("aria-expanded")) !== "true") {
+    await directoryItem.getByRole("button").first().click();
+  }
+
+  // The Files tree is virtualized: an expanded directory can truthfully contain
+  // a file whose row is not mounted until keyboard navigation scrolls it into
+  // view. Prefer the direct click when the row is already visible, then exercise
+  // the tree's public composite-keyboard contract instead of assuming every
+  // logical row permanently exists in the DOM.
+  const fileItem = page.getByRole("treeitem").filter({ hasText: file }).first();
+  if (directoryVisible && (await fileItem.isVisible())) {
+    await fileItem.getByRole("button").click();
+    return;
+  }
+
+  const tree = page.getByRole("tree").first();
+  await tree.waitFor({ state: "visible", timeout: 20_000 });
+  await tree.focus();
+  await tree.press("Home");
+
+  if (!(await tree.getAttribute("aria-activedescendant"))) {
+    // A cold Files tab can mount the composite before its async capture rows
+    // hydrate. Wait on the ARIA readiness contract rather than sleeping or
+    // assuming the first virtual row already exists.
+    await page.locator(FILE_TREE_READY_SELECTOR).first().waitFor({
+      state: "visible",
+      timeout: 20_000,
+    });
+    await tree.focus();
+    await tree.press("Home");
+  }
+
+  const observations: FileTreeObservation[] = [];
+  let directoryLevel: number | undefined;
+  let directoryFailureReason = `directory traversal exceeded ${FILE_TREE_MAX_NAVIGATION_STEPS} steps`;
+  for (let index = 0; index < FILE_TREE_MAX_NAVIGATION_STEPS; index += 1) {
+    const active = await readActiveFileTreeItem(page, tree);
+    if (!active) {
+      directoryFailureReason = "the tree lost its active descendant during directory traversal";
+      break;
+    }
+    rememberFileTreeObservation(observations, active.observation);
+    if ((await active.item.getByText(directory, { exact: true }).count()) > 0) {
+      if (active.observation.level === null) {
+        throw fileTreeSelectionError(
+          directory,
+          file,
+          `directory ${directory} has no valid aria-level`,
+          observations,
+        );
+      }
+      directoryLevel = active.observation.level;
+      if (active.observation.expanded !== true) {
+        await tree.press("ArrowRight");
+      }
+      await page
+        .locator(
+          `[id=${JSON.stringify(active.activeId)}][aria-expanded="true"]:not([aria-busy="true"])`,
+        )
+        .waitFor({ state: "visible", timeout: 20_000 });
+      await tree.press("ArrowDown");
+      const childId = await tree.getAttribute("aria-activedescendant");
+      if (!childId) {
+        throw fileTreeSelectionError(
+          directory,
+          file,
+          `directory ${directory} lost the active descendant after expansion`,
+          observations,
+        );
+      }
+      if (childId === active.activeId) {
+        throw fileTreeSelectionError(
+          directory,
+          file,
+          `directory ${directory} exposed no navigable child after expansion`,
+          observations,
+        );
+      }
+      break;
+    }
+
+    await tree.press("ArrowDown");
+    const nextActiveId = await tree.getAttribute("aria-activedescendant");
+    if (!nextActiveId) {
+      directoryFailureReason = "the tree lost its active descendant during directory traversal";
+      break;
+    }
+    if (nextActiveId === active.activeId) {
+      directoryFailureReason = "navigation stalled at the tree boundary";
+      break;
+    }
+  }
+
+  if (directoryLevel === undefined) {
+    throw fileTreeSelectionError(directory, file, directoryFailureReason, observations);
+  }
+
+  let fileFailureReason = `file traversal exceeded ${FILE_TREE_MAX_NAVIGATION_STEPS} steps`;
+  for (let index = 0; index < FILE_TREE_MAX_NAVIGATION_STEPS; index += 1) {
+    const active = await readActiveFileTreeItem(page, tree);
+    if (!active) {
+      fileFailureReason = "the tree lost its active descendant during file traversal";
+      break;
+    }
+    rememberFileTreeObservation(observations, active.observation);
+    if (active.observation.level === null) {
+      throw fileTreeSelectionError(
+        directory,
+        file,
+        `tree item ${active.observation.id} has no valid aria-level`,
+        observations,
+      );
+    }
+    if (active.observation.level <= directoryLevel) {
+      fileFailureReason = `navigation left the ${directory} subtree`;
+      break;
+    }
+    if ((await active.item.getByText(file, { exact: true }).count()) > 0) {
+      await tree.press("Enter");
+      return;
+    }
+
+    await tree.press("ArrowDown");
+    const nextActiveId = await tree.getAttribute("aria-activedescendant");
+    if (!nextActiveId) {
+      fileFailureReason = "the tree lost its active descendant during file traversal";
+      break;
+    }
+    if (nextActiveId === active.activeId) {
+      fileFailureReason = `navigation stalled inside the ${directory} subtree`;
+      break;
+    }
+  }
+  throw fileTreeSelectionError(directory, file, fileFailureReason, observations);
 }
 
 async function assertColdReview(page: Page, marker: string): Promise<void> {
-  const changes = page.getByRole("tab", { name: /Changes/ });
-  if ((await changes.getAttribute("aria-selected")) !== "true") await changes.click();
-  await page.locator("[data-workbench-changes-layout]").waitFor();
-  await page.getByText("api", { exact: true }).first().waitFor();
-  await page.getByText("web", { exact: true }).first().waitFor();
+  await assertChangesDefaultVisible(page);
+  await assertRepositoryChangesVisible(page, ["api", "web"]);
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
   await selectTreeFile(page, "api", "server.ts");
@@ -1767,6 +2320,41 @@ async function assertColdReview(page: Page, marker: string): Promise<void> {
   await page.getByRole("button", { name: "Open live file" }).waitFor();
 }
 
+export async function assertRepositoryChangesVisible(
+  page: Page,
+  repositoryRoots: readonly string[],
+): Promise<void> {
+  const layout = page.locator(CHANGES_LAYOUT_SELECTOR);
+  const mode = await layout.getAttribute("data-workbench-changes-layout");
+  if (mode === "rail") {
+    for (const root of repositoryRoots) {
+      await page.getByText(root, { exact: true }).first().waitFor();
+    }
+    return;
+  }
+  if (mode === "compact") {
+    const picker = page.locator("[data-compact-file-picker]");
+    await picker.waitFor({ state: "visible", timeout: 20_000 });
+    assertChangedFileLabelsContainRepositoryRoots(
+      await picker.locator("option").allTextContents(),
+      repositoryRoots,
+    );
+    return;
+  }
+  throw new Error(`unsupported workbench changes layout: ${mode ?? "missing"}`);
+}
+
+export function assertChangedFileLabelsContainRepositoryRoots(
+  labels: readonly string[],
+  repositoryRoots: readonly string[],
+): void {
+  for (const root of repositoryRoots) {
+    if (!labels.some((label) => label.includes(`${root}/`))) {
+      throw new Error(`compact workbench changes omitted repository ${root}`);
+    }
+  }
+}
+
 async function assertAccessibility(page: Page): Promise<void> {
   // Bun currently resolves Axe's Playwright peer to a second declaration copy.
   // The runtime Page is the same protocol object; erase only that duplicate-type
@@ -1774,6 +2362,14 @@ async function assertAccessibility(page: Page): Promise<void> {
   const report = await new AxeBuilder({ page: page as never })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
+  const manuallyAuditedContrastTargets = new Set(
+    await markIncompleteContrastTargetsForManualAudit(
+      page,
+      report.incomplete
+        .filter((rule) => rule.id === "color-contrast")
+        .flatMap((rule) => rule.nodes.map((node) => node.target)),
+    ),
+  );
   const manual = await manualAccessibilityAudit(page);
   if (report.violations.length > 0) {
     throw new Error(
@@ -1787,6 +2383,7 @@ async function assertAccessibility(page: Page): Promise<void> {
         if (rule.id === "aria-valid-attr-value") return false;
         if (rule.id === "color-contrast") {
           return (
+            !manuallyAuditedContrastTargets.has(target) &&
             !target.includes("diffs-container") &&
             !target.includes("data-line-number-content") &&
             !target.includes("data-contrast-audited") &&
@@ -1816,6 +2413,49 @@ async function assertAccessibility(page: Page): Promise<void> {
   if (manual.minimumContrast !== null && manual.minimumContrast < 4.5) {
     throw new Error(`manual text contrast ${manual.minimumContrast} is below WCAG AA 4.5:1`);
   }
+}
+
+export function axeManualContrastSelector(target: unknown): string | null {
+  if (!Array.isArray(target) || target.length !== 1 || typeof target[0] !== "string") return null;
+  const selector = target[0].trim();
+  return selector.length > 0 ? selector : null;
+}
+
+async function markIncompleteContrastTargetsForManualAudit(
+  page: Page,
+  targets: readonly unknown[],
+): Promise<string[]> {
+  const candidates = targets.flatMap((target) => {
+    const selector = axeManualContrastSelector(target);
+    return selector ? [{ selector, serializedTarget: JSON.stringify(target) }] : [];
+  });
+  return page.evaluate((browserCandidates) => {
+    const audited: string[] = [];
+    for (const { selector, serializedTarget } of browserCandidates) {
+      try {
+        const visibleMatches = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(
+          (element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          },
+        );
+        if (visibleMatches.length === 0) continue;
+        for (const element of visibleMatches) {
+          element.setAttribute("data-contrast-audited", "");
+        }
+        audited.push(serializedTarget);
+      } catch {
+        // Invalid or non-DOM Axe target paths remain unresolved and fail below.
+      }
+    }
+    return audited;
+  }, candidates);
 }
 
 async function assertTouchTargets(page: Page, mobile: boolean): Promise<void> {

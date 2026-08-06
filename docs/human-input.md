@@ -59,7 +59,8 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
   workflow/database clock skew re-arms with an interruptible floor instead of
   spinning the workflow and database;
 
-`session_events` remains the redacted audit/live projection. The request table
+`session_events` remains the exact audit/live projection for accepted payloads.
+The request table
 is the authoritative actionable read model; event delivery merely tells a
 client to reconcile it. Neither store is model conversation history.
 
@@ -80,8 +81,6 @@ type RequestHumanInputToolInput = {
     required: boolean;
     allowOther: boolean;
     validation?: {
-      minLength?: number | null;
-      maxLength?: number | null;
       minSelections?: number | null;
       maxSelections?: number | null;
     } | null;
@@ -91,11 +90,13 @@ type RequestHumanInputToolInput = {
 };
 ```
 
-The API validates the response again against the persisted questions. It
-rejects unknown or duplicate question/option ids, missing required answers,
-invalid `Other` use, the wrong cardinality, and length/selection-bound
-violations. User-controlled regular expressions are intentionally not part of
-the contract.
+Text answers have no agent-chosen character min/max (agents invent arbitrary
+`≥N chars` rules). Selection min/max remains. Answer strings stay
+platform-capped (~8192). The API validates the response again against the
+persisted questions: unknown or duplicate question/option ids, missing required
+answers, invalid `Other` use, and selection-bound violations. User-controlled
+regular expressions are intentionally not part of the contract. Legacy
+persisted `minLength`/`maxLength` on question JSON is ignored.
 
 ## API and permissions
 
@@ -128,20 +129,30 @@ The SDK exposes `listHumanInputRequests`, `getHumanInputRequest`, and
 
 ## React and embedded hosts
 
-`@opengeni/react` exposes two layers:
+`@opengeni/react` exposes three layers:
 
 - `useHumanInputRequests(sessionId)` is the headless lifecycle primitive. It
   reads the authoritative pending set, reconciles after relevant session
   events, can share a host's existing event feed, and guards duplicate submits.
-- `HumanInputForm` is the optional accessible default renderer. It supports all
-  question kinds, `Other`, validation, Skip, deadline presentation, and host
-  overrides for title, description, labels, and styling.
+- `HumanInputForm` is the accessible default renderer for **one** request. It
+  matches the waiting-tone decision surface used by approvals: question-first
+  title, compact options (not card-per-option), sticky header/footer inside a
+  bounded scroll region, relative deadlines, Skip without a contradictory
+  required asterisk on the whole-request skip path, and host overrides for
+  title, description, labels, and styling.
+- `HumanInputSurface` is the session-host shell: when several requests are
+  pending in parallel, it presents them **one at a time** (oldest first) with
+  an `N of M` progress label. Continue/Skip settles the active request; the
+  next remaining set advances when the authoritative pending list updates. The
+  follow-up composer stays fully available — structured input is not a modal
+  that owns the page.
 
-The stock OpenGeni session route mounts both. An embedded product may mount the
-same component, compose its own renderer over the hook, or use the SDK through
-its backend proxy. It should not maintain an independent request state machine:
-access control stays at the host/OpenGeni API boundary, while the OpenGeni row,
-turn checkpoint, workflow timer, and response event remain the durable truth.
+The stock OpenGeni session route mounts the hook plus `HumanInputSurface`. An
+embedded product may mount the surface, the single form, compose its own
+renderer over the hook, or use the SDK through its backend proxy. It should not
+maintain an independent request state machine: access control stays at the
+host/OpenGeni API boundary, while the OpenGeni row, turn checkpoint, workflow
+timer, and response event remain the durable truth.
 
 ## Acceptance boundary
 

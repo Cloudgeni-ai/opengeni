@@ -52,10 +52,35 @@ export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
 // 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models, while the
 // official Codex 0.144.0+ releases return all three exact slugs above. Keep
 // this pinned to the latest stable Codex release we have verified end-to-end.
-export const CODEX_CLIENT_VERSION = "0.144.6";
+export const CODEX_CLIENT_VERSION = "0.145.0";
+
+// Native ChatGPT/Codex subscription WebRTC call creation. Verified against
+// openai/codex 0.145.0 commit bd2de422aa287b97b06ca6425a10935bcf1b3731.
+export const CODEX_REALTIME_MODEL = "gpt-live-1-boulder-alpha";
+export const CODEX_REALTIME_VERSION = "v3";
+export const CODEX_REALTIME_DEFAULT_VOICE = "cove";
+export const CODEX_REALTIME_CALL_TIMEOUT_MS = 15_000;
 
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)
 export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when exp is unparseable
+
+// Codex Responses transport deadlines. The OpenAI SDK's own timeout only covers
+// the wait for response headers and erases the underlying timeout class into the
+// bare `Request timed out.` error. Keep the provider-specific budgets here so
+// the transport can enforce and durably report them without enabling the SDK's
+// blind request replay.
+export const CODEX_RESPONSE_HEADERS_TIMEOUT_MS = 4 * 60_000;
+export const CODEX_RESPONSE_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+export const CODEX_RESPONSE_WHOLE_TIMEOUT_MS = 30 * 60_000;
+// Kept as a compatibility-shaped policy field, but automatic replay is disabled
+// until a provider-specific operation receipt can prove non-acceptance or resume
+// the same operation identity. An absent response does not prove that the
+// provider never accepted the request.
+export const CODEX_RESPONSE_NO_BYTE_RETRIES = 0;
+export const CODEX_RESPONSE_RETRY_BACKOFF_MS = 1_000;
+// Must exceed the transport-owned whole-response deadline. This SDK guard is a
+// last-resort envelope; the inner transport emits the typed/durable failure.
+export const CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS = 35 * 60_000;
 
 // ── Apps / connectors MCP (spec §1.10, §E) ───────────────────────────────────
 // One server-side MCP exposes ALL the user's ChatGPT/Codex connectors

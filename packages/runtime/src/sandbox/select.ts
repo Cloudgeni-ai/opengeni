@@ -24,6 +24,11 @@ export interface NegotiationContext {
   liveness: "cold" | "warming" | "warm" | "draining";
   /** The lease epoch echoed on viewer heartbeats (the split-brain fence). */
   leaseEpoch: number;
+  /** Numeric/boolean archive completeness truth. Non-persistable targets use
+   * null/null/false; archive locations and provider details are never exposed. */
+  workspaceGeneration?: number | null;
+  archiveGeneration?: number | null;
+  archiveComplete?: boolean;
   /** The deployment desktop toggle (settings.sandboxDesktopEnabled). */
   desktopEnabled: boolean;
   /**
@@ -114,6 +119,35 @@ export function selectBackend(backend: SandboxBackend): CapabilityDescriptor {
     throw new Error(`Unknown sandbox backend "${backend}"`);
   }
   return descriptor;
+}
+
+/**
+ * Return the Agents SDK wire identifier for a product sandbox backend.
+ *
+ * Durable envelopes use the SDK identifier, which differs from the product
+ * registry key for the local provider (`unix_local` versus `local`). Keep that
+ * translation here so persistence, routing, and provider construction cannot
+ * drift into near-identical private mappings.
+ */
+export function sdkBackendIdForSandboxBackend(backend: SandboxBackend): string {
+  return selectBackend(backend).backendId;
+}
+
+/**
+ * Resolve either a product registry key or an Agents SDK wire identifier to the
+ * canonical product backend. Unknown identifiers stay unknown instead of being
+ * coerced to the deployment default.
+ */
+export function sandboxBackendForSdkBackendId(backendId: string): SandboxBackend | null {
+  if (Object.hasOwn(CAPABILITY_DESCRIPTORS, backendId)) {
+    return backendId as SandboxBackend;
+  }
+  for (const backend of Object.keys(CAPABILITY_DESCRIPTORS) as SandboxBackend[]) {
+    if (CAPABILITY_DESCRIPTORS[backend].backendId === backendId) {
+      return backend;
+    }
+  }
+  return null;
 }
 
 /** True iff the descriptor lists the requested OS as supported. */
@@ -411,6 +445,9 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     os: ctx.os,
     liveness: ctx.liveness,
     leaseEpoch: ctx.leaseEpoch,
+    workspaceGeneration: ctx.workspaceGeneration ?? null,
+    archiveGeneration: ctx.archiveGeneration ?? null,
+    archiveComplete: ctx.archiveComplete ?? false,
     viewerHeartbeatIntervalMs: 30_000,
     FileSystem: fileSystem,
     Terminal: terminal,

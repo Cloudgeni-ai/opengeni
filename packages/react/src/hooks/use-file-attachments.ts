@@ -1,8 +1,11 @@
 import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
-import { useCallback, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useEmbeddedFileAttachments,
+  type EmbeddedFileAttachmentClientOverride,
+} from "../session-context";
 
-export type UseFileAttachmentsOptions = ClientOverride & {
+export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
   /**
    * Only files matching this predicate are accepted by {@link
    * UseFileAttachmentsResult.addFromPaste} (the clipboard path). Defaults to
@@ -33,12 +36,20 @@ export type UseFileAttachmentsResult = {
    * straight into `useComposer`'s `sendExtras.resources`.
    */
   readyResources: FileResourceRef[];
-  /** True while any attachment is still uploading (drives the send-gate). */
+  /** True while any attachment is still uploading (drives progress UI). */
   uploading: boolean;
+  /**
+   * True while any attachment still needs an explicit outcome: wait for an
+   * upload, retry a failure, or remove it. This is the loss-prevention send
+   * gate; failed cards must never be silently omitted from a message.
+   */
+  hasUnresolved: boolean;
   /** Explicit picker / drop path — uploads every file, no filter. */
   addFiles: (files: Iterable<File>) => void;
   /** Clipboard path — applies `pasteFilter` (default `image/*`) then uploads. */
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
+  /** Restore already-ready server assets without recreating browser-local bytes. */
+  restoreReadyFiles: (files: Iterable<FileAsset>) => void;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -46,7 +57,13 @@ export type UseFileAttachmentsResult = {
   retry: (id: string) => void;
   /** Remove one attachment; revokes its object-URL. */
   remove: (id: string) => void;
-  /** Remove all; revokes every object-URL. Call from `useComposer`'s `onSent`. */
+  /**
+   * Remove only finalized files whose durable ids were accepted by a send.
+   * Attachments added while that request was in flight remain queued for the
+   * next message.
+   */
+  removeReadyFiles: (fileIds: Iterable<string>) => void;
+  /** Remove all attachments and revoke every object-URL. */
   clear: () => void;
 };
 
@@ -64,18 +81,52 @@ const isImage = (file: File): boolean => file.type.startsWith("image/");
 export function useFileAttachments(
   options: UseFileAttachmentsOptions = {},
 ): UseFileAttachmentsResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const attachmentsRef = useRef<FileAttachment[]>([]);
+  attachmentsRef.current = attachments;
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
+  // Upload promises are not cancellable at this layer. Fence their settlements
+  // when the hook changes client/workspace or unmounts so an old tenant/session
+  // cannot mutate the next attachment queue (or an already-unmounted component).
+  const scopeGeneration = useRef(0);
+  const previousScope = useRef({ client, workspaceId });
+
+  useEffect(() => {
+    const previous = previousScope.current;
+    if (previous.client === client && previous.workspaceId === workspaceId) return;
+    previousScope.current = { client, workspaceId };
+    scopeGeneration.current += 1;
+    sources.current.clear();
+    setAttachments((current) => {
+      for (const attachment of current) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      return [];
+    });
+  }, [client, workspaceId]);
+
+  useEffect(
+    () => () => {
+      scopeGeneration.current += 1;
+      sources.current.clear();
+      for (const attachment of attachmentsRef.current) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      attachmentsRef.current = [];
+    },
+    [],
+  );
 
   // Run (or re-run) the upload for one already-tracked attachment id. Sets it
   // back to `uploading`, then resolves to `ready` (with the asset) or `failed`
   // (with the error message).
   const startUpload = useCallback(
     (id: string, file: File) => {
+      const generation = scopeGeneration.current;
       void client
         .uploadFile(workspaceId, {
           filename: file.name || "file",
@@ -83,6 +134,11 @@ export function useFileAttachments(
           data: file,
         })
         .then((asset) => {
+          if (scopeGeneration.current !== generation) return;
+          // Retry bytes are useful only until durable finalization succeeds.
+          // Drop the source File immediately; restored/ready attachments must
+          // never retain browser-local byte authority.
+          sources.current.delete(id);
           setAttachments((current) =>
             current.map((attachment) =>
               attachment.id === id
@@ -100,6 +156,7 @@ export function useFileAttachments(
           );
         })
         .catch((error: unknown) => {
+          if (scopeGeneration.current !== generation) return;
           setAttachments((current) =>
             current.map((attachment) =>
               attachment.id === id
@@ -171,6 +228,60 @@ export function useFileAttachments(
     [addFiles, pasteFilter],
   );
 
+  const restoreReadyFiles = useCallback(
+    (files: Iterable<FileAsset>) => {
+      const incoming = new Map<string, FileAsset>();
+      for (const file of files) {
+        if (file.status === "ready" && file.workspaceId === workspaceId) {
+          incoming.set(file.id, file);
+        }
+      }
+      setAttachments((current) => {
+        const unresolved = current.filter((attachment) => attachment.status !== "ready");
+        const existingReady = new Map(
+          current.flatMap((attachment) =>
+            attachment.status === "ready" && attachment.file
+              ? ([[attachment.file.id, attachment]] as const)
+              : [],
+          ),
+        );
+        const restored = [...incoming.values()].map((file): FileAttachment => {
+          const existing = existingReady.get(file.id);
+          return existing
+            ? {
+                ...existing,
+                name: file.filename,
+                contentType: file.contentType,
+                sizeBytes: file.sizeBytes,
+                status: "ready",
+                file,
+                error: undefined,
+              }
+            : {
+                id: `restored:${file.id}`,
+                name: file.filename,
+                contentType: file.contentType,
+                sizeBytes: file.sizeBytes,
+                status: "ready",
+                file,
+                // No source File and no object URL: server metadata is the
+                // only authority restored across page/device boundaries.
+              };
+        });
+        for (const [fileId, attachment] of existingReady) {
+          if (!incoming.has(fileId) && attachment.previewUrl) {
+            URL.revokeObjectURL(attachment.previewUrl);
+          }
+        }
+        // A server restoration is authoritative for finalized assets, but an
+        // upload that has not finalized still belongs to the local actor. Keep
+        // those unresolved entries while replacing the ready set exactly.
+        return [...unresolved, ...restored];
+      });
+    },
+    [workspaceId],
+  );
+
   const remove = useCallback((id: string) => {
     sources.current.delete(id);
     setAttachments((current) => {
@@ -180,6 +291,24 @@ export function useFileAttachments(
       }
       return current.filter((attachment) => attachment.id !== id);
     });
+  }, []);
+
+  const removeReadyFiles = useCallback((fileIds: Iterable<string>) => {
+    const accepted = new Set(fileIds);
+    if (accepted.size === 0) return;
+    setAttachments((current) =>
+      current.filter((attachment) => {
+        const removeAccepted =
+          attachment.status === "ready" &&
+          attachment.file !== undefined &&
+          accepted.has(attachment.file.id);
+        if (removeAccepted) {
+          sources.current.delete(attachment.id);
+          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+        }
+        return !removeAccepted;
+      }),
+    );
   }, []);
 
   const clear = useCallback(() => {
@@ -202,10 +331,13 @@ export function useFileAttachments(
         : [],
     ),
     uploading: attachments.some((attachment) => attachment.status === "uploading"),
+    hasUnresolved: attachments.some((attachment) => attachment.status !== "ready"),
     addFiles,
     addFromPaste,
+    restoreReadyFiles,
     retry,
     remove,
+    removeReadyFiles,
     clear,
   };
 }

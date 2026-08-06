@@ -1,220 +1,137 @@
-import type {
-  TranscriptionAdapter,
-  TranscriptionAdapterStartContext,
-  TranscriptionEvent,
-  TranscriptionEventListener,
-  TranscriptionSession,
-  TranscriptionSessionRequest,
-  WorkspaceTranscriptionPolicy,
-} from "@opengeni/sdk";
+import type { ClientVoiceInputConfig } from "@opengeni/sdk";
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ChatComposer, type ComposerState } from "../src/index";
-import "../../../apps/web/src/styles.css";
+import { ChatComposer, type ComposerState } from "@opengeni/react";
+import "./styles.css";
 
-type FixtureMode = "normal" | "denied" | "hanging" | "cleanup-hangs" | "start-secret";
+type FixtureMode = "normal" | "denied" | "hanging";
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const requestedMode = params.get("mode");
 const initialMode: FixtureMode =
-  requestedMode === "denied" ||
-  requestedMode === "hanging" ||
-  requestedMode === "cleanup-hangs" ||
-  requestedMode === "start-secret"
-    ? requestedMode
-    : "normal";
+  requestedMode === "denied" || requestedMode === "hanging" ? requestedMode : "normal";
 if (theme === "light") document.documentElement.dataset.ogTheme = "light";
 else delete document.documentElement.dataset.ogTheme;
 
-const policy: WorkspaceTranscriptionPolicy = {
-  enabled: true,
-  acceptanceId: "11111111-1111-4111-8111-111111111111",
-  primary: {
-    provider: "fixture-speech",
-    model: "fixture-v1",
-    credentialMode: "managed",
-    credentialConnectionId: null,
-    region: null,
-  },
-  language: "en-US",
-  autoDetectLanguage: false,
-  diarization: { enabled: false, maxSpeakers: null },
-  retention: { mode: "none", maxDays: null },
-  privacy: { allowProviderLogging: false, allowProviderTraining: false },
-  fallback: { mode: "disabled", targets: [] },
-  cost: { currency: "USD", maxPerHour: null, maxPerMonth: null },
+const capability: ClientVoiceInputConfig = {
+  available: true,
+  maxDurationSeconds: 60,
+  maxSizeBytes: 25 * 1024 * 1024,
+  acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
 };
 
-class FixtureTranscriptionAdapter implements TranscriptionAdapter {
-  readonly descriptor = {
-    provider: "fixture-speech",
-    model: "fixture-v1",
-    credentialMode: "managed" as const,
-    region: null,
-  };
-  private listener: TranscriptionEventListener | null = null;
-  private request: TranscriptionSessionRequest | null = null;
-  private context: TranscriptionAdapterStartContext | null = null;
-  private sequence = 0;
-
-  constructor(readonly mode: FixtureMode) {}
-
-  async start(
-    request: TranscriptionSessionRequest,
-    listener: TranscriptionEventListener,
-    context: TranscriptionAdapterStartContext,
-  ): Promise<TranscriptionSession> {
-    this.request = request;
-    this.listener = listener;
-    this.context = context;
-    this.sequence = 0;
-    document.documentElement.dataset.transcriptionStartAborted = String(context.signal.aborted);
-    context.signal.addEventListener(
-      "abort",
-      () => {
-        document.documentElement.dataset.transcriptionStartAborted = "true";
-      },
-      { once: true },
+class FixtureMediaRecorder {
+  static isTypeSupported(type: string) {
+    return (
+      type.startsWith("audio/webm") || type.startsWith("audio/mp4") || type.startsWith("audio/ogg")
     );
-    this.emit({ type: "permission.requested" });
-
-    if (this.mode === "hanging") {
-      return await new Promise<TranscriptionSession>(() => {});
-    }
-    if (this.mode === "start-secret") {
-      const detail =
-        "FixtureProvider start failed api-key=fixture-secret Bearer opaque-token sk-fixture123";
-      context.reportDiagnostic({ operation: "start", code: "provider", detail });
-      throw new Error(detail);
-    }
-    if (this.mode === "denied") {
-      this.emit({
-        type: "session.error",
-        code: "permission_denied",
-        recoverable: false,
-      });
-    } else {
-      this.emit({ type: "session.opened", providerSessionId: "fixture-provider-session" });
-    }
-    return {
-      localSessionId: request.localSessionId,
-      cancel: async () => {
-        document.documentElement.dataset.transcriptionCancelInvoked = "true";
-        if (this.mode === "cleanup-hangs") return await new Promise<void>(() => {});
-        this.emit({ type: "session.closed", reason: "cancelled" });
-      },
-      close: async () => {
-        document.documentElement.dataset.transcriptionCloseInvoked = "true";
-        if (this.mode === "cleanup-hangs") return await new Promise<void>(() => {});
-      },
-    };
   }
-
-  partial(text = "This partial stays ephemeral"): void {
-    this.emit({
-      type: "transcript.partial",
-      segmentId: "fixture-segment",
-      text,
-      metadata: {
-        detectedLanguage: "en-US",
-        span: { startMilliseconds: 0, endMilliseconds: 800 },
-        confidence: 0.82,
-        speaker: { id: "speaker-1", label: "Speaker 1" },
-      },
-    });
+  state: "inactive" | "recording" = "inactive";
+  mimeType: string;
+  ondataavailable: ((event: BlobEvent) => void) | null = null;
+  onstop: (() => void) | null = null;
+  constructor(
+    readonly stream: MediaStream,
+    options?: MediaRecorderOptions,
+  ) {
+    this.mimeType = options?.mimeType ?? "audio/webm";
   }
-
-  final(text = "Final transcript remains editable"): void {
-    this.emit({
-      type: "transcript.final",
-      segmentId: "fixture-segment",
-      text,
-      providerAcceptanceId: "fixture-acceptance-1",
-      metadata: {
-        detectedLanguage: "en-US",
-        span: { startMilliseconds: 0, endMilliseconds: 1_200 },
-        confidence: 0.96,
-        speaker: { id: "speaker-1", label: "Speaker 1" },
-        words: [
-          {
-            text: "Final transcript remains editable",
-            span: { startMilliseconds: 0, endMilliseconds: 1_200 },
-            confidence: 0.96,
-            speaker: { id: "speaker-1" },
-          },
-        ],
-      },
-    });
+  start(timeslice?: number) {
+    this.state = "recording";
+    document.documentElement.dataset.transcriptionStatus = "recording";
+    document.documentElement.dataset.transcriptionTimeslice = String(timeslice ?? 0);
+    setTimeout(() => {
+      if (this.state !== "recording") return;
+      this.ondataavailable?.({
+        data: new Blob([new Uint8Array([9, 8, 7, 6])], { type: this.mimeType }),
+        timecode: timeslice ?? 5_000,
+      } as BlobEvent);
+      document.documentElement.dataset.transcriptionChunkEmitted = "true";
+    }, 0);
   }
-
-  emptyThenCorrectedFinal(): void {
-    this.emit({
-      type: "transcript.final",
-      segmentId: "fixture-correctable",
-      text: "  \n ",
-      providerAcceptanceId: "fixture-correctable-acceptance",
-    });
-    this.emit({
-      type: "transcript.final",
-      segmentId: "fixture-correctable",
-      text: "Corrected final is inserted once",
-      providerAcceptanceId: "fixture-correctable-acceptance",
-    });
-  }
-
-  reconnect(): void {
-    this.emit({
-      type: "session.reconnecting",
-      attempt: 1,
-      reason: "Fixture network interruption",
-    });
-  }
-
-  restore(): void {
-    this.emit({ type: "session.opened", providerSessionId: "fixture-provider-session-restored" });
-  }
-
-  fail(): void {
-    this.context?.reportDiagnostic({
-      operation: "session",
-      code: "provider",
-      detail: "FixtureProvider stream failed secret=fixture-secret Bearer opaque-token",
-    });
-    this.emit({
-      type: "session.error",
-      code: "provider",
-      recoverable: false,
-    });
-  }
-
-  private emit(payload: EventPayload): void {
-    if (!this.listener || !this.request) return;
-    this.sequence += 1;
-    this.listener({
-      localSessionId: this.request.localSessionId,
-      sequence: this.sequence,
-      occurredAt: "2026-07-21T12:00:00.000Z",
-      ...payload,
-    } as TranscriptionEvent);
+  stop() {
+    this.state = "inactive";
+    this.ondataavailable?.({
+      data: new Blob([new Uint8Array([1, 2, 3, 4])], { type: this.mimeType }),
+    } as BlobEvent);
+    this.onstop?.();
   }
 }
 
-type EventPayload = TranscriptionEvent extends infer Event
-  ? Event extends TranscriptionEvent
-    ? Omit<Event, "localSessionId" | "sequence" | "occurredAt">
-    : never
-  : never;
+function installBrowserFixtures(mode: FixtureMode) {
+  const track = {
+    stop() {
+      document.documentElement.dataset.transcriptionTracksStopped = "true";
+    },
+  };
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: {
+      getUserMedia:
+        mode === "denied"
+          ? async () => {
+              throw new DOMException("Permission denied", "NotAllowedError");
+            }
+          : async () => {
+              const requests = Number(
+                document.documentElement.dataset.transcriptionMicRequests ?? "0",
+              );
+              document.documentElement.dataset.transcriptionMicRequests = String(requests + 1);
+              return {
+                getTracks: () => [track],
+              } as unknown as MediaStream;
+            },
+    },
+  });
+  Object.defineProperty(window, "MediaRecorder", {
+    configurable: true,
+    value: FixtureMediaRecorder,
+  });
+}
 
-function Harness() {
-  const adapter = useMemo(() => new FixtureTranscriptionAdapter(initialMode), []);
+function createFixtureClient(mode: FixtureMode) {
+  return {
+    async transcribeAudio(
+      _workspaceId: string,
+      input: { signal?: AbortSignal | undefined },
+    ): Promise<{ text: string; languages: string[] }> {
+      document.documentElement.dataset.transcriptionUpload = "started";
+      if (mode === "hanging") {
+        await new Promise<never>((_resolve, reject) => {
+          input.signal?.addEventListener(
+            "abort",
+            () => reject(input.signal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }
+      if (input.signal?.aborted) {
+        throw input.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+      document.documentElement.dataset.transcriptionUpload = "completed";
+      return { text: "fixture transcript", languages: ["en"] };
+    },
+  };
+}
+
+function App() {
   const [value, setValue] = useState("Existing editable draft");
-  const [sent, setSent] = useState<Array<{ id: number; message: string }>>([]);
+  const [sent, setSent] = useState<string | null>(null);
+  const [mode] = useState<FixtureMode>(initialMode);
+  const client = useMemo(() => createFixtureClient(mode), [mode]);
+  useMemo(() => {
+    installBrowserFixtures(mode);
+    return null;
+  }, [mode]);
+
   const composer: ComposerState = {
     value,
     setValue,
+    hasDraftContent: () => value.trim().length > 0,
     send: async () => {
-      setSent((current) => [...current, { id: current.length + 1, message: value }]);
+      setSent(value);
+      document.documentElement.dataset.transcriptionSubmitted = value;
       return true;
     },
     steer: async () => true,
@@ -238,66 +155,30 @@ function Harness() {
     error: null,
     clearError: () => {},
   };
+
   return (
     <main
-      className="og-root flex min-h-dvh items-center justify-center bg-og-bg p-4 text-og-fg max-sm:p-3"
       data-transcription-harness
-      data-og-theme={theme === "light" ? "light" : undefined}
+      className="mx-auto flex min-h-screen max-w-3xl flex-col justify-end gap-4 p-4"
     >
-      <section className="grid w-full max-w-3xl gap-4 rounded-og-xl border border-og-border bg-og-surface-1 p-4 shadow-og-lg">
-        <header className="grid gap-1">
-          <h1 className="text-lg font-semibold">Voice input lifecycle fixture</h1>
-          <p className="text-sm text-og-fg-muted">
-            Local adapter events only · no microphone, network, provider, or credential access
-          </p>
-        </header>
-        <div className="min-h-24 rounded-og-md border border-og-border bg-og-surface-2/30 p-3 text-sm text-og-fg-muted">
-          Ordinary session timeline remains above one ordinary composer.
-          {sent.length > 0 ? (
-            <ol className="mt-2 grid gap-1" aria-label="Sent messages">
-              {sent.map((entry) => (
-                <li key={entry.id} className="text-og-fg">
-                  Sent: {entry.message}
-                </li>
-              ))}
-            </ol>
-          ) : null}
-        </div>
-        <ChatComposer
-          composer={composer}
-          transcription={{
-            adapter,
-            policy,
-            lifecycleTimeouts: { startMs: 80, cleanupMs: 40 },
-            onDiagnostic: () => {},
-          }}
-        />
-        <fieldset className="flex flex-wrap gap-2 rounded-og-md border border-og-border p-3">
-          <legend className="px-1 text-xs text-og-fg-muted">Deterministic adapter events</legend>
-          <FixtureButton onClick={() => adapter.partial()}>Emit partial</FixtureButton>
-          <FixtureButton onClick={() => adapter.final()}>Emit final</FixtureButton>
-          <FixtureButton onClick={() => adapter.emptyThenCorrectedFinal()}>
-            Emit empty then corrected final
-          </FixtureButton>
-          <FixtureButton onClick={() => adapter.reconnect()}>Interrupt stream</FixtureButton>
-          <FixtureButton onClick={() => adapter.restore()}>Restore stream</FixtureButton>
-          <FixtureButton onClick={() => adapter.fail()}>Fail stream</FixtureButton>
-        </fieldset>
-      </section>
+      <h1 className="text-og-sm font-medium text-og-fg">Voice input fixture</h1>
+      <p className="text-og-xs text-og-fg-muted">
+        Mode <code>{mode}</code>. Stop records and immediately uploads a transcription.
+      </p>
+      {sent ? <p>Sent: {sent}</p> : null}
+      <ChatComposer
+        composer={composer}
+        transcription={{
+          client: client as never,
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          capability,
+          workspaceEnabled: true,
+        }}
+      />
     </main>
   );
 }
 
-function FixtureButton({ children, onClick }: { children: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="min-h-9 rounded-og-md border border-og-border bg-og-surface-2 px-3 text-xs text-og-fg-muted hover:text-og-fg pointer-coarse:min-h-11"
-    >
-      {children}
-    </button>
-  );
-}
-
-createRoot(document.getElementById("root")!).render(<Harness />);
+const root = document.getElementById("root");
+if (!root) throw new Error("missing #root");
+createRoot(root).render(<App />);

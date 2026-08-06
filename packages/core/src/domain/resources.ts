@@ -6,8 +6,10 @@ import {
   mergeResourceRefs as mergeContractResourceRefs,
   mergeToolRefs,
   normalizeRepositorySubpath,
+  normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
   resourceIdentityKey,
+  resourceMountPath,
   resourceMountPathCollisionKey,
   ResourceRefConflictError,
   ResourceMountPathError,
@@ -18,7 +20,7 @@ import {
 import { areGitHubRepositoriesAllowedForWorkspace, requireFile, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
-export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[] {
+export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
   const mcpServerIds = new Set(settings.mcpServers.map((server) => server.id));
   const out: ToolRef[] = [];
   for (const tool of tools) {
@@ -75,6 +77,37 @@ export function withDefaultEnabledCapabilityMcpTools(
   return mergeToolRefs(tools, enabledCapabilityMcpToolRefs(settings, runtimeSettings));
 }
 
+/** Drop stored refs that are no longer present in the current runtime registry. */
+export function availableToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
+  const available = new Set(settings.mcpServers.map((server) => server.id));
+  return tools.filter((tool) => available.has(tool.id));
+}
+
+/** A child or fixed-policy follow-up may narrow its allow-list, never widen it. */
+export function assertToolRefsSubset(
+  requested: ToolRef[],
+  allowed: ToolRef[],
+  message = "requested tools exceed the session tool policy",
+): void {
+  const allowedIds = new Set(allowed.map((tool) => `${tool.kind}:${tool.id}`));
+  const widened = requested.find((tool) => !allowedIds.has(`${tool.kind}:${tool.id}`));
+  if (widened) {
+    throw new HTTPException(403, { message: `${message}: ${widened.id}` });
+  }
+}
+
+/** Validate runtime availability and then enforce the durable policy fence. */
+export function validateToolRefsForSessionPolicy(input: {
+  requested: ToolRef[];
+  settings: McpSettings;
+  allowedTools: ToolRef[];
+  message: string;
+}): ToolRef[] {
+  const validated = validateToolRefs(input.requested, input.settings);
+  assertToolRefsSubset(validated, input.allowedTools, input.message);
+  return validated;
+}
+
 export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
   const mountPaths = new Map<string, string>();
   const identities = new Map<string, string>();
@@ -84,28 +117,25 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
   for (const resource of resources) {
     let normalized: ResourceRef;
     if (resource.kind === "file") {
-      const mountPath = normalizeMountPath(resource.mountPath ?? `files/${resource.fileId}`);
+      const mountPath = normalizeMountPath(resourceMountPath(resource));
       normalized = {
         kind: "file",
         fileId: resource.fileId,
         mountPath,
       };
     } else {
-      const url = parseResourceUrl(resource.uri);
-      if (url.protocol !== "https:" || !url.hostname) {
-        throw new HTTPException(422, { message: "repository resources must use HTTPS Git URLs" });
-      }
-      const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-      const parts = path.split("/").filter(Boolean);
-      if (parts.length < 2) {
-        throw new HTTPException(422, { message: "repository URL must include owner and repo" });
-      }
-      const repo = parts.join("/");
-      const normalizedUri = `https://${url.host.toLowerCase()}/${repo}.git`;
-      const mountPath = normalizeMountPath(
-        resource.mountPath ?? defaultRepositoryMountPath(normalizedUri),
-      );
       const credentialProvider = gitCredentialProviderForRepository(resource);
+      let normalizedUri: string;
+      try {
+        normalizedUri = normalizeRepositoryTransportUri(resource.uri);
+      } catch (error) {
+        throw new HTTPException(422, {
+          message: error instanceof Error ? error.message : "invalid repository URI",
+        });
+      }
+      const mountPath = normalizeMountPath(
+        resource.mountPath ?? defaultRepositoryMountPath(normalizedUri, credentialProvider),
+      );
       const credentialBindingId = gitCredentialBindingIdForRepository(resource, credentialProvider);
       if (
         (resource.credentialBindingId || resource.connectionId || resource.access) &&
@@ -270,6 +300,15 @@ export async function validateGitHubRepositorySelection(
   }
 }
 
+/**
+ * A 422 from repository selection validation is an authoritative stale or
+ * revoked identity. Other failures (for example a database/catalog outage)
+ * leave the result unknown and must not cause draft hydration to delete it.
+ */
+export function isAuthoritativeGitHubRepositorySelectionError(error: unknown): boolean {
+  return error instanceof HTTPException && error.status === 422;
+}
+
 export async function validateFileResources(
   db: Database,
   workspaceId: string,
@@ -302,14 +341,6 @@ function normalizeMountPath(path: string): string {
   } catch (error) {
     if (!(error instanceof ResourceMountPathError)) throw error;
     throw new HTTPException(422, { message: `invalid resource mount path: ${path}` });
-  }
-}
-
-function parseResourceUrl(uri: string): URL {
-  try {
-    return new URL(uri);
-  } catch {
-    throw new HTTPException(422, { message: "repository resources must use valid URLs" });
   }
 }
 

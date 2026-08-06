@@ -1,8 +1,8 @@
 // The session header bar — the slim canvas top strip's contents on a session
 // route. Split out of rail-shell as a PURE, presentational component: it takes
 // plain session data + callbacks and renders the two-line identity block
-// (breadcrumb → title → model·effort · sandbox · codex) on the left and the
-// live-status cluster (connection, status, lock, panel toggle) on the right.
+// (breadcrumb → title) on the left and the action cluster on the right
+// (provider+model·effort·speed, sandbox, pin, connection, status, panel).
 // The live children that need their own hooks — the sandbox switcher and the
 // codex account indicator — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in rail-shell owns the
@@ -13,22 +13,29 @@ import {
 } from "@opengeni/react";
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
-import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon, PlayIcon } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon } from "lucide-react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 
+import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { ConnectionPill } from "@/components/common";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { displayModel } from "@/lib/format";
+import { isCodexProductModel } from "@/lib/session-model";
 import {
   SESSION_TITLE_MAX_LENGTH,
   sessionDisplayTitle,
   useInlineRename,
 } from "@/lib/session-rename";
-import type { Session } from "@/types";
+import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
+import { isIntelligenceEffort, labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
+import type { LatencyMode, Session } from "@/types";
 
 export function SessionHeader({
   session,
   ancestors,
+  lineageLoading,
   lineageError,
   connectionState,
   status,
@@ -41,10 +48,17 @@ export function SessionHeader({
   sandboxSlot,
   codexSlot,
   leading,
+  lastStartedModel,
+  lastStartedReasoningEffort,
+  lastStartedLatencyMode,
+  billingClass,
+  modelLabel,
+  policyLoading,
 }: {
   session: Session;
   /** Root-to-direct-parent order. */
   ancestors: SessionSummary[];
+  lineageLoading?: boolean;
   lineageError?: Error | null;
   connectionState: SessionEventsConnectionState;
   status: Session["status"];
@@ -56,56 +70,128 @@ export function SessionHeader({
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
-  /** The codex-account indicator — absent for host-credit sessions. */
+  /**
+   * Replaces the static provider mark when the session is on Codex — same icon,
+   * clickable for account status/switch. Absent for host-credit sessions.
+   */
   codexSlot?: ReactNode;
   /** Leading control (the mobile hamburger); absent on desktop. */
   leading?: ReactNode;
+  /**
+   * Model·effort·latency from the newest turn that durably emitted `turn.started`.
+   * Historical — does not follow the composer next-turn picker. Falls back to
+   * session creation defaults before any turn has admitted.
+   */
+  lastStartedModel?: string;
+  lastStartedReasoningEffort?: IntelligenceEffort;
+  lastStartedLatencyMode?: LatencyMode;
+  /** Billing rail for the provider mark (OpenGeni / Codex / BYOK). */
+  billingClass?: BillingClass;
+  /** Product model label (e.g. GPT-5.6 Luna). */
+  modelLabel?: string;
+  /**
+   * True while last-started policy and/or model catalog are still resolving.
+   * Avoids flashing session defaults (wrong provider) before admitted truth.
+   */
+  policyLoading?: boolean;
 }) {
+  const modelId = lastStartedModel?.trim() || session.model;
+  const resolvedBilling: BillingClass =
+    billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
+  const resolvedModel = modelLabel?.trim() || displayModel(modelId);
+  const sessionEffort = session.metadata.reasoningEffort;
+  const displayEffort: IntelligenceEffort =
+    lastStartedReasoningEffort ?? (isIntelligenceEffort(sessionEffort) ? sessionEffort : "low");
+  const sessionLatency = session.metadata.latencyMode;
+  const displayLatency: LatencyMode =
+    lastStartedLatencyMode ??
+    (sessionLatency === "fast" || sessionLatency === "priority" || sessionLatency === "standard"
+      ? sessionLatency
+      : "standard");
+  // Codex → clickable account chip. Other rails → static provider icon only
+  // (never invent a text "OpenGeni"/"BYOK" word). Don't key off `codexSlot != null`.
+  const isCodexRail = resolvedBilling === "codex_subscription";
+  const policyBits = [
+    resolvedModel,
+    labelEffort(displayEffort),
+    displayLatency === "fast" ? "Fast" : displayLatency === "priority" ? "Priority" : null,
+  ].filter((bit): bit is string => Boolean(bit));
+  const providerControl = isCodexRail ? (
+    (codexSlot ?? (
+      <BillingClassMark
+        billingClass="codex_subscription"
+        className="size-3.5 shrink-0 text-fg-muted"
+        aria-label=""
+      />
+    ))
+  ) : (
+    <BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0 text-fg-muted" />
+  );
   return (
     // An elevated band, not just canvas-with-a-hairline: reading as a real top
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header
-      data-sessionpin-session-header
-      className="flex h-14 min-w-0 shrink-0 items-center gap-1.5 overflow-hidden border-b border-border bg-surface/80 px-2 backdrop-blur supports-[backdrop-filter]:bg-surface/65 sm:gap-3 sm:px-5"
-    >
+    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-surface/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-surface/65">
       {leading}
-      <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 overflow-hidden">
+      <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them. */}
         <div className="min-w-0">
           <SessionAncestryBreadcrumb
             workspaceId={session.workspaceId}
+            parentSessionId={session.parentSessionId}
             ancestors={ancestors}
+            loading={lineageLoading}
             error={lineageError}
           />
         </div>
         <SessionTitleEditor session={session} onRename={onRename} />
-        {/* One quiet metadata voice: no label-colon grammar, no separator
-            soup — the model·effort token (the model earns a touch more weight,
-            the effort stays quiet), then the sandbox pill (its own shape, no
-            interposed dot), then the codex indicator. */}
-        <div className="hidden min-w-0 items-center gap-2 overflow-hidden text-2xs leading-4 text-fg-muted sm:flex">
-          <span className="min-w-0 shrink truncate font-medium text-fg-muted">
-            {session.model}
-            <span className="font-normal text-fg-muted">
-              {" "}
-              · {String(session.metadata.reasoningEffort ?? "low")}
-            </span>
-          </span>
-          {sandboxSlot}
-          {codexSlot}
-        </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5 sm:gap-2">
+        {/* Provider + model · effort · speed stay one cluster on the action side. */}
+        <div className="hidden min-w-0 max-w-[min(100%,18rem)] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted sm:flex md:max-w-[22rem]">
+          {policyLoading ? (
+            <span
+              className="inline-flex items-center gap-1.5"
+              aria-busy="true"
+              aria-label="Loading model"
+            >
+              <Skeleton className="h-6 w-11 shrink-0 rounded-full" />
+              <Skeleton className="h-3 w-36" />
+            </span>
+          ) : (
+            <span className="inline-flex min-w-0 items-center gap-1.5 truncate font-medium text-fg-muted">
+              {providerControl}
+              <span className="min-w-0 truncate font-normal">
+                {policyBits.map((bit, index) => (
+                  <span key={bit}>
+                    {index > 0 ? " · " : null}
+                    {bit}
+                  </span>
+                ))}
+              </span>
+            </span>
+          )}
+        </div>
+        {sandboxSlot}
         <SessionPinButton session={session} onPin={onPin} />
         <div className="hidden items-center gap-2 md:flex">
           <ConnectionPill state={connectionState} />
-          <SessionStatusBadge status={status} />
+          {/* Admission vs lifecycle are different axes, but showing both when
+              control is Active (Running + Active) is redundant noise. When
+              paused, admission is the headline — hide lifecycle so we don't
+              imply the session is still "Running"/"Idle" under a pause gate. */}
+          {session.effectiveControl.state === "active" ? (
+            <SessionStatusBadge status={status} />
+          ) : (
+            <WorkstreamControlIndicator session={session} />
+          )}
         </div>
-        <WorkstreamControlIndicator session={session} />
         <span className="sr-only md:hidden">
-          Connection {connectionState}. Session {status}.
+          Connection {connectionState}.{" "}
+          {session.effectiveControl.state === "active"
+            ? `Session ${status}.`
+            : "Workstream paused."}
         </span>
         {keyAuthRequired ? (
           <Button
@@ -134,17 +220,19 @@ export function SessionHeader({
   );
 }
 
+/** Pause-only header chip (Active is not shown — lifecycle status covers “go”). */
 function WorkstreamControlIndicator({ session }: { session: Session }) {
   const control = session.effectiveControl;
+  if (control.state !== "paused") {
+    return null;
+  }
   const blocker = control.primaryBlocker;
   const label =
-    control.state === "active"
-      ? "Active"
-      : blocker?.kind === "workspace"
-        ? "Workspace paused"
-        : control.directState === "paused" || blocker?.sessionId === session.id
-          ? "Paused here"
-          : `Paused by ${blocker?.displayName ?? "parent"}`;
+    blocker?.kind === "workspace"
+      ? "Workspace paused"
+      : control.directState === "paused" || blocker?.sessionId === session.id
+        ? "Paused here"
+        : `Paused by ${blocker?.displayName ?? "parent"}`;
   return (
     <button
       type="button"
@@ -153,17 +241,9 @@ function WorkstreamControlIndicator({ session }: { session: Session }) {
       onClick={() => {
         document.dispatchEvent(new Event(OPEN_WORKSTREAM_CONTROL_EVENT));
       }}
-      className={`inline-flex min-w-0 max-w-48 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${
-        control.state === "paused"
-          ? "border-status-waiting/35 bg-status-waiting/10 text-fg hover:bg-status-waiting/15"
-          : "border-status-running/30 bg-status-running/10 text-fg hover:bg-status-running/15"
-      }`}
+      className="inline-flex min-w-0 max-w-48 items-center gap-1.5 rounded-full border border-status-waiting/35 bg-status-waiting/10 px-2 py-0.5 text-xs font-medium text-fg hover:bg-status-waiting/15"
     >
-      {control.state === "paused" ? (
-        <PauseIcon className="size-3 shrink-0 fill-current text-status-waiting" />
-      ) : (
-        <PlayIcon className="size-3 shrink-0 fill-current text-status-running" />
-      )}
+      <PauseIcon className="size-3 shrink-0 fill-current text-status-waiting" />
       <span className="hidden truncate sm:inline">{label}</span>
       {control.additionalBlockerCount > 0 ? (
         <span className="hidden shrink-0 sm:inline">+{control.additionalBlockerCount}</span>
@@ -181,7 +261,11 @@ function SessionPinButton({
 }) {
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState("");
-  const announcementId = useId();
+  const announcementSequence = useRef(0);
+  const announce = useCallback((message: string) => {
+    announcementSequence.current += 1;
+    setAnnouncement(pinLiveAnnouncement(message, announcementSequence.current));
+  }, []);
   return (
     <>
       <Button
@@ -189,7 +273,6 @@ function SessionPinButton({
         variant={session.pinned ? "secondary" : "ghost"}
         size="icon-sm"
         aria-label={session.pinned ? "Unpin session" : "Pin session"}
-        aria-describedby={announcement ? announcementId : undefined}
         aria-pressed={Boolean(session.pinned)}
         aria-busy={busy}
         disabled={busy}
@@ -199,21 +282,21 @@ function SessionPinButton({
           setBusy(true);
           void onPin(session, nextPinned)
             .then((updated) => {
-              setAnnouncement(
+              announce(
                 updated
                   ? `Session ${nextPinned ? "pinned" : "unpinned"}.`
                   : `Session was not ${nextPinned ? "pinned" : "unpinned"}.`,
               );
             })
             .catch(() => {
-              setAnnouncement(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
+              announce(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
             })
             .finally(() => setBusy(false));
         }}
       >
         <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
       </Button>
-      <span id={announcementId} className="sr-only" aria-live="polite" aria-atomic="true">
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
     </>
@@ -260,6 +343,7 @@ function SessionTitleEditor(props: {
         }}
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
+        dir="auto"
         className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-none ring-1 ring-border-strong focus:outline-none focus-visible:outline-none"
         style={{ outline: "none" }}
       />
@@ -272,7 +356,8 @@ function SessionTitleEditor(props: {
         type="button"
         onClick={rename.startEditing}
         title={`${display} · click to rename`}
-        className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
+        dir="auto"
+        className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:min-h-11 pointer-coarse:px-2"
       >
         {display}
       </button>

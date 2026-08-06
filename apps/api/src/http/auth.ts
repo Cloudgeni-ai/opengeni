@@ -49,8 +49,17 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   }
   if (
     path === "/v1/integrations/oauth/callback" ||
-    path === "/v1/integrations/oauth/client-metadata.json"
+    path === "/v1/integrations/oauth/client-metadata.json" ||
+    path === "/v1/integrations/slack/callback" ||
+    path === "/v1/integrations/slack/events" ||
+    path === "/v1/integrations/slack/commands" ||
+    path === "/v1/integrations/slack/interactions"
   ) {
+    return true;
+  }
+  // Social OAuth (X / Reddit) browser redirect: exact path only, protected by
+  // signed single-use state plus a callback-time grant recheck.
+  if (path === "/v1/social/oauth/callback") {
     return true;
   }
   // Catalog logos are rendered via bare <img> tags, which carry no credentials;
@@ -59,9 +68,8 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path.startsWith("/v1/catalog-assets/")) {
     return true;
   }
-  // Compatibility entry for already-issued GitHub install/link URLs. It stays
-  // public like the callbacks above, verifies signed workspace-bound state,
-  // and then terminates with 410 while new installation binding is disabled.
+  // The GitHub owner-consent entry remains public like the callbacks above; it
+  // verifies fresh signed workspace-bound state before redirecting to GitHub.
   if (githubConnectPathPattern.test(path)) {
     return true;
   }
@@ -78,7 +86,10 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
     return true;
   }
-  if (settings.authAllowHealth && (path === "/healthz" || path === "/readyz")) {
+  if (
+    settings.authAllowHealth &&
+    (path === "/healthz" || path === "/readyz" || path === "/traffic-readyz")
+  ) {
     return true;
   }
   if (settings.authAllowMetrics && path === "/metrics") {

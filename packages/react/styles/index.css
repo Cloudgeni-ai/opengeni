@@ -19,18 +19,34 @@
 @theme inline {
   --font-og-sans: var(--og-font-sans);
   --font-og-mono: var(--og-font-mono);
+  /* Compatibility aliases still used by published components and the exact
+     dropdown primitives shared with the web app. Keep the public stylesheet
+     self-contained instead of requiring consumers to copy the app theme. */
+  --font-sans: var(--og-font-sans);
+  --font-mono: var(--og-font-mono);
 
-  /* Type ramp — a real 4-step scale (no half-pixel hand-tuning). Every
-     timeline string maps to one of these via `text-og-{xs,sm,base,md}`;
-     mono reuses the same steps. */
-  --text-og-xs: 11px;
-  --text-og-xs--line-height: 1.45;
-  --text-og-sm: 12px;
-  --text-og-sm--line-height: 1.5;
-  --text-og-base: 13px;
-  --text-og-base--line-height: 1.55;
-  --text-og-md: 15px;
-  --text-og-md--line-height: 1.6;
+  /* Type ramp. Runtime values live in tokens.css so an embedder can tune the
+     complete SDK subtree without rebuilding Tailwind. The control/menu tokens
+     preserve Tailwind's historic xs/sm metrics without leaking through or
+     mutating the host application's own `text-xs` / `text-sm` utilities. */
+  --text-og-xs: var(--og-font-size-xs);
+  --text-og-xs--line-height: var(--og-line-height-xs);
+  --text-og-sm: var(--og-font-size-sm);
+  --text-og-sm--line-height: var(--og-line-height-sm);
+  --text-og-base: var(--og-font-size-base);
+  --text-og-base--line-height: var(--og-line-height-base);
+  --text-og-md: var(--og-font-size-md);
+  --text-og-md--line-height: var(--og-line-height-md);
+  --text-og-control: var(--og-font-size-control);
+  --text-og-control--line-height: var(--og-line-height-control);
+  --text-og-menu: var(--og-font-size-menu);
+  --text-og-menu--line-height: var(--og-line-height-menu);
+  --text-og-composer: var(--og-font-size-composer);
+  --text-og-composer--line-height: var(--og-line-height-composer);
+  --text-og-composer-wide: var(--og-font-size-composer-wide);
+  --text-og-composer-wide--line-height: var(--og-line-height-composer-wide);
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
 
   --color-og-bg: var(--og-color-bg);
   --color-og-surface-1: var(--og-color-surface-1);
@@ -44,6 +60,7 @@
 
   --color-og-accent: var(--og-color-accent);
   --color-og-accent-strong: var(--og-color-accent-strong);
+  --color-og-accent-deep: var(--og-color-accent-deep);
   --color-og-accent-fg: var(--og-color-accent-fg);
   --color-og-accent-soft: var(--og-color-accent-soft);
 
@@ -55,11 +72,64 @@
   --color-og-status-cancelled: var(--og-color-status-cancelled);
   --color-og-danger: var(--og-color-danger);
 
+  --color-bg: var(--og-color-bg);
+  --color-surface: var(--og-color-surface-1);
+  --color-surface-2: var(--og-color-surface-2);
+  --color-surface-3: var(--og-color-surface-3);
+  --color-border: var(--og-color-border);
+  --color-border-strong: var(--og-color-border-strong);
+  --color-fg: var(--og-color-fg);
+  --color-fg-muted: var(--og-color-fg-muted);
+  --color-fg-subtle: var(--og-color-fg-subtle);
+  --color-brand: var(--og-color-accent);
+  --color-brand-strong: var(--og-color-accent-deep);
+  --color-brand-fg: var(--og-color-accent-fg);
+  --color-status-queued: var(--og-color-status-queued);
+  --color-status-running: var(--og-color-status-running);
+  --color-status-idle: var(--og-color-status-idle);
+  --color-status-waiting: var(--og-color-status-waiting);
+  --color-status-success: var(--og-color-status-idle);
+  --color-status-failed: var(--og-color-status-failed);
+  --color-status-cancelled: var(--og-color-status-cancelled);
+  --color-danger: var(--og-color-danger);
+
+  --color-background: var(--color-bg);
+  --color-foreground: var(--color-fg);
+  --color-card: var(--color-surface);
+  --color-card-foreground: var(--color-fg);
+  --color-popover: var(--color-surface-3);
+  --color-popover-foreground: var(--color-fg);
+  --color-primary: var(--color-brand-strong);
+  --color-primary-foreground: var(--color-brand-fg);
+  --color-secondary: var(--color-surface-2);
+  --color-secondary-foreground: var(--color-fg);
+  --color-muted: var(--color-surface-2);
+  --color-muted-foreground: var(--color-fg-muted);
+  --color-accent: var(--color-surface-2);
+  --color-accent-foreground: var(--color-fg);
+  --color-destructive: var(--og-color-danger);
+  --color-destructive-filled: color-mix(in oklch, var(--og-color-danger) 70%, black);
+  --color-destructive-foreground: var(--og-color-accent-fg);
+  --color-input: var(--color-surface-2);
+  --color-ring: var(--color-brand);
+  --color-sidebar: var(--color-surface);
+  --color-sidebar-foreground: var(--color-fg);
+  --color-sidebar-primary: var(--color-brand-strong);
+  --color-sidebar-primary-foreground: var(--color-brand-fg);
+  --color-sidebar-accent: var(--color-surface-2);
+  --color-sidebar-accent-foreground: var(--color-fg);
+  --color-sidebar-border: var(--color-border);
+  --color-sidebar-ring: var(--color-brand);
+
   --radius-og-xs: var(--og-radius-xs);
   --radius-og-sm: var(--og-radius-sm);
   --radius-og-md: var(--og-radius-md);
   --radius-og-lg: var(--og-radius-lg);
   --radius-og-xl: var(--og-radius-xl);
+  --radius-sm: var(--og-radius-sm);
+  --radius-md: var(--og-radius-md);
+  --radius-lg: var(--og-radius-lg);
+  --radius-xl: var(--og-radius-xl);
 
   --shadow-og-sm: var(--og-shadow-sm);
   --shadow-og-md: var(--og-shadow-md);
@@ -75,8 +145,65 @@
   --animate-og-blink: og-blink 1s steps(2, start) infinite;
   --animate-og-shimmer: og-shimmer 2.2s linear infinite;
   --animate-og-spin: og-spin 0.9s linear infinite;
-  --animate-og-expand: og-expand var(--og-duration-fast) var(--og-ease-in-out);
-  --animate-og-collapse: og-collapse var(--og-duration-fast) var(--og-ease-in-out);
+  --animate-og-waveform: og-waveform 1.15s var(--og-ease-in-out) infinite;
+  /* Manual disclose — snappy. Auto settle-collapse is the slow path below. */
+  --animate-og-expand: og-expand var(--og-duration-disclose) var(--og-ease-in-out);
+  --animate-og-collapse: og-collapse var(--og-duration-disclose) var(--og-ease-in-out);
+  /* Auto-fold the reader did not ask for: ~7× manual so it reads as choreography. */
+  --animate-og-settle-chip: og-settle-chip var(--og-duration-slow) var(--og-ease-out) both;
+  /* Ease-out: settle lands softly (slow tail), not a symmetric ease-in-out stop. */
+  --animate-og-settle-collapse: og-collapse var(--og-duration-disclose-settle) var(--og-ease-out);
+  /* Live tool rows arriving mid-turn — soft, not tied to manual disclose speed. */
+  --animate-og-row-enter: og-row-enter var(--og-duration-slow) var(--og-ease-stream) both;
+  /* Stream end fallback breath when View Transitions are unavailable. */
+  --animate-og-markdown-settle: og-markdown-settle var(--og-duration-markdown-crystallize)
+    var(--og-ease-stream) both;
+}
+
+/* Typography utilities also publish their effective metrics as private
+   component variables. A host reset such as `.app button { font: inherit }`
+   otherwise beats a one-class Tailwind utility on specificity and silently
+   inflates embedded controls. The scoped guard below reads these variables at
+   higher specificity, while responsive variants can still replace them and
+   public --og-* tokens remain the only customization surface. */
+@utility text-og-xs {
+  --og-component-font-size: var(--og-font-size-xs);
+  --og-component-line-height: var(--og-line-height-xs);
+}
+
+@utility text-og-sm {
+  --og-component-font-size: var(--og-font-size-sm);
+  --og-component-line-height: var(--og-line-height-sm);
+}
+
+@utility text-og-base {
+  --og-component-font-size: var(--og-font-size-base);
+  --og-component-line-height: var(--og-line-height-base);
+}
+
+@utility text-og-md {
+  --og-component-font-size: var(--og-font-size-md);
+  --og-component-line-height: var(--og-line-height-md);
+}
+
+@utility text-og-control {
+  --og-component-font-size: var(--og-font-size-control);
+  --og-component-line-height: var(--og-line-height-control);
+}
+
+@utility text-og-menu {
+  --og-component-font-size: var(--og-font-size-menu);
+  --og-component-line-height: var(--og-line-height-menu);
+}
+
+@utility text-og-composer {
+  --og-component-font-size: var(--og-font-size-composer);
+  --og-component-line-height: var(--og-line-height-composer);
+}
+
+@utility text-og-composer-wide {
+  --og-component-font-size: var(--og-font-size-composer-wide);
+  --og-component-line-height: var(--og-line-height-composer-wide);
 }
 
 /* Radix Collapsible disclosure: height auto-animates via the content var. Used
@@ -92,7 +219,10 @@
     height: 0;
     opacity: 0;
   }
-  60% {
+  40% {
+    opacity: 0.25;
+  }
+  85% {
     opacity: 1;
   }
   to {
@@ -106,7 +236,10 @@
     height: var(--radix-collapsible-content-height);
     opacity: 1;
   }
-  40% {
+  35% {
+    opacity: 0.7;
+  }
+  70% {
     opacity: 0;
   }
   to {
@@ -115,16 +248,74 @@
   }
 }
 
-/* Entry: messages and timeline rows slide in just enough to feel placed. */
-@keyframes og-enter {
+/* Settle chip emphasis — never opacity 0. The live shell already shows this
+   row; fading it out→in was the "steps flash" when settle armed or when
+   activity→turn remounted and duration/facets caught up. */
+@keyframes og-settle-chip {
   from {
-    opacity: 0;
-    transform: translateY(4px);
+    background-color: color-mix(in oklch, var(--color-og-surface-1, transparent) 55%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+/* Streaming tip ink: short age-window wash. Fast arrival still keeps a soft
+   band (many young batches); slow arrival is only a tight tip breath — a long
+   linear fade read as 2–3× too much wash on sparse tokens. Inline, no transform. */
+@keyframes og-stream-ink {
+  from {
+    opacity: 0.3;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
+}
+.og-stream-ink {
+  display: inline;
+  animation: og-stream-ink var(--og-duration-stream) var(--og-ease-out) both;
+}
+
+/* Stream-end remount fallback when View Transitions are unavailable.
+   No blur — blur read as a slow blink on the whole assistant message. */
+@keyframes og-markdown-settle {
+  from {
+    opacity: 0.92;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.og-markdown-settle {
+  animation: var(--animate-og-markdown-settle);
+}
+
+/* Markdown crystallize no longer uses View Transitions — styling `*` faded the
+   document root and read as a full-page blink at stream end. Local
+   `.og-markdown-settle` on the body is enough. */
+
+/* Entry: opacity only — translateY fought the tip-follow camera and ticked. */
+@keyframes og-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Live activity rows: opacity only. translateY stacked with tip stick and
+   read as a second one-line tick on every tool/message append. */
+@keyframes og-row-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-og-row-enter {
+  animation: var(--animate-og-row-enter);
 }
 
 /* Live/running indicators breathe; they do not flash. */
@@ -162,6 +353,19 @@
 @keyframes og-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Composer voice waveform — calm bar motion when AnalyserNode levels are unavailable. */
+@keyframes og-waveform {
+  0%,
+  100% {
+    transform: scaleY(0.28);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 0.95;
   }
 }
 
@@ -211,6 +415,31 @@
   color: var(--og-color-fg);
 }
 
+:is(.og-root.og-root, .og-root .og-root)
+  :where(
+    .text-og-xs,
+    .text-og-sm,
+    .text-og-base,
+    .text-og-md,
+    .text-og-control,
+    .text-og-menu,
+    .text-og-composer,
+    .text-og-composer-wide
+  ),
+:is(
+  .og-root.text-og-xs,
+  .og-root.text-og-sm,
+  .og-root.text-og-base,
+  .og-root.text-og-md,
+  .og-root.text-og-control,
+  .og-root.text-og-menu,
+  .og-root.text-og-composer,
+  .og-root.text-og-composer-wide
+) {
+  font-size: var(--og-component-font-size);
+  line-height: var(--tw-leading, var(--og-component-line-height));
+}
+
 .og-root :where(*) {
   scrollbar-width: thin;
   scrollbar-color: var(--og-color-border-strong) transparent;
@@ -236,6 +465,10 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+  /* Age-window delays would otherwise hold tip ink invisible (fill: both). */
+  .og-root .og-stream-ink {
+    animation-delay: 0ms !important;
   }
 }
 

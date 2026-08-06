@@ -30,50 +30,102 @@
 // so a box that was re-armed mid-sweep is never terminated out from under a live
 // holder.
 
+import { randomUUID } from "node:crypto";
 import {
   accrueWarmSeconds,
+  adoptLegacyModalCheckpointArtifact,
   confirmDrainCold,
   appendSessionEventToSandboxGroup,
+  bindRetainedProcessProviderIdentity,
+  claimWorkspaceArchiveCapture,
+  claimSandboxCheckpointArtifactsForGc,
+  claimTerminalRetainedProcesses,
+  countActiveRetainedProcessesByOwnerState,
+  countSandboxCheckpointArtifactsByState,
+  countExpiredDrainingSandboxLeases,
   countQueuedTurns,
   countSandboxLeasesByLiveness,
+  deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   getBillingBalance,
   listCreditBalancesByAccount,
+  listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
+  listSandboxViewerForceDrainWorkspaceIds,
+  markSandboxCheckpointArtifactDeletePending,
   persistDrainSnapshot,
+  pruneDeletedSandboxCheckpointArtifacts,
+  registerSandboxCheckpointArtifact,
+  recordRetainedProcessReconciliationProof,
+  releaseWorkspaceArchiveCapture,
+  replaceExpiredWorkspaceArchiveCapture,
   readLease,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
+  requestDueSandboxRotationsGlobal,
+  readSandboxRotationBacklog,
+  retainedProcessReconciliationProof,
+  retainedProcessSettlementIdentity,
+  settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
+  settleRetainedProcess,
   type MeterableWarmLease,
   type ReapDrainable,
+  type RetainedProcessProviderProof,
+  type SandboxRetainedProcess,
+  type LeaseSnapshot,
 } from "@opengeni/db";
-import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
 import {
-  // The reaper attaches to the box by id to terminate it. It does NOT use
-  // establishSandboxSessionFromEnvelope (which cold-RESTORES via create() on a
-  // NotFound) — restoring a box just to immediately kill it is wrong. Instead it
-  // builds the client + resumes the envelope DIRECTLY: a live box resumes, gets
-  // its /workspace PERSISTED (snapshot/tar), then is terminated; a gone box
-  // (NotFound on resume) is already down, a clean no-op.
+  // Normal drain teardown builds the client and resumes the envelope directly:
+  // a live box gets its /workspace persisted before termination, while a gone
+  // box is typed as provider loss. Stale capture reconciliation separately uses
+  // establishSandboxSessionFromEnvelope in strict resume-only mode so it can
+  // reuse the runtime's provider-ready proof without ever cold-restoring.
+  captureVerifiedWorkspaceArchive,
   createSandboxClientForBackend,
-  deletePriorPersistedSnapshot,
+  deleteModalCheckpointSnapshot,
   deserializeSandboxSessionStateEnvelope,
+  establishSandboxSessionFromEnvelope,
+  inspectModalSandboxLifecycle,
+  isExecSessionLostBanner,
   isProviderSandboxNotFoundError,
+  parseExecBannerExitCode,
+  resolveModalCheckpointProviderBindingForLiveSandbox,
+  resolveModalCheckpointProviderBinding,
+  resolveModalCheckpointProviderBindingForSession,
+  sandboxBackendForSdkBackendId,
+  sandboxCommandExitCode,
+  sandboxCommandStillRunning,
   sweepModalOrphanSandboxes,
   terminateModalSandboxById,
+  verifySandboxExecReadiness,
   type ModalOrphanSweepTermination,
+  type ModalCheckpointProviderBinding,
+  type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordCreditBalanceGauges,
   recordCreditMicros,
+  recordExpiredDrainingSandboxLeaseGauges,
+  recordRetainedProcessInventoryGauges,
+  recordRetainedProcessReconciliation,
+  recordSandboxCheckpointArtifactGauges,
+  recordSandboxCheckpointArtifactOutcome,
+  recordSandboxDeadlineRotationsRequested,
+  recordSandboxInventoryProjectionFailure,
+  recordSandboxInventoryProjectionSuccess,
+  type RetainedProcessReconciliationOutcome,
+  type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
+  recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
 } from "../observability-metrics";
+import { providerIdentityFromResumeState } from "../sandbox-routing";
 
 export type ReapSandboxLeasesResult = {
   /** Stale viewer holders + warming-death rows the sweep touched is folded into
@@ -122,31 +174,48 @@ type CreateSandboxClientForBackendFn = typeof createSandboxClientForBackend;
  * archive onto the lease under the epoch fence, BEFORE the box is terminated
  * (sandbox-file-persistence). The caller (`terminateDrainableBox`) closes over
  * db/accountId/row and delegates to persistDrainSnapshot. Returns:
- *   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished). The box
- *                     is wanted again; the seam MUST NOT terminate it.
- *   - priorArchive / priorArchivePrev -> superseded archives to GC at drain.
+ * `wrote:false` means the CAS missed (re-armed / newer epoch / vanished). The
+ * box is wanted again, so the seam MUST NOT terminate it. Provider-native
+ * deletion is owned independently by artifact-ledger GC.
  *
  * Pass null for archiveBase64 to CAS-check WITHOUT writing (re-arm guard for
  * backends with no persistWorkspace — ensures a re-arm during the snapshot window
- * aborts the terminate before client.delete()). priorArchive values are always
- * null in this case.
+ * aborts the terminate before client.delete()).
  */
 export type PersistArchiveFn = (
   archiveBase64: string | null,
-) => Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }>;
+  archiveMetadata?: WorkspaceArchiveDescriptor,
+  providerSession?: unknown,
+  providerBinding?: Awaited<
+    ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
+  > | null,
+) => Promise<{
+  wrote: boolean;
+  archiveRevision?: string | null;
+}>;
+
+export type ProviderTerminationOutcome = {
+  /** false means an epoch/refcount CAS proved the box was re-armed, so it was
+   *  deliberately left running and the cold commit must not execute. */
+  terminated: boolean;
+  /** True only when a definitive provider NotFound proved the cloud box had
+   *  already vanished before this drain could capture its workspace. */
+  providerMissingBeforeCapture: boolean;
+};
 
 /** The provider-terminate seam. Production wires the real resume-by-id ->
  *  persistWorkspace -> persist-onto-lease (epoch-fenced) -> snapshot-GC ->
  *  provider stop() (`terminateProviderBox`); a unit test injects a spy so the
  *  drain/CAS logic is exercised against a real DB without a live provider box.
- *  Returns true when the box was terminated (or already gone), false when persist
- *  found the lease re-armed and the box was deliberately LEFT RUNNING. */
+ *  Test seams may return the legacy boolean shorthand. Production returns the
+ *  typed outcome so the cold commit can distinguish a clean stop from definitive
+ *  provider disappearance before capture. */
 export type TerminateBoxFn = (
   settings: ActivityServices["settings"],
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>,
   observability: ActivityServices["observability"],
   persistArchive: PersistArchiveFn,
-) => Promise<boolean>;
+) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
   settings: ActivityServices["settings"],
@@ -161,7 +230,54 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Override only the read-only provider process probe. The canonical DB
+   * settlement remains real in tests and production. */
+  probeRetainedProcess?: RetainedProcessProbeFn;
+  /** Observe a historical Modal box after its lease row has advanced to a
+   * successor identity. Lifecycle-only; a live box remains ambiguous. */
+  inspectHistoricalModalSandbox?: HistoricalModalSandboxLifecycleProbeFn;
+  /** Override the read-only exact-instance readiness probe used before the
+   * reaper settles blockers for a provider that has definitively vanished. */
+  probeDrainableProvider?: DrainableProviderProbeFn;
 };
+
+export type RetainedProcessProbeResult =
+  | { status: "proved"; proof: RetainedProcessProviderProof }
+  | {
+      status: "binding";
+      providerBindingKey: string;
+      providerBinding: ModalCheckpointProviderBinding;
+    }
+  | {
+      status: "deferred";
+      reason:
+        | "identity_mismatch"
+        | "resume_state_missing"
+        | "backend_unsupported"
+        | "provider_running"
+        | "provider_unknown"
+        | "provider_timeout"
+        | "provider_error"
+        | "provider_binding_missing"
+        | "provider_binding_mismatch";
+    };
+
+export type RetainedProcessProbeFn = (
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+  process: SandboxRetainedProcess,
+) => Promise<RetainedProcessProbeResult>;
+
+export type HistoricalModalSandboxLifecycleProbeFn = typeof inspectModalSandboxLifecycle;
+
+export type DrainableProviderProbeFn = (
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+) => Promise<"ready" | "missing">;
+
+export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
+export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
+export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
 
 export function createSandboxLeaseActivities(
   services: () => Promise<ActivityServices>,
@@ -170,11 +286,13 @@ export function createSandboxLeaseActivities(
   const terminateBox: TerminateBoxFn = options.terminateBox ?? terminateProviderBox;
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+  const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
+  const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
   /**
    * The one global reaper sweep. Idempotent; concurrency-safe with itself.
-   * Gated by the caller (the Schedule is only registered when
-   * sandboxOwnershipEnabled); a defensive no-op here too so a manual trigger
-   * with the flag off can never terminate a box.
+   * The global Schedule always runs. A defensive mutation gate here ensures
+   * that an ownership-off deployment still refreshes read-only metrics and
+   * repairs the system-update outbox but can never terminate a box.
    */
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
     const service = await services();
@@ -198,6 +316,11 @@ export function createSandboxLeaseActivities(
         deleted: expiredSessionListSnapshots,
       });
     }
+    // Inventory is useful even while provider ownership is disabled, and the
+    // same globally scheduled activity remains its single projection owner.
+    // Refresh before the mutation gate so dashboards show truthful zero/history
+    // state and absence alerts do not misclassify an intentional rollout flag.
+    await refreshQueueLeaseAndCreditGauges(db, observability);
     if (!settings.sandboxOwnershipEnabled) {
       if (parentUpdates.claimed > 0) {
         observability.info("system-update outbox reconciled", parentUpdates);
@@ -211,7 +334,18 @@ export function createSandboxLeaseActivities(
         modalOrphansTerminated: 0,
       };
     }
-    await refreshQueueLeaseAndCreditGauges(db, observability);
+
+    const rotationsRequested = await requestDueSandboxRotationsGlobal(
+      db,
+      settings.sandboxRotationLeadMs,
+      settings.sandboxRotationBatchSize,
+    ).catch((error) => {
+      observability.warn("sandbox reaper: provider-deadline rotation request failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return 0;
+    });
+    recordSandboxDeadlineRotationsRequested(observability, rotationsRequested);
 
     // (0) Warm-meter tick (P2.1) — accrue warm-seconds for every WARM viewer-only
     // box (turn-held boxes meter on the turn heartbeat, so the list fn excludes
@@ -223,11 +357,42 @@ export function createSandboxLeaseActivities(
     // workspace at 0 balance / over its warm cap force-drains its VIEWER-ONLY
     // boxes (guarded turn_holders=0 — a paying turn is NEVER killed). The newly
     // draining rows are caught by the same sweep's terminate below.
+    const forceDrainWorkspaceIds = new Set<string>();
+    if (
+      settings.billingMode === "stripe" ||
+      settings.usageLimitsMode === "managed" ||
+      settings.sandboxMaxWarmSecondsPerWorkspace > 0
+    ) {
+      for (const workspaceId of metered.workspaceIds) {
+        forceDrainWorkspaceIds.add(workspaceId);
+      }
+    }
+    try {
+      for (const workspaceId of await listSandboxViewerForceDrainWorkspaceIds(db)) {
+        forceDrainWorkspaceIds.add(workspaceId);
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: viewer force-drain workspace read failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const forceDrained = await forceDrainOverLimitWorkspaces(
       db,
       settings,
-      metered.workspaceIds,
+      forceDrainWorkspaceIds,
       observability,
+    );
+
+    // (0c) Terminal-owner retained-process reconciliation. Owner state selects
+    // only a bounded inspection batch; exact provider exit/loss proof is
+    // checkpointed before canonical settlement. Ambiguous, running, timed-out,
+    // unsupported, and transient provider states preserve every durable row.
+    await reconcileTerminalRetainedProcesses(
+      db,
+      settings,
+      observability,
+      probeRetainedProcess,
+      options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
     );
 
     // (1) The DB-only cross-workspace sweep. Returns the drainable rows.
@@ -261,6 +426,7 @@ export function createSandboxLeaseActivities(
           row,
           observability,
           terminateBox,
+          probeDrainableProvider,
         );
         if (drainedCold) {
           terminated += 1;
@@ -287,13 +453,24 @@ export function createSandboxLeaseActivities(
       });
     }
 
+    const checkpointGc = await gcSandboxCheckpointArtifacts(db, settings, observability).catch(
+      (error) => {
+        observability.warn("sandbox reaper: checkpoint artifact GC failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return { claimed: 0, deleted: 0, failed: 0 };
+      },
+    );
+
     await refreshQueueLeaseAndCreditGauges(db, observability);
 
     if (
       drainable.length > 0 ||
       metered.accrued > 0 ||
       forceDrained > 0 ||
-      modalOrphansTerminated > 0
+      modalOrphansTerminated > 0 ||
+      rotationsRequested > 0 ||
+      checkpointGc.claimed > 0
     ) {
       observability.info("sandbox reaper swept", {
         drainable: drainable.length,
@@ -302,6 +479,10 @@ export function createSandboxLeaseActivities(
         metered: metered.accrued,
         forceDrained,
         modalOrphansTerminated,
+        rotationsRequested,
+        checkpointArtifactsClaimed: checkpointGc.claimed,
+        checkpointArtifactsDeleted: checkpointGc.deleted,
+        checkpointArtifactsFailed: checkpointGc.failed,
       });
     }
 
@@ -316,6 +497,671 @@ export function createSandboxLeaseActivities(
   }
 
   return { reapSandboxLeases };
+}
+
+const CHECKPOINT_GC_LIMIT = 50;
+const CHECKPOINT_GC_CLAIM_TTL_MS = 10 * 60_000;
+const CHECKPOINT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60_000;
+const CHECKPOINT_TOMBSTONE_PRUNE_LIMIT = 500;
+
+async function gcSandboxCheckpointArtifacts(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+): Promise<{ claimed: number; deleted: number; failed: number }> {
+  // Explicit OPENGENI_MODAL_TOKEN_* settings are optional: the SDK also supports
+  // an operator-provisioned Modal profile. Durable artifacts must not become
+  // immortal merely because credentials arrive through that supported path.
+  const adopted = await adoptLegacyModalCheckpointReceipts(db, settings, observability).catch(
+    (error) => {
+      observability.warn("sandbox reaper: legacy Modal checkpoint discovery failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return 0;
+    },
+  );
+  if (adopted > 0) {
+    recordSandboxCheckpointArtifactOutcome(observability, "legacy_adopted", adopted);
+    observability.info("sandbox reaper: adopted legacy Modal checkpoint receipts", { adopted });
+  }
+  const claimId = crypto.randomUUID();
+  const claims = await claimSandboxCheckpointArtifactsForGc(db, {
+    claimId,
+    limit: CHECKPOINT_GC_LIMIT,
+    claimTtlMs: CHECKPOINT_GC_CLAIM_TTL_MS,
+  });
+  recordSandboxCheckpointArtifactOutcome(observability, "claimed", claims.length);
+  let deleted = 0;
+  let failed = 0;
+  for (const claim of claims) {
+    try {
+      if (claim.providerBackend !== "modal") {
+        throw new Error(`Unsupported checkpoint provider ${claim.providerBackend}`);
+      }
+      await deleteModalCheckpointSnapshot(settings, claim.providerBindingKey, claim.objectId);
+      const settled = await settleSandboxCheckpointArtifactGc(db, {
+        artifactId: claim.id,
+        claimId,
+        deleted: true,
+        retryAfterMs: 1_000,
+      });
+      if (settled) {
+        deleted += 1;
+        recordSandboxCheckpointArtifactOutcome(observability, "deleted");
+      }
+    } catch (error) {
+      failed += 1;
+      recordSandboxCheckpointArtifactOutcome(observability, "delete_failed");
+      const retryAfterMs = Math.min(
+        6 * 60 * 60_000,
+        5_000 * 2 ** Math.min(claim.deleteAttempts, 17),
+      );
+      await settleSandboxCheckpointArtifactGc(db, {
+        artifactId: claim.id,
+        claimId,
+        deleted: false,
+        error: error instanceof Error ? error.message : String(error),
+        retryAfterMs,
+      }).catch(() => false);
+      observability.warn("sandbox reaper: checkpoint artifact delete failed", {
+        artifactId: claim.id,
+        providerBackend: claim.providerBackend,
+        objectKind: claim.objectKind,
+        attempt: claim.deleteAttempts,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const pruned = await pruneDeletedSandboxCheckpointArtifacts(
+    db,
+    CHECKPOINT_TOMBSTONE_RETENTION_MS,
+    CHECKPOINT_TOMBSTONE_PRUNE_LIMIT,
+  );
+  recordSandboxCheckpointArtifactOutcome(observability, "tombstone_pruned", pruned);
+  return { claimed: claims.length, deleted, failed };
+}
+
+async function adoptLegacyModalCheckpointReceipts(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+): Promise<number> {
+  const slots = await listLegacyModalCheckpointSlots(db, 25);
+  if (slots.length === 0) return 0;
+  const bindings = new Map<
+    string,
+    Promise<Awaited<ReturnType<typeof resolveModalCheckpointProviderBindingForLiveSandbox>>>
+  >();
+  let adopted = 0;
+  for (const slot of slots) {
+    try {
+      let binding = bindings.get(slot.instanceId);
+      if (!binding) {
+        binding = resolveModalCheckpointProviderBindingForLiveSandbox(settings, slot.instanceId);
+        bindings.set(slot.instanceId, binding);
+      }
+      const resolvedBinding = await binding;
+      if (
+        await adoptLegacyModalCheckpointArtifact(db, {
+          accountId: slot.accountId,
+          workspaceId: slot.workspaceId,
+          sandboxGroupId: slot.sandboxGroupId,
+          leaseId: slot.leaseId,
+          leaseEpoch: slot.leaseEpoch,
+          workspaceGeneration: slot.workspaceGeneration,
+          slot: slot.slot,
+          archiveBase64: slot.archiveBase64,
+          descriptor: slot.descriptor,
+          providerBindingKey: resolvedBinding.key,
+          providerBinding: resolvedBinding.binding,
+        })
+      ) {
+        adopted += 1;
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: legacy Modal checkpoint adoption failed", {
+        workspaceId: slot.workspaceId,
+        sandboxGroupId: slot.sandboxGroupId,
+        slot: slot.slot,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return adopted;
+}
+
+async function reconcileTerminalRetainedProcesses(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  probe: RetainedProcessProbeFn,
+  inspectHistoricalModalSandbox: HistoricalModalSandboxLifecycleProbeFn,
+): Promise<void> {
+  const claimId = crypto.randomUUID();
+  let claims: Awaited<ReturnType<typeof claimTerminalRetainedProcesses>>;
+  try {
+    claims = await claimTerminalRetainedProcesses(db, {
+      claimId,
+      limit: RETAINED_PROCESS_RECONCILIATION_LIMIT,
+      claimTtlMs: RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS,
+    });
+  } catch (error) {
+    recordRetainedProcessReconciliation(observability, "claim_failed");
+    observability.warn("sandbox reaper: retained-process claim failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
+  for (const claim of claims) {
+    let process = claim.process;
+    const expected = retainedProcessSettlementIdentity(process);
+    let proof = retainedProcessReconciliationProof(process);
+    if (!proof) {
+      let observation: RetainedProcessProbeResult | null = null;
+
+      // Legacy rows created before provider bindings existed are adoptable only
+      // when the exact historical sandbox resolves in the configured Modal
+      // namespace. NotFound is ambiguous here: it can mean either deletion or
+      // credential rotation, so it never creates ownership or loss proof.
+      if (
+        process.providerBackend === "modal" &&
+        process.routeTargetId === null &&
+        !process.providerBindingKey
+      ) {
+        try {
+          const lifecycle = await withRetainedProcessProbeTimeout(
+            inspectHistoricalModalSandbox(settings, process.providerInstanceId, null),
+          );
+          if (lifecycle.status === "not_found") {
+            observation = { status: "deferred", reason: "provider_binding_missing" };
+          } else {
+            process = await bindRetainedProcessProviderIdentity(db, {
+              accountId: process.accountId,
+              workspaceId: process.workspaceId,
+              sessionId: process.sessionId,
+              processId: process.id,
+              expected,
+              claimId: claim.claimId,
+              providerBindingKey: lifecycle.providerBindingKey,
+              providerBinding: lifecycle.providerBinding,
+            });
+            recordRetainedProcessReconciliation(observability, "provider_binding_adopted");
+            if (lifecycle.status === "terminated") {
+              observation = {
+                status: "proved",
+                proof: {
+                  outcome: "lost",
+                  exitCode: null,
+                  reason: "provider_instance_terminated",
+                },
+              };
+            }
+          }
+        } catch (error) {
+          observation = {
+            status: "deferred",
+            reason:
+              error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "provider_error",
+          };
+        }
+      }
+
+      if (observation === null) {
+        const lease = await readLease(db, process.workspaceId, process.sandboxGroupId).catch(
+          () => null,
+        );
+        const currentLeaseIdentityMatches =
+          Boolean(lease) &&
+          lease!.id === process.leaseId &&
+          lease!.leaseEpoch === process.leaseEpoch &&
+          lease!.backend === process.providerBackend &&
+          lease!.instanceId === process.providerInstanceId &&
+          process.routeTargetId === null;
+        if (!currentLeaseIdentityMatches) {
+          // The lease may already be cold or belong to a successor. Its current
+          // resume envelope cannot interrogate the historical process, but a
+          // bound process can safely inspect the exact old Modal sandbox id.
+          if (process.providerBackend !== "modal" || process.routeTargetId !== null) {
+            observation = { status: "deferred", reason: "identity_mismatch" };
+          } else {
+            try {
+              const lifecycle = await withRetainedProcessProbeTimeout(
+                inspectHistoricalModalSandbox(
+                  settings,
+                  process.providerInstanceId,
+                  process.providerBindingKey,
+                ),
+              );
+              observation =
+                lifecycle.status === "not_found"
+                  ? {
+                      status: "proved",
+                      proof: {
+                        outcome: "lost",
+                        exitCode: null,
+                        reason: "provider_instance_not_found",
+                      },
+                    }
+                  : lifecycle.status === "terminated"
+                    ? {
+                        status: "proved",
+                        proof: {
+                          outcome: "lost",
+                          exitCode: null,
+                          reason: "provider_instance_terminated",
+                        },
+                      }
+                    : { status: "deferred", reason: "identity_mismatch" };
+            } catch (error) {
+              observation = {
+                status: "deferred",
+                reason:
+                  error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "provider_error",
+              };
+            }
+          }
+        } else {
+          try {
+            observation = await probe(settings, lease!, process);
+          } catch (error) {
+            observability.warn("sandbox reaper: retained-process provider probe failed", {
+              processId: process.id,
+              providerBackend: process.providerBackend,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            observation = { status: "deferred", reason: "provider_error" };
+          }
+        }
+      }
+      if (observation.status === "binding") {
+        try {
+          process = await bindRetainedProcessProviderIdentity(db, {
+            accountId: process.accountId,
+            workspaceId: process.workspaceId,
+            sessionId: process.sessionId,
+            processId: process.id,
+            expected,
+            claimId: claim.claimId,
+            providerBindingKey: observation.providerBindingKey,
+            providerBinding: observation.providerBinding,
+          });
+          recordRetainedProcessReconciliation(observability, "provider_binding_adopted");
+          observation = { status: "deferred", reason: "provider_running" };
+        } catch (error) {
+          observability.warn("sandbox reaper: retained-process binding adoption failed", {
+            processId: process.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          observation = { status: "deferred", reason: "provider_error" };
+        }
+      }
+      if (observation.status === "deferred") {
+        await deferRetainedProcessClaim(
+          db,
+          settings,
+          observability,
+          process,
+          expected,
+          claim.claimId,
+          observation.reason,
+        );
+        continue;
+      }
+      try {
+        process = await recordRetainedProcessReconciliationProof(db, {
+          accountId: process.accountId,
+          workspaceId: process.workspaceId,
+          sessionId: process.sessionId,
+          processId: process.id,
+          expected,
+          claimId: claim.claimId,
+          proof: observation.proof,
+        });
+        proof = observation.proof;
+        recordRetainedProcessReconciliation(observability, `proof_${proof.outcome}`);
+      } catch (error) {
+        recordRetainedProcessReconciliation(observability, "proof_checkpoint_failed");
+        observability.warn("sandbox reaper: retained-process proof checkpoint failed", {
+          processId: process.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+    }
+
+    try {
+      await settleRetainedProcess(db, {
+        accountId: process.accountId,
+        workspaceId: process.workspaceId,
+        sessionId: process.sessionId,
+        processId: process.id,
+        expected,
+        reconciliationClaimId: claim.claimId,
+        outcome: proof.outcome,
+        exitCode: proof.exitCode,
+        reason: proof.reason,
+        idleGraceMs: settings.sandboxIdleGraceMs,
+      });
+      recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
+    } catch (error) {
+      recordRetainedProcessReconciliation(observability, "settlement_failed");
+      observability.warn("sandbox reaper: retained-process settlement failed", {
+        processId: process.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await deferRetainedProcessClaim(
+        db,
+        settings,
+        observability,
+        process,
+        expected,
+        claim.claimId,
+        "settlement_failed",
+      );
+    }
+  }
+}
+
+async function deferRetainedProcessClaim(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  process: SandboxRetainedProcess,
+  expected: ReturnType<typeof retainedProcessSettlementIdentity>,
+  claimId: string,
+  outcome: RetainedProcessReconciliationOutcome,
+): Promise<void> {
+  const exponent = Math.min(4, Math.max(0, process.reconcileAttempts - 1));
+  const retryAfterMs = Math.min(
+    5 * 60_000,
+    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
+  );
+  try {
+    await deferRetainedProcessReconciliation(db, {
+      accountId: process.accountId,
+      workspaceId: process.workspaceId,
+      sessionId: process.sessionId,
+      processId: process.id,
+      expected,
+      claimId,
+      outcome,
+      retryAfterMs,
+    });
+    recordRetainedProcessReconciliation(observability, outcome);
+  } catch (error) {
+    recordRetainedProcessReconciliation(observability, "defer_failed");
+    observability.warn("sandbox reaper: retained-process defer failed", {
+      processId: process.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+type RetainedProcessProbeClient = {
+  backendId: string;
+  resume?: (state: unknown) => Promise<unknown>;
+  deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
+};
+
+type RetainedProcessProbeSession = {
+  writeStdin?: (args: {
+    sessionId: number;
+    chars: string;
+    yieldTimeMs: number;
+    maxOutputTokens: number;
+  }) => Promise<unknown>;
+};
+
+const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
+
+async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(RETAINED_PROCESS_PROBE_TIMEOUT),
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function probeRetainedProcessAtProvider(
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+  process: SandboxRetainedProcess,
+): Promise<RetainedProcessProbeResult> {
+  if (
+    lease.id !== process.leaseId ||
+    lease.sandboxGroupId !== process.sandboxGroupId ||
+    lease.leaseEpoch !== process.leaseEpoch ||
+    lease.backend !== process.providerBackend ||
+    lease.instanceId !== process.providerInstanceId ||
+    lease.resumeBackendId !== process.providerBackend ||
+    process.routeTargetId !== null
+  ) {
+    return { status: "deferred", reason: "identity_mismatch" };
+  }
+  if (!lease.resumeState) {
+    return { status: "deferred", reason: "resume_state_missing" };
+  }
+  const envelopeBackend = (lease.resumeState as { backendId?: unknown }).backendId;
+  if (envelopeBackend !== undefined && envelopeBackend !== process.providerBackend) {
+    return { status: "deferred", reason: "identity_mismatch" };
+  }
+  if (providerIdentityFromResumeState(lease.resumeState) !== process.providerInstanceId) {
+    return { status: "deferred", reason: "identity_mismatch" };
+  }
+
+  let configuredModalBinding: Awaited<
+    ReturnType<typeof resolveModalCheckpointProviderBinding>
+  > | null = null;
+  if (process.providerBackend === "modal" && process.providerBindingKey) {
+    try {
+      configuredModalBinding = await withRetainedProcessProbeTimeout(
+        resolveModalCheckpointProviderBinding(settings),
+      );
+    } catch (error) {
+      return {
+        status: "deferred",
+        reason: error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "provider_error",
+      };
+    }
+    if (configuredModalBinding.key !== process.providerBindingKey) {
+      return { status: "deferred", reason: "provider_binding_mismatch" };
+    }
+  }
+
+  let client: RetainedProcessProbeClient | undefined;
+  try {
+    client = createSandboxClientForBackend(process.providerBackend as never, settings) as
+      | RetainedProcessProbeClient
+      | undefined;
+  } catch {
+    return { status: "deferred", reason: "provider_error" };
+  }
+  if (!client || client.backendId !== process.providerBackend || !client.resume) {
+    return { status: "deferred", reason: "backend_unsupported" };
+  }
+  const envelopeSessionState =
+    (lease.resumeState as { sessionState?: unknown }).sessionState ?? lease.resumeState;
+  let resumedState: unknown;
+  try {
+    resumedState = await deserializeSandboxSessionStateEnvelope(
+      client as never,
+      envelopeSessionState,
+    );
+  } catch {
+    return { status: "deferred", reason: "provider_error" };
+  }
+  if (resumedState === undefined) {
+    return { status: "deferred", reason: "resume_state_missing" };
+  }
+
+  let session: RetainedProcessProbeSession;
+  try {
+    session = (await withRetainedProcessProbeTimeout(
+      client.resume(resumedState),
+    )) as RetainedProcessProbeSession;
+  } catch (error) {
+    if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
+      return { status: "deferred", reason: "provider_timeout" };
+    }
+    if (isProviderSandboxNotFoundError(client.backendId, error)) {
+      if (process.providerBackend === "modal" && !process.providerBindingKey) {
+        return { status: "deferred", reason: "provider_binding_missing" };
+      }
+      return {
+        status: "proved",
+        proof: {
+          outcome: "lost",
+          exitCode: null,
+          reason: "provider_instance_not_found",
+        },
+      };
+    }
+    return { status: "deferred", reason: "provider_error" };
+  }
+  if (typeof session.writeStdin !== "function") {
+    return { status: "deferred", reason: "backend_unsupported" };
+  }
+  if (process.providerBackend === "modal") {
+    let liveBinding: Awaited<ReturnType<typeof resolveModalCheckpointProviderBindingForSession>>;
+    try {
+      liveBinding = await withRetainedProcessProbeTimeout(
+        resolveModalCheckpointProviderBindingForSession(settings, session),
+      );
+    } catch (error) {
+      return {
+        status: "deferred",
+        reason: error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "provider_error",
+      };
+    }
+    if (!process.providerBindingKey) {
+      return {
+        status: "binding",
+        providerBindingKey: liveBinding.key,
+        providerBinding: liveBinding.binding,
+      };
+    }
+    if (
+      liveBinding.key !== process.providerBindingKey ||
+      configuredModalBinding?.key !== process.providerBindingKey
+    ) {
+      return { status: "deferred", reason: "provider_binding_mismatch" };
+    }
+  }
+
+  let result: unknown;
+  try {
+    result = await withRetainedProcessProbeTimeout(
+      session.writeStdin({
+        sessionId: process.providerSessionId,
+        chars: "",
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 2_000,
+      }),
+    );
+  } catch (error) {
+    if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
+      return { status: "deferred", reason: "provider_timeout" };
+    }
+    if (isProviderSandboxNotFoundError(client.backendId, error)) {
+      if (process.providerBackend === "modal" && !process.providerBindingKey) {
+        return { status: "deferred", reason: "provider_binding_missing" };
+      }
+      return {
+        status: "proved",
+        proof: {
+          outcome: "lost",
+          exitCode: null,
+          reason: "provider_instance_not_found",
+        },
+      };
+    }
+    return { status: "deferred", reason: "provider_error" };
+  }
+  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId);
+  if (
+    observation.status === "deferred" &&
+    observation.reason === "provider_running" &&
+    lease.rotationRequestedAt !== null
+  ) {
+    // A background PTY cannot outlive the finite provider box. Interrupt only
+    // this exact durable provider session after rotation admission is fenced;
+    // settlement still requires an exit/loss banner on this or a later sweep.
+    try {
+      const interrupted = await withRetainedProcessProbeTimeout(
+        session.writeStdin({
+          sessionId: process.providerSessionId,
+          chars: "\u0003",
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 2_000,
+        }),
+      );
+      return classifyRetainedProcessPollResult(interrupted, process.providerSessionId);
+    } catch (error) {
+      if (isProviderSandboxNotFoundError(client.backendId, error)) {
+        if (process.providerBackend === "modal" && !process.providerBindingKey) {
+          return { status: "deferred", reason: "provider_binding_missing" };
+        }
+        return {
+          status: "proved",
+          proof: {
+            outcome: "lost",
+            exitCode: null,
+            reason: "provider_instance_not_found",
+          },
+        };
+      }
+      return {
+        status: "deferred",
+        reason: error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "provider_error",
+      };
+    }
+  }
+  return observation;
+}
+
+/** Classify only exact SDK control banners. Arbitrary output, malformed text,
+ * and a running marker are observations to retry; none is physical exit proof. */
+export function classifyRetainedProcessPollResult(
+  result: unknown,
+  providerSessionId: number,
+): RetainedProcessProbeResult {
+  if (typeof result !== "string") {
+    return { status: "deferred", reason: "provider_unknown" };
+  }
+  if (isExecSessionLostBanner(result, providerSessionId)) {
+    return {
+      status: "proved",
+      proof: {
+        outcome: "lost",
+        exitCode: null,
+        reason: "provider_session_lost_banner",
+      },
+    };
+  }
+  const exitCode = parseExecBannerExitCode(result);
+  if (exitCode !== null) {
+    return {
+      status: "proved",
+      proof: { outcome: "exited", exitCode, reason: "provider_exit_banner" },
+    };
+  }
+  return {
+    status: "deferred",
+    reason: result.includes("Process running with session ID")
+      ? "provider_running"
+      : "provider_unknown",
+  };
 }
 
 /**
@@ -380,17 +1226,71 @@ async function refreshQueueLeaseAndCreditGauges(
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  try {
+  await refreshSandboxInventoryGauge(observability, "leases", "sandbox-lease", async () => {
     recordSandboxLeaseGauges(observability, await countSandboxLeasesByLiveness(db));
-  } catch (error) {
-    observability.warn("sandbox reaper: sandbox-lease gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  });
+  await refreshSandboxInventoryGauge(
+    observability,
+    "checkpoint_artifacts",
+    "checkpoint-artifact",
+    async () => {
+      recordSandboxCheckpointArtifactGauges(
+        observability,
+        await countSandboxCheckpointArtifactsByState(db),
+      );
+    },
+  );
+  await refreshSandboxInventoryGauge(
+    observability,
+    "rotation_backlog",
+    "rotation-backlog",
+    async () => {
+      recordSandboxRotationBacklogGauges(observability, await readSandboxRotationBacklog(db));
+    },
+  );
+  await refreshSandboxInventoryGauge(
+    observability,
+    "retained_processes",
+    "retained-process",
+    async () => {
+      recordRetainedProcessInventoryGauges(
+        observability,
+        await countActiveRetainedProcessesByOwnerState(db),
+      );
+    },
+  );
+  await refreshSandboxInventoryGauge(
+    observability,
+    "expired_drains",
+    "expired-draining",
+    async () => {
+      recordExpiredDrainingSandboxLeaseGauges(
+        observability,
+        await countExpiredDrainingSandboxLeases(db),
+      );
+    },
+  );
   try {
     recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
   } catch (error) {
     observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function refreshSandboxInventoryGauge(
+  observability: ActivityServices["observability"],
+  domain: SandboxInventoryProjectionDomain,
+  diagnosticName: string,
+  refresh: () => Promise<void>,
+): Promise<void> {
+  try {
+    await refresh();
+    recordSandboxInventoryProjectionSuccess(observability, domain);
+  } catch (error) {
+    recordSandboxInventoryProjectionFailure(observability, domain);
+    observability.warn(`sandbox reaper: ${diagnosticName} gauge refresh failed`, {
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -412,10 +1312,6 @@ async function forceDrainOverLimitWorkspaces(
   const enforceBalance =
     settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   const cap = settings.sandboxMaxWarmSecondsPerWorkspace;
-  // Nothing to enforce → skip the whole pass (no lock churn).
-  if (!enforceBalance && cap <= 0) {
-    return 0;
-  }
   let forceDrained = 0;
   for (const workspaceId of workspaceIds) {
     try {
@@ -519,6 +1415,78 @@ async function sweepModalOrphansForConfiguredBackend(
 }
 
 /**
+ * A capture claim whose owning worker disappeared must not fence a workspace
+ * forever. The drain reaper reaches this seam only after every holder is gone.
+ * It resumes the exact attributed provider without replacement and proves that
+ * a no-op command can execute. A paused snapshot cannot pass that proof; a
+ * missing provider is returned as typed loss; every ambiguous error preserves
+ * the old claim for the next sweep.
+ */
+async function probeDrainableProviderReadiness(
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+): Promise<"ready" | "missing"> {
+  if (!lease.instanceId || !lease.resumeState) {
+    throw new Error("Expired workspace capture has no resumable provider identity");
+  }
+  const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
+  const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
+  let established: Awaited<ReturnType<typeof establishSandboxSessionFromEnvelope>>;
+  try {
+    established = await establishSandboxSessionFromEnvelope(settings, lease.resumeState, {
+      sessionId: `sandbox-capture-recovery:${lease.sandboxGroupId}`,
+      recovery: "resume-only",
+      backendOverride: backend as never,
+    });
+  } catch (error) {
+    if (isProviderSandboxNotFoundError(backend, error)) return "missing";
+    throw error;
+  }
+  if (established.instanceId !== lease.instanceId) {
+    throw new Error("Expired workspace capture resumed a different provider instance");
+  }
+  try {
+    if (established.backendId === "modal") {
+      await verifySandboxExecReadiness(established, RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS);
+      return "ready";
+    }
+    const session = established.session as {
+      exec?: (args: {
+        cmd: string;
+        yieldTimeMs?: number;
+        maxOutputTokens?: number;
+      }) => Promise<unknown>;
+      execCommand?: (args: {
+        cmd: string;
+        yieldTimeMs?: number;
+        maxOutputTokens?: number;
+      }) => Promise<unknown>;
+    };
+    const run = session.exec ?? session.execCommand;
+    if (!run) throw new Error("Expired workspace capture provider has no readiness command");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      run.call(session, { cmd: "true", yieldTimeMs: 1_000, maxOutputTokens: 1_000 }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Expired workspace capture readiness probe timed out")),
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+        );
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+    if (sandboxCommandStillRunning(result) || sandboxCommandExitCode(result) !== 0) {
+      throw new Error("Expired workspace capture provider is not command-ready");
+    }
+    return "ready";
+  } catch (error) {
+    if (isProviderSandboxNotFoundError(backend, error)) return "missing";
+    throw error;
+  }
+}
+
+/**
  * Terminate one drainable box by id, then CAS its lease draining->cold under the
  * epoch fence. Returns true when the lease went cold (the box is ours to stop
  * and was stopped), false when a concurrent sweep / re-arm / newer epoch means
@@ -541,6 +1509,7 @@ async function terminateDrainableBox(
   row: ReapDrainable,
   observability: ActivityServices["observability"],
   terminateBox: TerminateBoxFn,
+  probeDrainableProvider: DrainableProviderProbeFn,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -563,6 +1532,79 @@ async function terminateDrainableBox(
     return false;
   }
 
+  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+  let captureClaim:
+    | NonNullable<
+        Extract<Awaited<ReturnType<typeof claimWorkspaceArchiveCapture>>, { status: "claimed" }>
+      >["claim"]
+    | null = null;
+  let providerMissingBeforeCapture = false;
+  if (lease.instanceId) {
+    if (lease.archiveCapture) {
+      if (lease.archiveCapture.deadlineAt.getTime() > Date.now()) {
+        // A live owner still holds the provider pause gate. It will release the
+        // exact claim on settlement; this sweep must not compete.
+        return false;
+      }
+      // A deadline is never evidence that a non-cancellable provider capture
+      // stopped. Without an exact resume envelope there is no safe way to prove
+      // the attributed provider is command-ready, so preserve the gate.
+      if (!lease.resumeState) return false;
+      const providerState = await probeDrainableProvider(settings, lease);
+      if (providerState === "missing") {
+        providerMissingBeforeCapture = true;
+        captureClaim = {
+          ...lease.archiveCapture,
+          leaseId: lease.id,
+          leaseEpoch: lease.leaseEpoch,
+          instanceId: lease.instanceId,
+          archiveGeneration: lease.archiveGeneration,
+          archiveComplete: lease.archiveComplete,
+        };
+      } else {
+        const replacement = await replaceExpiredWorkspaceArchiveCapture(db, {
+          accountId,
+          workspaceId: row.workspaceId,
+          sandboxGroupId: row.sandboxGroupId,
+          priorCaptureId: lease.archiveCapture.id,
+          captureId: randomUUID(),
+          expectedEpoch: row.leaseEpoch,
+          expectedInstanceId: lease.instanceId,
+          captureTimeoutMs,
+        });
+        if (!replacement) return false;
+        captureClaim = replacement;
+      }
+    } else {
+      const claimed = await claimWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId: row.workspaceId,
+        sandboxGroupId: row.sandboxGroupId,
+        captureId: randomUUID(),
+        expectedEpoch: row.leaseEpoch,
+        expectedInstanceId: lease.instanceId,
+        liveness: "draining",
+        captureTimeoutMs,
+        minIntervalMs: 0,
+      });
+      if (claimed.status === "claimed") {
+        captureClaim = claimed.claim;
+      } else if (claimed.status === "mutation_in_progress") {
+        // An admission is normally authoritative proof that a provider
+        // operation may still be running. It cannot, however, pin a draining
+        // lease forever after the exact provider has disappeared. Probe the
+        // attributed instance without replacement. Only typed NotFound permits
+        // the cold commit to reject the exact stale admissions; a live or
+        // ambiguous provider remains fenced for a later sweep.
+        const providerState = await probeDrainableProvider(settings, lease);
+        if (providerState !== "missing") return false;
+        providerMissingBeforeCapture = true;
+      } else {
+        return false;
+      }
+    }
+  }
+
   // The epoch-fenced PERSIST-onto-lease CAS the terminate seam calls AFTER it has
   // snapshotted the live box and BEFORE it terminates (sandbox-file-persistence).
   // Same guard as confirmDrainCold (draining AND refcount=0 AND lease_epoch=
@@ -572,82 +1614,181 @@ async function terminateDrainableBox(
   // the durable sandbox.box.terminated event below carries it, so a "terminated
   // with NOTHING persisted" (box already dead at drain) is visible in the DB.
   let persisted = false;
-  const persistArchive: PersistArchiveFn = async (archiveBase64: string | null) => {
-    const result = await persistDrainSnapshot(db, {
+  let archiveRevision: string | null = null;
+  const persistArchive: PersistArchiveFn = async (
+    archiveBase64: string | null,
+    archiveMetadata?: WorkspaceArchiveDescriptor,
+    _providerSession?: unknown,
+    providerBinding?: Awaited<
+      ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
+    > | null,
+  ) => {
+    // A live persistable provider must own the exact durable capture claim.
+    // Without it we cannot prove that these bytes came from a provider that was
+    // admission-fenced for the full pause/capture interval.
+    if (!lease.instanceId || !captureClaim) {
+      return { wrote: false, archiveRevision: null };
+    }
+    let checkpointArtifactId: string | null = null;
+    if (
+      archiveBase64 &&
+      archiveMetadata?.version === 2 &&
+      (archiveMetadata.provider === "modal_snapshot_filesystem" ||
+        archiveMetadata.provider === "modal_snapshot_directory")
+    ) {
+      if (!providerBinding) {
+        throw new Error("Modal native snapshot has no exact session provider identity");
+      }
+      const candidate = await registerSandboxCheckpointArtifact(db, {
+        accountId,
+        workspaceId: row.workspaceId,
+        sandboxGroupId: row.sandboxGroupId,
+        sourceLeaseId: lease.id,
+        sourceLeaseEpoch: row.leaseEpoch,
+        sourceInstanceId: lease.instanceId,
+        sourceWorkspaceGeneration: captureClaim.workspaceGeneration,
+        providerBindingKey: providerBinding.key,
+        providerBinding: providerBinding.binding,
+        workspaceArchive: archiveBase64,
+        workspaceArchiveMeta: archiveMetadata,
+      });
+      checkpointArtifactId = candidate.id;
+    }
+    const baseInput = {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
       expectedEpoch: row.leaseEpoch,
-      workspaceArchive: archiveBase64,
-    });
+      expectedInstanceId: lease.instanceId,
+      expectedWorkspaceGeneration: captureClaim.workspaceGeneration,
+      captureId: captureClaim.id,
+    };
+    let result: Awaited<ReturnType<typeof persistDrainSnapshot>>;
+    if (archiveBase64 === null) {
+      result = await persistDrainSnapshot(db, { ...baseInput, workspaceArchive: null });
+    } else {
+      if (!archiveMetadata) {
+        throw new Error("Sandbox snapshot publication requires a verified archive descriptor");
+      }
+      result = await persistDrainSnapshot(db, {
+        ...baseInput,
+        workspaceArchive: archiveBase64,
+        workspaceArchiveMeta: archiveMetadata,
+        ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
+      });
+    }
+    if (!result.wrote && checkpointArtifactId) {
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId,
+        workspaceId: row.workspaceId,
+        artifactId: checkpointArtifactId,
+        reason: "drain_snapshot_publication_fenced",
+      }).catch(() => undefined);
+    }
     if (result.wrote && archiveBase64 !== null) {
       persisted = true;
+      archiveRevision = result.archiveRevision;
     }
     return result;
   };
 
-  // Resume-by-id -> persistWorkspace -> persist-onto-lease -> GC prior snapshot ->
-  // provider terminate. A box that is already gone (NotFound) is success (the goal
-  // is "box is not running"). A genuine PERSIST failure (could not snapshot) or a
-  // resume failure on a box that IS alive re-throws -> the lease stays draining for
-  // the next sweep (NEVER terminate a box whose files we could not capture). A
-  // persist CAS-miss (re-armed) returns false -> the box was left running; skip the
-  // cold-commit so the re-armed box is not cold-leaked.
-  const terminated = await terminateBox(settings, lease, observability, persistArchive);
-  if (!terminated) {
-    return false;
-  }
+  // Resume-by-id -> verified capture -> persist-onto-lease -> provider
+  // terminate. Persisting atomically hands any displaced provider snapshot to
+  // the provider-bound artifact ledger; its global GC worker owns deletion.
+  // Definitive NotFound before capture is a typed loss, not ordinary teardown
+  // success: confirmDrainCold preserves any prior archive or marks recovery
+  // unrecoverable when none exists. A genuine capture/resume failure leaves the
+  // lease draining for a later sweep (NEVER terminate a box whose files we
+  // could not capture). A persist CAS miss means the box was re-armed and left
+  // running, so the cold commit is skipped.
+  try {
+    const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
+      ? { terminated: true, providerMissingBeforeCapture: true }
+      : await terminateBox(settings, lease, observability, persistArchive);
+    const terminated = typeof termination === "boolean" ? termination : termination.terminated;
+    if (!terminated) {
+      return false;
+    }
 
-  // The authoritative commit: CAS draining->cold under the epoch fence. If a
-  // late re-arm or newer epoch raced in after our re-read, wentCold:false and we
-  // report a skip (the box is down; a fresh acquire cold-restores it).
-  const { wentCold } = await confirmDrainCold(db, {
-    accountId,
-    workspaceId: row.workspaceId,
-    sandboxGroupId: row.sandboxGroupId,
-    expectedEpoch: row.leaseEpoch,
-  });
-  if (wentCold) {
-    // Durable termination record (sandbox-file-persistence observability): who
-    // ended this box and whether its /workspace was captured first, appended to
-    // every session sharing the group's box. Best-effort: attribution must
-    // never affect the drain outcome.
-    try {
-      await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
-        type: "sandbox.box.terminated",
-        payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
-      });
-    } catch (eventError) {
-      observability.warn(
-        "sandbox reaper: box-terminated event write failed (drain outcome unaffected)",
-        {
+    const providerMissing =
+      providerMissingBeforeCapture ||
+      (typeof termination === "boolean" ? false : termination.providerMissingBeforeCapture);
+    // The authoritative commit: CAS draining->cold under the epoch fence. If a
+    // late re-arm or newer epoch raced in after our re-read, wentCold:false and we
+    // report a skip (the box is down; a fresh acquire cold-restores it).
+    const { wentCold } = await confirmDrainCold(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      providerMissingBeforeCapture: providerMissing,
+    });
+    if (wentCold) {
+      // Durable termination record (sandbox-file-persistence observability): who
+      // ended this box and whether its /workspace was captured first, appended to
+      // every session sharing the group's box. Best-effort: attribution must
+      // never affect the drain outcome.
+      try {
+        await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
+          type: "sandbox.box.terminated",
+          payload: {
+            actor: "reaper",
+            persisted,
+            archiveRevision,
+            instanceId: lease.instanceId,
+            providerMissingBeforeCapture: providerMissing,
+          },
+        });
+      } catch (eventError) {
+        observability.warn(
+          "sandbox reaper: box-terminated event write failed (drain outcome unaffected)",
+          {
+            sandboxGroupId: row.sandboxGroupId,
+            error: eventError instanceof Error ? eventError.message : String(eventError),
+          },
+        );
+      }
+    }
+    return wentCold;
+  } finally {
+    if (captureClaim && lease.instanceId) {
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId: row.workspaceId,
+        sandboxGroupId: row.sandboxGroupId,
+        captureId: captureClaim.id,
+        expectedEpoch: row.leaseEpoch,
+        expectedInstanceId: lease.instanceId,
+      }).catch((error) => {
+        observability.warn("sandbox reaper: archive capture gate release failed", {
           sandboxGroupId: row.sandboxGroupId,
-          error: eventError instanceof Error ? eventError.message : String(eventError),
-        },
-      );
+          leaseEpoch: row.leaseEpoch,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
   }
-  return wentCold;
 }
 
 // The persist-capable slice of a live provider session. persistWorkspace()
 // snapshots /workspace (snapshot_filesystem → a Modal snapshot-ref; tar → a tar
-// archive) and returns the archive bytes. modal carries the Modal SDK client used
-// for snapshot-image GC (deletePriorPersistedSnapshot reads session.modal).
+// archive) and returns the archive bytes. The session also carries the Modal SDK
+// client used to bind the snapshot receipt to the exact provider namespace.
 type PersistableSession = TerminableSession & {
   persistWorkspace?: () => Promise<Uint8Array | undefined>;
 };
 
 /**
  * Resume/attach the box by id, PERSIST its /workspace, fold the snapshot onto the
- * lease under the epoch fence, GC the superseded snapshot, THEN terminate. Resumes
- * DIRECTLY (no cold-restore fallback) so a gone box is a clean no-op, never a
- * wasteful create-then-kill:
+ * lease under the epoch fence, hand the superseded snapshot to durable GC, THEN
+ * terminate. Resumes DIRECTLY (no cold-restore fallback) so a gone box is a clean
+ * no-op, never a wasteful create-then-kill:
  *   - build the client for the lease's backend;
  *   - deserialize + resume the envelope (warm reattach by id, R4-safe);
  *   - session.persistWorkspace() -> capture the /workspace archive;
- *   - persistArchive(base64) -> CAS-fold it onto the lease (epoch-fenced);
- *   - GC the PRIOR snapshot (keep-latest-per-lease);
+ *   - persistArchive(base64) -> CAS-fold it onto the lease and atomically mark
+ *     the displaced artifact delete-pending;
+ *   - the provider-bound global GC deletes that object asynchronously;
  *   - terminate the live handle (client.delete / session kill|terminate|close).
  *
  * Returns true when the box was terminated (or was already gone), false when the
@@ -671,11 +1812,12 @@ export async function terminateProviderBox(
   observability: ActivityServices["observability"],
   persistArchive: PersistArchiveFn,
   createClientForBackend: CreateSandboxClientForBackendFn = createSandboxClientForBackend,
-): Promise<boolean> {
-  const backend = (lease.resumeBackendId ?? lease.backend) as string;
+): Promise<ProviderTerminationOutcome> {
+  const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
+  const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
   // 'none' / no backend -> nothing to terminate.
   if (!backend || backend === "none") {
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // CRITICAL SAFETY (bring-your-own-compute): NEVER provider-stop
@@ -699,7 +1841,7 @@ export async function terminateProviderBox(
         backend,
       },
     );
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // A warming-death row can have a provider instance id recorded immediately
@@ -717,7 +1859,7 @@ export async function terminateProviderBox(
           instanceId: lease.instanceId,
         },
       );
-      return false;
+      return { terminated: false, providerMissingBeforeCapture: false };
     }
     try {
       await terminateModalSandboxById(settings, lease.instanceId);
@@ -731,19 +1873,22 @@ export async function terminateProviderBox(
         instanceId: lease.instanceId,
       });
     }
-    return true;
+    // This branch is a warming-death box recorded before any resumable envelope
+    // was published. It was never a ready workspace, so a missing instance does
+    // not imply loss of a previously exposed workspace revision.
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // resume_state is the folded group box-envelope (the provider sessionState the
   // box was last persisted as). No envelope -> no live box to stop.
   if (!lease.resumeState) {
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   const client = createClientForBackend(backend as never, settings) as TerminableClient | undefined;
   if (!client) {
     // 'none' backend resolved to no client.
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // Resume by id (warm reattach) — NO cold-restore. A NotFound here = the box is
@@ -752,9 +1897,10 @@ export async function terminateProviderBox(
   let sessionState: unknown;
   try {
     if (!client.resume || !client.deserializeSessionState) {
-      // A backend that cannot resume cannot be attached-to for terminate; the
-      // provider idle-timeout is the backstop. No-op.
-      return true;
+      // A cloud backend that cannot prove provider state is not safely
+      // terminable: treating this as success would cold the lease while the
+      // provider may still be live. Leave it draining for a later retry.
+      throw new Error(`sandbox backend ${backend} cannot resume a drainable provider box`);
     }
     // resume_state is the lease ENVELOPE: `{ backendId, sessionState: {
     // providerState: { sandboxId, ... }, manifest, ... } }` (the shape
@@ -774,20 +1920,17 @@ export async function terminateProviderBox(
       envelopeSessionState,
     );
     if (resumedState === undefined) {
-      return true;
+      throw new Error(`sandbox backend ${backend} returned no resumable provider state`);
     }
     session = (await client.resume(resumedState)) as PersistableSession;
     sessionState = resumedState;
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
-      observability.info(
-        "sandbox reaper: drainable box already gone (NotFound on resume) — proceeding to cold",
-        {
-          sandboxGroupId: lease.sandboxGroupId,
-          backend,
-        },
-      );
-      return true;
+      observability.info("sandbox reaper: drainable box already gone before workspace capture", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      });
+      return { terminated: true, providerMissingBeforeCapture: true };
     }
     // Re-throw a non-NotFound resume failure so the caller SKIPS (the lease stays
     // draining for the next sweep) — never cold a box we could not prove is gone.
@@ -798,19 +1941,29 @@ export async function terminateProviderBox(
   // snapshot must re-throw BEFORE any terminate so files are never lost — the next
   // sweep retries, the provider idle-timeout is the backstop. A NotFound here (the
   // box raced gone between resume and persist) is success: nothing to persist.
-  let archiveBytes: Uint8Array | undefined;
+  let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>> | undefined;
+  const sessionWorkspacePersistence = (
+    session as { state?: { workspacePersistence?: unknown } } | undefined
+  )?.state?.workspacePersistence;
+  const checkpointBinding =
+    backend === "modal" &&
+    (sessionWorkspacePersistence === "snapshot_filesystem" ||
+      sessionWorkspacePersistence === "snapshot_directory")
+      ? await withRetainedProcessProbeTimeout(
+          resolveModalCheckpointProviderBindingForSession(settings, session),
+        )
+      : null;
   try {
-    archiveBytes = session?.persistWorkspace ? await session.persistWorkspace() : undefined;
+    verifiedArchive = session?.persistWorkspace
+      ? await captureVerifiedWorkspaceArchive(session)
+      : undefined;
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
-      observability.info(
-        "sandbox reaper: box gone during persist (NotFound) — nothing to snapshot, proceeding to cold",
-        {
-          sandboxGroupId: lease.sandboxGroupId,
-          backend,
-        },
-      );
-      return true;
+      observability.info("sandbox reaper: box gone during workspace capture", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      });
+      return { terminated: true, providerMissingBeforeCapture: true };
     }
     observability.warn(
       "sandbox reaper: persistWorkspace failed — leaving box draining (files NOT lost)",
@@ -836,9 +1989,13 @@ export async function terminateProviderBox(
   // so without this check we would delete a box the lease now treats as live. The
   // null-archive path of persistArchive does exactly this: FOR UPDATE + liveness/
   // refcount/epoch guard, no write. wrote:false → abort the terminate.
-  if (archiveBytes && archiveBytes.length > 0) {
-    const archiveBase64 = Buffer.from(archiveBytes).toString("base64");
-    const { wrote, priorArchive, priorArchivePrev } = await persistArchive(archiveBase64);
+  if (verifiedArchive) {
+    const { wrote } = await persistArchive(
+      verifiedArchive.base64,
+      verifiedArchive.descriptor,
+      session,
+      checkpointBinding,
+    );
     if (!wrote) {
       observability.info(
         "sandbox reaper: lease re-armed during persist — leaving box RUNNING (no terminate)",
@@ -847,41 +2004,15 @@ export async function terminateProviderBox(
           backend,
         },
       );
-      return false;
-    }
-    // Keep-latest-per-lease GC: best-effort delete the prior snapshot image now,
-    // while the session (and its Modal client) is still live. Never throws.
-    const deleted = await deletePriorPersistedSnapshot(session, priorArchive);
-    if (deleted) {
-      observability.info("sandbox reaper: GC'd superseded workspace snapshot", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-        snapshotId: deleted,
-      });
-    }
-    const deletedPrev = await deletePriorPersistedSnapshot(session, priorArchivePrev);
-    if (deletedPrev) {
-      observability.info("sandbox reaper: GC'd superseded previous workspace snapshot", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-        snapshotId: deletedPrev,
-      });
+      return { terminated: false, providerMissingBeforeCapture: false };
     }
   } else {
-    // No archive produced (backend has no persistWorkspace or returned empty).
-    // CAS-check via persistArchive(null): if the lease was re-armed during the
-    // snapshot window, wrote:false → leave the box RUNNING (abort terminate).
-    const { wrote } = await persistArchive(null);
-    if (!wrote) {
-      observability.info(
-        "sandbox reaper: lease re-armed during snapshot window (no-archive path) — leaving box RUNNING (no terminate)",
-        {
-          sandboxGroupId: lease.sandboxGroupId,
-          backend,
-        },
-      );
-      return false;
-    }
+    // A resumable cloud box that produces no verified archive cannot be safely
+    // deleted: it may contain work newer than the lease's last durable revision.
+    // Keep the lease draining and retry instead of knowingly discarding bytes.
+    throw new Error(
+      `sandbox backend ${backend} produced no verified workspace archive during drain`,
+    );
   }
 
   // Provider terminate. Prefer the client.delete(state) teardown (the canonical
@@ -890,25 +2021,33 @@ export async function terminateProviderBox(
   try {
     if (client.delete && sessionState !== undefined) {
       await client.delete(sessionState);
-      return true;
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
     if (session?.kill) {
       await session.kill();
-      return true;
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
     if (session?.terminate) {
       await session.terminate();
-      return true;
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
-    if (session?.close && !session.closed) {
-      await session.close();
+    if (session?.close) {
+      if (!session.closed) {
+        await session.close();
+      }
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
   } catch (error) {
-    observability.warn("sandbox reaper: provider terminate raised (box may already be gone)", {
-      sandboxGroupId: lease.sandboxGroupId,
-      backend,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    if (isProviderSandboxNotFoundError(client.backendId, error)) {
+      observability.info("sandbox reaper: provider already gone during terminate", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      });
+      // Capture was already durably folded above, so this is not a
+      // missing-before-capture outcome.
+      return { terminated: true, providerMissingBeforeCapture: false };
+    }
+    throw error;
   }
-  return true;
+  throw new Error(`sandbox backend ${backend} exposes no provider termination method`);
 }

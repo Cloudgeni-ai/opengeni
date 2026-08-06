@@ -22,7 +22,9 @@ export {
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  mcpToolLeaf,
   toolDisplayName,
+  toolMatchesLeaf,
 } from "./projection";
 
 // item types
@@ -30,7 +32,12 @@ export type {
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
+  ContextCompactionItem,
+  FleetDecisionItem,
+  FleetDecisionScoreItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   MemoryItem,
   NoticeItem,
   ReasoningItem,
@@ -81,13 +88,34 @@ export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot
 // disclosure defaults (opt-in initial-open seed; for screenshot/test instrumentation)
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";
 
+// fold memory (cross-remount resting state so wraps never reopen settled folds)
+export { FoldMemoryProvider, inheritFoldRestingState, useFoldMemory } from "./fold-memory";
+export type { FoldRestingState } from "./fold-memory";
+
+// seen activity ids (live tool enter across rail remounts)
+export { SeenActivityIdsProvider, useSeenActivityIds } from "./seen-activity-ids";
+
+// session compute label (host-supplied active machine / cloud sandbox name)
+export { TimelineComputeLabelProvider, useTimelineComputeLabel } from "./compute-label";
+
 // turn-collapse summary chip
-export { TurnSummary } from "./turn-summary";
-export type { TurnOutcome, TurnSummaryProps } from "./turn-summary";
+export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary, useTurnSettleOpen } from "./turn-summary";
+export type {
+  BuiltInTurnSummaryFacetId,
+  TurnOutcome,
+  TurnSummaryContext,
+  TurnSummaryFacet,
+  TurnSummaryFacetConfiguration,
+  TurnSummaryFacetResult,
+  TurnSummaryOptions,
+  TurnSummaryProps,
+} from "./turn-summary";
 
 // parsers (pure, reusable by custom renderers)
 export {
   applyPatchOps,
+  applyPatchOpsFromToolItem,
+  parseFreeformApplyPatch,
   controlCaret,
   execTruncated,
   isApplyPatch,
@@ -95,7 +123,6 @@ export {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,

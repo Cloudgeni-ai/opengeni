@@ -353,59 +353,65 @@ async function writeReceiptFromEnvironment(): Promise<void> {
   console.log(JSON.stringify({ path: outputPath, sha256, receipt }));
 }
 
-async function verifyReceiptFile(args: {
+export async function verifyReceiptFile(args: {
   path: string;
   sourceSha: string;
-  expectedPackages: string;
+  expectedPackages: string | null;
 }): Promise<void> {
   const raw = await readFile(resolve(args.path), "utf8");
   if (raw.length > 1024 * 1024) {
     throw new Error("release candidate receipt exceeds 1 MiB");
   }
+  const packageExpectation =
+    args.expectedPackages === null
+      ? {}
+      : { packages: parseExpectedPackages(args.expectedPackages) };
   const receipt = validateReleaseCandidateReceipt(
     parseJson<unknown>("release candidate receipt", raw),
     {
       sourceSha: args.sourceSha,
-      packages: parseExpectedPackages(args.expectedPackages),
       ociPrefix: releaseOciPrefixFromEnvironment(),
+      ...packageExpectation,
     },
   );
   console.log(JSON.stringify({ ok: true, receipt }));
 }
 
-function parseArgs(values: string[]): {
+export function parseReleaseCandidateArgs(values: string[]): {
   verifyPath: string | null;
   sourceSha: string;
-  expectedPackages: string;
+  expectedPackages: string | null;
 } {
   const output = {
     verifyPath: null as string | null,
     sourceSha: "",
-    expectedPackages: "",
+    expectedPackages: null as string | null,
   };
   for (let index = 0; index < values.length; index += 1) {
     const flag = values[index];
-    const next = () => {
-      const value = values[++index];
-      if (!value) throw new Error(`${flag} requires a value`);
+    const next = (allowEmpty = false) => {
+      index += 1;
+      if (index >= values.length) throw new Error(`${flag} requires a value`);
+      const value = values[index] ?? "";
+      if (!allowEmpty && !value) throw new Error(`${flag} requires a value`);
       return value;
     };
     if (flag === "--verify") output.verifyPath = next();
     else if (flag === "--source-sha") output.sourceSha = next();
-    else if (flag === "--expected-packages") {
-      const value = values[++index];
-      if (value === undefined) throw new Error(`${flag} requires a value`);
-      output.expectedPackages = value;
-    } else throw new Error(`unknown argument: ${flag}`);
+    else if (flag === "--expected-packages") output.expectedPackages = next(true);
+    else throw new Error(`unknown argument: ${flag}`);
   }
   if (output.verifyPath && !output.sourceSha) {
     throw new Error("--verify requires --source-sha");
+  }
+  if (output.expectedPackages !== null && !output.verifyPath) {
+    throw new Error("--expected-packages requires --verify");
   }
   return output;
 }
 
 if (import.meta.main) {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseReleaseCandidateArgs(process.argv.slice(2));
   if (args.verifyPath) {
     await verifyReceiptFile({
       path: args.verifyPath,

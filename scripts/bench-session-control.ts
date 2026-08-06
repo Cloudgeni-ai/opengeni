@@ -50,12 +50,13 @@ try {
     insert into sessions (
       id, account_id, workspace_id, status, initial_message, title,
       resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
-      temporal_workflow_id
+      temporal_workflow_id, tool_policy
     ) values (
       ${rootId}::uuid, ${accountId}::uuid, ${workspaceId}::uuid, 'idle',
       'benchmark root', 'Benchmark root', '[]'::jsonb, '[]'::jsonb,
       jsonb_build_object('bench_index', 0), 'benchmark-model', 'none',
-      ${rootId}::uuid, ${`session-${rootId}`}
+      ${rootId}::uuid, ${`session-${rootId}`},
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
     )
   `;
   if (sessionCount > 1) {
@@ -63,7 +64,7 @@ try {
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, title,
         resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
-        parent_session_id, temporal_workflow_id
+        parent_session_id, temporal_workflow_id, tool_policy
       )
       select
         md5(${workspaceId} || ':' || generated.i::text)::uuid,
@@ -84,7 +85,17 @@ try {
             then md5(${workspaceId} || ':' || (generated.i - 1)::text)::uuid
           else md5(${workspaceId} || ':' || (1 + ((generated.i - ${depth} - 1) % ${depth}))::text)::uuid
         end,
-        'session-' || md5(${workspaceId} || ':' || generated.i::text)::uuid::text
+        'session-' || md5(${workspaceId} || ':' || generated.i::text)::uuid::text,
+        jsonb_build_object(
+          'mode', 'explicit',
+          'inheritedFromSessionId',
+          case
+            when generated.i = 1 then ${rootId}::uuid
+            when generated.i <= ${depth}
+              then md5(${workspaceId} || ':' || (generated.i - 1)::text)::uuid
+            else md5(${workspaceId} || ':' || (1 + ((generated.i - ${depth} - 1) % ${depth}))::text)::uuid
+          end
+        )
       from generate_series(1, ${sessionCount - 1}) as generated(i)
     `;
   }

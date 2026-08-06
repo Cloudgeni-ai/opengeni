@@ -7,6 +7,7 @@ import type {
   AccessGrant,
   SessionAuthorizationOperation,
   SessionAuthorizationPort,
+  SessionAuthorizationSurface,
   SessionCommandReceipt,
   SessionControlRequest,
   SessionControlResponse,
@@ -15,7 +16,7 @@ import type {
   WorkspaceInferenceControlRequest,
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
-import { reasoningEffortForMetadata } from "@opengeni/contracts";
+import { latencyModeForMetadata, reasoningEffortForMetadata } from "@opengeni/contracts";
 import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
@@ -55,6 +56,8 @@ export type HumanSessionCommandContext = {
   workspaceId: string;
   sessionId: string;
   subjectId: string;
+  /** See AgentSessionCommandContext.authorizationSurface. */
+  authorizationSurface?: SessionAuthorizationSurface;
 };
 
 export type AgentSessionCommandContext = {
@@ -65,6 +68,13 @@ export type AgentSessionCommandContext = {
   callerTurnId: string;
   callerAttemptId: string;
   callerExecutionGeneration: number;
+  /**
+   * The trusted adapter surface that owns this command's one authorization
+   * decision. Direct core callers omit it and retain the canonical `core`
+   * surface; adapters that delegate the complete command set it explicitly so
+   * they do not authorize once at the edge and then repeat the host call here.
+   */
+  authorizationSurface?: SessionAuthorizationSurface;
 };
 
 type SessionAuthorizationCommandDeps = {
@@ -104,7 +114,7 @@ async function authorizeHumanSessionCommand(
   return await requireSessionAuthorization(deps, humanAccessGrant(context), {
     sessionId: context.sessionId,
     operation,
-    surface: "core",
+    surface: context.authorizationSurface ?? "core",
   });
 }
 
@@ -117,7 +127,7 @@ async function authorizeAgentSessionCommand(
   return await requireSessionAuthorization(deps, agentAccessGrant(context), {
     sessionId: targetSessionId,
     operation,
-    surface: "core",
+    surface: context.authorizationSurface ?? "core",
   });
 }
 
@@ -174,6 +184,7 @@ async function publishAndWakeAgentCommand(
     wakeRevision: number | null;
     shouldSignal: boolean;
     interruptionCount: number;
+    controlRequested?: boolean;
   },
 ): Promise<void> {
   await publishSessionEventIds(deps, input.workspaceId, input.sessionId, input.eventIds);
@@ -185,12 +196,18 @@ async function publishAndWakeAgentCommand(
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       wakeRevision: input.wakeRevision,
-      ...(input.interruptionCount > 0 ? { interruptionRequested: true } : {}),
+      ...(input.controlRequested || input.interruptionCount > 0
+        ? { interruptionRequested: true }
+        : {}),
     });
-  } catch (error) {
+  } catch {
     console.warn(
-      `[session-commands] immediate Agent command wake failed for ${input.workspaceId}/${input.sessionId}; durable outbox will retry`,
-      error,
+      "[session-commands] immediate Agent command wake failed; durable outbox will retry",
+      {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "agent_command_wake_failed",
+        origin: "core",
+      },
     );
   }
 }
@@ -209,10 +226,15 @@ async function requestControlWakeDispatch(
   if (wakeCount === 0) return;
   try {
     await deps.workflowClient.requestSessionWorkflowWakeDispatch();
-  } catch (error) {
+  } catch {
     console.warn(
-      `[session-commands] immediate control wake dispatch failed for ${wakeCount} committed revisions; durable outbox will retry`,
-      error,
+      "[session-commands] immediate control wake dispatch failed; durable outbox will retry",
+      {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "control_wake_dispatch_failed",
+        origin: "core",
+        wakeCount,
+      },
     );
   }
 }
@@ -319,6 +341,7 @@ export async function steerAgentSession(
     wakeRevision: result.wakeRevision,
     shouldSignal: result.shouldSignal,
     interruptionCount: result.interruptionCount,
+    controlRequested: true,
   });
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   return result;
@@ -339,7 +362,12 @@ export async function controlAgentSessionWorkstream(
     reason?: string | null;
   },
 ) {
-  await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.control");
+  const authorization = await authorizeAgentSessionCommand(
+    deps,
+    context,
+    input.targetSessionId,
+    "session.control",
+  );
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
       mutateSessionControlInTransaction(tx as unknown as Database, {
@@ -358,7 +386,7 @@ export async function controlAgentSessionWorkstream(
   ]);
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   await requestControlWakeDispatch(deps, result.wakeCount);
-  return result;
+  return { ...result, authorization };
 }
 
 function receipt(row: SessionCommandReceiptRow): SessionCommandReceipt {
@@ -384,9 +412,9 @@ function composerDraft(
     revision: row.revision,
     text: row.text,
     resources: row.resources as ComposerDraft["resources"],
-    tools: row.tools as ComposerDraft["tools"],
     model: row.model,
     reasoningEffort: row.reasoningEffort as ComposerDraft["reasoningEffort"],
+    latencyMode: row.latencyMode as ComposerDraft["latencyMode"],
     sourceTurnId: row.sourceTurnId,
     sourceTurnVersion: row.sourceTurnVersion,
     updatedAt: row.updatedAt.toISOString(),
@@ -546,7 +574,7 @@ export async function steerHumanQueuePrompt(
   return response;
 }
 
-export async function controlHumanSessionWorkstream(
+export async function controlHumanSessionWorkstreamWithOutcome(
   deps: {
     db: Database;
     bus: EventBus;
@@ -555,7 +583,7 @@ export async function controlHumanSessionWorkstream(
   },
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
-): Promise<SessionControlResponse> {
+): Promise<{ response: SessionControlResponse; replay: boolean }> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
@@ -580,13 +608,24 @@ export async function controlHumanSessionWorkstream(
     ),
     interruptionCount: result.interruptionCount,
     wakeCount: result.wakeCount,
+    cancelledSessionCount: result.cancelledSessionCount,
+    cancelledTurnCount: result.cancelledTurnCount,
   };
-  await publishSessionEventIds(deps, context.workspaceId, context.sessionId, [
-    result.sessionControlEventId,
-  ]);
+  for (const affected of result.affectedSessionEvents) {
+    await publishSessionEventIds(deps, context.workspaceId, affected.sessionId, affected.eventIds);
+  }
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   await requestControlWakeDispatch(deps, result.wakeCount);
-  return response;
+  return { response, replay: result.replay };
+}
+
+/** Backward-compatible response path used by the REST control route. */
+export async function controlHumanSessionWorkstream(
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
+  context: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[1],
+  input: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[2],
+): Promise<SessionControlResponse> {
+  return (await controlHumanSessionWorkstreamWithOutcome(deps, context, input)).response;
 }
 
 export async function controlHumanWorkspace(
@@ -647,9 +686,9 @@ export async function getHumanComposerDraft(
     revision: 0,
     text: "",
     resources: [],
-    tools: [],
     model: session.model,
     reasoningEffort: reasoningEffortForMetadata(session.metadata, "medium"),
+    latencyMode: latencyModeForMetadata(session.metadata, "standard"),
     sourceTurnId: null,
     sourceTurnVersion: null,
     updatedAt: null,

@@ -4,7 +4,12 @@
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
-import { useRouterState } from "@tanstack/react-router";
+import {
+  OpenGeniApiError,
+  OpenGeniSessionListCursorError,
+  type SessionListResponse,
+} from "@opengeni/sdk";
+import { Link, useRouterState } from "@tanstack/react-router";
 import {
   ChevronRightIcon,
   EllipsisIcon,
@@ -15,7 +20,16 @@ import {
   PlusIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { Button } from "@/components/ui/button";
@@ -38,8 +52,10 @@ import {
   advanceSessionPageIdentity,
   emptySessionContinuation,
   mergeSessionContinuation,
+  rebaseSessionContinuation,
   sessionPageKey,
 } from "@/lib/session-pagination";
+import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
 import {
   MAX_VISUAL_TREE_DEPTH,
@@ -48,26 +64,80 @@ import {
   sessionStateLabel,
   visualTreeDepth,
 } from "@/lib/session-rail";
-import { applySessionPinProjection, subscribeToSessionPinChanges } from "@/lib/session-pins";
 import {
-  SESSION_GROUP_LABELS,
-  SESSION_GROUP_ORDER,
-  buildRailForest,
+  cancelSessionRowRevealIntent,
+  consumeSessionRowRevealIntent,
+  sessionFocusAttribute,
+  shouldRecordSessionRowFocusIntent,
+  shouldMoveSessionRowFocus,
+  shouldRestoreSessionFocus,
+  type SessionFocusTarget,
+} from "@/lib/session-focus";
+import {
+  applySessionPinProjection,
+  applySessionRailProjection,
+  subscribeToSessionPinChanges,
+} from "@/lib/session-pins";
+import {
+  buildPinnedRailSections,
   groupSessionsForRail,
   mergeSessionForRail,
-  nodeIsActive,
-  recencyGroupFor,
   relativeTimeLabel,
-  sessionActivityTime,
   visibleForestRows,
+  visibleTreeRows,
   type SessionTreeNode,
 } from "@/lib/sessions-group";
+import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
+import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
+import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
+/** True when the browser should own navigation (new tab / window / modified click). */
+function isModifiedNavigationClick(
+  event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "button">,
+): boolean {
+  return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
+}
+
+/** Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab. */
+function NewSessionLink(props: { className?: string; "aria-label"?: string; children: ReactNode }) {
+  const rail = useRail();
+  const context = useAppContext();
+  return (
+    <Link
+      to="/workspaces/$workspaceId/sessions"
+      params={{ workspaceId: rail.workspaceId }}
+      aria-label={props["aria-label"]}
+      aria-keyshortcuts="Meta+Shift+O Control+Shift+O"
+      className={props.className}
+      onClick={(event) => {
+        if (isModifiedNavigationClick(event)) return;
+        context.resetSessionView();
+        rail.setDrawerOpen(false);
+        // Same-route Link may not remount the index; ask it to refocus the composer.
+        queueMicrotask(() => requestCreateComposerFocus());
+      }}
+    >
+      {props.children}
+    </Link>
+  );
+}
+
 type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
-type PinFn = (session: Session, pinned: boolean) => Promise<Session | null>;
+type PinFocusTarget = SessionFocusTarget;
+type PinFn = (
+  session: Session,
+  pinned: boolean,
+  restoreFocusTo?: PinFocusTarget,
+) => Promise<Session | null>;
 type PinOverride = { session: Session; operation: number };
+type PendingPinFocus = {
+  sessionId: string;
+  operation: number;
+  target: PinFocusTarget;
+  settled: boolean;
+};
 type ChildPageState = {
   sessions: Session[];
   nextCursor: string | null;
@@ -99,12 +169,14 @@ export function SessionList() {
   // the actual tree.
   const globalPinPage = useWorkspaceSessions({
     limit: 1,
+    pinsOnly: true,
     pollIntervalMs: 15_000,
-    enabled: hierarchyMode,
   });
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
   const {
     pinned: globalPinned,
+    loading: globalPinsLoading,
+    error: globalPinsError,
     pinnedTruncated: globalPinsTruncated,
     refresh: refreshGlobalPins,
   } = globalPinPage;
@@ -114,17 +186,15 @@ export function SessionList() {
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
   const refreshSessionPages = useCallback(async () => {
-    await Promise.all([refresh(), ...(hierarchyMode ? [refreshGlobalPins()] : [])]);
-  }, [hierarchyMode, refresh, refreshGlobalPins]);
+    await Promise.all([refresh(), refreshGlobalPins()]);
+  }, [refresh, refreshGlobalPins]);
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
-  // The server cursor carries the first page's short-lived snapshot identity.
-  // If a poll replaces that snapshot, any continuation loaded from the old
-  // activity order is stale even when workspace/search are unchanged.
-  const paginationKey = `${sessionPageKey(rail.workspaceId, search)}\u0000${
-    hierarchyMode ? "roots" : "search"
-  }\u0000${nextCursor ?? "complete"}`;
+  // The continuation generation is keyed only to workspace/search. Polling
+  // page one rotates the server's short-lived snapshot, but must not discard
+  // older pages the user already loaded from the prior snapshot.
+  const paginationKey = sessionPageKey(rail.workspaceId, search);
   const paginationIdentity = useRef({ key: paginationKey, generation: 0 });
   paginationIdentity.current = advanceSessionPageIdentity(
     paginationIdentity.current,
@@ -141,6 +211,11 @@ export function SessionList() {
   const loadMoreAttempt = useRef(0);
   const loadMoreError = activeContinuation.failed;
   const [announcement, setAnnouncement] = useState("");
+  const pinAnnouncementSequence = useRef(0);
+  const announcePinResult = useCallback((message: string) => {
+    pinAnnouncementSequence.current += 1;
+    setAnnouncement(pinLiveAnnouncement(message, pinAnnouncementSequence.current));
+  }, []);
   const [childPages, setChildPages] = useState<ReadonlyMap<string, ChildPageState>>(
     () => new Map(),
   );
@@ -157,6 +232,8 @@ export function SessionList() {
   );
   const pinOperation = useRef(0);
   const pinning = useRef(new Set<string>());
+  const listRef = useRef<HTMLDivElement>(null);
+  const pendingPinFocus = useRef<PendingPinFocus | null>(null);
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
     pollIntervalMs: 30_000,
   });
@@ -164,31 +241,28 @@ export function SessionList() {
     () => [...childPages.values()].flatMap((page) => page.sessions),
     [childPages],
   );
-  const allSessions = useMemo(() => {
+  const serverSessions = useMemo(() => {
     const source = new Map<string, Session>();
     // Search is intentionally flat. Normal navigation starts with real roots,
     // then adds only explicitly loaded child pages and the active session's
     // lineage. A child can therefore never become a fake root merely because
     // its parent fell outside a global recency page.
-    const lineageSessions = hierarchyMode
-      ? [...(activeLineage.lineage?.ancestors ?? []), ...(context.session ? [context.session] : [])]
-      : [];
-    // Precedence is continuation < current page < lazy children < active
-    // lineage < current pinned section. Pins carry the freshest personal pin
-    // revision, while route/SSE data wins for the currently open lifecycle.
-    for (const session of [
-      ...extraSessions,
-      ...sessions,
-      ...loadedChildren,
-      ...lineageSessions,
-      ...pinned,
-    ]) {
+    // List/page projections own personal pin revisions and server treeStats.
+    // Insert those first, with the current pinned section last so an older
+    // ordinary continuation cannot overwrite a newer pin projection.
+    for (const session of [...extraSessions, ...sessions, ...loadedChildren, ...pinned]) {
       const current = source.get(session.id);
       source.set(session.id, current ? mergeSessionForRail(current, session) : session);
     }
-    for (const [id, override] of pinOverrides) {
-      const current = source.get(id);
-      source.set(id, current ? mergeSessionForRail(current, override.session) : override.session);
+    // Route/lineage projections own lifecycle and content. Merge list-owned
+    // fields into them rather than replacing either domain wholesale; in
+    // particular, a stale route object must not resurrect a cross-device pin.
+    const lineageSessions = hierarchyMode
+      ? [...(activeLineage.lineage?.ancestors ?? []), ...(context.session ? [context.session] : [])]
+      : [];
+    for (const session of lineageSessions) {
+      const projected = source.get(session.id);
+      source.set(session.id, projected ? applySessionRailProjection(session, projected) : session);
     }
     return [...source.values()];
   }, [
@@ -197,16 +271,103 @@ export function SessionList() {
     extraSessions,
     hierarchyMode,
     loadedChildren,
-    pinOverrides,
     pinned,
     sessions,
   ]);
-  const pinnedSessions = useMemo(
-    () => allSessions.filter((session) => Boolean(session.pinned)),
-    [allSessions],
-  );
+  const allSessions = useMemo(() => {
+    const source = new Map(serverSessions.map((session) => [session.id, session]));
+    for (const [id, override] of pinOverrides) {
+      const current = source.get(id);
+      source.set(
+        id,
+        current
+          ? (applySessionPinProjection(current, override.session) ?? current)
+          : override.session,
+      );
+    }
+    return [...source.values()];
+  }, [pinOverrides, serverSessions]);
+
+  // A complete pins-only page makes presence authoritative, but absence does
+  // not carry the version of a remotely unpinned relation. Loaded child pages
+  // can outlive many root/global polls, so point-read only their stale positive
+  // pins and merge the exact revision back into every cached parent page.
+  const staleChildPinProbes = useRef(new Map<string, string>());
+  useEffect(() => {
+    if (globalPinsLoading || globalPinsError) return;
+    const pinnedIds = new Set(globalPinned.map((session) => session.id));
+    const stalePins = loadedChildren.filter(
+      (session) => session.pinned && !pinnedIds.has(session.id),
+    );
+    const staleKeys = new Set(
+      stalePins.map((session) => `${session.id}:${session.pinVersion ?? 0}`),
+    );
+    for (const [sessionId, key] of staleChildPinProbes.current) {
+      if (!staleKeys.has(key)) staleChildPinProbes.current.delete(sessionId);
+    }
+    const childEpoch = childLoadEpoch.current;
+    for (const stale of stalePins) {
+      const key = `${stale.id}:${stale.pinVersion ?? 0}`;
+      if (staleChildPinProbes.current.get(stale.id) === key) continue;
+      staleChildPinProbes.current.set(stale.id, key);
+      void context.client
+        .getSession(rail.workspaceId, stale.id)
+        .then((authoritative) => {
+          if (
+            childLoadEpoch.current !== childEpoch ||
+            staleChildPinProbes.current.get(stale.id) !== key
+          ) {
+            return;
+          }
+          setChildPages((current) => {
+            let changed = false;
+            const next = new Map(current);
+            for (const [parentId, page] of current) {
+              const projectedSessions = page.sessions.map((session) => {
+                if (session.id !== stale.id) return session;
+                const projected = applySessionPinProjection(session, authoritative) ?? session;
+                if (projected !== session) changed = true;
+                return projected;
+              });
+              if (projectedSessions.some((session, index) => session !== page.sessions[index])) {
+                next.set(parentId, { ...page, sessions: projectedSessions });
+              }
+            }
+            return changed ? next : current;
+          });
+        })
+        .catch((requestError: unknown) => {
+          if (requestError instanceof OpenGeniApiError && requestError.status === 404) {
+            setChildPages((current) => {
+              let changed = false;
+              const next = new Map(current);
+              for (const [parentId, page] of current) {
+                const retainedSessions = page.sessions.filter((session) => session.id !== stale.id);
+                if (retainedSessions.length !== page.sessions.length) {
+                  changed = true;
+                  next.set(parentId, { ...page, sessions: retainedSessions });
+                }
+              }
+              return changed ? next : current;
+            });
+          }
+          if (staleChildPinProbes.current.get(stale.id) === key) {
+            staleChildPinProbes.current.delete(stale.id);
+          }
+        });
+    }
+  }, [
+    context.client,
+    globalPinned,
+    globalPinsError,
+    globalPinsLoading,
+    loadedChildren,
+    rail.workspaceId,
+  ]);
   const openSessionId = context.session?.id;
   const openSessionWorkspaceId = context.session?.workspaceId;
+  const openSessionPinned = Boolean(context.session?.pinned);
+  const openSessionPinVersion = context.session?.pinVersion ?? 0;
   const setContextSession = context.setSession;
 
   // The route header and rail intentionally keep separate projections. Merge
@@ -215,10 +376,65 @@ export function SessionList() {
   // disagreeing. Preserve the route/SSE-owned lifecycle and content fields.
   useEffect(() => {
     if (!openSessionId || openSessionWorkspaceId !== rail.workspaceId) return;
-    const projected = allSessions.find((candidate) => candidate.id === openSessionId);
+    // Do not feed the rail's short-lived optimistic override into the route
+    // header. A same-version optimistic timestamp can make a later failed
+    // rollback look non-exact, causing its authoritative lower revision to be
+    // rejected as stale and leaving the header pinned forever.
+    const projected = serverSessions.find((candidate) => candidate.id === openSessionId);
     if (!projected) return;
     setContextSession((current) => applySessionPinProjection(current, projected));
-  }, [allSessions, openSessionId, openSessionWorkspaceId, rail.workspaceId, setContextSession]);
+  }, [openSessionId, openSessionWorkspaceId, rail.workspaceId, serverSessions, setContextSession]);
+
+  const activePinProbe = useRef<{ key: string | null; operation: number }>({
+    key: null,
+    operation: 0,
+  });
+  useEffect(() => {
+    const globalPageContainsOpenSession = globalPinned.some(
+      (candidate) => candidate.id === openSessionId,
+    );
+    if (
+      !openSessionId ||
+      openSessionWorkspaceId !== rail.workspaceId ||
+      !openSessionPinned ||
+      globalPinsLoading ||
+      globalPinsError ||
+      globalPageContainsOpenSession
+    ) {
+      activePinProbe.current.key = null;
+      activePinProbe.current.operation += 1;
+      return;
+    }
+
+    const key = `${openSessionId}:${openSessionPinVersion}`;
+    if (activePinProbe.current.key === key) return;
+    const operation = ++activePinProbe.current.operation;
+    activePinProbe.current.key = key;
+    void context.client
+      .getSession(rail.workspaceId, openSessionId)
+      .then((authoritative) => {
+        if (activePinProbe.current.operation !== operation) return;
+        // Point reads are used only for the absent pin projection. Route/SSE
+        // remains authoritative for every lifecycle and content field.
+        setContextSession((current) => applySessionPinProjection(current, authoritative));
+      })
+      .catch(() => {
+        if (activePinProbe.current.operation === operation) {
+          activePinProbe.current.key = null;
+        }
+      });
+  }, [
+    context.client,
+    globalPinned,
+    globalPinsError,
+    globalPinsLoading,
+    openSessionId,
+    openSessionPinned,
+    openSessionPinVersion,
+    openSessionWorkspaceId,
+    rail.workspaceId,
+    setContextSession,
+  ]);
 
   const activeSessionId = useRouterState({
     select: (state): string | null => {
@@ -226,143 +442,26 @@ export function SessionList() {
       return match?.[1] ?? null;
     },
   });
+  // Only a route transition, keyboard navigation, or the explicit "Show path"
+  // action may reveal a row. Polls and pagination replace `flat` too, so a
+  // derived focus index is not itself permission to move this scroll container.
+  const rowRevealIntent = useRef<string | null>(activeSessionId);
 
   // Search results are deliberately flat: a partial match set is not a tree.
-  // Normal navigation contains only true roots, lazily loaded children, and the
-  // active lineage, so buildRailForest never has to invent root placement.
-  const completeForest = useMemo(
+  // Normal navigation contains only true roots, lazily loaded children, and
+  // the active lineage. The helper builds all three projections together so
+  // explicit nested pins never disappear into an ancestor shortcut.
+  const railSections = useMemo(
     () =>
-      buildRailForest(
+      buildPinnedRailSections(
         hierarchyMode
           ? allSessions
-          : allSessions.map((session) => ({
-              ...session,
-              parentSessionId: null,
-            })),
+          : allSessions.map((session) => ({ ...session, parentSessionId: null })),
       ),
     [allSessions, hierarchyMode],
   );
-  const forest = useMemo(() => {
-    // A pinned node is promoted with its subtree into the Pinned section. Prune
-    // it recursively from the ordinary hierarchy so a pinned child is not
-    // rendered twice (and keyboard focus never has two rows with one identity).
-    type RemovedCounts = {
-      total: number;
-      running: number;
-      queued: number;
-      attention: number;
-      paused: number;
-      failed: number;
-    };
-    const emptyCounts = (): RemovedCounts => ({
-      total: 0,
-      running: 0,
-      queued: 0,
-      attention: 0,
-      paused: 0,
-      failed: 0,
-    });
-    const addCounts = (target: RemovedCounts, source: RemovedCounts): void => {
-      target.total += source.total;
-      target.running += source.running;
-      target.queued += source.queued;
-      target.attention += source.attention;
-      target.paused += source.paused;
-      target.failed += source.failed;
-    };
-    const subtreeCounts = (node: SessionTreeNode): RemovedCounts => {
-      const stats = node.session.treeStats;
-      const status = node.session.status;
-      const counts: RemovedCounts = {
-        total: 1,
-        running: status === "running" || status === "recovering" ? 1 : 0,
-        queued: status === "queued" || status === "waiting_capacity" ? 1 : 0,
-        attention: status === "requires_action" ? 1 : 0,
-        paused: node.session.effectiveControl.state === "paused" ? 1 : 0,
-        failed: status === "failed" ? 1 : 0,
-      };
-      if (stats) {
-        counts.total += stats.totalDescendants;
-        counts.running += stats.runningDescendants;
-        counts.queued += stats.queuedDescendants;
-        counts.attention += stats.attentionDescendants;
-        counts.paused += stats.pausedDescendants;
-        counts.failed += stats.failedDescendants;
-      } else {
-        for (const child of node.children) addCounts(counts, subtreeCounts(child));
-      }
-      return counts;
-    };
-    const prune = (
-      node: SessionTreeNode,
-    ): { node: SessionTreeNode | null; removed: RemovedCounts } => {
-      if (node.session.pinned) return { node: null, removed: subtreeCounts(node) };
-      const removed = emptyCounts();
-      let removedDirectChildren = 0;
-      const children: SessionTreeNode[] = [];
-      for (const child of node.children) {
-        const result = prune(child);
-        addCounts(removed, result.removed);
-        if (result.node) children.push(result.node);
-        else removedDirectChildren += 1;
-      }
-      const stats = node.session.treeStats;
-      const session = stats
-        ? {
-            ...node.session,
-            treeStats: {
-              directChildren: Math.max(0, stats.directChildren - removedDirectChildren),
-              totalDescendants: Math.max(0, stats.totalDescendants - removed.total),
-              runningDescendants: Math.max(0, stats.runningDescendants - removed.running),
-              queuedDescendants: Math.max(0, stats.queuedDescendants - removed.queued),
-              attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
-              pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
-              failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
-              truncated: stats.truncated,
-            },
-          }
-        : node.session;
-      const pruned = {
-        session,
-        children,
-        hasActiveDescendant: children.some((child) => nodeIsActive(child)),
-      };
-      return { node: pruned, removed };
-    };
-    const roots = [
-      ...completeForest.running,
-      ...completeForest.grouped.flatMap((bucket) => bucket.sessions),
-    ];
-    const prunedRoots = roots.flatMap((node) => {
-      const result = prune(node).node;
-      return result ? [result] : [];
-    });
-    const running = prunedRoots
-      .filter((node) => nodeIsActive(node))
-      .sort(
-        (left, right) => sessionActivityTime(right.session) - sessionActivityTime(left.session),
-      );
-    const buckets = new Map<(typeof SESSION_GROUP_ORDER)[number], SessionTreeNode[]>();
-    for (const node of prunedRoots
-      .filter((candidate) => !nodeIsActive(candidate))
-      .sort(
-        (left, right) => sessionActivityTime(right.session) - sessionActivityTime(left.session),
-      )) {
-      const group = recencyGroupFor(sessionActivityTime(node.session));
-      const groupSessions = buckets.get(group) ?? [];
-      groupSessions.push(node);
-      buckets.set(group, groupSessions);
-    }
-    return {
-      running,
-      grouped: SESSION_GROUP_ORDER.flatMap((group) => {
-        const nodes = buckets.get(group);
-        return nodes?.length
-          ? [{ group, label: SESSION_GROUP_LABELS[group], sessions: nodes }]
-          : [];
-      }),
-    };
-  }, [completeForest]);
+  const forest = railSections.ordinary;
+  const pinnedNodes = railSections.pinned;
   const nodesById = useMemo(() => {
     const result = new Map<string, SessionTreeNode>();
     const visit = (node: SessionTreeNode): void => {
@@ -370,45 +469,12 @@ export function SessionList() {
       result.set(node.session.id, node);
       for (const child of node.children) visit(child);
     };
-    for (const node of completeForest.running) visit(node);
-    for (const bucket of completeForest.grouped) {
+    for (const node of railSections.complete.running) visit(node);
+    for (const bucket of railSections.complete.grouped) {
       for (const node of bucket.sessions) visit(node);
     }
     return result;
-  }, [completeForest]);
-  // Pins are promoted shortcuts, not a second ownership model. If both a
-  // parent and its descendant are pinned, the parent owns the visible pinned
-  // subtree so no session row appears twice.
-  const pinnedNodes = useMemo<SessionTreeNode[]>(() => {
-    const byId = new Map(allSessions.map((session) => [session.id, session]));
-    const hasPinnedAncestor = (session: Session): boolean => {
-      const seen = new Set<string>();
-      let parentId = session.parentSessionId;
-      while (parentId && !seen.has(parentId)) {
-        seen.add(parentId);
-        const parent = byId.get(parentId);
-        if (!parent) return false;
-        if (parent.pinned) return true;
-        parentId = parent.parentSessionId;
-      }
-      return false;
-    };
-    return [...pinnedSessions]
-      .filter((session) => !hasPinnedAncestor(session))
-      .sort(
-        (left, right) =>
-          Date.parse(right.pinnedAt ?? "") - Date.parse(left.pinnedAt ?? "") ||
-          right.id.localeCompare(left.id),
-      )
-      .map(
-        (session) =>
-          nodesById.get(session.id) ?? {
-            session,
-            children: [],
-            hasActiveDescendant: false,
-          },
-      );
-  }, [allSessions, nodesById, pinnedSessions]);
+  }, [railSections.complete]);
 
   // Manual state is separate from the small derived active-path expansion.
   // Polls can therefore never reopen a branch the user explicitly collapsed.
@@ -516,34 +582,108 @@ export function SessionList() {
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
   const revealActivePath = useCallback(() => {
+    rowRevealIntent.current = activeSessionId;
     setManualExpanded((current) => new Set([...current, ...activeAncestorIds]));
     setManualCollapsed((current) => {
       const next = new Set(current);
       for (const sessionId of activeAncestorIds) next.delete(sessionId);
       return next;
     });
-  }, [activeAncestorIds]);
+  }, [activeAncestorIds, activeSessionId]);
 
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
     return [
-      ...pinnedNodes.map((node) => ({ node, depth: 0 })),
+      ...visibleTreeRows(pinnedNodes, expanded),
       ...visibleForestRows(forest, expanded),
     ].filter(({ node }) => {
       if (seen.has(node.session.id)) return false;
       seen.add(node.session.id);
       return true;
     });
-  }, [pinnedNodes, forest, expanded]);
+  }, [expanded, forest, pinnedNodes]);
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
 
+  useLayoutEffect(() => {
+    const pending = pendingPinFocus.current;
+    const root = listRef.current;
+    if (!pending || !root) return;
+    const operation = pending.operation;
+    let cancelled = false;
+    let frame: number | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const restore = () => {
+      if (cancelled) return;
+      const current = pendingPinFocus.current;
+      if (!current || current.operation !== operation) return;
+      const attribute = sessionFocusAttribute(current.target);
+      const destination = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].find(
+        (element) => element.getAttribute(attribute) === current.sessionId,
+      );
+      if (
+        destination &&
+        shouldRestoreSessionFocus(
+          document.activeElement as HTMLElement | null,
+          destination,
+          current.sessionId,
+          document.body,
+        )
+      ) {
+        try {
+          destination.focus({ preventScroll: true });
+        } catch {
+          // A concurrent query transition can remove the destination between
+          // the connectivity check and focus(). The next fenced attempt is the
+          // only safe recovery; never fall back to an unrelated element.
+        }
+      }
+    };
+    const finish = () => {
+      restore();
+      const current = pendingPinFocus.current;
+      if (current?.operation === operation && current.settled) {
+        pendingPinFocus.current = null;
+      }
+    };
+
+    // Layout handles the optimistic/rollback commit. The microtask lets
+    // Radix finish its close bookkeeping, and rAF handles the post-animation
+    // remount; every attempt is fenced to this exact operation.
+    restore();
+    queueMicrotask(() => {
+      restore();
+      if (cancelled) return;
+      if (typeof window.requestAnimationFrame === "function") {
+        frame = window.requestAnimationFrame(finish);
+      } else {
+        timeout = setTimeout(finish, 0);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      if (timeout !== null) clearTimeout(timeout);
+    };
+  }, [flat]);
+
   const onPin = useCallback<PinFn>(
-    async (target, nextPinned) => {
+    async (target, nextPinned, restoreFocusTo = "row") => {
       if (pinning.current.has(target.id)) {
         return target;
       }
       pinning.current.add(target.id);
       const operation = ++pinOperation.current;
+      // An optimistic pin moves the row between different group subtrees. That
+      // remounts the Radix menu trigger before Radix can restore keyboard focus.
+      // Keep the intended destination through the whole request so a failed
+      // mutation that rolls the row back also restores focus after its remount.
+      pendingPinFocus.current = {
+        sessionId: target.id,
+        operation,
+        target: restoreFocusTo,
+        settled: false,
+      };
       const optimistic: Session = {
         ...target,
         pinned: nextPinned,
@@ -571,7 +711,7 @@ export function SessionList() {
         }
         await refreshSessionPages();
         const label = target.title?.trim() || target.initialMessage?.trim() || "Untitled session";
-        setAnnouncement(
+        announcePinResult(
           updated
             ? `${nextPinned ? "Pinned" : "Unpinned"} ${label}.`
             : `${label} was not ${nextPinned ? "pinned" : "unpinned"}. Server state refreshed.`,
@@ -579,6 +719,10 @@ export function SessionList() {
         return updated;
       } finally {
         pinning.current.delete(target.id);
+        const pending = pendingPinFocus.current;
+        if (pending?.sessionId === target.id && pending.operation === operation) {
+          pending.settled = true;
+        }
         setPinOverrides((current) => {
           if (current.get(target.id)?.operation !== operation) return current;
           const next = new Map(current);
@@ -587,31 +731,56 @@ export function SessionList() {
         });
       }
     },
-    [context, refreshSessionPages],
+    [announcePinResult, context, refreshSessionPages],
   );
 
   const loadMore = useCallback(async () => {
     if (!continuationCursor || loadingMore) return;
     const requestGeneration = pageGeneration;
     const attempt = ++loadMoreAttempt.current;
+    const requestIsCurrent = (): boolean =>
+      paginationIdentity.current.generation === requestGeneration &&
+      loadMoreAttempt.current === attempt;
+    const listPage = async (cursor?: string): Promise<SessionListResponse> =>
+      await context.client.listSessionPage(rail.workspaceId, {
+        limit: 50,
+        ...(cursor ? { cursor } : {}),
+        ...(search ? { search } : {}),
+        ...(hierarchyMode ? { parentSessionId: null } : {}),
+      });
     setLoadingMoreGeneration(requestGeneration);
     setContinuation((current) => ({
       ...activeSessionContinuation(current, requestGeneration),
       failed: false,
     }));
     try {
-      const page = await context.client.listSessionPage(rail.workspaceId, {
-        limit: 50,
-        cursor: continuationCursor,
-        ...(search ? { search } : {}),
-        ...(hierarchyMode ? { parentSessionId: null } : {}),
-      });
-      if (
-        paginationIdentity.current.generation !== requestGeneration ||
-        loadMoreAttempt.current !== attempt
-      ) {
-        return;
+      let page: SessionListResponse;
+      try {
+        page = await listPage(continuationCursor);
+      } catch (cursorError) {
+        if (!(cursorError instanceof OpenGeniSessionListCursorError)) throw cursorError;
+
+        // The snapshot behind the retained cursor expired. Re-read page one
+        // once, fence it to this query, and continue immediately from its new
+        // cursor. A second expiry bubbles to the normal retryable failure path
+        // instead of creating an unbounded cursor-refresh loop.
+        const freshFirstPage = await listPage();
+        if (!requestIsCurrent()) return;
+        setContinuation((current) =>
+          rebaseSessionContinuation(
+            current,
+            pageGeneration,
+            requestGeneration,
+            freshFirstPage.nextCursor,
+          ),
+        );
+        if (!freshFirstPage.nextCursor) {
+          setAnnouncement("No more older sessions.");
+          return;
+        }
+        page = await listPage(freshFirstPage.nextCursor);
       }
+      if (!requestIsCurrent()) return;
       setContinuation((current) =>
         mergeSessionContinuation(current, pageGeneration, requestGeneration, page),
       );
@@ -621,12 +790,7 @@ export function SessionList() {
           : `Loaded ${page.sessions.length} older session${page.sessions.length === 1 ? "" : "s"}.`,
       );
     } catch {
-      if (
-        paginationIdentity.current.generation !== requestGeneration ||
-        loadMoreAttempt.current !== attempt
-      ) {
-        return;
-      }
+      if (!requestIsCurrent()) return;
       // Keep already loaded rows and make this bounded page explicitly
       // retryable; a silent no-op would look like pagination had ended.
       setContinuation((current) => ({
@@ -635,10 +799,7 @@ export function SessionList() {
       }));
       setAnnouncement("Older sessions did not load. Retry is available.");
     } finally {
-      if (
-        paginationIdentity.current.generation === requestGeneration &&
-        loadMoreAttempt.current === attempt
-      ) {
+      if (requestIsCurrent()) {
         setLoadingMoreGeneration(null);
       }
     }
@@ -673,8 +834,8 @@ export function SessionList() {
     };
   }, [refreshSessionPages]);
 
-  const listRef = useRef<HTMLDivElement>(null);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const rowFocusIntent = useRef<string | null>(null);
   const focusIndex = useMemo(() => {
     const preferredId = focusedSessionId ?? activeSessionId;
     const preferred = preferredId ? flat.findIndex((session) => session.id === preferredId) : -1;
@@ -689,6 +850,9 @@ export function SessionList() {
   useEffect(() => {
     const routeChanged = previousActiveSessionId.current !== activeSessionId;
     previousActiveSessionId.current = activeSessionId;
+    if (routeChanged) {
+      rowRevealIntent.current = activeSessionId;
+    }
     setFocusedSessionId((current) => {
       if (!routeChanged && current && flat.some((session) => session.id === current)) {
         return current;
@@ -724,29 +888,60 @@ export function SessionList() {
         nextIndex = flat.length - 1;
       }
       const next = nextIndex === null ? null : flat[nextIndex];
-      if (next) {
+      if (next && shouldRecordSessionRowFocusIntent(nextIndex, focusIndex)) {
+        rowFocusIntent.current = next.id;
         setFocusedSessionId(next.id);
+      } else {
+        // A boundary key is a navigation no-op. Clear any older intent
+        // synchronously so a later list refresh cannot steal focus from a row
+        // action that the user focused after the no-op.
+        rowFocusIntent.current = null;
       }
     },
     [flat, focusIndex],
   );
 
-  // Scroll the keyboard-focused row into view.
-  useEffect(() => {
-    if (focusIndex < 0 || !listRef.current) {
+  // Consume an explicit reveal/focus intent once. Data churn can rerun this
+  // effect, but with no intent it owns neither DOM focus nor rail scroll.
+  // Layout timing makes real DOM focus part of the discrete keyboard commit;
+  // a passive effect can leave Home/End visibly on the prior row for a frame.
+  useLayoutEffect(() => {
+    const root = listRef.current;
+    if (focusIndex < 0 || !root) {
       return;
     }
-    const row = listRef.current.querySelector<HTMLElement>(
-      `[data-session-index="${focusIndex}"][data-session-focus]`,
-    );
-    row?.scrollIntoView({ block: "nearest" });
-    // Arrow/Home/End navigation must move real DOM focus, not just paint a
-    // visual highlight. Do not steal focus when a route/poll changes while the
-    // user is typing elsewhere.
-    if (listRef.current.contains(document.activeElement) && row !== document.activeElement) {
-      row?.focus();
+    const requestedFocusId = rowFocusIntent.current;
+    const requestedRevealId = rowRevealIntent.current;
+    const requestedSessionId = requestedFocusId ?? requestedRevealId;
+    if (!requestedSessionId) {
+      return;
     }
-  }, [focusIndex]);
+    const row = [...root.querySelectorAll<HTMLElement>("[data-session-row]")].find(
+      (candidate) => candidate.dataset.sessionRow === requestedSessionId,
+    );
+    if (!row) {
+      return;
+    }
+    // Arrow/Home/End navigation must move real DOM focus, not just paint a
+    // visual highlight. A route/poll/pin reorder has no such intent and must
+    // never steal focus from an actions trigger or another active control.
+    if (requestedFocusId) {
+      const renderedSessionId = flat[focusIndex]?.id ?? null;
+      if (
+        pendingPinFocus.current ||
+        !root.contains(document.activeElement) ||
+        !shouldMoveSessionRowFocus(requestedFocusId, renderedSessionId)
+      ) {
+        rowFocusIntent.current = null;
+        return;
+      }
+      rowFocusIntent.current = null;
+      row.scrollIntoView({ block: "nearest" });
+      row.focus();
+    } else {
+      consumeSessionRowRevealIntent(root, rowRevealIntent);
+    }
+  }, [flat, focusIndex]);
 
   useEffect(() => {
     if (loading || !search) return;
@@ -763,17 +958,19 @@ export function SessionList() {
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
-              type="button"
+              asChild
               variant="ghost"
               size="icon-xs"
-              aria-label="New session"
-              onClick={rail.startNewSession}
               className="text-fg-muted hover:text-fg pointer-coarse:size-11"
             >
-              <PlusIcon className="size-3.5" />
+              <NewSessionLink aria-label="New session">
+                <PlusIcon className="size-3.5" />
+              </NewSessionLink>
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="right">New session · c</TooltipContent>
+          <TooltipContent side="right">
+            New session · {shortcutLabel(NEW_SESSION_SHORTCUT)}
+          </TooltipContent>
         </Tooltip>
       </div>
 
@@ -806,6 +1003,18 @@ export function SessionList() {
         aria-label={hierarchyMode ? "Workstreams" : "Session search results"}
         data-sessionpin-session-list
         onKeyDown={onKeyDown}
+        onPointerDown={() => {
+          // Direct reader input cancels a reveal whose target has not mounted
+          // yet. A generic scroll handler cannot distinguish that input from
+          // browser anchoring caused by page merges and other DOM reflow.
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
+        onTouchStart={() => {
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
+        onWheel={() => {
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2"
       >
         <p className="sr-only" aria-live="polite" aria-atomic="true">
@@ -836,7 +1045,7 @@ export function SessionList() {
             </button>
           </div>
         ) : flat.length === 0 ? (
-          <EmptySessions onStart={rail.startNewSession} />
+          <EmptySessions />
         ) : (
           <>
             {pinnedNodes.length > 0 ? (
@@ -853,7 +1062,6 @@ export function SessionList() {
                   onRevealActivePath={revealActivePath}
                   childPages={childPages}
                   onLoadMoreChildren={loadChildPage}
-                  onSelect={rail.openSession}
                   onRename={context.updateSessionTitle}
                   onPin={onPin}
                 />
@@ -877,7 +1085,6 @@ export function SessionList() {
                 onRevealActivePath={revealActivePath}
                 childPages={childPages}
                 onLoadMoreChildren={loadChildPage}
-                onSelect={rail.openSession}
                 onRename={context.updateSessionTitle}
                 onPin={onPin}
               />
@@ -896,7 +1103,6 @@ export function SessionList() {
                 onRevealActivePath={revealActivePath}
                 childPages={childPages}
                 onLoadMoreChildren={loadChildPage}
-                onSelect={rail.openSession}
                 onRename={context.updateSessionTitle}
                 onPin={onPin}
               />
@@ -941,7 +1147,6 @@ function SessionGroup(props: {
   onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
-  onSelect: (sessionId: string) => void;
   onRename: RenameFn;
   onPin: PinFn;
 }) {
@@ -972,7 +1177,6 @@ function SessionGroup(props: {
             onRevealActivePath={props.onRevealActivePath}
             childPages={props.childPages}
             onLoadMoreChildren={props.onLoadMoreChildren}
-            onSelect={props.onSelect}
             onRename={props.onRename}
             onPin={props.onPin}
           />
@@ -1006,7 +1210,6 @@ function SessionTreeRow(props: {
   onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
-  onSelect: (sessionId: string) => void;
   onRename: RenameFn;
   onPin: PinFn;
 }) {
@@ -1014,6 +1217,7 @@ function SessionTreeRow(props: {
   const index = props.flat.indexOf(node.session);
   const directChildCount = node.session.treeStats?.directChildren ?? node.children.length;
   const childCount = node.session.treeStats?.totalDescendants ?? node.children.length;
+  const childCountTruncated = node.session.treeStats?.truncated ?? false;
   const hasChildren = directChildCount > 0 || node.children.length > 0;
   const treeHasActiveDescendant = Boolean(
     node.session.treeStats &&
@@ -1031,13 +1235,17 @@ function SessionTreeRow(props: {
     hiddenActivePath && hiddenActivePath.length > 1
       ? hiddenActivePath[hiddenActivePath.length - 1]!.session
       : null;
+  const title =
+    node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
+  const hasVisibleChildRegion = Boolean(hiddenActiveSession || (isExpanded && childCount > 0));
   return (
-    <>
+    <div role="listitem" className="min-w-0">
       <SessionRow
         session={node.session}
         index={index}
         depth={props.depth}
         childCount={childCount}
+        childCountTruncated={childCountTruncated}
         hasChildren={hasChildren}
         expanded={isExpanded}
         hasActiveDescendant={node.hasActiveDescendant || treeHasActiveDescendant}
@@ -1045,59 +1253,61 @@ function SessionTreeRow(props: {
         active={node.session.id === props.activeSessionId}
         focused={index >= 0 && index === props.focusIndex}
         onFocus={() => props.onFocusSession(node.session.id)}
-        onSelect={props.onSelect}
         onRename={props.onRename}
         onPin={props.onPin}
       />
-      {hiddenActiveSession ? (
-        <ActivePathShortcut
-          session={hiddenActiveSession}
-          depth={props.depth + 1}
-          hiddenLevels={hiddenActivePath!.length - 1}
-          onReveal={props.onRevealActivePath}
-        />
-      ) : null}
-      {childCount > 0 && isExpanded
-        ? node.children.map((child) => (
-            <SessionTreeRow
-              key={child.session.id}
-              node={child}
+      {hasVisibleChildRegion ? (
+        <div role="list" aria-label={`Spawned sessions from ${title}`}>
+          {hiddenActiveSession ? (
+            <ActivePathShortcut
+              session={hiddenActiveSession}
               depth={props.depth + 1}
-              flat={props.flat}
-              activeSessionId={props.activeSessionId}
-              focusIndex={props.focusIndex}
-              onFocusSession={props.onFocusSession}
-              expanded={props.expanded}
-              onToggleExpand={props.onToggleExpand}
-              onRevealActivePath={props.onRevealActivePath}
-              childPages={props.childPages}
-              onLoadMoreChildren={props.onLoadMoreChildren}
-              onSelect={props.onSelect}
-              onRename={props.onRename}
-              onPin={props.onPin}
+              hiddenLevels={hiddenActivePath!.length - 1}
+              onReveal={props.onRevealActivePath}
             />
-          ))
-        : null}
-      {isExpanded && childPage?.loading ? (
-        <TreeLoadRow depth={props.depth + 1} text="Loading sessions…" />
+          ) : null}
+          {childCount > 0 && isExpanded
+            ? node.children.map((child) => (
+                <SessionTreeRow
+                  key={child.session.id}
+                  node={child}
+                  depth={props.depth + 1}
+                  flat={props.flat}
+                  activeSessionId={props.activeSessionId}
+                  focusIndex={props.focusIndex}
+                  onFocusSession={props.onFocusSession}
+                  expanded={props.expanded}
+                  onToggleExpand={props.onToggleExpand}
+                  onRevealActivePath={props.onRevealActivePath}
+                  childPages={props.childPages}
+                  onLoadMoreChildren={props.onLoadMoreChildren}
+                  onRename={props.onRename}
+                  onPin={props.onPin}
+                />
+              ))
+            : null}
+          {isExpanded && childPage?.loading ? (
+            <TreeLoadRow depth={props.depth + 1} text="Loading sessions…" />
+          ) : null}
+          {isExpanded && childPage?.failed ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Retry loading sessions"
+              onClick={() =>
+                void props.onLoadMoreChildren(node.session.id, childPage.nextCursor ?? undefined)
+              }
+            />
+          ) : null}
+          {isExpanded && !childPage?.loading && !childPage?.failed && childPage?.nextCursor ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Show more"
+              onClick={() => void props.onLoadMoreChildren(node.session.id, childPage.nextCursor!)}
+            />
+          ) : null}
+        </div>
       ) : null}
-      {isExpanded && childPage?.failed ? (
-        <TreeLoadRow
-          depth={props.depth + 1}
-          text="Retry loading sessions"
-          onClick={() =>
-            void props.onLoadMoreChildren(node.session.id, childPage.nextCursor ?? undefined)
-          }
-        />
-      ) : null}
-      {isExpanded && !childPage?.loading && !childPage?.failed && childPage?.nextCursor ? (
-        <TreeLoadRow
-          depth={props.depth + 1}
-          text="Show more"
-          onClick={() => void props.onLoadMoreChildren(node.session.id, childPage.nextCursor!)}
-        />
-      ) : null}
-    </>
+    </div>
   );
 }
 
@@ -1153,17 +1363,21 @@ function TreeLoadRow({
 }) {
   const style = { paddingLeft: 26 + visualTreeDepth(depth) * 12 };
   return onClick ? (
-    <button
-      type="button"
-      onClick={onClick}
-      style={style}
-      className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
-    >
-      {text}
-    </button>
+    <div role="listitem">
+      <button
+        type="button"
+        onClick={onClick}
+        style={style}
+        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
+      >
+        {text}
+      </button>
+    </div>
   ) : (
-    <div style={style} className="flex h-8 items-center text-xs text-fg-subtle" role="status">
-      {text}
+    <div role="listitem">
+      <div style={style} className="flex h-8 items-center text-xs text-fg-subtle" role="status">
+        {text}
+      </div>
     </div>
   );
 }
@@ -1175,6 +1389,8 @@ function SessionRow(props: {
   depth: number;
   /** Spawned-child count; a chevron + badge appear when > 0. */
   childCount: number;
+  /** True when childCount is a server traversal lower bound. */
+  childCountTruncated: boolean;
   hasChildren: boolean;
   expanded: boolean;
   /** A descendant is live — a collapsed parent shows a quiet activity dot. */
@@ -1183,7 +1399,6 @@ function SessionRow(props: {
   active: boolean;
   focused: boolean;
   onFocus: () => void;
-  onSelect: (sessionId: string) => void;
   onRename: RenameFn;
   onPin: PinFn;
 }) {
@@ -1191,9 +1406,12 @@ function SessionRow(props: {
   const title =
     props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
   const rename = useInlineRename(props.session, props.onRename);
+  const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
   const stateLabel = sessionStateLabel(props.session);
   const descendantLabel = sessionDescendantLabel(props.session);
+  const childCountText = sessionDescendantCountText(props.childCount, props.childCountTruncated);
+  const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
   const relativeTime = relativeTimeLabel(props.session.updatedAt);
   // Indent nested rows; the leading affordance is a chevron for parents, else a
@@ -1234,11 +1452,11 @@ function SessionRow(props: {
     </span>
   );
 
-  // While renaming, the row body becomes an inline input. Keep it as a
-  // listitem so the surrounding list semantics and the active accent bar hold.
+  // While renaming, the row body becomes an inline input. SessionTreeRow owns
+  // the listitem semantics so its spawned-session list can remain nested.
   if (rename.editing) {
     return (
-      <div role="listitem" className={rowClassName}>
+      <div className={rowClassName}>
         <ActiveAccent active={props.active} />
         {lead}
         <RailStatusDot status={props.session.status} />
@@ -1274,20 +1492,25 @@ function SessionRow(props: {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div role="listitem" title={`${title} — ${stateLabel}`} className={rowClassName}>
+        <div title={`${title} — ${stateLabel}`} className={rowClassName}>
           <ActiveAccent active={props.active} />
           {lead}
-          <button
-            type="button"
+          <Link
+            to="/workspaces/$workspaceId/sessions/$sessionId"
+            params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
             data-session-index={props.index}
             data-session-focus
+            data-session-row={props.session.id}
             tabIndex={props.focused ? 0 : -1}
             aria-current={props.active ? "page" : undefined}
             aria-label={`Open ${title}. ${stateLabel}${
               props.session.pinned ? ". Pinned" : ""
-            }${hasChildren ? `. ${props.childCount} spawned sessions` : ""}`}
+            }${hasChildren ? `. ${childCountAria.replace("descendant", "spawned")}` : ""}`}
             onFocus={props.onFocus}
-            onClick={() => props.onSelect(props.session.id)}
+            onClick={(event) => {
+              if (isModifiedNavigationClick(event)) return;
+              rail.setDrawerOpen(false);
+            }}
             className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
           >
             <RailStatusDot status={props.session.status} />
@@ -1314,9 +1537,7 @@ function SessionRow(props: {
                     <span className="absolute inset-0 animate-og-pulse rounded-full bg-status-running" />
                   </span>
                 ) : null}
-                <span aria-label={`${props.childCount} descendant sessions`}>
-                  {props.childCount}
-                </span>
+                <span aria-label={childCountAria}>{childCountText}</span>
               </span>
             ) : null}
             {/* Relative time is visible at rest (the list is grouped by recency),
@@ -1327,7 +1548,7 @@ function SessionRow(props: {
                 {relativeTime}
               </span>
             ) : null}
-          </button>
+          </Link>
           <RowActionsMenu
             session={props.session}
             onRename={rename.startEditing}
@@ -1335,14 +1556,27 @@ function SessionRow(props: {
           />
         </div>
       </ContextMenuTrigger>
-      <ContextMenuContent className="min-w-40">
+      <ContextMenuContent
+        className="min-w-40"
+        data-session-menu={props.session.id}
+        onCloseAutoFocus={(event) => {
+          if (!contextPinSelection.current) return;
+          // The original trigger is about to be unmounted by the optimistic
+          // group move. SessionList restores the corresponding remounted row.
+          event.preventDefault();
+          contextPinSelection.current = false;
+        }}
+      >
         <ContextMenuItem className="pointer-coarse:min-h-11" onSelect={rename.startEditing}>
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
         <ContextMenuItem
           className="pointer-coarse:min-h-11"
-          onSelect={() => void props.onPin(props.session, !props.session.pinned)}
+          onSelect={() => {
+            contextPinSelection.current = true;
+            void props.onPin(props.session, !props.session.pinned, "row");
+          }}
         >
           <PinIcon className={props.session.pinned ? "size-4 fill-current" : "size-4"} />
           {props.session.pinned ? "Unpin" : "Pin"}
@@ -1356,7 +1590,7 @@ function sessionDescendantLabel(session: Session): string | null {
   const stats = session.treeStats;
   if (!stats || stats.totalDescendants === 0) return null;
   const live = stats.runningDescendants + stats.queuedDescendants;
-  const total = `${stats.totalDescendants}${stats.truncated ? "+" : ""}`;
+  const total = sessionDescendantCountText(stats.totalDescendants, stats.truncated);
   if (stats.attentionDescendants > 0) {
     return `${stats.attentionDescendants} need you · ${total} total`;
   }
@@ -1391,6 +1625,7 @@ function RowActionsMenu({
   onRename: () => void;
   onPin: PinFn;
 }) {
+  const pinSelection = useRef(false);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1401,6 +1636,7 @@ function RowActionsMenu({
           aria-label={`Actions for ${
             session.title?.trim() || session.initialMessage?.trim() || "Untitled session"
           }`}
+          data-session-actions={session.id}
           onClick={(event) => event.stopPropagation()}
           className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-100"
         >
@@ -1410,13 +1646,21 @@ function RowActionsMenu({
       <DropdownMenuContent
         align="end"
         className="min-w-40"
+        data-session-menu={session.id}
         onClick={(event) => event.stopPropagation()}
+        onCloseAutoFocus={(event) => {
+          if (!pinSelection.current) return;
+          // The optimistic projection remounts the trigger under another
+          // SessionGroup; the list-level focus owner targets that new node.
+          event.preventDefault();
+          pinSelection.current = false;
+        }}
       >
         <DropdownMenuItem
           className="pointer-coarse:min-h-11"
           onSelect={onRename}
           // The menu item lives inside the row; stop the synthetic click from
-          // bubbling to the row's onSelect (open-session).
+          // activating the session link.
           onClick={(event) => event.stopPropagation()}
         >
           <PencilIcon className="size-4" />
@@ -1424,7 +1668,10 @@ function RowActionsMenu({
         </DropdownMenuItem>
         <DropdownMenuItem
           className="pointer-coarse:min-h-11"
-          onSelect={() => void onPin(session, !session.pinned)}
+          onSelect={() => {
+            pinSelection.current = true;
+            void onPin(session, !session.pinned, "actions");
+          }}
           onClick={(event) => event.stopPropagation()}
         >
           <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
@@ -1460,13 +1707,15 @@ function RailStatusDot({ status }: { status: Session["status"] }) {
   );
 }
 
-function EmptySessions({ onStart }: { onStart: () => void }) {
+function EmptySessions() {
   return (
     <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-border px-3 py-4 text-center">
       <p className="text-xs text-fg-subtle">No sessions yet</p>
-      <Button type="button" size="sm" onClick={onStart} className="mx-auto">
-        <PlusIcon className="size-3.5" />
-        Start your first session
+      <Button asChild size="sm" className="mx-auto">
+        <NewSessionLink>
+          <PlusIcon className="size-3.5" />
+          Start your first session
+        </NewSessionLink>
       </Button>
     </div>
   );
@@ -1521,18 +1770,15 @@ export function CollapsedSessionsButton() {
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="New session"
-            onClick={rail.startNewSession}
-            className="text-fg-muted hover:text-fg"
-          >
-            <PlusIcon className="size-4" />
+          <Button asChild variant="ghost" size="icon-sm" className="text-fg-muted hover:text-fg">
+            <NewSessionLink aria-label="New session">
+              <PlusIcon className="size-4" />
+            </NewSessionLink>
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="right">New session · c</TooltipContent>
+        <TooltipContent side="right">
+          New session · {shortcutLabel(NEW_SESSION_SHORTCUT)}
+        </TooltipContent>
       </Tooltip>
     </div>
   );

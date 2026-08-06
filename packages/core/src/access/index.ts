@@ -1,6 +1,7 @@
-import type { Settings } from "@opengeni/config";
+import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import {
   verifyDelegatedAccessToken,
+  type AccountGrant,
   type AccessContext,
   type AccessGrant,
   type Permission,
@@ -17,8 +18,43 @@ import {
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
+import { getManagedSession } from "../managed-session";
 
 const bearerPrefix = "Bearer ";
+
+/** Exact Better Auth evidence for the current direct managed request. */
+export interface DirectManagedSessionEvidence {
+  userId: string;
+  sessionId: string;
+}
+
+// Session identifiers are request-local authorization evidence. They must not
+// enter grants, AccessContext metadata, idempotency keys, hashes, audit rows,
+// projections, or logs. A WeakMap keeps the evidence attached only to the
+// in-memory context object produced by the direct Better Auth path.
+const directManagedSessionEvidence = new WeakMap<object, DirectManagedSessionEvidence>();
+
+export function directManagedSessionEvidenceFor(
+  context: AccessContext,
+): DirectManagedSessionEvidence | null {
+  return directManagedSessionEvidence.get(context as unknown as object) ?? null;
+}
+
+/** Test/adapter seam for binding exact evidence to an already-built context. */
+export function bindDirectManagedSessionEvidence(
+  context: AccessContext,
+  evidence: DirectManagedSessionEvidence,
+): void {
+  if (!evidence.userId.trim() || !evidence.sessionId.trim()) {
+    throw new Error("direct managed session evidence requires userId and sessionId");
+  }
+  directManagedSessionEvidence.set(context as unknown as object, { ...evidence });
+}
+
+function copyDirectManagedSessionEvidence(from: AccessContext, to: AccessContext): void {
+  const evidence = directManagedSessionEvidenceFor(from);
+  if (evidence) directManagedSessionEvidence.set(to as unknown as object, evidence);
+}
 
 export type AccessDeps = {
   db: Database;
@@ -40,10 +76,64 @@ export async function requireAccessGrant(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrant> {
+  return (await requireAccessGrantAuthorization(c, deps, workspaceId, permission)).grant;
+}
+
+export type AccessGrantAuthorization = {
+  grant: AccessGrant;
+  accountGrant: AccountGrant | null;
+  authenticatedSubjectId: string;
+  contextIntegrity: boolean;
+};
+
+export function accessGrantAuthorizationFromContext(
+  context: AccessContext,
+  grant: AccessGrant,
+): AccessGrantAuthorization {
+  const matchingAccountGrants = context.accountGrants.filter(
+    (candidate) => candidate.accountId === grant.accountId,
+  );
+  const delegated = grant.metadata?.delegated === true;
+  const contextIntegrity =
+    context.subjectId === grant.subjectId &&
+    context.accountGrants.every((candidate) => candidate.subjectId === context.subjectId) &&
+    context.workspaceGrants.every(
+      (candidate) =>
+        candidate.subjectId === context.subjectId &&
+        candidate.principalKind === grant.principalKind &&
+        (candidate.metadata?.delegated === true) === delegated &&
+        Boolean(candidate.serviceInitiator) === Boolean(grant.serviceInitiator) &&
+        Boolean(candidate.serviceInitiatorContext) === Boolean(grant.serviceInitiatorContext) &&
+        context.accountGrants.filter(
+          (accountGrant) => accountGrant.accountId === candidate.accountId,
+        ).length === 1,
+    ) &&
+    matchingAccountGrants.length === 1 &&
+    matchingAccountGrants[0]?.subjectId === context.subjectId;
+  return {
+    grant,
+    accountGrant: contextIntegrity ? matchingAccountGrants[0]! : null,
+    authenticatedSubjectId: context.subjectId,
+    contextIntegrity,
+  };
+}
+
+export async function requireAccessGrantAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
+  const principalKind = hostedHumanSessionPrincipalKind(context);
   const grant =
     context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
-    (await getWorkspaceGrant(deps.db, context.subjectId, workspaceId));
+    (await getWorkspaceGrant(
+      deps.db,
+      context.subjectId,
+      workspaceId,
+      principalKind ? { principalKind } : undefined,
+    ));
   if (!grant) {
     const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
     if (!workspace) {
@@ -68,7 +158,21 @@ export async function requireAccessGrant(
   if (permission) {
     requirePermission(grant, permission);
   }
-  return grant;
+  return accessGrantAuthorizationFromContext(context, grant);
+}
+
+function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session" | undefined {
+  if (context.mode !== "managed" || context.workspaceGrants.length === 0) {
+    return undefined;
+  }
+  return context.workspaceGrants.every(
+    (grant) =>
+      grant.principalKind === "human_session" &&
+      grant.metadata?.delegated !== true &&
+      !grant.serviceInitiator,
+  )
+    ? "human_session"
+    : undefined;
 }
 
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
@@ -83,14 +187,57 @@ export function requirePermission(grant: AccessGrant, permission: Permission): v
         message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
       });
     }
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new HTTPException(403, {
+      message: `missing permission: ${permission}`,
+    });
   }
 }
 
+/**
+ * Require a permission to be present literally on the grant. This deliberately
+ * does not expand workspace:admin or deprecated aliases and is reserved for
+ * authorities, such as plaintext secret reads, that old broad grants must not
+ * acquire implicitly.
+ */
+export function requireLiteralPermission(grant: AccessGrant, permission: Permission): void {
+  if (!hasLiteralPermission(grant.permissions, permission)) {
+    throw new HTTPException(403, {
+      message: `missing literal permission: ${permission}`,
+    });
+  }
+}
+
+export function hasLiteralPermission(permissions: Permission[], permission: Permission): boolean {
+  return permissions.includes(permission);
+}
+
 export function hasPermission(permissions: Permission[], permission: Permission): boolean {
+  if (permission === "secrets:read") {
+    return permissions.includes("secrets:read");
+  }
   const aliases: Partial<Record<Permission, Permission[]>> = {
     "variable-sets:use": ["environments:use" as Permission],
     "variable-sets:manage": ["environments:manage" as Permission],
+    "variable-sets:list": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use" as Permission,
+      "environments:manage" as Permission,
+    ],
+    "variable-sets:read": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use" as Permission,
+      "environments:manage" as Permission,
+    ],
+    "variable-sets:write": ["variable-sets:manage", "environments:manage" as Permission],
+    "secrets:list": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use" as Permission,
+      "environments:manage" as Permission,
+    ],
+    "secrets:write": ["variable-sets:manage", "environments:manage" as Permission],
   };
   return (
     permissions.includes(permission) ||
@@ -101,6 +248,10 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
   if (deps.settings.productAccessMode === "local") {
+    const delegated = await delegatedAccessContext(c, deps, "local");
+    if (delegated) {
+      return delegated;
+    }
     return await bootstrapWorkspace(deps.db, {
       accountExternalSource: "opengeni:local",
       accountExternalId: "default",
@@ -150,13 +301,19 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await deps.managedAuth.api.getSession({ headers: c.req.raw.headers });
-    if (session?.user) {
-      return await ensureManagedAccessForUser(deps.db, {
+    const session = await getManagedSession(c, deps.managedAuth);
+    const sessionId = typeof session?.session?.id === "string" ? session.session.id : null;
+    if (session?.user && sessionId) {
+      const context = await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,
         email: session.user.email,
         name: session.user.name,
       });
+      directManagedSessionEvidence.set(context as unknown as object, {
+        userId: session.user.id,
+        sessionId,
+      });
+      return context;
     }
   }
 
@@ -208,6 +365,7 @@ async function apiKeyAccessContext(
             subjectId,
             subjectLabel: apiKey.name,
             permissions: apiKey.permissions,
+            principalKind: "api_key",
             metadata: {
               authType: "api_key",
               governanceRevision: governance.governanceRevision,
@@ -223,13 +381,14 @@ async function apiKeyAccessContext(
 async function delegatedAccessContext(
   c: Context,
   deps: AccessDeps,
-  mode: "configured" | "managed",
+  mode: "local" | "configured" | "managed",
   token = bearerToken(c),
 ): Promise<AccessContext | null> {
-  if (!token || !deps.settings.delegationSecret) {
+  const delegationSecret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (!token || !delegationSecret) {
     return null;
   }
-  const payload = await verifyDelegatedAccessToken(deps.settings.delegationSecret, token);
+  const payload = await verifyDelegatedAccessToken(delegationSecret, token);
   if (!payload) {
     return null;
   }
@@ -256,12 +415,16 @@ async function delegatedAccessContext(
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
         permissions: payload.permissions,
+        principalKind: payload.principalKind,
         // sessionId is worker-asserted (HMAC-signed token claim), not agent
         // controlled; it scopes session-bound MCP tools such as goal management.
         metadata: {
           delegated: true,
           authIssuedAt: payload.iat ?? null,
           ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
+          ...(payload.firstPartyMcpTools !== undefined
+            ? { firstPartyMcpTools: payload.firstPartyMcpTools }
+            : {}),
           // Caller identity: the turn that minted this token. Tools classify the
           // CALLER from this instead of re-reading the live active pointer.
           ...(payload.turnId ? { turnId: payload.turnId } : {}),
@@ -319,7 +482,7 @@ async function governanceBoundContext(
   const workspaceGrants = context.workspaceGrants.map((grant) =>
     blocked(grant) ? { ...grant, permissions: [] } : grant,
   );
-  return {
+  const bounded: AccessContext = {
     ...context,
     accountGrants: context.accountGrants.map((grant) =>
       blocked(grant) ? { ...grant, permissions: [] } : grant,
@@ -331,6 +494,8 @@ async function governanceBoundContext(
         ? null
         : context.defaultWorkspaceId,
   };
+  copyDirectManagedSessionEvidence(context, bounded);
+  return bounded;
 }
 
 function authorizationWasInvalidated(

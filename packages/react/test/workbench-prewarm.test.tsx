@@ -426,6 +426,44 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await rendered.unmount();
   });
 
+  test("a repository-read degraded capture reports the truthful live fallback", async () => {
+    const notifications: Array<{ kind: string; message: string }> = [];
+    const { client, spy } = coldClient({
+      getWorkspaceCapture: async () => ({
+        available: false,
+        degradedReason: "repository_read_unavailable",
+        revision: 4,
+        capturedAt: "2026-07-28T22:28:32.701Z",
+        turnId: "turn-4",
+        leaseEpoch: 1,
+      }),
+    });
+    const rendered = await renderComponent(
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          autoSaveId="og.test.prewarm.repository-read-degraded"
+          onNotify={(notification) => notifications.push(notification)}
+        />,
+      ),
+    );
+    await flush(60);
+
+    expect(spy.attachCalls).toBe(0);
+    expect(notifications).toEqual([
+      {
+        kind: "error",
+        message:
+          "Workspace capture is incomplete because repository changes could not be read. Live files remain authoritative.",
+      },
+    ]);
+    expect(rendered.container.textContent).toContain("Workspace is resting");
+    await rendered.unmount();
+  });
+
   test("a reconnecting workspace shows one truthful waking state without a duplicate wake action", async () => {
     const { client, spy } = coldClient({
       getWorkspaceCapture: async () => ({ available: false }),
@@ -439,6 +477,9 @@ describe("workbench prewarm gating (Refinement 1)", () => {
             name: "Cloud sandbox",
             kind: "modal",
             state: "reconnecting",
+            workspaceGeneration: null,
+            archiveGeneration: null,
+            archiveComplete: false,
             active: true,
             isSessionGroup: true,
             os: "linux",

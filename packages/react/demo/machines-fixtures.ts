@@ -12,7 +12,7 @@ import type {
   MachinesResponse,
   MachineView,
   MetricSample,
-} from "../src/index";
+} from "@opengeni/react";
 
 const GiB = 1024 * 1024 * 1024;
 
@@ -54,6 +54,9 @@ function machine(
   return {
     enrollmentId: overrides.enrollmentId ?? "enr-" + overrides.sandboxId,
     kind: "selfhosted",
+    workspaceGeneration: null,
+    archiveGeneration: null,
+    archiveComplete: false,
     active: false,
     isSessionGroup: false,
     os: "linux",

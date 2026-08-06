@@ -1,26 +1,34 @@
 # Conversation context compaction
 
-OpenGeni has one compaction mechanism: durable, portable plaintext compaction
-that follows the local compaction path in Codex CLI 0.144.6 (upstream tag
-`rust-v0.144.6`, commit `5d1fbf26c43abc65a203928b2e31561cb039e06d`). It is used for
-OpenAI, Azure, Codex subscriptions, and registry providers. There is no
-provider-side mode, off switch, compatibility ladder, request-local history
-trim, or deterministic non-model fallback.
+OpenGeni freezes a per-session compaction mode at create time
+(`sessions.codex_compaction_mode`):
 
-Portable plaintext is required for the Codex subscription pool. A session can
-move between independently authenticated ChatGPT subscriptions, while Codex's
-remote encrypted compaction item is tied to the provider/account that created
-it. Persisting that opaque item would make a later subscription unable to
-recover the compacted assistant/tool history.
+| Mode | When | Mechanism |
+| --- | --- | --- |
+| `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` on `remote_v2` builds the agent first so that prefix matches (portable `/compact` still skips prepareTools/sandbox). Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+
+There is no off switch, compatibility ladder, request-local history trim, or
+deterministic non-model fallback. A `remote_v2` session never silently falls
+back to portable on remote failure (avoids mixed history shapes). Azure /
+OpenAI platform remote compact APIs are out of scope.
+
+Workspace setting `codexCompactionDefault` only affects **new** Codex sessions;
+later setting changes never move an already-frozen session.
+
+The portable path follows Codex CLI 0.146.0 local compaction (upstream tag
+`rust-v0.146.0`, commit `be449751a978f02e5bbba886999662956c7f38f5`) and is used
+for OpenAI, Azure, registry providers, and portable-locked Codex sessions.
 
 The implementation lives in:
 
-- `packages/runtime/src/context-compaction.ts`: thresholds, upstream prompt and
-  prefix, rebuild rules, and the typed compaction signal.
-- `packages/runtime/src/index.ts`: the tool-less summarizer and per-call signal.
-- `apps/worker/src/activities/context-compaction.ts`: summarizer retry and the
-  fenced durable replacement.
-- `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery.
+- `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
+  remote v2 retain/rebuild helpers, and the typed compaction signal.
+- `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
+- `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
+  retry, remote fail-closed path, fenced durable replacement.
+- `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery;
+  Codex ALS beta/turn-metadata headers for remote v2.
 - `packages/db/src/index.ts`: the atomic history replacement and token signal.
 
 ## Token limits
@@ -38,7 +46,7 @@ If a model has no explicit automatic limit, OpenGeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
-The Codex subscription catalog verified with Codex CLI 0.144.6 on 2026-07-18
+The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
 has:
 
 | quantity | tokens |
@@ -47,16 +55,39 @@ has:
 | effective input window (95%) | 258,400 |
 | automatic compaction limit (90%) | 244,800 |
 
-Before a provider response exists, the guard estimates the complete outgoing
-request: active items, instructions, and tool schemas. After a response, it
-anchors to that exact response's provider-reported **total** tokens and adds all
-locally appended items after the last model-generated item, plus any positive
+Automatic compaction is provider-accounted. Before a provider response exists,
+no local whole-request estimate may force compaction: OpenGeni sends the request,
+then either records the provider's usage or handles the provider's typed context
+overflow through the same compaction recovery. After a response, the per-call
+guard anchors to that exact response's provider-reported **total** tokens and
+adds only items appended after the last model-generated item plus positive
 instruction or tool-schema growth. That anchor is accepted only when the usage
-revision belongs to the immediately preceding model request. If stream
-consumption lags the SDK's background model loop, the guard uses the complete
-request estimate instead of binding delayed usage to a newer request. A durable prior-turn input count is only a
-conservative floor; it can never hide a larger active-history estimate. Attempt
-fencing prevents a stale worker from overwriting durable token state.
+revision belongs to the immediately preceding model request; a delayed signal
+is ignored rather than attached to newer input. At a later turn boundary, the
+attempt-fenced provider-reported `last_input_tokens` is the only durable
+automatic signal. Every newer authoritative terminal response replaces it with
+that response's usable input count or null when the provider supplied none;
+compaction and context clearing also set it to null. A missing or invalid count
+never carries an older response's value forward. Local
+estimates remain limited to shaping a compaction request and describing the
+history-only before/after replacement; they never enter `last_input_tokens`.
+
+Opaque Codex items (`type: "compaction"` with `encrypted_content`, and
+reasoning with encrypted content) use Codex CLI's encrypted-payload heuristic
+(`visible_bytes ≈ len * 3/4 - 650`, then `ceil(bytes / 4)` tokens). They are
+never JSON-stringified into the local budget — that mistake treated ciphertext
+as prompt text, inflated `last_input_tokens` after remote_v2, and re-triggered
+auto-compaction.
+
+Typed `input_image`, `image_url`, structured `image`, and
+`computer_screenshot` objects are projected as native media before the generic
+JSON/text estimate. Explicit detail and dimensions are retained; when needed,
+a bounded byte prefix can recover PNG, GIF, WebP VP8X, or JPEG geometry. The
+PNG path accepts geometry only from a complete first IHDR chunk with a valid
+CRC32 over its type and 13-byte data. The dimension-aware estimate is capped, and unknown geometry uses one explicit
+conservative bounded fallback. Inline image bytes or data-URL base64 therefore
+do not grow the text estimate linearly. A data URL inside ordinary textual
+content is still text and receives ordinary text accounting.
 
 ## Model-facing tool output
 
@@ -73,6 +104,14 @@ Pause, Steer, failure, and deploy recovery can still reconcile the real outcome.
 UI/audit events are a separate projection and are never used to reconstruct
 model history.
 
+The final request-time filter is not a compaction boundary. For an unchanged
+canonical prefix and settings, a later provider request must reproduce the
+earlier serialized filtered prefix exactly. Deterministic protocol
+normalization and output bounding are allowed; arbitrary text must not be
+classified or rewritten, and deleting or reordering an earlier
+`view_image` call/result pair is not. Only the fenced durable replacement below
+may remove active history.
+
 ## What the summarizer sees
 
 The compaction model receives:
@@ -82,9 +121,22 @@ The compaction model receives:
 3. the same system instructions as the running agent;
 4. no tools and no provider-side context-management policy.
 
+Explicit compaction is a new accepted logical turn and therefore composes the
+same deterministic workspace instruction-policy and preference-descriptor
+governance as an ordinary agent turn. Its service initiator may inherit the
+causal human's immutable preference authority from the latest started turn;
+pure service compaction has no personal preference authority. The exact
+snapshot is attempt-fenced, recovery reuses it, and Documents/RAG evidence are
+never promoted into governance.
+
 Responses providers use the Agents SDK's structured Responses conversion, so
 tool calls/results remain real protocol items on the wire. Chat providers use a
-plain-text adapter because Chat Completions has a different item protocol.
+request-local transcript adapter because Chat Completions has a different item
+protocol. It projects only record types the Chat converter cannot express,
+preserves their readable historical facts, and never mutates canonical history.
+Historical `tool_search` calls and outputs are not rerun, compared with the
+current catalog, or reclassified. There is no switch-time rewrite and no second
+durable history form.
 
 Before the provider call, OpenGeni estimates the complete checkpoint input. It
 replaces aggregate oversized tool results oldest-first only in the temporary
@@ -118,19 +170,44 @@ The replacement history is:
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.
 
-Prior summaries, platform-authored ephemeral context, and images are not kept
-as user boundaries. Assistant messages, reasoning, tool calls, and tool results
-leave the active model history but remain in inactive audit rows.
+Prior summaries are not kept as user boundaries. Portable retention strips
+images from retained user messages; **remote_v2** keeps `input_image` parts in
+the cleartext suffix (CLI parity). Durable machine inputs participate in the
+history being summarized like every other canonical model item. Assistant
+messages, reasoning, tool calls, and tool results leave the active model
+history but remain in inactive audit rows.
 
-The generated replacement must estimate strictly smaller than the active input.
-Its deterministic fingerprint must also differ from the latest durable
-replacement; an exact repeat settles once as `replacement_unchanged` instead of
-entering another compaction/retry cycle.
+On the **portable** path, the generated replacement must estimate strictly
+smaller than the active input, and its deterministic fingerprint must differ
+from the latest durable replacement (an exact repeat settles as
+`replacement_unchanged`). **remote_v2** follows Codex CLI: a valid opaque
+compaction item is installed without those local gates; token usage is
+recomputed from the opaque-aware estimate afterward.
+
 One transaction locks workspace, session, and turn; verifies
 `turnId + executionGeneration + attemptId`; supersedes every old active row;
-inserts the replacement at fresh whole-number positions; updates
+inserts the replacement at fresh whole-number positions; clears
 `last_input_tokens`; records `session.context.compacted`; and clears a manual
 compaction request when applicable. A stale attempt can do none of those writes.
+
+## Timeline UX
+
+Compaction is maintenance of **conversation history** supplied to the model, not a
+rewrite of the chat transcript. The React timeline projects a first-class
+`context-compaction` landmark (not a foldable notice):
+
+| Event | Landmark phase |
+| --- | --- |
+| `session.context.compaction.requested` (idle manual claim) | `started` until a later finish settles it |
+| `session.context.compaction.started` (attempt-fenced, before provider call) | `started` — live-published so the UI can show progress |
+| `session.context.compacted` | `compacted` with optional `~before → ~after estimated history tokens` |
+| `session.context.compaction.skipped` | `skipped` with a short reason |
+
+Start and finish for the same turn settle in place (one landmark). The landmark
+is a turn boundary, so mid-turn auto-compact stays visible between collapsed
+pre/post activity instead of vanishing inside a chevron. Copy always reminds
+that chat history above is unchanged. Provider `implementation` stays in the
+event payload for debug, not as hero UI text.
 
 ## Turn behavior
 
@@ -160,15 +237,15 @@ When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
 database settlement records
 `session.context.compaction.skipped(reason="summarization_failed")`, clears that
 one request, records `turn.failed`, and returns the session to idle. For a
-failure during same-turn recovery, the exact turn is settled once, ordinary
-internal updates are deferred, and any delivered goal-continuation receipt is
-terminalized. A worker crash therefore cannot clear the request without the
-matching terminal truth, and an idle maintenance execution cannot immediately
-recreate itself forever. With no newer actionable work wake, the workflow ends
-instead of retrying against unchanged history. Ordinary machine updates remain
-pending; a later human/API prompt, Steer, or explicitly requested Compact can
-create newer truth and make one new attempt. The active history stays unchanged
-throughout.
+failure during same-turn recovery, the exact turn is settled once. Machine
+inputs already visible to the model remain delivered in active history and are
+never requeued; only genuinely new updates remain pending. A worker crash
+therefore cannot clear the request without matching terminal truth, and an idle
+maintenance execution cannot immediately recreate itself forever. With no
+newer actionable work wake, the workflow ends instead of retrying against
+unchanged history. A later human/API prompt, Steer, explicitly requested
+Compact, or genuinely new machine input can create newer truth and make one new
+attempt. The active history stays unchanged throughout.
 
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,
@@ -195,7 +272,10 @@ same logical turn after replacement. While idle, the request creates one
 born-running `source="compaction"` maintenance execution on the existing turn
 ledger. That execution is not conversational work and is never a prompt-queue
 row; it exists to own model allocation, attempt fencing, recovery, and
-settlement, and it never prepares tools or a sandbox.
+settlement. Portable `/compact` still skips prepareTools/sandbox. `remote_v2`
+`/compact` prepares tools and builds the agent first so the compact request
+reuses the ordinary tools→instructions cache prefix, then settles without
+inference.
 
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated

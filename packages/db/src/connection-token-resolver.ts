@@ -4,28 +4,81 @@ import {
   type Settings,
 } from "@opengeni/config";
 import type {
+  ConnectionKind,
   ConnectionCredentialsPort,
+  ConnectionStatus,
   McpConnectionResourceScope,
   McpCredentialAuthNeededReason,
   McpCredentialsRequest,
   TurnInitiator,
   TurnInitiatorContext,
 } from "@opengeni/contracts";
+import {
+  OAUTH_MAX_RESPONSE_BYTES,
+  pinnedFetch,
+  readResponseJsonBounded,
+  undiciFetch,
+  validateHttpUrl,
+  type DnsLookup,
+  type FetchLike,
+} from "@opengeni/network";
+export { isPrivateAddress } from "@opengeni/network";
 import { Buffer } from "node:buffer";
-import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
-import {
-  loadConnectionCredentialForBroker,
-  recordConnectionTokenRefresh,
-  recordConnectionUsed,
-  setConnectionStatus,
-  type ConnectionCredentialForBroker,
-  type Database,
-} from "./index";
+import type { Database } from "./database";
+
+export type ConnectionCredentialForBroker = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+  providerDomain: string;
+  kind: ConnectionKind;
+  status: ConnectionStatus;
+  credential: Record<string, unknown>;
+  grantedScopes: string[];
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  version: number;
+  metadata: Record<string, unknown>;
+};
+
+export type ConnectionCredentialLookupInput = {
+  workspaceId: string;
+  connectionId?: string;
+  providerDomain: string;
+  kind?: ConnectionKind;
+  subjectId?: string | null;
+  allowSubjectOwned?: boolean;
+};
+
+export type ConnectionTokenRefreshInput = {
+  id: string;
+  version: number;
+  workspaceId: string;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+  grantedScopes?: string[];
+  lastRefreshAt: Date;
+  subjectId?: string | null;
+};
+
+export type ConnectionStatusGuard = {
+  id: string;
+  version: number;
+  subjectId?: string | null;
+};
 
 export type ResolveConnectionCredentialResult =
-  | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
+  | {
+      status: "ok";
+      headers: Record<string, string>;
+      connectionId: string;
+      /** Exact durable version when the credential came from the local connection store. */
+      connectionVersion?: number;
+      expiresAt?: Date | null;
+    }
   | {
       status: "auth_needed";
       reason: McpCredentialAuthNeededReason;
@@ -50,6 +103,8 @@ export type ResolveConnectionCredentialInput = {
   /** @deprecated Use toolName. Retained for the API's pre-existing broker call shape. */
   toolId?: string;
   connectionRef: McpServerConnectionRef;
+  /** Exact MCP destination whose request would receive the resolved headers. */
+  destinationUrl: string;
   forceRefresh?: boolean;
 };
 
@@ -81,7 +136,8 @@ export class HostMcpCredentialBindingError extends Error {
       | "connectionId"
       | "scopes"
       | "resource"
-      | "selectedResources",
+      | "selectedResources"
+      | "destinationUrl",
   ) {
     super(`host MCP credential ${field} binding mismatch`);
     this.name = "HostMcpCredentialBindingError";
@@ -102,6 +158,13 @@ export function buildHostConnectionTokenResolver(
     if (input.workspaceId !== context.workspaceId) {
       throw new HostMcpCredentialScopeError("workspaceId");
     }
+    const destinationUrl = canonicalHttpUrl(input.destinationUrl);
+    if (
+      !destinationUrl ||
+      !destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain)
+    ) {
+      throw new HostMcpCredentialBindingError("destinationUrl");
+    }
     const toolName = input.toolName ?? input.toolId;
     const request: McpCredentialsRequest = {
       accountId: context.accountId,
@@ -114,6 +177,7 @@ export function buildHostConnectionTokenResolver(
       initiator: context.initiator,
       initiatorContext: { ...context.initiatorContext },
       surface: context.surface,
+      destinationUrl,
       serverId: input.serverId,
       connectionRef: {
         providerDomain: input.connectionRef.providerDomain,
@@ -307,25 +371,57 @@ function parseHostCredentialExpiry(value: string | null | undefined): Date | nul
 }
 
 export type ConnectionBrokerDeps = {
-  loadCredential: typeof loadConnectionCredentialForBroker;
-  recordRefresh: typeof recordConnectionTokenRefresh;
-  setStatus: typeof setConnectionStatus;
-  recordUsed: typeof recordConnectionUsed;
+  loadCredential: (
+    db: Database,
+    settings: Settings,
+    input: ConnectionCredentialLookupInput,
+  ) => Promise<ConnectionCredentialForBroker | null>;
+  recordRefresh: (db: Database, input: ConnectionTokenRefreshInput) => Promise<boolean>;
+  setStatus: (
+    db: Database,
+    workspaceId: string,
+    status: ConnectionStatus,
+    lastError: string | null,
+    guard: ConnectionStatusGuard,
+  ) => Promise<boolean>;
+  recordUsed: (
+    db: Database,
+    workspaceId: string,
+    connectionId: string,
+    subjectId?: string | null,
+  ) => Promise<void>;
   refresh: typeof refreshOAuthConnectionCredential;
   encrypt: typeof encryptEnvironmentValue;
   keyBytes: typeof environmentsEncryptionKeyBytes;
   now: () => Date;
 };
 
-const defaultDeps: ConnectionBrokerDeps = {
-  loadCredential: loadConnectionCredentialForBroker,
-  recordRefresh: recordConnectionTokenRefresh,
-  setStatus: setConnectionStatus,
-  recordUsed: recordConnectionUsed,
-  refresh: refreshOAuthConnectionCredential,
-  encrypt: encryptEnvironmentValue,
-  keyBytes: environmentsEncryptionKeyBytes,
-  now: () => new Date(),
+export type PermanentConnectionRefreshFailure = {
+  workspaceId: string;
+  connectionId: string;
+  connectionVersion: number;
+  subjectId: string | null;
+  providerDomain: string;
+  httpStatus: number;
+  oauthErrorCode: string | null;
+};
+
+export type ConnectionTokenResolverOptions = {
+  /** Provider-aware transport override used by local/integration adapters. */
+  refreshTransport?: RefreshTransportOptions;
+  /**
+   * Optional provider adapter for an atomic, metadata-aware permanent refresh
+   * transition. Returning true means the adapter owned the transition (even if
+   * its CAS lost to newer truth); false falls back to generic needs_reauth.
+   */
+  transitionPermanentRefreshFailure?: (
+    failure: PermanentConnectionRefreshFailure,
+  ) => Promise<boolean>;
+};
+
+export type RefreshTransportOptions = {
+  fetchImpl?: FetchLike;
+  dnsLookup?: DnsLookup;
 };
 
 const inflight = new Map<string, Promise<ConnectionCredentialForBroker>>();
@@ -335,16 +431,25 @@ const CONNECTION_REFRESH_TIMEOUT_MS = 10_000;
 export function buildConnectionTokenResolver(
   db: Database,
   settings: Settings,
-  deps: ConnectionBrokerDeps = defaultDeps,
+  deps: ConnectionBrokerDeps,
+  options: ConnectionTokenResolverOptions = {},
 ): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
+  type CredentialLookupInput = Pick<
+    ResolveConnectionCredentialInput,
+    "workspaceId" | "connectionRef" | "subjectId"
+  >;
   const load = async (
-    input: ResolveConnectionCredentialInput,
+    input: CredentialLookupInput,
   ): Promise<ConnectionCredentialForBroker | null> => {
-    const request: Parameters<typeof loadConnectionCredentialForBroker>[2] = {
+    const subjectOwned = input.connectionRef.subjectScope === "subject";
+    if (subjectOwned && !input.subjectId) {
+      return null;
+    }
+    const request: ConnectionCredentialLookupInput = {
       workspaceId: input.workspaceId,
       providerDomain: input.connectionRef.providerDomain,
-      // I1 deliberately accepts workspace-shared connections only at runtime.
-      allowSubjectOwned: false,
+      allowSubjectOwned: subjectOwned,
+      ...(subjectOwned ? { subjectId: input.subjectId! } : {}),
     };
     if (input.connectionRef.connectionId !== undefined) {
       request.connectionId = input.connectionRef.connectionId;
@@ -352,18 +457,24 @@ export function buildConnectionTokenResolver(
     if (input.connectionRef.kind !== undefined) {
       request.kind = input.connectionRef.kind;
     }
-    if (input.subjectId !== undefined) {
-      request.subjectId = input.subjectId;
+    const credential = await deps.loadCredential(db, settings, request);
+    if (!credential) return null;
+    if (subjectOwned) {
+      return credential.subjectId === input.subjectId ? credential : null;
     }
-    return deps.loadCredential(db, settings, request);
+    return credential.subjectId === null ? credential : null;
   };
 
   const snapshot = async (
     cred: ConnectionCredentialForBroker,
     ref: McpServerConnectionRef,
+    destinationUrl: string,
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
+    }
+    if (!connectionBindingMatches(cred, ref, destinationUrl)) {
+      return authNeeded(ref, "missing_connection", cred.id);
     }
     const missingScopes = missingRequestedScopes(ref.scopes, cred.grantedScopes);
     if (missingScopes.length > 0) {
@@ -395,11 +506,12 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
-    await deps.recordUsed(db, cred.workspaceId, cred.id);
+    await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
     return {
       status: "ok",
       headers,
       connectionId: cred.id,
+      connectionVersion: cred.version,
       expiresAt: cred.expiresAt,
     };
   };
@@ -412,14 +524,15 @@ export function buildConnectionTokenResolver(
     if (!key) {
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
-    const refreshed = await deps.refresh(cred, ref, settings);
-    const refreshRecord: Parameters<typeof recordConnectionTokenRefresh>[1] = {
+    const refreshed = await deps.refresh(cred, ref, settings, options.refreshTransport);
+    const refreshRecord: ConnectionTokenRefreshInput = {
       id: cred.id,
       version: cred.version,
       workspaceId: cred.workspaceId,
       credentialEncrypted: deps.encrypt(key, JSON.stringify(refreshed.credential)),
       expiresAt: refreshed.expiresAt,
       lastRefreshAt: deps.now(),
+      subjectId: cred.subjectId,
     };
     if (refreshed.grantedScopes !== undefined) {
       refreshRecord.grantedScopes = refreshed.grantedScopes;
@@ -428,8 +541,8 @@ export function buildConnectionTokenResolver(
     if (persisted) {
       const current = await load({
         workspaceId: cred.workspaceId,
-        serverId: "",
         connectionRef: { ...ref, connectionId: cred.id },
+        ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
       });
       if (current) {
         return current;
@@ -437,8 +550,8 @@ export function buildConnectionTokenResolver(
     }
     const winner = await load({
       workspaceId: cred.workspaceId,
-      serverId: "",
       connectionRef: { ...ref, connectionId: cred.id },
+      ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
     });
     if (winner?.status === "active") {
       return winner;
@@ -450,7 +563,7 @@ export function buildConnectionTokenResolver(
     cred: ConnectionCredentialForBroker,
     ref: McpServerConnectionRef,
   ): Promise<ConnectionCredentialForBroker> => {
-    const key = `${cred.id}:${cred.version}`;
+    const key = `${cred.subjectId ?? "workspace"}:${cred.id}:${cred.version}`;
     const existing = inflight.get(key);
     if (existing) {
       return existing;
@@ -466,6 +579,9 @@ export function buildConnectionTokenResolver(
 
   return async (input) => {
     const ref = input.connectionRef;
+    if (ref.subjectScope === "subject" && !input.subjectId) {
+      return authNeeded(ref, "personal_authority_unavailable", ref.connectionId);
+    }
     // Repository-scoped provider bindings require a broker that can prove the
     // selected-resource boundary. The generic standalone credential store has
     // no provider-specific containment adapter, so it must fail closed instead
@@ -485,6 +601,12 @@ export function buildConnectionTokenResolver(
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
     }
+    // Reject an audience/destination mismatch before any provider-side refresh
+    // or usage update. Refreshing first would still create an unauthorized
+    // external side effect even though the token was never sent to the target.
+    if (!connectionBindingMatches(cred, ref, input.destinationUrl)) {
+      return authNeeded(ref, "missing_connection", cred.id);
+    }
     if (shouldRefresh(cred, input.forceRefresh === true, deps.now())) {
       try {
         cred = await refreshSingleFlight(cred, ref);
@@ -492,40 +614,120 @@ export function buildConnectionTokenResolver(
         // Only a rejected grant may poison the connection; transient failures
         // (network errors, AS 5xx) leave it active so the next resolve retries.
         if (isPermanentRefreshError(error)) {
-          await deps
-            .setStatus(
-              db,
-              input.workspaceId,
-              "needs_reauth",
-              error instanceof Error ? error.message : String(error),
-              {
+          let handled = false;
+          if (options.transitionPermanentRefreshFailure) {
+            try {
+              handled = await options.transitionPermanentRefreshFailure({
+                workspaceId: cred.workspaceId,
+                connectionId: cred.id,
+                connectionVersion: cred.version,
+                subjectId: cred.subjectId,
+                providerDomain: cred.providerDomain,
+                httpStatus: error.httpStatus,
+                oauthErrorCode: error.oauthErrorCode,
+              });
+            } catch {
+              handled = false;
+            }
+          }
+          if (!handled) {
+            await deps
+              .setStatus(db, input.workspaceId, "needs_reauth", error.message, {
                 id: cred.id,
                 version: cred.version,
-              },
-            )
-            .catch(() => undefined);
+                subjectId: cred.subjectId,
+              })
+              .catch(() => undefined);
+          }
         }
         return authNeeded(ref, "refresh_failed", cred.id);
       }
     }
-    return await snapshot(cred, ref);
+    return await snapshot(cred, ref, input.destinationUrl);
   };
+}
+
+function connectionBindingMatches(
+  cred: ConnectionCredentialForBroker,
+  ref: McpServerConnectionRef,
+  destinationUrl: string,
+): boolean {
+  if (cred.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase()) return false;
+  if (ref.kind && cred.kind !== ref.kind) return false;
+
+  const credential = cred.credential as Record<string, unknown>;
+  const metadata = cred.metadata as Record<string, unknown>;
+  const boundMcpUrl = stringValue(credential.mcp_url) ?? stringValue(metadata.mcpUrl);
+  const destination = canonicalHttpUrl(destinationUrl);
+  if (!destination) return false;
+  if (boundMcpUrl) {
+    const binding = canonicalHttpUrl(boundMcpUrl);
+    if (!binding || destination !== binding) return false;
+  } else if (!destinationHostMatchesProvider(destination, cred.providerDomain)) {
+    // Legacy/manual API-key rows may predate mcpUrl metadata. They are still
+    // host-bound to their canonical provider domain, never usable as an
+    // arbitrary bearer/header source for an unrelated MCP destination.
+    return false;
+  }
+  if (cred.kind !== "oauth2") return true;
+  const boundResource = stringValue(credential.resource) ?? stringValue(metadata.resource);
+  if (ref.resource) {
+    if (!boundResource) return false;
+    if (canonicalResource(ref.resource) !== canonicalResource(boundResource)) return false;
+  }
+  return true;
+}
+
+function destinationHostMatchesProvider(destinationUrl: string, providerDomain: string): boolean {
+  const destinationHost = new URL(destinationUrl).hostname.toLowerCase();
+  const provider = providerDomain
+    .trim()
+    .toLowerCase()
+    .replace(/^\.+|\.+$/g, "");
+  return (
+    Boolean(provider) && (destinationHost === provider || destinationHost.endsWith(`.${provider}`))
+  );
+}
+
+function canonicalHttpUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    url.hostname = url.hostname.toLowerCase();
+    if (
+      (url.protocol === "https:" && url.port === "443") ||
+      (url.protocol === "http:" && url.port === "80")
+    ) {
+      url.port = "";
+    }
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function canonicalResource(value: string): string {
+  return canonicalHttpUrl(value) ?? value.trim();
 }
 
 export class ConnectionRefreshHttpError extends Error {
   readonly httpStatus: number;
+  readonly oauthErrorCode: string | null;
 
-  constructor(httpStatus: number) {
+  constructor(httpStatus: number, oauthErrorCode: string | null = null) {
     super(`connection refresh failed with HTTP ${httpStatus}`);
     this.name = "ConnectionRefreshHttpError";
     this.httpStatus = httpStatus;
+    this.oauthErrorCode = oauthErrorCode;
   }
 }
 
 // The token endpoint rejecting the grant itself means re-auth is the only way
 // forward. 429 (throttling) and 408 are transient despite being 4xx; network
 // failures and AS 5xx are likewise retryable.
-function isPermanentRefreshError(error: unknown): boolean {
+function isPermanentRefreshError(error: unknown): error is ConnectionRefreshHttpError {
   return (
     error instanceof ConnectionRefreshHttpError &&
     error.httpStatus >= 400 &&
@@ -618,7 +820,8 @@ function headersForCredential(cred: ConnectionCredentialForBroker): Record<strin
 export async function refreshOAuthConnectionCredential(
   cred: ConnectionCredentialForBroker,
   ref: McpServerConnectionRef,
-  settings?: Settings,
+  settings: Settings,
+  transportOptions: RefreshTransportOptions = {},
 ): Promise<{
   credential: Record<string, unknown>;
   expiresAt: Date | null;
@@ -639,8 +842,14 @@ export async function refreshOAuthConnectionCredential(
   if (!refreshToken || !tokenEndpoint) {
     throw new Error("connection has no refresh token endpoint");
   }
-  if (settings) {
-    await assertOAuthEndpointAllowed(tokenEndpoint, settings);
+  let validatedTokenEndpoint: string;
+  try {
+    validatedTokenEndpoint = validateHttpUrl(tokenEndpoint, {
+      label: "OAuth refresh token endpoint",
+      allowLoopbackHttp: settings.environment === "local" || settings.environment === "test",
+    });
+  } catch {
+    throw new Error("connection has an invalid refresh token endpoint");
   }
   const body = new URLSearchParams();
   body.set("grant_type", "refresh_token");
@@ -674,20 +883,37 @@ export async function refreshOAuthConnectionCredential(
   if (ref.scopes?.length) {
     body.set("scope", ref.scopes.join(" "));
   }
-  const response = await fetch(tokenEndpoint, {
-    method: "POST",
-    headers,
-    body,
-    redirect: "manual",
-    signal: AbortSignal.timeout(CONNECTION_REFRESH_TIMEOUT_MS),
-  });
+  const response = await pinnedFetch(
+    validatedTokenEndpoint,
+    {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(CONNECTION_REFRESH_TIMEOUT_MS),
+    },
+    settings,
+    {
+      fetchImpl: transportOptions.fetchImpl ?? undiciFetch,
+      ...(transportOptions.dnsLookup ? { dnsLookup: transportOptions.dnsLookup } : {}),
+      label: "OAuth token endpoint",
+      requireHttpsOutsideLocalTest: true,
+    },
+  );
   if (response.status >= 300 && response.status < 400) {
+    await cancelResponseBody(response);
     throw new ConnectionRefreshHttpError(response.status);
   }
   if (!response.ok) {
-    throw new ConnectionRefreshHttpError(response.status);
+    throw new ConnectionRefreshHttpError(
+      response.status,
+      await readOAuthRefreshErrorCode(response),
+    );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = await readResponseJsonBounded<Record<string, unknown>>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OAuth refresh token response",
+  );
   const accessToken = stringValue(payload.access_token);
   if (!accessToken) {
     throw new Error("connection refresh response did not include access_token");
@@ -714,6 +940,21 @@ export async function refreshOAuthConnectionCredential(
     expiresAt,
     ...(scopeText ? { grantedScopes: scopeText.split(/\s+/).filter(Boolean) } : {}),
   };
+}
+
+async function readOAuthRefreshErrorCode(response: Response): Promise<string | null> {
+  try {
+    const payload = await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "OAuth refresh error response",
+    );
+    const code = stringValue(payload.error);
+    return code && /^[a-z0-9_.-]{1,64}$/i.test(code) ? code : null;
+  } catch {
+    await cancelResponseBody(response);
+    return null;
+  }
 }
 
 function expiresAtFromTokenResponse(
@@ -750,107 +991,6 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-async function assertOAuthEndpointAllowed(rawUrl: string, settings: Settings): Promise<void> {
-  if (
-    settings.integrationsAllowPrivateNetworkTargets ||
-    ["local", "test"].includes(settings.environment)
-  ) {
-    return;
-  }
-  const url = new URL(rawUrl);
-  if (url.protocol !== "https:") {
-    throw new Error("OAuth token endpoint must use https outside local/test");
-  }
-  const hostname = url.hostname.toLowerCase();
-  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
-    throw new Error("OAuth token endpoint may not target localhost");
-  }
-  const literal = isIP(hostname);
-  const addresses = literal
-    ? [hostname]
-    : (await lookup(hostname, { all: true })).map((entry) => entry.address);
-  if (addresses.some(isPrivateAddress)) {
-    throw new Error("OAuth token endpoint may not target a private network address");
-  }
-}
-
-export function isPrivateAddress(address: string): boolean {
-  const normalized = normalizeAddress(address);
-  const mapped = ipv4FromMappedIpv6(normalized);
-  if (mapped) {
-    return isPrivateIpv4Address(mapped);
-  }
-  if (normalized.includes(":")) {
-    if (isIP(normalized) !== 6) {
-      return true;
-    }
-    return (
-      normalized === "::1" ||
-      normalized === "::" ||
-      normalized.startsWith("fc") ||
-      normalized.startsWith("fd") ||
-      normalized.startsWith("fe8") ||
-      normalized.startsWith("fe9") ||
-      normalized.startsWith("fea") ||
-      normalized.startsWith("feb")
-    );
-  }
-  return isPrivateIpv4Address(normalized);
-}
-
-function normalizeAddress(address: string): string {
-  const trimmed = address.trim().toLowerCase();
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function ipv4FromMappedIpv6(address: string): string | null {
-  if (!address.startsWith("::ffff:")) {
-    return null;
-  }
-  const embedded = address.slice("::ffff:".length);
-  if (embedded.includes(".")) {
-    return embedded;
-  }
-  const parts = embedded.split(":");
-  if (parts.length !== 2 || parts.some((part) => !/^[0-9a-f]{1,4}$/.test(part))) {
-    return null;
-  }
-  const high = Number.parseInt(parts[0]!, 16);
-  const low = Number.parseInt(parts[1]!, 16);
-  if (
-    !Number.isInteger(high) ||
-    !Number.isInteger(low) ||
-    high < 0 ||
-    high > 0xffff ||
-    low < 0 ||
-    low > 0xffff
-  ) {
-    return null;
-  }
-  return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
-}
-
-function isPrivateIpv4Address(address: string): boolean {
-  if (isIP(address) !== 4) {
-    return true;
-  }
-  const parts = address.split(".").map((part) => Number(part));
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return true;
-  }
-  const [a, b] = parts as [number, number, number, number];
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168)
-  );
+async function cancelResponseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
 }

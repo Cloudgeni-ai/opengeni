@@ -18,7 +18,7 @@ credentials, without making those servers deployment-global.
   none, and a string array requires approval only for those unprefixed tool
   names. Selective policies are canonicalized as a sorted set and bounded to
   2,048 names, 256 KiB total UTF-8, and 1 KiB UTF-8 per name.
-- `headers`: write-only credential headers.
+- `headers`: configured credential headers, authenticated-encrypted at rest.
 - `connectionRef`: optional non-secret opaque connection pointer. Standalone
   deployments resolve it through OpenGeni's connection store; embedded hosts
   can resolve the same pointer through `ConnectionCredentialsPort.mcpCredentials`.
@@ -37,8 +37,12 @@ Session responses and session events expose only metadata:
 }
 ```
 
-Header values are never returned at create time, on list/get, in session events,
-or through the SDK/React surfaces.
+Create, list/get, session-event, and ordinary SDK/React projections expose only
+metadata. The approved release-held follow-up adds a separate tenant-
+scoped exact-plaintext operation requiring the owning resource permission plus
+`secrets:read`, with metadata-only audit. That dedicated operation is not
+implemented in the current emergency head and is never inferred from an
+unrelated session response.
 
 ## Permission
 
@@ -104,7 +108,7 @@ Credentials rotate through a `user.message` payload:
   "payload": {
     "text": "continue",
     "mcpCredentialUpdates": [
-      { "id": "crm", "headers": { "Authorization": "Bearer ..." } }
+      { "id": "crm", "headers": { "X-Synthetic-Key": "synthetic-test-value" } }
     ]
   }
 }
@@ -118,6 +122,35 @@ successful rotation replaces the encrypted header map and increments
 The connection ref is likewise immutable for the session server. To switch an
 endpoint to a different host connection, create a new session attachment rather
 than treating credential rotation as a connection-rebinding operation.
+
+## Connector action policy enforcement
+
+Connection-backed MCP tools can additionally be governed by workspace
+`connector_action_policies`. Each versioned row scopes one connection, server,
+tool, and action (with `*` wildcards for server/tool/action) to `allow`, `ask`,
+or `block`. Attempt claim copies a bounded, ordered policy snapshot into
+`session_turn_attempts.connector_action_policies`; later policy edits affect a
+new attempt only, except that an already-created Ask request keeps its original
+decision across the approval-resume attempt.
+
+Resolution is most-specific-first. Two matching policies with equal specificity
+fail closed as Block. No matching row preserves the historical unmanaged
+behavior. The connector decision composes monotonically with `requireApproval`:
+Block stops before MCP invocation, Ask requires the ordinary durable approval,
+and Allow never removes a session-level approval requirement.
+
+Managed calls use `connector_action_requests` as an idempotency and evidence
+ledger. It freezes the initiating actor, original attempt, connection/server/
+tool identity, the matched attempt-frozen policy action selector (`*` for a
+wildcard or ambiguous match), policy id/version/source, and a canonical SHA-256
+action fingerprint. A caller-controlled `arguments.action` is used only
+transiently for policy matching and is never copied into request or audit rows.
+Approval records the authenticated approver separately. The execution attempt
+is recorded when an approved request resumes. A repeated call after execution
+began is marked outcome-uncertain and denied rather than sent to the provider
+again. Audit rows contain only these bounded identifiers, decisions, timestamps,
+fingerprints, and coarse outcomes—never raw arguments, headers, credentials,
+request bodies, tool results, or response payloads.
 
 Child inheritance is a create-time snapshot, not a live credential link. A
 static encrypted header map is copied as ciphertext and starts at credential
@@ -151,15 +184,29 @@ attempt-fenced configuration and request-time resolver, including forced refresh
 after a 401. Normal session reads return only safe metadata and the non-secret
 connection pointer.
 
-## Never-return-values invariant
+For model MCP execution, the worker also supplies attempt-bound connector policy
+hooks to the runtime. The runtime wraps converted MCP function tools and every
+sandbox clone, evaluates approval before interruption, rechecks durable
+admission immediately before invocation, and commits completion or uncertainty
+afterward. This wrapper does not change tool selection, connector visibility,
+Toolspace exclusion rules, or Slack interaction progress delivery.
 
-The no-value invariant has two layers:
+## Dedicated-read invariant
 
-1. Core converts raw create/rotation inputs into encrypted DB rows plus safe
-   metadata before appending events or publishing.
-2. The DB event sanitizer defensively strips `mcpServers[].headers`,
-   `mcpServers[].headersEncrypted`, `mcpCredentialUpdates[].headers`, and
-   `mcpCredentialUpdates[].headersEncrypted` to header names if a future path
-   accidentally attempts to persist them.
+Configured credential values and canonical arbitrary content follow different
+paths:
 
-Do not add API, event, log, span, or audit paths that expose header values.
+1. Core treats typed create/rotation fields as configured-secret writes and
+   atomically stores authenticated ciphertext plus metadata. It does not
+   regex-scan or rewrite arbitrary messages, tool results, errors, or source
+   content that happen to resemble headers or tokens.
+2. Ordinary session/event/list projections contain credential references,
+   header names, and versions, not a hidden masked substitute. The approved
+   release-held follow-up adds a dedicated tenant-scoped secret read that returns
+   exact plaintext only after the owning resource authorization plus
+   `secrets:read` succeeds and its metadata-only audit record commits; it is not
+   implemented in this emergency head.
+
+Do not expose header values through unrelated API, event, log, span, or audit
+paths. When the dedicated authorized read ships, do not weaken it by masking,
+hashing, or rewriting the returned plaintext.

@@ -13,6 +13,8 @@ import {
   assertProviderRegistryInvariants,
   createSandboxClient,
   negotiateCapabilities,
+  sandboxBackendForSdkBackendId,
+  sdkBackendIdForSandboxBackend,
   selectBackend,
 } from "../src/sandbox";
 
@@ -53,6 +55,19 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
       // backendId == enum key for all but local (SDK reports "unix_local").
       expect(reg.descriptor.backendId).toBe(backend === "local" ? "unix_local" : backend);
     }
+  });
+
+  test("product and SDK backend identities round-trip through one canonical mapping", () => {
+    for (const backend of SandboxBackend.options) {
+      const sdkBackendId = sdkBackendIdForSandboxBackend(backend);
+      expect(sdkBackendId).toBe(CAPABILITY_DESCRIPTORS[backend].backendId);
+      expect(sandboxBackendForSdkBackendId(sdkBackendId)).toBe(backend);
+      expect(sandboxBackendForSdkBackendId(backend)).toBe(backend);
+    }
+    expect(sdkBackendIdForSandboxBackend("local")).toBe("unix_local");
+    expect(sandboxBackendForSdkBackendId("unix_local")).toBe("local");
+    expect(sandboxBackendForSdkBackendId("unknown-provider")).toBeNull();
+    expect(sandboxBackendForSdkBackendId("toString")).toBeNull();
   });
 });
 
@@ -101,6 +116,27 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     // Modal's short server-default idle-reap can never kill an idle box before the
     // OpenGeni reaper snapshots /workspace.
     expect(client.options?.idleTimeoutMs).toBe(3_600_000);
+  });
+
+  test("docker threads an explicit shared workspace base directory", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "docker",
+        dockerWorkspaceBaseDir: "/var/lib/opengeni/docker-workspaces",
+      }),
+    ) as { options?: Record<string, unknown> };
+    expect(client.options?.workspaceBaseDir).toBe("/var/lib/opengeni/docker-workspaces");
+  });
+
+  test("docker rejects a relative workspace base directory", () => {
+    expect(() =>
+      createSandboxClient(
+        testSettings({
+          sandboxBackend: "docker",
+          dockerWorkspaceBaseDir: "relative/workspaces",
+        }),
+      ),
+    ).toThrow(SandboxConfigError);
   });
 
   test("modal hard lifetime and create timeout derive from configured settings", () => {

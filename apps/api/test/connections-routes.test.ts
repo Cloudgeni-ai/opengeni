@@ -8,13 +8,13 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import {
+  createConnection,
   createDb,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
-  loadConnectionCredentialForBroker,
   loadIntegrationOAuthClient,
-  replaceIntegrationOAuthClient,
+  loadConnectionCredentialForBroker,
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -25,6 +25,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { assertSlackAuthorizationServer } from "../src/integrations/oauth-client";
 
 const DELEGATION_SECRET = "connections-routes-delegation-secret";
 const STATE_SECRET = "connections-routes-state-secret";
@@ -72,6 +73,17 @@ function app(overrides: Partial<Settings> = {}) {
     bus: {} as never,
     workflowClient: {} as never,
     managedAuth: null,
+  } as never);
+}
+
+function appWithDeps(overrides: Partial<Settings>, extraDeps: Record<string, unknown>) {
+  return createApp({
+    settings: { ...settings, ...overrides },
+    db: client.db,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+    ...extraDeps,
   } as never);
 }
 
@@ -129,6 +141,15 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
     insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
   await shared!
     .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
+  for (const subjectId of ["subject-a", "subject-b"]) {
+    await shared!.admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, subject_label, role, permissions
+      ) values (
+        ${account!.id}, ${workspace!.id}, ${subjectId}, ${subjectId}, 'member',
+        ${shared!.admin.json(["connections:read", "connections:write"])}
+      )`;
+  }
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -142,28 +163,15 @@ async function bearer(
     workspaceId: workspace.workspaceId,
     subjectId,
     permissions,
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   return `Bearer ${token}`;
 }
 
-function requestHeaderValue(headers: HeadersInit | undefined, name: string): string | null {
-  if (!headers) {
-    return null;
-  }
-  if (headers instanceof Headers) {
-    return headers.get(name);
-  }
-  const lowerName = name.toLowerCase();
-  if (Array.isArray(headers)) {
-    return headers.find(([key]) => key.toLowerCase() === lowerName)?.[1] ?? null;
-  }
-  const record = headers as Record<string, string>;
-  return record[name] ?? record[lowerName] ?? null;
-}
-
 type FakeAuthorizationServer = {
   url: string;
+  issuerRootRequests: string[];
   tokenRequests: URLSearchParams[];
   tokenRequestAuthHeaders: Array<string | null>;
   registrations: Record<string, unknown>[];
@@ -181,17 +189,24 @@ function startFakeAuthorizationServer(
     tokenAccessToken?: string | ((body: URLSearchParams) => string);
     tokenStatus?: number;
     tokenError?: string;
+    tokenResponseStalls?: boolean;
+    onTokenRequest?: (body: URLSearchParams) => void | Promise<void>;
   } = {},
 ): FakeAuthorizationServer {
   const tokenRequests: URLSearchParams[] = [];
   const tokenRequestAuthHeaders: Array<string | null> = [];
   const registrations: Record<string, unknown>[] = [];
+  const issuerRootRequests: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
       const origin = `http://127.0.0.1:${server.port}`;
+      if (url.pathname === "/") {
+        issuerRootRequests.push(url.toString());
+        return new Response("human documentation", { status: 200 });
+      }
       if (url.pathname === "/.well-known/oauth-protected-resource") {
         return Response.json({
           resource: "urn:test:mcp",
@@ -237,6 +252,7 @@ function startFakeAuthorizationServer(
         const body = new URLSearchParams(await request.text());
         tokenRequests.push(body);
         tokenRequestAuthHeaders.push(request.headers.get("authorization"));
+        await options.onTokenRequest?.(body);
         if (options.tokenStatus && options.tokenStatus >= 400) {
           return Response.json(
             {
@@ -244,6 +260,16 @@ function startFakeAuthorizationServer(
               error_description: "fake token failure",
             },
             { status: options.tokenStatus },
+          );
+        }
+        if (options.tokenResponseStalls) {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"access_token":"partial'));
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
           );
         }
         return Response.json({
@@ -262,6 +288,7 @@ function startFakeAuthorizationServer(
   });
   return {
     url: `http://127.0.0.1:${server.port}`,
+    issuerRootRequests,
     tokenRequests,
     tokenRequestAuthHeaders,
     registrations,
@@ -269,7 +296,89 @@ function startFakeAuthorizationServer(
   };
 }
 
+describe("personal Slack OAuth origin binding", () => {
+  test("accepts only Slack-owned issuer and OAuth endpoints", () => {
+    const slack = {
+      issuer: "https://slack.com",
+      authorizationServer: "https://slack.com",
+      authorizationEndpoint: "https://slack.com/oauth/v2/authorize",
+      tokenEndpoint: "https://slack.com/api/oauth.v2.access",
+    };
+    expect(() => assertSlackAuthorizationServer(slack as never)).not.toThrow();
+    expect(() =>
+      assertSlackAuthorizationServer({
+        ...slack,
+        tokenEndpoint: "https://attacker.example/token",
+      } as never),
+    ).toThrow("did not remain bound to slack.com");
+    expect(() =>
+      assertSlackAuthorizationServer({
+        ...slack,
+        issuer: "https://mcp.slack.com",
+        authorizationServer: "https://mcp.slack.com",
+      } as never),
+    ).not.toThrow();
+    expect(() =>
+      assertSlackAuthorizationServer({
+        ...slack,
+        issuer: "https://mcp-slack.example",
+        authorizationServer: "https://mcp-slack.example",
+      } as never),
+    ).toThrow("did not remain bound to slack.com");
+  });
+});
+
 describe("connections routes", () => {
+  test("manual connection ownership defaults to workspace and personal binds only the caller", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const create = (body: Record<string, unknown>) =>
+      app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          credential: { headers: { authorization: "Bearer fixture" } },
+          ...body,
+        }),
+      });
+
+    const defaultWorkspace = await create({});
+    expect(defaultWorkspace.status).toBe(201);
+    expect(
+      ((await defaultWorkspace.json()) as { connection: { subjectId: string | null } }).connection
+        .subjectId,
+    ).toBeNull();
+
+    const explicitPersonal = await create({
+      providerDomain: "personal-api.example.com",
+      ownership: "personal",
+    });
+    expect(explicitPersonal.status).toBe(201);
+    expect(
+      ((await explicitPersonal.json()) as { connection: { subjectId: string | null } }).connection
+        .subjectId,
+    ).toBe("subject-a");
+
+    const contradictory = await create({
+      providerDomain: "contradictory.example.com",
+      ownership: "workspace",
+      subjectId: "subject-a",
+    });
+    expect(contradictory.status).toBe(422);
+    expect(await contradictory.text()).toContain(
+      "ownership and subjectId describe different connection owners",
+    );
+  });
+
   test("manual api_key create/list/get/revoke is permission-gated and never returns secret material", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -518,9 +627,145 @@ describe("connections routes", () => {
       },
     );
     expect(crossSubjectGet.status).toBe(404);
+    const crossSubjectPatch = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${subjectBId}`,
+      {
+        method: "PATCH",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ metadata: { forged: true } }),
+      },
+    );
+    expect(crossSubjectPatch.status).toBe(404);
+    const crossSubjectDelete = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${subjectBId}`,
+      {
+        method: "DELETE",
+        headers: { authorization: await bearer(workspace, "subject-a", ["connections:write"]) },
+      },
+    );
+    expect(crossSubjectDelete.status).toBe(404);
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, subjectBId, "subject-b"),
+    ).toMatchObject({ status: "active", subjectId: "subject-b" });
   });
 
-  test("oauth start/callback completes CIMD flow, creates a verified oauth2 connection, and keeps PKCE verifier out of URLs", async () => {
+  test("personal Slack status and disconnect stay exact-subject and separate from workspace rows", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const credentialEncrypted = ["opaque", "fixture"].join("-");
+    const alice = await createConnection(client.db, {
+      ...workspace,
+      subjectId: "subject-a",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted,
+      grantedScopes: ["search:read.public", "chat:write"],
+      expiresAt: new Date(Date.now() - 60_000),
+      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+      createdBySubjectId: "subject-a",
+    });
+    const bob = await createConnection(client.db, {
+      ...workspace,
+      subjectId: "subject-b",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted,
+      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+      createdBySubjectId: "subject-b",
+    });
+    const workspaceRow = await createConnection(client.db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "app_install",
+      credentialEncrypted,
+      metadata: { role: "workspace-fixture" },
+      createdBySubjectId: "subject-a",
+    });
+
+    const listed = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      headers: { authorization: await bearer(workspace, "subject-a", ["connections:read"]) },
+    });
+    expect(listed.status).toBe(200);
+    const listedBody = (await listed.json()) as {
+      connections: Array<Record<string, unknown> & { id: string; subjectId: string | null }>;
+    };
+    expect(listedBody.connections.map((connection) => connection.id).sort()).toEqual(
+      [alice.id, workspaceRow.id].sort(),
+    );
+    expect(listedBody.connections.map((connection) => connection.id)).not.toContain(bob.id);
+    expect(listedBody.connections.every((connection) => !("credential" in connection))).toBe(true);
+    expect(
+      listedBody.connections.every((connection) => !("credentialEncrypted" in connection)),
+    ).toBe(true);
+
+    const disconnected = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${alice.id}`,
+      {
+        method: "DELETE",
+        headers: { authorization: await bearer(workspace, "subject-a", ["connections:write"]) },
+      },
+    );
+    expect(disconnected.status).toBe(200);
+    expect((await disconnected.json()) as unknown).toMatchObject({
+      connection: { id: alice.id, subjectId: "subject-a", status: "revoked" },
+    });
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, bob.id, "subject-b"),
+    ).toMatchObject({ status: "active", subjectId: "subject-b" });
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, workspaceRow.id, "subject-a"),
+    ).toMatchObject({ status: "active", subjectId: null, kind: "app_install" });
+  });
+
+  test("personal Slack oauth2 rows cannot be created or converted through generic credential routes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const direct = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectId: "subject-a",
+        credential: { access_token: "fixture" },
+      }),
+    });
+    expect(direct.status).toBe(422);
+
+    const seed = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "example.com",
+        kind: "api_key",
+        subjectId: "subject-a",
+        credential: { headers: { authorization: "Bearer seed" } },
+      }),
+    });
+    const seedId = ((await seed.json()) as { connection: { id: string } }).connection.id;
+    const convert = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${seedId}`,
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ providerDomain: "slack.com", kind: "oauth2" }),
+      },
+    );
+    expect(convert.status).toBe(422);
+  });
+
+  test("oauth start/callback defaults to a verified workspace oauth2 connection and keeps PKCE verifier out of URLs", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
@@ -566,12 +811,14 @@ describe("connections routes", () => {
       expect(authUrl.searchParams.get("resource")).toBe("urn:test:mcp");
       expect(authUrl.searchParams.get("scope")).toBe("documents:read");
       expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(as.issuerRootRequests).toEqual([]);
       expect(authUrl.searchParams.has("code_verifier")).toBe(false);
 
       const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
       expect(state?.workspaceId).toBe(workspace.workspaceId);
       expect(state?.accountId).toBe(workspace.accountId);
       expect(state?.subjectId).toBe("subject-a");
+      expect(state?.ownership).toBe("workspace");
       expect(state?.providerDomain).toBe("mcp.example.com");
       expect(state?.mcpUrl).toBe(mcp.url);
       expect(state?.resource).toBe("urn:test:mcp");
@@ -592,6 +839,7 @@ describe("connections routes", () => {
       // connectionId) so the SPA can build the enable connectionRef straight from
       // the redirect, without depending on a listConnections round-trip.
       expect(location).toContain("providerDomain=mcp.example.com");
+      expect(location).toContain("ownership=workspace");
 
       expect(as.tokenRequests).toHaveLength(1);
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
@@ -607,6 +855,7 @@ describe("connections routes", () => {
         workspaceId: workspace.workspaceId,
         providerDomain: "mcp.example.com",
         kind: "oauth2",
+        allowSubjectOwned: false,
       });
       expect(loaded?.credential).toMatchObject({
         access_token: "mcp-access-token",
@@ -616,7 +865,17 @@ describe("connections routes", () => {
         token_endpoint: `${as.url}/token`,
         client_id: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
       });
-      expect(loaded?.metadata.authorizationServerIssuer).toBe(as.url);
+      expect(loaded?.subjectId).toBeNull();
+      const listedForBob = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections`,
+        { headers: { authorization: await bearer(workspace, "subject-b", ["connections:read"]) } },
+      );
+      expect(
+        ((await listedForBob.json()) as { connections: Array<{ id: string }> }).connections.map(
+          (connection) => connection.id,
+        ),
+      ).toContain(loaded!.id);
+      expect(loaded?.metadata.authorizationServerIssuer).toBe(new URL(as.url).toString());
       expect(loaded?.metadata.resource).toBe("urn:test:mcp");
       expect(loaded?.metadata.mcpUrl).toBe(mcp.url);
       expect(loaded?.metadata.mcpToolsVerification).toMatchObject({ status: "ok" });
@@ -626,6 +885,78 @@ describe("connections routes", () => {
     } finally {
       mcp.close();
       as.close();
+    }
+  });
+
+  test("oauth start fails promptly with a structured stage when metadata streaming stalls", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    let origin = "";
+    const source = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/mcp") {
+          return new Response(null, {
+            status: 401,
+            headers: {
+              "www-authenticate": `Bearer resource_metadata="${origin}/prm"`,
+            },
+          });
+        }
+        if (path === "/prm") {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode('{"authorization_servers":["https://issuer.test"]'),
+                );
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${source.port}`;
+    try {
+      const startedAt = performance.now();
+      const response = await appWithDeps(
+        { environment: "test" },
+        { oauthStartDeadlineMs: 25 },
+      ).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerDomain: "stalled.example.test",
+          mcpUrl: `${origin}/mcp`,
+        }),
+      });
+      const body = (await response.json()) as {
+        error: {
+          code: string;
+          message: string;
+          retryable: boolean;
+          details?: Record<string, string>;
+        };
+      };
+      expect(response.status).toBe(408);
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(body.error).toMatchObject({
+        code: "upstream_unavailable",
+        retryable: true,
+        details: {
+          oauthStage: "protected_resource_metadata",
+          oauthReason: "timeout",
+        },
+      });
+      expect(body.error.message).toContain("protected-resource discovery");
+    } finally {
+      source.stop(true);
     }
   });
 
@@ -652,12 +983,17 @@ describe("connections routes", () => {
           body: JSON.stringify({
             providerDomain: "linear.app",
             mcpUrl: mcp.url,
+            ownership: "personal",
             returnPath: "/integrations?connect_item=linear",
           }),
         },
       );
-      expect(response.status).toBe(200);
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
       const body = (await response.json()) as { state: string; authorizationUrl: string };
+      expect(
+        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
+      ).toBe("personal");
       expect(new URL(body.authorizationUrl).searchParams.get("resource")).toBe("urn:test:mcp");
 
       const callback = await publicApp(client.db).request(
@@ -665,6 +1001,7 @@ describe("connections routes", () => {
       );
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(callback.headers.get("location")).toContain("ownership=personal");
       expect(callback.headers.get("location")).not.toContain("verification=failed");
       expect(as.tokenRequests).toHaveLength(1);
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
@@ -673,6 +1010,8 @@ describe("connections routes", () => {
         workspaceId: workspace.workspaceId,
         providerDomain: "linear.app",
         kind: "oauth2",
+        subjectId: "subject-a",
+        allowSubjectOwned: true,
       });
       expect(loaded?.credential).toMatchObject({
         access_token: "token-for-urn:test:mcp",
@@ -736,17 +1075,21 @@ describe("connections routes", () => {
       expect(callback.status).toBe(302);
       const location = callback.headers.get("location")!;
       expect(location).toContain("integration_oauth=error");
+      expect(location).toContain("stage=token_exchange");
       expect(location).toContain("reason=invalid_client");
       expect(location).toContain("connect_item=linear");
 
       expect(errors).toHaveLength(1);
       expect(errors[0]).toMatchObject({
         message: "MCP OAuth callback failed",
-        "opengeni.oauth.stage": "token_exchange",
-        "opengeni.oauth.reason": "invalid_client",
-        "opengeni.oauth.provider_domain": "mcp.example.com",
-        "opengeni.oauth.client_registration_method": "cimd",
+        errorClass: "OAuthOperationError",
+        errorCode: "oauth_operation_failed",
+        origin: "oauth",
       });
+      expect(JSON.stringify(errors)).not.toContain("token_exchange");
+      expect(JSON.stringify(errors)).not.toContain("invalid_client");
+      expect(JSON.stringify(errors)).not.toContain("mcp.example.com");
+      expect(JSON.stringify(errors)).not.toContain("cimd");
       expect(JSON.stringify(errors)).not.toContain(verifier);
       expect(JSON.stringify(errors)).not.toContain("abc");
     } finally {
@@ -755,53 +1098,236 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth reconnect preserves a subject-owned connection subject", async () => {
+  test("oauth callback aborts a stalled token response and redirects with its exact stage", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const headers = {
-      authorization: await bearer(workspace, "subject-a", [
-        "connections:read",
-        "connections:write",
-      ]),
-      "content-type": "application/json",
-    };
-    const seeded = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        providerDomain: "subject-oauth.example.com",
-        kind: "api_key",
-        subjectId: "subject-a",
-        credential: { headers: { authorization: "Bearer old" } },
-      }),
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      tokenResponseStalls: true,
     });
-    expect(seeded.status).toBe(201);
-    const seededBody = (await seeded.json()) as {
-      connection: { id: string; subjectId: string | null };
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const started = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "stalled-token.example.com",
+            mcpUrl: mcp.url,
+            returnPath: "/integrations?connect_item=stalled-token",
+          }),
+        },
+      );
+      const state = ((await started.json()) as { state: string }).state;
+      const startedAt = performance.now();
+      const callback = await publicAppWithDeps(
+        client.db,
+        {},
+        { oauthCallbackDeadlineMs: 500 },
+      ).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`);
+      expect(callback.status).toBe(302);
+      expect(performance.now() - startedAt).toBeLessThan(2_000);
+      const location = callback.headers.get("location")!;
+      expect(location).toContain("integration_oauth=error");
+      expect(location).toContain("stage=token_exchange");
+      expect(location).toContain("reason=timeout");
+      expect(
+        await loadConnectionCredentialForBroker(client.db, settings, {
+          workspaceId: workspace.workspaceId,
+          providerDomain: "stalled-token.example.com",
+          kind: "oauth2",
+          allowSubjectOwned: false,
+        }),
+      ).toBeNull();
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth callback revalidates membership before nonce consumption and before persistence", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const setPermissions = async (next: string[]) => {
+      await shared!.admin`
+        update workspace_memberships
+        set permissions = ${shared!.admin.json(next)}
+        where workspace_id = ${workspace.workspaceId}
+          and subject_id = 'subject-a'`;
     };
-    expect(seededBody.connection.subjectId).toBe("subject-a");
+
+    const firstAs = startFakeAuthorizationServer({ clientIdMetadataDocumentSupported: true });
+    const firstMcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${firstAs.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const started = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "grant-before.example.com",
+            mcpUrl: firstMcp.url,
+          }),
+        },
+      );
+      const state = ((await started.json()) as { state: string }).state;
+      await setPermissions(["connections:read"]);
+      const denied = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+      );
+      expect(denied.headers.get("location")).toContain("reason=state_invalid");
+      expect(firstAs.tokenRequests).toHaveLength(0);
+
+      await setPermissions(["connections:read", "connections:write"]);
+      const retried = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+      );
+      expect(retried.headers.get("location")).toContain("integration_oauth=success");
+      expect(firstAs.tokenRequests).toHaveLength(1);
+    } finally {
+      firstMcp.close();
+      firstAs.close();
+    }
+
+    await setPermissions(["connections:read", "connections:write"]);
+    const secondAs = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      onTokenRequest: async () => await setPermissions(["connections:read"]),
+    });
+    const secondMcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${secondAs.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const started = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "grant-persist.example.com",
+            mcpUrl: secondMcp.url,
+          }),
+        },
+      );
+      const state = ((await started.json()) as { state: string }).state;
+      const denied = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+      );
+      expect(denied.headers.get("location")).toContain("reason=persist_failed");
+      expect(
+        await loadConnectionCredentialForBroker(client.db, settings, {
+          workspaceId: workspace.workspaceId,
+          providerDomain: "grant-persist.example.com",
+          kind: "oauth2",
+          subjectId: "subject-a",
+          allowSubjectOwned: true,
+        }),
+      ).toBeNull();
+    } finally {
+      await setPermissions(["connections:read", "connections:write"]);
+      secondMcp.close();
+      secondAs.close();
+    }
+  });
+
+  test("oauth reconnect is exact-subject and preserves the owner", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const seeded = await createConnection(client.db, {
+      ...workspace,
+      subjectId: "subject-a",
+      providerDomain: "subject-oauth.example.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        rawKey,
+        JSON.stringify({ access_token: "old", token_type: "Bearer" }),
+      ),
+      metadata: { mcpUrl: "https://subject-oauth.example.com/mcp" },
+      createdBySubjectId: "subject-a",
+    });
 
     const as = startFakeAuthorizationServer({ clientIdMetadataDocumentSupported: true });
     const mcp = startTestMcpServer({
       requiredAuthorization: "Bearer mcp-access-token",
       unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
     });
+    const aliceHeaders = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
     try {
+      const bobReconnect = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-b", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "subject-oauth.example.com",
+            mcpUrl: mcp.url,
+            connectionId: seeded.id,
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      expect(bobReconnect.status).toBe(404);
+
+      const ownershipTransfer = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: aliceHeaders,
+          body: JSON.stringify({
+            providerDomain: "subject-oauth.example.com",
+            mcpUrl: mcp.url,
+            connectionId: seeded.id,
+            ownership: "workspace",
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      expect(ownershipTransfer.status).toBe(409);
+
       const response = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers,
+          headers: aliceHeaders,
           body: JSON.stringify({
             providerDomain: "subject-oauth.example.com",
             mcpUrl: mcp.url,
-            connectionId: seededBody.connection.id,
+            connectionId: seeded.id,
             returnPath: "/integrations",
           }),
         },
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
+      expect(
+        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
+      ).toBe("personal");
       const callback = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -810,12 +1336,18 @@ describe("connections routes", () => {
       const updated = await getConnectionMetadata(
         client.db,
         workspace.workspaceId,
-        seededBody.connection.id,
+        seeded.id,
         "subject-a",
       );
-      expect(updated?.subjectId).toBe("subject-a");
-      expect(updated?.kind).toBe("oauth2");
-      expect(updated?.status).toBe("active");
+      expect(updated).toMatchObject({
+        subjectId: "subject-a",
+        kind: "oauth2",
+        status: "active",
+        version: seeded.version + 1,
+      });
+      expect(
+        await getConnectionMetadata(client.db, workspace.workspaceId, seeded.id, "subject-b"),
+      ).toBeNull();
     } finally {
       mcp.close();
       as.close();
@@ -873,11 +1405,123 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth start never replays dynamic client registration to a redirect origin", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const hits: string[] = [];
+    const registrations: Array<{
+      method: string;
+      contentType: string | null;
+      body: Record<string, unknown>;
+    }> = [];
+    const redirectHits: string[] = [];
+    const redirectSink = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        redirectHits.push(new URL(request.url).pathname);
+        return Response.json({ client_id: "stolen-registration" });
+      },
+    });
+    const source = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        const origin = `http://127.0.0.1:${source.port}`;
+        hits.push(url.pathname);
+        if (url.pathname === "/mcp") {
+          return new Response("", {
+            status: 401,
+            headers: { "www-authenticate": `Bearer resource_metadata="${origin}/prm"` },
+          });
+        }
+        if (url.pathname === "/prm") {
+          return Response.json({
+            resource: `${origin}/mcp`,
+            authorization_servers: [`${origin}/as`],
+            scopes_supported: ["documents:read"],
+          });
+        }
+        if (url.pathname === "/as") {
+          return Response.json({
+            issuer: `${origin}/as`,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            registration_endpoint: `${origin}/register`,
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["none"],
+          });
+        }
+        if (url.pathname === "/register") {
+          registrations.push({
+            method: request.method,
+            contentType: request.headers.get("content-type"),
+            body: (await request.json()) as Record<string, unknown>,
+          });
+          return new Response("", {
+            status: 307,
+            headers: {
+              location: `http://127.0.0.1:${redirectSink.port}/capture-registration`,
+            },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const response = await app({ environment: "test" }).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "dcr-redirect.example.com",
+            mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
+            requestedScopes: ["documents:read"],
+          }),
+        },
+      );
+      const responseText = await response.text();
+      expect(response.status, responseText).toBe(422);
+      expect(responseText).toContain("may not follow redirects");
+      expect(hits).toEqual([
+        "/mcp",
+        "/prm",
+        "/.well-known/oauth-authorization-server/as",
+        "/as/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration/as",
+        "/as/.well-known/openid-configuration",
+        "/.well-known/openid-configuration",
+        "/as",
+        "/register",
+      ]);
+      expect(registrations).toEqual([
+        {
+          method: "POST",
+          contentType: "application/json",
+          body: expect.objectContaining({
+            client_name: "OpenGeni",
+            redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
+          }),
+        },
+      ]);
+      expect(redirectHits).toEqual([]);
+    } finally {
+      source.stop(true);
+      redirectSink.stop(true);
+    }
+  });
+
   test("oauth start uses configured operator credentials for Slack-shaped authorization servers", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
-      issuer: "https://mcp.slack.com",
+      issuer: "https://slack.com/mcp",
       clientIdMetadataDocumentSupported: false,
       tokenEndpointAuthMethodsSupported: ["client_secret_post"],
       scopesSupported: ["search:read.public", "chat:write"],
@@ -888,13 +1532,9 @@ describe("connections routes", () => {
     });
     try {
       const response = await app({
-        integrationsOauthClientsJson: JSON.stringify({
-          "https://mcp.slack.com": {
-            clientId: "slack-client-id",
-            clientSecret: "slack-client-secret",
-            tokenEndpointAuthMethod: "client_secret_post",
-          },
-        }),
+        environment: "test",
+        slackClientId: "slack-client-id",
+        slackClientSecret: "slack-client-secret",
       }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
         method: "POST",
         headers: {
@@ -908,7 +1548,8 @@ describe("connections routes", () => {
         }),
       });
 
-      expect(response.status).toBe(200);
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
       const body = (await response.json()) as { state: string; authorizationUrl: string };
       const authUrl = new URL(body.authorizationUrl);
       expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
@@ -921,13 +1562,8 @@ describe("connections routes", () => {
       expect(JSON.stringify(state)).not.toContain("slack-client-secret");
 
       const callback = await publicApp(client.db, {
-        integrationsOauthClientsJson: JSON.stringify({
-          "https://mcp.slack.com": {
-            clientId: "slack-client-id",
-            clientSecret: "slack-client-secret",
-            tokenEndpointAuthMethod: "client_secret_post",
-          },
-        }),
+        slackClientId: "slack-client-id",
+        slackClientSecret: "slack-client-secret",
       }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -943,67 +1579,67 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth start uses one-time manual credentials for Slack-shaped authorization servers", async () => {
+  test("personal Slack rejects browser-provided OAuth clients before discovery", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const as = startFakeAuthorizationServer({
-      issuer: "https://mcp.slack.com",
-      clientIdMetadataDocumentSupported: false,
-      tokenEndpointAuthMethodsSupported: ["client_secret_post"],
-      scopesSupported: ["search:read.public", "chat:write"],
-    });
-    const mcp = startTestMcpServer({
-      requiredAuthorization: "Bearer mcp-access-token",
-      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="search:read.public chat:write"`,
-    });
-    try {
-      const response = await app().request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
-        {
-          method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            providerDomain: "slack.com",
-            mcpUrl: mcp.url,
-            returnPath: "/capabilities?connect_item=slack",
-            oauthClient: {
-              clientId: "manual-slack-client-id",
-              clientSecret: "manual-slack-client-secret",
-              tokenEndpointAuthMethod: "client_secret_post",
-            },
-          }),
+    const response = await app({
+      slackClientId: "deployment-slack-client-id",
+      slackClientSecret: "deployment-slack-client-secret",
+    }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        providerDomain: "slack.com",
+        mcpUrl: "https://mcp.slack.com/mcp",
+        returnPath: "/capabilities?connect_item=slack",
+        oauthClient: {
+          clientId: "browser-slack-client-id",
+          clientSecret: "browser-slack-client-secret",
+          tokenEndpointAuthMethod: "client_secret_post",
         },
-      );
-
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { state: string; authorizationUrl: string };
-      expect(new URL(body.authorizationUrl).searchParams.get("client_id")).toBe(
-        "manual-slack-client-id",
-      );
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
-      expect(state?.clientRegistrationMethod).toBe("manual");
-      expect(state?.clientId).toBe("manual-slack-client-id");
-      expect(typeof state?.encryptedClientSecret).toBe("string");
-      expect(JSON.stringify(state)).not.toContain("manual-slack-client-secret");
-
-      const callback = await publicApp(client.db).request(
-        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
-      );
-      expect(callback.status).toBe(302);
-      expect(callback.headers.get("location")).toContain("integration_oauth=success");
-      expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("client_id")).toBe("manual-slack-client-id");
-      expect(as.tokenRequests[0]!.get("client_secret")).toBe("manual-slack-client-secret");
-    } finally {
-      mcp.close();
-      as.close();
-    }
+      }),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain("deployment-managed");
   });
 
-  test("oauth start uses CIMD for Linear when CIMD is advertised", async () => {
+  test("personal Slack requires deployment OAuth settings and the exact hosted MCP resource", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const request = async (overrides: Partial<Settings>, mcpUrl: string) =>
+      app(overrides).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({ providerDomain: "slack.com", mcpUrl }),
+      });
+
+    const missingDeploymentClient = await request({}, "https://mcp.slack.com/mcp");
+    expect(missingDeploymentClient.status).toBe(503);
+    expect(await missingDeploymentClient.text()).toContain(
+      "personal Slack OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
+    );
+
+    const nonOfficialResource = await request(
+      {
+        environment: "production",
+        slackClientId: "deployment-slack-client-id",
+        slackClientSecret: "deployment-slack-client-secret",
+      },
+      "https://slack.example.test/mcp",
+    );
+    const nonOfficialResourceText = await nonOfficialResource.text();
+    expect(nonOfficialResource.status, nonOfficialResourceText).toBe(422);
+    expect(nonOfficialResourceText).toContain("https://mcp.slack.com/mcp");
+  });
+
+  test("oauth start prefers DCR for Linear when DCR and CIMD are advertised", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
@@ -1036,18 +1672,14 @@ describe("connections routes", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string; authorizationUrl: string };
       const authUrl = new URL(body.authorizationUrl);
-      expect(authUrl.searchParams.get("client_id")).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
+      expect(authUrl.searchParams.get("client_id")).toBe(`${as.url}/registered-client/1`);
       expect(authUrl.searchParams.get("resource")).toBe("urn:test:mcp");
       expect(authUrl.searchParams.get("scope")).toBe("read write");
-      expect(as.registrations).toHaveLength(0);
+      expect(as.registrations).toHaveLength(1);
 
       const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
-      expect(state?.clientRegistrationMethod).toBe("cimd");
-      expect(state?.clientId).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
+      expect(state?.clientRegistrationMethod).toBe("dcr");
+      expect(state?.clientId).toBe(`${as.url}/registered-client/1`);
 
       const callback = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
@@ -1055,119 +1687,119 @@ describe("connections routes", () => {
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toContain("integration_oauth=success");
       expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("client_id")).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
+      expect(as.tokenRequests[0]!.get("client_id")).toBe(`${as.url}/registered-client/1`);
       expect(as.tokenRequests[0]!.has("client_secret")).toBe(false);
       expect(as.tokenRequestAuthHeaders[0]).toBeNull();
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
-
-      const loadedClient = await loadIntegrationOAuthClient(
-        client.db,
-        settings,
-        "https://mcp.linear.app",
-      );
-      expect(loadedClient).toBeNull();
     } finally {
       mcp.close();
       as.close();
     }
   });
 
-  test("oauth start ignores stored Linear DCR client when CIMD is advertised", async () => {
+  test("oauth start replaces a stale DCR client when provider endpoints change", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    await replaceIntegrationOAuthClient(client.db, {
-      issuer: "https://mcp.linear.app",
-      authorizationServer: "https://mcp.linear.app",
-      clientId: "public-linear-client",
-      tokenEndpointAuthMethod: "none",
-      metadata: {
-        registrationEndpoint: "https://mcp.linear.app/register",
-        registeredAt: "2026-01-01T00:00:00.000Z",
-      },
-    });
-    const as = startFakeAuthorizationServer({
-      issuer: "https://mcp.linear.app",
-      clientIdMetadataDocumentSupported: true,
+    const issuer = "https://stable-issuer.example.test";
+    const firstAs = startFakeAuthorizationServer({
+      issuer,
+      clientIdMetadataDocumentSupported: false,
       dcr: true,
-      scopesSupported: ["read", "write"],
-      tokenEndpointAuthMethodsSupported: ["client_secret_basic", "client_secret_post", "none"],
+      scopesSupported: ["read"],
     });
-    const mcp = startTestMcpServer({
+    const firstMcp = startTestMcpServer({
       requiredAuthorization: "Bearer mcp-access-token",
-      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="read write"`,
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${firstAs.url}/.well-known/oauth-protected-resource", scope="read"`,
     });
-    try {
-      const response = await app().request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
-        {
-          method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            providerDomain: "linear.app",
-            mcpUrl: mcp.url,
-            returnPath: "/integrations?connect_item=linear",
-          }),
+    const secondAs = startFakeAuthorizationServer({
+      issuer,
+      clientIdMetadataDocumentSupported: false,
+      dcr: true,
+      scopesSupported: ["read"],
+    });
+    const secondMcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${secondAs.url}/.well-known/oauth-protected-resource", scope="read"`,
+    });
+    const start = async (mcpUrl: string) =>
+      await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
         },
-      );
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { authorizationUrl: string };
-      expect(new URL(body.authorizationUrl).searchParams.get("client_id")).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
-      expect(as.registrations).toHaveLength(0);
+        body: JSON.stringify({
+          providerDomain: "moving-provider.example.com",
+          mcpUrl,
+          returnPath: "/integrations?connect_item=moving-provider",
+        }),
+      });
+    try {
+      const first = await start(firstMcp.url);
+      expect(first.status).toBe(200);
+      expect(firstAs.registrations).toHaveLength(1);
 
-      const loadedClient = await loadIntegrationOAuthClient(
+      const second = await start(secondMcp.url);
+      const secondText = await second.clone().text();
+      expect(second.status, secondText).toBe(200);
+      const secondBody = (await second.json()) as { state: string; authorizationUrl: string };
+      expect(secondAs.registrations).toHaveLength(1);
+      expect(new URL(secondBody.authorizationUrl).searchParams.get("client_id")).toBe(
+        `${secondAs.url}/registered-client/1`,
+      );
+
+      const stored = await loadIntegrationOAuthClient(
         client.db,
         settings,
-        "https://mcp.linear.app",
+        new URL(issuer).toString(),
       );
-      expect(loadedClient).toMatchObject({
-        clientId: "public-linear-client",
-        clientSecret: null,
-        tokenEndpointAuthMethod: "none",
+      expect(stored).toMatchObject({
+        authorizationServer: secondAs.url,
+        clientId: `${secondAs.url}/registered-client/1`,
+        metadata: {
+          registrationEndpoint: `${secondAs.url}/register`,
+          authorizationEndpoint: `${secondAs.url}/authorize`,
+          tokenEndpoint: `${secondAs.url}/token`,
+          redirectUri: "https://api.opengeni.test/v1/integrations/oauth/callback",
+          registeredScopes: ["read"],
+        },
       });
     } finally {
-      mcp.close();
-      as.close();
+      firstMcp.close();
+      firstAs.close();
+      secondMcp.close();
+      secondAs.close();
     }
   });
 
   test("oauth discovery validates redirect targets before following metadata redirects", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const originalFetch = globalThis.fetch;
     const hits: string[] = [];
-    let privateHopHits = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      hits.push(url);
-      expect(init?.redirect).toBe("manual");
-      if (url === "https://1.1.1.1/mcp") {
-        return new Response("", {
-          status: 401,
-          headers: { "www-authenticate": `Bearer resource_metadata="https://1.1.1.1/prm"` },
-        });
-      }
-      if (url === "https://1.1.1.1/prm") {
-        return new Response("", {
-          status: 302,
-          headers: { location: "https://127.0.0.1/private-prm" },
-        });
-      }
-      if (url === "https://127.0.0.1/private-prm") {
-        privateHopHits += 1;
-        return Response.json({ authorization_servers: [] });
-      }
-      return new Response("unexpected fetch", { status: 500 });
-    }) as typeof fetch;
+    const source = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        const origin = `http://127.0.0.1:${source.port}`;
+        hits.push(url.pathname);
+        if (url.pathname === "/mcp") {
+          return new Response("", {
+            status: 401,
+            headers: { "www-authenticate": `Bearer resource_metadata="${origin}/prm"` },
+          });
+        }
+        if (url.pathname === "/prm") {
+          return new Response("", {
+            status: 302,
+            headers: { location: "file:///tmp/private-prm" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
     try {
-      const response = await app({ environment: "production" }).request(
+      const response = await app({ environment: "test" }).request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
@@ -1178,84 +1810,165 @@ describe("connections routes", () => {
           },
           body: JSON.stringify({
             providerDomain: "redirect.example.com",
-            mcpUrl: "https://1.1.1.1/mcp",
+            mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
           }),
         },
       );
       const responseText = await response.text();
       expect(response.status, responseText).toBe(422);
-      expect(responseText).toContain("private network");
-      expect(hits).toEqual(["https://1.1.1.1/mcp", "https://1.1.1.1/prm"]);
-      expect(privateHopHits).toBe(0);
+      expect(responseText).toContain("only supports http and https");
+      expect(hits).toEqual(["/mcp", "/prm"]);
     } finally {
-      globalThis.fetch = originalFetch;
+      source.stop(true);
     }
   });
 
-  test("oauth callback records non-fatal tools/list verification failure after guarded fetch redirects", async () => {
+  test("oauth callback never replays token exchange secrets to a redirect origin", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const originalFetch = globalThis.fetch;
-    const hits: string[] = [];
-    let privateHopHits = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      hits.push(url);
-      expect(init?.redirect).toBe("manual");
-      if (url === "https://1.1.1.1/token") {
-        const body = new URLSearchParams(String(init?.body));
-        expect(body.get("resource")).toBe("https://1.1.1.1/mcp");
-        return Response.json({
-          access_token: "mcp-access-token",
-          token_type: "Bearer",
-          expires_in: 3600,
-          scope: "documents:read",
+    const redirectHits: string[] = [];
+    const tokenRequests: Array<{ authorization: string | null; body: URLSearchParams }> = [];
+    const redirectSink = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        redirectHits.push(new URL(request.url).pathname);
+        return Response.json({ access_token: "stolen" });
+      },
+    });
+    const tokenOrigin = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname !== "/token") {
+          return new Response("not found", { status: 404 });
+        }
+        tokenRequests.push({
+          authorization: request.headers.get("authorization"),
+          body: new URLSearchParams(await request.text()),
         });
-      }
-      if (url === "https://1.1.1.1/mcp") {
-        expect(requestHeaderValue(init?.headers, "authorization")).toBe("Bearer mcp-access-token");
         return new Response("", {
           status: 302,
-          headers: { location: "https://127.0.0.1/private-mcp" },
+          headers: { location: `http://127.0.0.1:${redirectSink.port}/capture-token` },
         });
-      }
-      if (url === "https://127.0.0.1/private-mcp") {
-        privateHopHits += 1;
+      },
+    });
+    const origin = `http://127.0.0.1:${tokenOrigin.port}`;
+    const state = createSignedState(STATE_SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      providerDomain: "token-redirect.example.com",
+      mcpUrl: `${origin}/mcp`,
+      resource: `${origin}/mcp`,
+      requestedScopes: [],
+      authorizeScopes: ["documents:read"],
+      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "redirect-verifier"),
+      clientId: "redirect-client",
+      tokenEndpoint: `${origin}/token`,
+      authorizationServer: origin,
+      issuer: origin,
+      clientRegistrationMethod: "manual",
+      tokenEndpointAuthMethod: "client_secret_basic",
+      encryptedClientSecret: encryptEnvironmentValue(rawKey, "redirect-client-secret"),
+      returnPath: "/integrations",
+    });
+    try {
+      const response = await publicApp(client.db, { environment: "test" }).request(
+        `/v1/integrations/oauth/callback?code=redirect-code&state=${encodeURIComponent(state)}`,
+      );
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toContain("integration_oauth=error");
+      expect(response.headers.get("location")).toContain("reason=token_exchange_failed");
+      expect(tokenRequests).toHaveLength(1);
+      expect(tokenRequests[0]!.authorization).toMatch(/^Basic /);
+      expect(tokenRequests[0]!.body.get("code")).toBe("redirect-code");
+      expect(tokenRequests[0]!.body.get("code_verifier")).toBe("redirect-verifier");
+      expect(redirectHits).toEqual([]);
+    } finally {
+      tokenOrigin.stop(true);
+      redirectSink.stop(true);
+    }
+  });
+
+  test("oauth callback records non-fatal verification failure without replaying its bearer to a redirect origin", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const hits: string[] = [];
+    const redirectHits: string[] = [];
+    const tokenBodies: URLSearchParams[] = [];
+    const mcpAuthorization: Array<string | null> = [];
+    const redirectSink = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        redirectHits.push(new URL(request.url).pathname);
         return Response.json({ tools: [] });
-      }
-      return new Response("unexpected fetch", { status: 500 });
-    }) as typeof fetch;
+      },
+    });
+    const provider = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        hits.push(url.pathname);
+        if (url.pathname === "/token") {
+          tokenBodies.push(new URLSearchParams(await request.text()));
+          return Response.json({
+            access_token: "mcp-access-token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: "documents:read",
+          });
+        }
+        if (url.pathname === "/mcp") {
+          mcpAuthorization.push(request.headers.get("authorization"));
+          return new Response("", {
+            status: 302,
+            headers: { location: `http://127.0.0.1:${redirectSink.port}/capture-bearer` },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const origin = `http://127.0.0.1:${provider.port}`;
     const state = createSignedState(STATE_SECRET, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       subjectId: "subject-a",
       providerDomain: "verify-redirect.example.com",
-      resource: "https://1.1.1.1/mcp",
+      mcpUrl: `${origin}/mcp`,
+      resource: `${origin}/mcp`,
       requestedScopes: [],
       authorizeScopes: ["documents:read"],
       encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "verify-redirect-verifier"),
       clientId: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      tokenEndpoint: "https://1.1.1.1/token",
-      authorizationServer: "https://as.example.com",
-      issuer: "https://as.example.com",
+      tokenEndpoint: `${origin}/token`,
+      authorizationServer: origin,
+      issuer: origin,
       clientRegistrationMethod: "cimd",
       tokenEndpointAuthMethod: "none",
       returnPath: "/integrations",
     });
     try {
-      const response = await publicApp(client.db, { environment: "production" }).request(
+      const response = await publicApp(client.db, { environment: "test" }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
       );
       expect(response.status).toBe(302);
       expect(response.headers.get("location")).toContain("integration_oauth=success");
       expect(response.headers.get("location")).toContain("verification=failed");
-      expect(hits).toEqual(["https://1.1.1.1/token", "https://1.1.1.1/mcp"]);
-      expect(privateHopHits).toBe(0);
+      expect(hits).toEqual(["/token", "/mcp"]);
+      expect(tokenBodies).toHaveLength(1);
+      expect(tokenBodies[0]!.get("resource")).toBe(`${origin}/mcp`);
+      expect(mcpAuthorization).toEqual(["Bearer mcp-access-token"]);
+      expect(redirectHits).toEqual([]);
       const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
         workspaceId: workspace.workspaceId,
         providerDomain: "verify-redirect.example.com",
         kind: "oauth2",
+        subjectId: "subject-a",
+        allowSubjectOwned: true,
       });
       expect(loaded?.credential).toMatchObject({ access_token: "mcp-access-token" });
       expect(loaded?.metadata.mcpToolsVerification).toMatchObject({
@@ -1263,7 +1976,8 @@ describe("connections routes", () => {
         reason: "tools_list_failed",
       });
     } finally {
-      globalThis.fetch = originalFetch;
+      provider.stop(true);
+      redirectSink.stop(true);
     }
   });
 
@@ -1367,14 +2081,17 @@ describe("connections routes", () => {
   test("oauth routes are hidden while integrations are disabled and start does not discover", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const originalFetch = globalThis.fetch;
     let fetchCalls = 0;
-    globalThis.fetch = (async () => {
-      fetchCalls += 1;
-      return new Response("unexpected discovery", { status: 500 });
-    }) as typeof fetch;
+    const discoveryTarget = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        fetchCalls += 1;
+        return new Response("unexpected discovery", { status: 500 });
+      },
+    });
     try {
-      const start = await app({ integrationsEnabled: false }).request(
+      const start = await app({ integrationsEnabled: false, environment: "test" }).request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
@@ -1384,7 +2101,7 @@ describe("connections routes", () => {
           },
           body: JSON.stringify({
             providerDomain: "disabled.example.com",
-            mcpUrl: "https://1.1.1.1/mcp",
+            mcpUrl: `http://127.0.0.1:${discoveryTarget.port}/mcp`,
           }),
         },
       );
@@ -1399,7 +2116,7 @@ describe("connections routes", () => {
       expect(await callback.text()).toContain("integrations are not enabled");
       expect(fetchCalls).toBe(0);
     } finally {
-      globalThis.fetch = originalFetch;
+      discoveryTarget.stop(true);
     }
   });
 

@@ -1,0 +1,515 @@
+{
+  "uid": "opengeni-sandbox-health",
+  "title": "OpenGeni · Sandbox Health",
+  "description": "Provider operations, sandbox lifecycle, durable recovery, and reconciliation. Database inventory panels admit only fresh projections and never sum replicated control-worker gauges.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "tags": ["opengeni", "sandbox", "observability"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Authoritative inventory",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Live lease states",
+      "description": "Fresh full-database projection. These are lifecycle states, not a sum of control replicas.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_leases:fresh_max{liveness=~\"warming|warm|draining\"}",
+          "legendFormat": "{{liveness}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 1, "w": 6, "h": 6 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Cold lease history",
+      "description": "Durable cold rows are historical recovery state, not active sandboxes or capacity usage.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed-color", "fixedColor": "blue" } },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_leases:fresh_max{liveness=\"cold\"}",
+          "legendFormat": "cold history",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 6, "y": 1, "w": 6, "h": 6 }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Inventory projection age",
+      "description": "Freshest complete projection per domain. Alerts and panels fail closed after 300 seconds.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 180 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min by (domain) (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds)",
+          "legendFormat": "{{domain}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 1, "w": 8, "h": 6 }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Projection failures",
+      "description": "Failed complete database projections over the selected range. Freshness age remains the authoritative alarm.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_sandbox_inventory_refresh_failures_total[$__range])) or vector(0)",
+          "legendFormat": "failed refreshes",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 6 }
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Provisioning and routed provider operations",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 7, "w": 24, "h": 1 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Sandbox creates by backend and outcome",
+      "description": "Physical provider create attempts over the selected interval.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (backend, outcome) (increase(opengeni_sandbox_creates_total[$__rate_interval]))",
+          "legendFormat": "{{backend}} · {{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Create latency by backend",
+      "description": "p50/p95/p99 provider create latency. Default buckets extend beyond the warming timeout.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, backend) (rate(opengeni_sandbox_create_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{backend}} p50",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, backend) (rate(opengeni_sandbox_create_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{backend}} p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le, backend) (rate(opengeni_sandbox_create_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{backend}} p99",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Routed operations by backend, op, and outcome",
+      "description": "One observation per physical provider-session method invocation. Expected file/directory misses are labeled not_found; actual provider/control failures are labeled failed. A fenced retry remains visible as a failed attempt followed by a new attempt.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (backend, op, outcome) (rate(opengeni_sandbox_operations_total[$__rate_interval]))",
+          "legendFormat": "{{backend}} · {{op}} · {{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 9 }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Routed operation p95 latency",
+      "description": "Provider execution only; database admission and durable settlement are intentionally outside this latency.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, backend, op) (rate(opengeni_sandbox_operation_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{backend}} · {{op}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 9 }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Warming timeouts / orphan sweeps",
+      "description": "Increases in the selected range. Both should normally remain zero.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_sandbox_warming_timeouts_total[$__range])) or vector(0)",
+          "legendFormat": "warming timeouts",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(opengeni_sandbox_orphans_terminated_total[$__range])) or vector(0)",
+          "legendFormat": "orphans terminated",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 25, "w": 8, "h": 6 }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Operation failure ratio by backend",
+      "description": "Actual failed physical attempts divided by ok + failed attempts. Expected path misses (not_found) are excluded from both sides; absent when there is no relevant traffic.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (backend) (rate(opengeni_sandbox_operations_total{outcome=\"failed\"}[$__rate_interval])) / sum by (backend) (rate(opengeni_sandbox_operations_total{outcome=~\"ok|failed\"}[$__rate_interval]))",
+          "legendFormat": "{{backend}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 8, "y": 25, "w": 16, "h": 6 }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Checkpoint and provider-deadline recovery",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 31, "w": 24, "h": 1 }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Checkpoint artifacts by lifecycle state",
+      "description": "Fresh durable inventory. delete_failed and a growing delete_pending/deleting population require investigation.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_checkpoint_artifacts:fresh_max",
+          "legendFormat": "{{state}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Checkpoint GC operations",
+      "description": "Durable checkpoint claims, deletions, failures, and tombstone pruning.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(opengeni_sandbox_checkpoint_artifact_operations_total[$__rate_interval]))",
+          "legendFormat": "{{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Deadline rotation backlog",
+      "description": "Requested/overdue rotations and the exact ownership blocker preventing the finite-lifetime box from rotating.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_rotation_backlog:fresh_max",
+          "legendFormat": "{{kind}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 8 }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Expired drains by backend and age",
+      "description": "Fresh inventory. lt_5m is the grace interval; 5m_1h, 1h_1d, and gte_1d are alertable.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_leases_expired_draining:fresh_max",
+          "legendFormat": "{{backend}} · {{age_bucket}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 40, "w": 12, "h": 8 }
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Retained processes and reconciliation",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 48, "w": 24, "h": 1 }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Active retained processes by owner state",
+      "description": "A retained process is a durable provider execution still treated as active, grouped by its exact logical owner state.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:retained_processes_active:fresh_max",
+          "legendFormat": "{{owner_state}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 49, "w": 12, "h": 8 }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Terminal-owner retained-process backlog",
+      "description": "These are problematic: the logical owner is terminal while the physical provider process remains active.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:retained_processes_terminal_owner_backlog:fresh_max",
+          "legendFormat": "{{owner_state}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 49, "w": 12, "h": 8 }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Retained-process reconciliation outcomes",
+      "description": "Bounded proof, provider, claim, and settlement outcomes from the reconciliation loop.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(opengeni_retained_process_reconciliation_total[$__rate_interval]))",
+          "legendFormat": "{{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 57, "w": 24, "h": 8 }
+    }
+  ]
+}

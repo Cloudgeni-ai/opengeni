@@ -9,6 +9,7 @@ import {
 } from "@opengeni/contracts";
 import {
   approveOrganizationRecoveryForRequest,
+  acceptOrganizationRecoveryCustodianForRequest,
   beginOrganizationRecovery,
   cancelOrganizationRecoveryForRequest,
   enrollOrganizationRecoveryPolicy,
@@ -42,6 +43,21 @@ export function registerOrganizationRoutes(app: Hono, deps: ApiRouteDeps): void 
     return c.json(
       OrganizationGovernance.parse(
         await enrollOrganizationRecoveryPolicy(deps, context, accountId, request),
+      ),
+    );
+  });
+
+  // Exactly one body-minimal enrollment operation. The direct managed session
+  // evidence is request-local and the database resolves it to the canonical
+  // Better Auth user inside the same transaction; no caller-supplied identity
+  // or session id is accepted in the body.
+  app.post("/v1/accounts/:accountId/governance/recovery-policy/self-accept", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = c.req.param("accountId");
+    requireSecureRecoveryTransport(c.req.url, deps);
+    return c.json(
+      OrganizationGovernance.parse(
+        await acceptOrganizationRecoveryCustodianForRequest(deps, context, accountId),
       ),
     );
   });

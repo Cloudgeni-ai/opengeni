@@ -9,6 +9,7 @@ import {
   sessionStatusFromEvents,
   toolDisplayName,
   type AgentMessageItem,
+  type FleetDecisionItem,
   type MemoryItem,
   type SandboxItem,
   type TimelineGroup,
@@ -20,21 +21,21 @@ import {
 } from "../src/timeline";
 
 describe("toolDisplayName", () => {
-  test("strips the MCP server-id prefix and shows only the tool", () => {
+  test("strips the MCP server-id prefix and title-cases the leaf", () => {
     // Catalog-imported MCP server: <opaque slug+hash>__<tool>.
     expect(
       toolDisplayName("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8__list_organizations"),
-    ).toBe("list organizations");
-    expect(toolDisplayName("opengeni__set_session_title")).toBe("set session title");
+    ).toBe("List organizations");
+    expect(toolDisplayName("opengeni__set_session_title")).toBe("Set session title");
   });
 
-  test("plain built-in tool names (no __ boundary) are just de-slugged", () => {
-    expect(toolDisplayName("session_create")).toBe("session create");
-    expect(toolDisplayName("bash")).toBe("bash");
+  test("plain built-in tool names (no __ boundary) are de-slugged and title-cased", () => {
+    expect(toolDisplayName("session_create")).toBe("Session create");
+    expect(toolDisplayName("bash")).toBe("Bash");
   });
 
   test("splits on the FIRST __ so a tool name containing __ survives whole", () => {
-    expect(toolDisplayName("mcp-supabase-abc123__do__thing")).toBe("do thing");
+    expect(toolDisplayName("mcp-supabase-abc123__do__thing")).toBe("Do thing");
   });
 });
 
@@ -80,6 +81,56 @@ function reset(): void {
   sequence = 0;
 }
 
+function fleetDecisionPayload(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    mode: "shadow",
+    actual: { outcome: "selected", candidateKey: "c00", reason: "active" },
+    comparison: "match",
+    replay: {
+      schemaVersion: 1,
+      policyVersion: "adaptive-shadow-v1",
+      mode: "shadow",
+      input: { candidates: [{ key: "c00" }, { key: "c01" }] },
+      truncatedCandidateCount: 0,
+      policyFingerprint: "must-not-reach-the-view",
+      inputFingerprint: "must-not-reach-the-view",
+      decisionFingerprint: "must-not-reach-the-view",
+      decision: {
+        outcome: "selected",
+        selectedCandidateKey: "c00",
+        reason: "affinity_best",
+        admission: {
+          outcome: "admit",
+          reason: "pacing_disabled",
+          borrowedIdleCapacity: false,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 0,
+        confidence: "unknown",
+        scores: [
+          {
+            candidateKey: "c00",
+            eligible: true,
+            rejectionReason: null,
+            total: -2_400,
+            confidence: "unknown",
+          },
+          {
+            candidateKey: "c01",
+            eligible: true,
+            rejectionReason: null,
+            total: 1_600,
+            confidence: "unknown",
+          },
+        ],
+      },
+    },
+    accountEmail: "secret-owner@example.test",
+    credentialId: "credential-secret",
+  };
+}
+
 type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
 
@@ -106,6 +157,156 @@ function flattenActivityIds(group: TurnGroup | undefined): string[] {
 }
 
 describe("buildTimeline", () => {
+  test("projects a bounded identity-free fleet shadow decision", () => {
+    reset();
+    const items = buildTimeline([event("codex.fleet.decision", fleetDecisionPayload())]);
+
+    expect(items).toHaveLength(1);
+    const decision = items[0] as FleetDecisionItem;
+    expect(decision).toMatchObject({
+      kind: "fleet-decision",
+      turnId: "turn-1",
+      policyVersion: "adaptive-shadow-v1",
+      actualOutcome: "selected",
+      actualCandidateKey: "c00",
+      shadowOutcome: "selected",
+      shadowCandidateKey: "c00",
+      comparison: "match",
+      candidateCount: 2,
+      truncatedCandidateCount: 0,
+      scoreRowsTruncatedCount: 0,
+    });
+    expect(decision.scores).toEqual([
+      {
+        candidateKey: "c00",
+        eligible: true,
+        rejectionReason: null,
+        total: -2_400,
+        confidence: "unknown",
+      },
+      {
+        candidateKey: "c01",
+        eligible: true,
+        rejectionReason: null,
+        total: 1_600,
+        confidence: "unknown",
+      },
+    ]);
+    const projected = JSON.stringify(decision);
+    expect(projected).not.toContain("secret-owner@example.test");
+    expect(projected).not.toContain("credential-secret");
+    expect(projected).not.toContain("Fingerprint");
+    expect(projected).not.toContain("must-not-reach-the-view");
+  });
+
+  test("accepts every typed admission reason with its matching event semantics", () => {
+    reset();
+    const cases = [
+      { reason: "fenced_in_flight", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "pacing_disabled", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_unknown", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_available", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "work_conserving_borrow", outcome: "admit", borrowedIdleCapacity: true },
+      { reason: "manager_priority", outcome: "pace", borrowedIdleCapacity: false },
+      { reason: "standard_starvation_bound", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_saturated", outcome: "pace", borrowedIdleCapacity: false },
+      { reason: "emergency_fuse", outcome: "pace", borrowedIdleCapacity: false },
+    ] as const satisfies ReadonlyArray<{
+      reason: FleetDecisionItem["admissionReason"];
+      outcome: FleetDecisionItem["admissionOutcome"];
+      borrowedIdleCapacity: boolean;
+    }>;
+
+    for (const admissionCase of cases) {
+      const payload = fleetDecisionPayload();
+      const isPaced = admissionCase.outcome === "pace";
+      payload.comparison = isPaced ? "different_outcome" : "match";
+      const replay = payload.replay as { decision: Record<string, unknown> };
+      replay.decision = {
+        ...replay.decision,
+        outcome: isPaced ? "paced" : "selected",
+        selectedCandidateKey: isPaced ? null : "c00",
+        reason: isPaced ? "admission_paced" : "affinity_best",
+        admission: {
+          outcome: admissionCase.outcome,
+          reason: admissionCase.reason,
+          borrowedIdleCapacity: admissionCase.borrowedIdleCapacity,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 0,
+        scores: isPaced ? [] : (replay.decision.scores ?? []),
+      };
+
+      const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+      expect(item).toMatchObject({
+        kind: "fleet-decision",
+        shadowOutcome: isPaced ? "paced" : "selected",
+        shadowReason: isPaced ? "admission_paced" : "affinity_best",
+        admissionOutcome: admissionCase.outcome,
+        admissionReason: admissionCase.reason,
+        borrowedIdleCapacity: admissionCase.borrowedIdleCapacity,
+      });
+    }
+  });
+
+  test("caps score rows at 32 without reading an extra secret-shaped row", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    const replay = payload.replay as Record<string, unknown>;
+    const input = replay.input as Record<string, unknown>;
+    const decision = replay.decision as Record<string, unknown>;
+    input.candidates = Array.from({ length: 32 }, (_, index) => ({
+      key: `c${index.toString(36).padStart(2, "0")}`,
+    }));
+    decision.scores = [
+      ...Array.from({ length: 32 }, (_, index) => ({
+        candidateKey: `c${index.toString(36).padStart(2, "0")}`,
+        eligible: true,
+        rejectionReason: null,
+        total: index,
+        confidence: "unknown",
+      })),
+      {
+        candidateKey: "credential-secret@example.test",
+        eligible: true,
+        rejectionReason: null,
+        total: 33,
+        confidence: "unknown",
+      },
+    ];
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item?.kind).toBe("fleet-decision");
+    if (item?.kind !== "fleet-decision") throw new Error("expected fleet decision");
+    expect(item.scores).toHaveLength(32);
+    expect(item.scoreRowsTruncatedCount).toBe(1);
+    expect(JSON.stringify(item)).not.toContain("credential-secret@example.test");
+  });
+
+  test("drops malformed or identity-shaped fleet events instead of rendering payload strings", () => {
+    reset();
+    const invalidAlias = fleetDecisionPayload();
+    (invalidAlias.actual as Record<string, unknown>).candidateKey =
+      "credential-secret@example.test";
+
+    const invalidEnum = fleetDecisionPayload();
+    (invalidEnum.replay as { decision: Record<string, unknown> }).decision.reason =
+      "operator supplied this arbitrary message";
+
+    const invalidNumber = fleetDecisionPayload();
+    const invalidScores = (invalidNumber.replay as { decision: { scores: unknown[] } }).decision
+      .scores;
+    (invalidScores[0] as Record<string, unknown>).total = Number.POSITIVE_INFINITY;
+
+    const inconsistentReason = fleetDecisionPayload();
+    (inconsistentReason.actual as Record<string, unknown>).reason = "all_capped";
+
+    expect(buildTimeline([event("codex.fleet.decision", invalidAlias)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", invalidEnum)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", invalidNumber)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", inconsistentReason)])).toEqual([]);
+  });
+
   test("projects childCompletion user messages as worker-completion items", () => {
     reset();
     const items = buildTimeline([
@@ -160,16 +361,18 @@ describe("buildTimeline", () => {
 
   test("accumulates streaming deltas into one agent message and finalizes on completed", () => {
     reset();
-    const items = buildTimeline([
-      event("user.message", { text: "Deploy staging" }),
-      event("agent.message.delta", { text: "On it — " }),
-      event("agent.message.delta", { text: "checking the cluster." }),
-      event("agent.message.completed", { text: "On it — checking the cluster." }),
-    ]);
+    const user = event("user.message", { text: "Deploy staging" });
+    const deltaA = event("agent.message.delta", { text: "On it — " });
+    const deltaB = event("agent.message.delta", { text: "checking the cluster." });
+    const done = event("agent.message.completed", { text: "On it — checking the cluster." });
+    const items = buildTimeline([user, deltaA, deltaB, done]);
     expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message"]);
     const message = items[1] as AgentMessageItem;
     expect(message.text).toBe("On it — checking the cluster.");
     expect(message.streaming).toBe(false);
+    // Footer "finished at" uses the completed event time, not the first delta.
+    expect(message.occurredAt).toBe(done.occurredAt);
+    expect(message.occurredAt).not.toBe(deltaA.occurredAt);
   });
 
   test("keeps accumulated text when completed text does not extend it", () => {
@@ -547,6 +750,27 @@ describe("buildTimeline", () => {
     expect(message.tools).toEqual([]);
   });
 
+  test("projects realtime voice text while retaining expandable execution context", () => {
+    reset();
+    const context = [
+      "<realtime_delegation>",
+      "  <input>Check the active task</input>",
+      "  <transcript_delta>user: include tests</transcript_delta>",
+      "</realtime_delegation>",
+    ].join("\n");
+    const [message] = buildTimeline([
+      event("user.message", {
+        text: "Check the active task",
+        presentation: { kind: "realtime_voice", context },
+      }),
+    ]) as UserMessageItem[];
+    expect(message).toMatchObject({
+      kind: "user-message",
+      text: "Check the active task",
+      presentation: { kind: "realtime_voice", context },
+    });
+  });
+
   test("a delta after a tool call starts a new message instead of appending", () => {
     reset();
     const items = buildTimeline([
@@ -581,12 +805,113 @@ describe("buildTimeline", () => {
     expect(second.output).toBe("resource {}");
   });
 
+  test("a completed hosted web-search item settles without a separate output event", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: {
+            action: { type: "search", query: "OpenAI official website" },
+          },
+        },
+      }),
+    ]);
+
+    expect((items[0] as ToolCallItem).status).toBe("complete");
+  });
+
+  test("hosted search between stream and completed message keeps event order", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Answer" }),
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: { action: { type: "search", query: "source" } },
+        },
+      }),
+      event("agent.message.completed", { text: "Answer with sources." }),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "agent-message"]);
+    expect((items[1] as AgentMessageItem).text).toBe("Answer with sources.");
+  });
+
+  test("duplicate web_search toolCall.created events merge by call id", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Search 1/5" }),
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        arguments: { type: "search", query: "hexagonal diamond" },
+        raw: {
+          type: "hosted_tool_call",
+          status: "in_progress",
+          providerData: { action: { type: "search", query: "hexagonal diamond" } },
+        },
+      }),
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: { type: "web_search_call" },
+        },
+      }),
+      event("agent.message.completed", { text: "Search 1/5\nResult from 1" }),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "agent-message"]);
+    const search = items[0] as ToolCallItem;
+    expect(search.status).toBe("complete");
+    expect(
+      (search.raw as { providerData?: { action?: { query?: string } } }).providerData?.action
+        ?.query,
+    ).toBe("hexagonal diamond");
+  });
+
+  test("ordinary tools after a completed mid-turn message keep append order", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.completed", { text: "I'll check next." }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "ls" },
+      }),
+      event("agent.message.completed", { text: "Done." }),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual(["agent-message", "tool-call", "agent-message"]);
+  });
+
+  test("removes unresolved private citation handles from timeline text", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.completed", {
+        text: "OpenAI docs. citeturn1search3turn2view0",
+      }),
+    ]);
+
+    expect((items[0] as AgentMessageItem).text).toBe("OpenAI docs.");
+  });
+
   test("session_create becomes a worker item with prompt and spawned session id from MCP output", () => {
     reset();
-    const worker = {
-      id: "0b3ba745-1111-4222-8333-9c76ad9e0000",
-      workspaceId: "ws-1",
-      status: "queued",
+    const workerId = "0b3ba745-1111-4222-8333-9c76ad9e0000";
+    const receipt = {
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_create",
+      resource: { type: "session", id: workerId, state: "queued" },
     };
     const items = buildTimeline([
       event("agent.toolCall.created", {
@@ -596,7 +921,7 @@ describe("buildTimeline", () => {
       }),
       event("agent.toolCall.output", {
         id: "call-1",
-        output: { content: [{ type: "text", text: JSON.stringify(worker) }] },
+        output: { content: [{ type: "text", text: JSON.stringify(receipt) }] },
       }),
     ]);
     expect(items).toHaveLength(1);
@@ -605,7 +930,7 @@ describe("buildTimeline", () => {
     expect(item.action).toBe("spawn");
     expect(item.prompt).toBe("Run the drift check on prod");
     expect(item.status).toBe("complete");
-    expect(item.workerSessionId).toBe(worker.id);
+    expect(item.workerSessionId).toBe(workerId);
   });
 
   test("a worker spawn whose output carries an error flag settles to failed, not complete", () => {
@@ -688,14 +1013,54 @@ describe("buildTimeline", () => {
       event("session.context.compacted", {
         estimatedTokensBefore: 288_000,
         estimatedTokensAfter: 23_091,
+        trigger: "auto",
       }),
     ]);
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      kind: "notice",
-      tone: "waiting",
-      text: "Active conversation history compacted from approximately 288,000 to 23,091 tokens.",
+      kind: "context-compaction",
+      phase: "compacted",
+      trigger: "auto",
+      estimatedTokensBefore: 288_000,
+      estimatedTokensAfter: 23_091,
     });
+  });
+
+  test("settles a started compaction landmark into the finish event", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.started", {
+        trigger: "auto",
+        estimatedTokensBefore: 288_000,
+      }),
+      event("session.context.compacted", {
+        trigger: "auto",
+        estimatedTokensBefore: 288_000,
+        estimatedTokensAfter: 23_091,
+        implementation: "responses_compaction_v2",
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "context-compaction",
+      phase: "compacted",
+      estimatedTokensAfter: 23_091,
+      implementation: "responses_compaction_v2",
+    });
+  });
+
+  test("projects operator requested as a live started landmark until finish", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.requested", { trigger: "operator" }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "context-compaction",
+        phase: "started",
+        trigger: "operator",
+      }),
+    ]);
   });
 
   test("renders standalone compaction as maintenance, not an extra chat turn", () => {
@@ -711,8 +1076,50 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "notice" });
+    expect(items[0]).toMatchObject({ kind: "context-compaction", phase: "compacted" });
     expect(items.some((item) => item.kind === "turn-end")).toBe(false);
+  });
+
+  test("keeps mid-turn compaction outside the folded turn body", () => {
+    reset();
+    const turn = { turnId: "turn-compact" };
+    const events = [
+      event("turn.started", {}, turn),
+      event(
+        "agent.toolCall.created",
+        { id: "c1", name: "exec_command", arguments: { cmd: "before" } },
+        turn,
+      ),
+      event("agent.toolCall.output", { id: "c1", output: "ok" }, turn),
+      event("session.context.compaction.started", { trigger: "auto" }, turn),
+      event(
+        "session.context.compacted",
+        { trigger: "auto", estimatedTokensBefore: 100_000, estimatedTokensAfter: 40_000 },
+        turn,
+      ),
+      event(
+        "agent.toolCall.created",
+        { id: "c2", name: "exec_command", arguments: { cmd: "after" } },
+        turn,
+      ),
+      event("agent.toolCall.output", { id: "c2", output: "ok" }, turn),
+      event("turn.completed", {}, turn),
+    ];
+    const items = buildTimeline(events);
+    const groups = groupTimeline(items);
+    expect(items.some((item) => item.kind === "context-compaction")).toBe(true);
+    const topLevelCompaction = groups.find(
+      (group) => group.kind === "item" && group.item.kind === "context-compaction",
+    );
+    expect(topLevelCompaction).toBeDefined();
+    for (const group of groups) {
+      if (group.kind !== "turn") continue;
+      expect(
+        group.groups.some(
+          (child) => child.kind === "item" && child.item.kind === "context-compaction",
+        ),
+      ).toBe(false);
+    }
   });
 
   test("shows why an operator compaction request was skipped", () => {
@@ -726,9 +1133,9 @@ describe("buildTimeline", () => {
     ]);
     expect(items).toEqual([
       expect.objectContaining({
-        kind: "notice",
-        tone: "waiting",
-        text: "Context compaction skipped because the generated checkpoint would not reduce the context.",
+        kind: "context-compaction",
+        phase: "skipped",
+        skipReason: "replacement_not_smaller",
       }),
     ]);
   });
@@ -740,9 +1147,9 @@ describe("buildTimeline", () => {
     ]);
     expect(items).toEqual([
       expect.objectContaining({
-        kind: "notice",
-        tone: "failed",
-        text: "Context compaction failed without replacing the active conversation history. Request it again to retry.",
+        kind: "context-compaction",
+        phase: "skipped",
+        skipReason: "summarization_failed",
       }),
     ]);
   });
@@ -1112,6 +1519,153 @@ describe("buildTimeline", () => {
     reset();
     const items = buildTimeline([event("goal.set", { goal: { text: "Keep staging green" } })]);
     expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
+  });
+
+  test("agent goal tool stays in the activity cluster; landmark is suppressed", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-mem",
+          name: "opengeni__memory_search",
+          arguments: { query: "tokens" },
+        }),
+        event("agent.toolCall.output", { id: "call-mem", output: "ok" }),
+        event("agent.toolCall.created", {
+          id: "call-goal",
+          name: "opengeni__goal_set",
+          arguments: { text: "Explain the MCP token flow" },
+        }),
+        event("agent.toolCall.output", { id: "call-goal", output: "ok" }),
+        event("goal.set", {
+          goalId: "goal-1",
+          text: "Explain the MCP token flow",
+          actor: "agent",
+          version: 1,
+        }),
+        event("agent.toolCall.created", {
+          id: "call-box",
+          name: "opengeni__sandboxes_list",
+          arguments: {},
+        }),
+        event("agent.toolCall.output", { id: "call-box", output: "[]" }),
+      ]),
+    );
+    expect(groups.filter((group) => group.kind === "item")).toHaveLength(0);
+    const activities = collectActivityGroups(groups);
+    expect(activities).toHaveLength(1);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual([
+      "tool-call",
+      "tool-call",
+      "tool-call",
+    ]);
+    expect(
+      activities[0]!.items
+        .filter((item): item is ToolCallItem => item.kind === "tool-call")
+        .map((item) => item.name),
+    ).toEqual(["opengeni__memory_search", "opengeni__goal_set", "opengeni__sandboxes_list"]);
+  });
+
+  test("non-agent goal.set still renders a landmark (API / create-session)", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.set", {
+        goalId: "goal-1",
+        text: "Keep staging green",
+        actor: "api",
+        version: 1,
+      }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
+  });
+
+  test("system goal.paused still renders a landmark", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.paused", {
+        goalId: "goal-1",
+        actor: "system",
+        reason: "no_progress",
+      }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "paused" });
+  });
+
+  test("goal.continuation still renders a landmark", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.continuation", { text: "still working toward the goal" }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "goal",
+      action: "continuation",
+      text: "still working toward the goal",
+    });
+  });
+
+  test("solo goal_continuation machine-input batches are suppressed (GoalRow owns the tick)", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.continuation", { text: "Extract the realtime controller" }),
+      event("system.update.delivered", {
+        historyItemId: "history-1",
+        count: 1,
+        members: [
+          {
+            id: "update-1",
+            kind: "goal_continuation",
+            classification: "info",
+            sourceId: "goal-1",
+            summary: "The session goal is not done. Goal: Extract the realtime controller",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "goal",
+      action: "continuation",
+      text: "Extract the realtime controller",
+    });
+  });
+
+  test("mixed batches that include goal_continuation still render as machine-input", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.continuation", { text: "keep going" }),
+      event("system.update.delivered", {
+        historyItemId: "history-2",
+        count: 2,
+        members: [
+          {
+            id: "update-1",
+            kind: "goal_continuation",
+            classification: "info",
+            sourceId: "goal-1",
+            summary: "The session goal is not done.",
+          },
+          {
+            id: "update-2",
+            kind: "child_terminal_result",
+            classification: "success",
+            sourceId: "child-1",
+            summary: "Child finished.",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "goal", action: "continuation" }),
+        expect.objectContaining({
+          kind: "machine-input-batch",
+          members: expect.arrayContaining([
+            expect.objectContaining({ kind: "goal_continuation" }),
+            expect.objectContaining({ kind: "child_terminal_result" }),
+          ]),
+        }),
+      ]),
+    );
   });
 
   test("goal.cleared is tolerated as a goal landmark", () => {
@@ -1608,6 +2162,12 @@ describe("extractSessionRef", () => {
       }),
     ).toBe(id);
     expect(extractSessionRef({ structuredContent: { sessionId: id } })).toBe(id);
+    expect(
+      extractSessionRef({
+        receiptVersion: "mcp-mutation-receipt.v1",
+        resource: { type: "session", id, state: "queued" },
+      }),
+    ).toBe(id);
   });
 
   test("rejects non-uuid ids and unrelated payloads", () => {
@@ -1925,17 +2485,44 @@ describe("buildTimeline — memory writes", () => {
     expect(items).toEqual([]);
   });
 
-  test("clusters memory writes as activity steps alongside tool calls", () => {
+  test("memory_save tool calls are suppressed; the memory.* landmark owns the row", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "memory_save", arguments: {} }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "opengeni__memory_save",
+          arguments: {},
+        }),
         event("agent.toolCall.output", { id: "call-1", output: "ok" }),
         event("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
       ]),
     );
     const activities = collectActivityGroups(groups);
     expect(activities).toHaveLength(1);
-    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["memory"]);
+  });
+
+  test("prefixed opengeni__session_create projects as a worker item", () => {
+    reset();
+    const worker = {
+      id: "0b3ba745-1111-4222-8333-9c76ad9e0000",
+      workspaceId: "ws-1",
+      status: "queued",
+    };
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "opengeni__session_create",
+        arguments: JSON.stringify({ initialMessage: "Run the drift check on prod" }),
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: { content: [{ type: "text", text: JSON.stringify(worker) }] },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect((items[0] as WorkerItem).kind).toBe("worker");
+    expect((items[0] as WorkerItem).workerSessionId).toBe(worker.id);
   });
 });

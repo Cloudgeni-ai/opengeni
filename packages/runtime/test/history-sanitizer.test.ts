@@ -3,11 +3,11 @@ import {
   computerCallNormalizingFetch,
   elideSupersededViewImagePairs,
   normalizeComputerCallActions,
+  projectRejectedProviderArtifactsFromSerializedRunState,
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
   sanitizeHistoryItemsForModel,
-  stripReasoningEncryptedContent,
-  stripReasoningIdentityFromSerializedRunState,
+  serializedRunStateHasOpaqueProviderArtifact,
 } from "../src/history-sanitizer";
 
 // The legible "screen capture failed" error card the wire-level backstop now
@@ -44,15 +44,6 @@ function functionResult(callId: string) {
   };
 }
 
-function viewImageCall(callId: string, path: string) {
-  return {
-    type: "function_call",
-    callId,
-    name: "view_image",
-    arguments: JSON.stringify({ path }),
-    status: "completed",
-  };
-}
 // tool_search items (progressive connector disclosure). The SDK holds the wire
 // shape: snake_case call_id, arguments round-tripped as-is (an object).
 function toolSearchCall(callId: string) {
@@ -187,47 +178,27 @@ describe("sanitizeHistoryItemsForModel", () => {
   });
 });
 
-describe("elideSupersededViewImagePairs", () => {
-  test("keeps only the newest fully-paired image observation for the same path", () => {
+describe("elideSupersededViewImagePairs compatibility", () => {
+  test("is an identity no-op that never deletes, reorders, clones, or mutates repeated pairs", () => {
     const items = [
-      userMessage("inspect both"),
-      reasoning("rs-old"),
-      viewImageCall("img-old", "/tmp/a.png"),
-      functionResult("img-old"),
-      viewImageCall("img-b", "/tmp/b.png"),
-      functionResult("img-b"),
-      reasoning("rs-new"),
-      viewImageCall("img-new", "/tmp/a.png"),
-      functionResult("img-new"),
+      userMessage("inspect twice"),
+      reasoning("rs_old"),
+      { ...functionCall("view_old", "view_image"), arguments: '{"path":"/tmp/a.png"}' },
+      functionResult("view_old"),
+      assistantMessage("first observation"),
+      reasoning("rs_new"),
+      { ...functionCall("view_new", "view_image"), arguments: '{"path":"/tmp/a.png"}' },
+      functionResult("view_new"),
     ];
+    const serialized = JSON.stringify(items);
 
-    const out = elideSupersededViewImagePairs(items);
-    expect(out).toEqual([items[0], items[4], items[5], items[6], items[7], items[8]]);
-  });
+    const result = elideSupersededViewImagePairs(items);
 
-  test("does not discard the last valid image when a newer call is incomplete", () => {
-    const items = [
-      viewImageCall("img-valid", "/tmp/a.png"),
-      functionResult("img-valid"),
-      viewImageCall("img-inflight", "/tmp/a.png"),
-    ];
-
-    expect(elideSupersededViewImagePairs(items)).toEqual(items);
-  });
-
-  test("leaves distinct image paths and non-image tools byte-identical", () => {
-    const items = [
-      viewImageCall("img-a", "/tmp/a.png"),
-      functionResult("img-a"),
-      viewImageCall("img-b", "/tmp/b.png"),
-      functionResult("img-b"),
-      functionCall("other", "memory_search"),
-      functionResult("other"),
-    ];
-
-    const out = elideSupersededViewImagePairs(items);
-    expect(out).toEqual(items);
-    expect(out[0]).toBe(items[0]);
+    expect(result).toBe(items);
+    expect(result).toHaveLength(items.length);
+    result.forEach((item, index) => expect(item).toBe(items[index]));
+    expect(JSON.stringify(result)).toBe(serialized);
+    expect(JSON.stringify(items)).toBe(serialized);
   });
 });
 
@@ -659,74 +630,9 @@ describe("computerCallNormalizingFetch — empty image_url backstop (action-time
   });
 });
 
-describe("stripReasoningEncryptedContent", () => {
-  test("drops providerData.encrypted_content (snake) but preserves reasoning text", () => {
-    const item = {
-      type: "reasoning",
-      id: "rs_1",
-      summary: [{ type: "summary_text", text: "I considered the options" }],
-      content: [{ type: "input_text", text: "visible chain of thought" }],
-      providerData: { encrypted_content: "gAAAA-account-A-blob", other: "keep" },
-    } as any;
-    const out = stripReasoningEncryptedContent(item) as any;
-    // The opaque blob is gone…
-    expect("encrypted_content" in out.providerData).toBe(false);
-    // …but the visible reasoning text and every other field survive.
-    expect(out.providerData.other).toBe("keep");
-    expect(out.summary).toEqual(item.summary);
-    expect(out.content).toEqual(item.content);
-    expect(out.id).toBe("rs_1");
-    // Non-mutating: the input keeps its blob.
-    expect(item.providerData.encrypted_content).toBe("gAAAA-account-A-blob");
-  });
-
-  test("drops providerData.encryptedContent (camel) too", () => {
-    const item = {
-      type: "reasoning",
-      providerData: { encryptedContent: "blob", encrypted_content: "blob2" },
-    } as any;
-    const out = stripReasoningEncryptedContent(item) as any;
-    expect("encryptedContent" in out.providerData).toBe(false);
-    expect("encrypted_content" in out.providerData).toBe(false);
-  });
-
-  test("clears a top-level encrypted_content (compaction item shape)", () => {
-    const item = { type: "compaction", encrypted_content: "blob", summary: "kept" } as any;
-    const out = stripReasoningEncryptedContent(item) as any;
-    expect("encrypted_content" in out).toBe(false);
-    expect(out.summary).toBe("kept");
-  });
-
-  test("returns the SAME reference when there is nothing encrypted to strip", () => {
-    const reasoningNoBlob = {
-      type: "reasoning",
-      content: [{ type: "input_text", text: "t" }],
-    } as any;
-    expect(stripReasoningEncryptedContent(reasoningNoBlob)).toBe(reasoningNoBlob);
-  });
-
-  test("leaves non-reasoning items untouched (by reference)", () => {
-    const message = {
-      type: "message",
-      role: "assistant",
-      content: [{ type: "output_text", text: "hello" }],
-      // A message would never carry this, but prove we never touch it.
-      providerData: { encrypted_content: "should-not-be-removed" },
-    } as any;
-    const out = stripReasoningEncryptedContent(message);
-    expect(out).toBe(message);
-    expect((out as any).providerData.encrypted_content).toBe("should-not-be-removed");
-  });
-});
-
-describe("stripReasoningIdentityFromSerializedRunState", () => {
-  // The approval RunState replay path
-  // replay a serialized RunState blob that has no per-item producer tag. When the
-  // resuming codex account differs from the freezing one, this neutralizes EVERY
-  // reasoning item's account-bound identity (encrypted_content + provider id)
-  // wherever it lives in the blob, while preserving message / tool / compaction
-  // content. Both HOLE A vectors (foreign blob 400, foreign rs_ id rejection) are
-  // closed because neither the blob nor the id survives.
+describe("projectRejectedProviderArtifactsFromSerializedRunState", () => {
+  // This projection is used only after an explicit provider rejection. It
+  // creates one temporary view; the durable RunState is never modified.
 
   const fullBlob = () =>
     JSON.stringify({
@@ -737,6 +643,19 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
           id: "rs_orig",
           content: [{ type: "input_text", text: "t" }],
           providerData: { encrypted_content: "enc-orig", keep: "yes" },
+        },
+        { type: "compaction", encrypted_content: "comp-blob", summary: "kept" },
+        {
+          type: "tool_search_call",
+          call_id: "search-1",
+          execution: "client",
+          arguments: { query: "mail" },
+        },
+        {
+          type: "tool_search_output",
+          call_id: "search-1",
+          execution: "client",
+          tools: [],
         },
         { type: "message", role: "user", content: "the question" },
       ],
@@ -785,7 +704,8 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
     });
 
   test("strips encrypted_content (snake+camel) and the rs_ id from reasoning in every location", () => {
-    const out = stripReasoningIdentityFromSerializedRunState(fullBlob());
+    const durable = fullBlob();
+    const out = projectRejectedProviderArtifactsFromSerializedRunState(durable);
     const parsed = JSON.parse(out);
     // No encrypted blob survives anywhere…
     for (const enc of ["enc-orig", "enc-resp-camel", "enc-last", "enc-gen"]) {
@@ -801,6 +721,11 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
     expect(out).toContain("the question");
     expect(out).toContain("the answer");
     expect(out).toContain("call_1");
+    expect(out).not.toContain("comp-blob");
+    expect(out).not.toContain('"type":"compaction"');
+    expect(out).toContain('"execution":"client"');
+    expect(durable).toContain("enc-orig");
+    expect(durable).toContain("comp-blob");
   });
 
   test("returns the SAME string reference when there is no reasoning to strip (no-op)", () => {
@@ -819,23 +744,44 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
         },
       ],
     });
-    expect(stripReasoningIdentityFromSerializedRunState(blob)).toBe(blob);
+    expect(projectRejectedProviderArtifactsFromSerializedRunState(blob)).toBe(blob);
   });
 
-  test("leaves compaction items untouched (their encrypted_content is a required field)", () => {
+  test("omits opaque compaction items from the recovery view", () => {
     const blob = JSON.stringify({
       $schemaVersion: "1.12",
       originalInput: [{ type: "compaction", encrypted_content: "comp-blob", summary: "kept" }],
       modelResponses: [],
       generatedItems: [],
     });
-    // No reasoning anywhere → byte-identical (same reference); compaction intact.
-    expect(stripReasoningIdentityFromSerializedRunState(blob)).toBe(blob);
+    const out = projectRejectedProviderArtifactsFromSerializedRunState(blob);
+    expect(out).not.toBe(blob);
+    expect(out).not.toContain("comp-blob");
+    expect(blob).toContain("comp-blob");
   });
 
   test("forwards a non-JSON string unchanged (same reference)", () => {
     const sentinel = "not-json-cleared-state-sentinel";
-    expect(stripReasoningIdentityFromSerializedRunState(sentinel)).toBe(sentinel);
+    expect(projectRejectedProviderArtifactsFromSerializedRunState(sentinel)).toBe(sentinel);
+  });
+
+  test("opaque detection reads only SDK history locations, not nested tool payload data", () => {
+    const nestedData = JSON.stringify({
+      originalInput: [
+        {
+          type: "function_call_result",
+          callId: "call-1",
+          output: {
+            type: "reasoning",
+            providerData: { encrypted_content: "user-data-not-provider-state" },
+          },
+        },
+      ],
+      generatedItems: [],
+      modelResponses: [],
+    });
+    expect(serializedRunStateHasOpaqueProviderArtifact(nestedData)).toBe(false);
+    expect(serializedRunStateHasOpaqueProviderArtifact(fullBlob())).toBe(true);
   });
 });
 

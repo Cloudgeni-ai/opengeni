@@ -8,6 +8,7 @@
 // `fleet.machines` is empty and this falls back to a static "Run on: Cloud
 // sandbox" label with no actionable dropdown.
 import { useMachines, type MachineView } from "@opengeni/react/machines";
+import type { SandboxBackend } from "@opengeni/sdk";
 import { CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 
-const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
+export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
+
+export function sessionSupportsFleetSwitching(sandboxBackend: SandboxBackend): boolean {
+  return sandboxBackend !== "none";
+}
 
 /** Whether a machine can be a swap target right now (the active one always can,
  *  since selecting it is a harmless no-op; otherwise it must be compute-selectable). */

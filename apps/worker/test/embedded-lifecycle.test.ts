@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
+import type { Database } from "@opengeni/db";
 import {
   createOpenGeniWorker,
   resolveOpenGeniWorkflowDefinition,
@@ -12,6 +13,7 @@ import {
 } from "../src";
 import {
   createWorkerHttpHandler,
+  dbReadyCheck,
   type ReadinessChecks,
   type WorkerLifecycleState,
 } from "../src/http";
@@ -197,6 +199,45 @@ describe("embedded worker lifecycle contract", () => {
     await expect(lifecycle.run()).rejects.toThrow("cannot run a worker service that is stopped");
   });
 
+  test("worker lifecycle public logs omit arbitrary shutdown reasons and errors", async () => {
+    const sentinel = "WORKER_LIFECYCLE_PUBLIC_SENTINEL_3a91c7";
+    const settings = {
+      ...testSettings(),
+      observabilityStructuredLogs: true,
+      observabilityMetricsEnabled: false,
+    };
+    const warnings: unknown[][] = [];
+    const logs: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.log = (...args: unknown[]) => logs.push(args);
+    const lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      observability: createObservability(settings, { component: "worker-test" }),
+      worker: {
+        run: async () => undefined,
+        shutdown: () => {
+          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
+        },
+      },
+      closeOwnedResources: async () => undefined,
+    });
+
+    try {
+      lifecycle.drain(sentinel);
+      await lifecycle.close();
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+
+    const rendered = JSON.stringify([...warnings, ...logs]);
+    expect(rendered).toContain("worker_draining");
+    expect(rendered).toContain("worker_shutdown_request_failed");
+    expect(rendered).not.toContain(sentinel);
+  });
+
   test("workspace source uses source workflows while installed dist requires its bundle", async () => {
     const source = resolveOpenGeniWorkflowDefinition();
     expect(source).toEqual({
@@ -216,6 +257,75 @@ describe("embedded worker lifecycle contract", () => {
     expect(() =>
       resolveOpenGeniWorkflowDefinition(pathToFileURL(join(dist, "index.js")).href),
     ).toThrow("OpenGeni workflow bundle is missing");
+  });
+
+  test("worker database readiness enforces supplied posture and retains the embedded probe", async () => {
+    let directExecutions = 0;
+    let catalogQueries = 0;
+    const catalogResults: unknown[] = [
+      [
+        {
+          current_user: "opengeni_app",
+          session_user: "opengeni_app",
+          database_owner: "opengeni_migrator",
+          can_connect_database: true,
+          can_create_in_database: false,
+          row_security: "on",
+          rolcanlogin: true,
+          rolsuper: false,
+          rolinherit: false,
+          rolcreaterole: false,
+          rolcreatedb: false,
+          rolreplication: false,
+          rolbypassrls: false,
+        },
+      ],
+      [],
+      [
+        { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
+        { name: "public", owner: "opengeni_migrator", usage: true, create: false },
+      ],
+      [],
+      [],
+      [],
+      [
+        {
+          name: "workspace_rls_visible(uuid, uuid)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+        },
+      ],
+    ];
+    const db = {
+      execute: async () => {
+        directExecutions += 1;
+        return [];
+      },
+      transaction: async (
+        callback: (tx: { execute: () => Promise<unknown> }) => Promise<unknown>,
+      ) =>
+        callback({
+          execute: async () => {
+            const result = catalogResults[catalogQueries];
+            catalogQueries += 1;
+            return result;
+          },
+        }),
+    } as unknown as Database;
+
+    await dbReadyCheck(db, {
+      rlsStrategy: "force",
+      expectedRole: "opengeni_app",
+      targetSchema: "public",
+      protectedTables: [],
+      tablePrivileges: {},
+      protectedNoDirectDmlTables: [],
+    })();
+    expect(catalogQueries).toBe(catalogResults.length);
+    expect(directExecutions).toBe(0);
+
+    await dbReadyCheck(db)();
+    expect(directExecutions).toBe(1);
   });
 
   test("readiness follows role lifecycle while health stays live during drain", async () => {
@@ -272,7 +382,10 @@ describe("embedded worker lifecycle contract", () => {
       checks: {
         db: () => undefined,
         nats: () => {
-          throw new Error("broker disconnected");
+          throw Object.assign(new Error("WORKER_READYZ_PUBLIC_SENTINEL_786d18"), {
+            name: "WORKER_READYZ_PUBLIC_SENTINEL_786d18",
+            code: "WORKER_READYZ_PUBLIC_SENTINEL_786d18",
+          });
         },
         temporal: () => undefined,
       },
@@ -281,10 +394,12 @@ describe("embedded worker lifecycle contract", () => {
 
     const response = await fetch(new Request("http://worker.test/readyz"));
     expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({
+    const body = await response.json();
+    expect(body).toMatchObject({
       ok: false,
       state: "ready",
-      checks: { nats: { ok: false, error: "broker disconnected" } },
+      checks: { nats: { ok: false, error: "dependency_unavailable" } },
     });
+    expect(JSON.stringify(body)).not.toContain("WORKER_READYZ_PUBLIC_SENTINEL_786d18");
   });
 });

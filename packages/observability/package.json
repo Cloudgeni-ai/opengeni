@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/observability",
-  "version": "0.3.0",
+  "version": "0.5.2",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -26,15 +26,16 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsup",
-    "typecheck": "tsgo --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@opengeni/contracts": "workspace:*",
     "prom-client": "^15.1.3"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   }
 }

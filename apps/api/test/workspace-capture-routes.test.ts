@@ -10,6 +10,7 @@ import {
   CAPTURE_INLINE_MANIFEST_MAX_BYTES,
   serveWorkspaceCapture,
   serveWorkspaceCaptureFile,
+  WorkspaceCaptureManifestCache,
   type CaptureStoragePort,
 } from "../src/routes/workspace-capture";
 
@@ -69,6 +70,7 @@ describe("M2 capture-read route discipline (static)", () => {
       for (const needle of [
         "c.req.query",
         "latestWorkspaceCapture",
+        "sessionLatestWorkspaceCapture",
         "workspaceCaptureAtRevision",
         "getSession(",
       ]) {
@@ -83,7 +85,7 @@ describe("M2 capture-read route discipline (static)", () => {
     expect(body).not.toContain("channelAPreamble");
     expect(body).not.toContain("withChannelA");
     // Served from the DB helper + object storage.
-    expect(body).toContain("latestWorkspaceCapture");
+    expect(body).toContain("sessionLatestWorkspaceCapture");
     expect(body).toContain("serveWorkspaceCapture");
   });
 
@@ -181,11 +183,14 @@ function makeRow(overrides: Partial<WorkspaceCaptureRow> = {}): WorkspaceCapture
 // In-memory storage: byte map for reads, a stub signer that records the key.
 function fakeStorage(
   objects: Record<string, Uint8Array>,
-): CaptureStoragePort & { signed: string[] } {
+): CaptureStoragePort & { reads: string[]; signed: string[] } {
+  const reads: string[] = [];
   const signed: string[] = [];
   return {
+    reads,
     signed,
     async getObjectBytes(key) {
+      reads.push(key);
       const bytes = objects[key];
       return bytes ? { bytes } : null;
     },
@@ -306,6 +311,56 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(res.manifestUrl).toBeNull();
     expect(res.manifest?.files[0]?.path).toBe("src/app.ts");
     expect(storage.signed).toEqual([]); // one round-trip; no second blob hop
+  });
+
+  test("validated inline manifests are reused from the bounded revision cache", async () => {
+    const manifest = makeManifest([fileEntry({})]);
+    const storage = fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)),
+    });
+    const cache = new WorkspaceCaptureManifestCache();
+    const row = makeRow();
+
+    const first = await serveWorkspaceCapture(row, storage, cache);
+    const second = await serveWorkspaceCapture(row, storage, cache);
+    expect(first.available).toBe(true);
+    expect(second).toBe(first);
+    expect(storage.reads).toEqual([MANIFEST_KEY]);
+  });
+
+  test("a changed row identity cannot reuse a cached manifest", async () => {
+    const manifest = makeManifest([fileEntry({})]);
+    const storage = fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)),
+    });
+    const cache = new WorkspaceCaptureManifestCache();
+
+    expect((await serveWorkspaceCapture(makeRow(), storage, cache)).available).toBe(true);
+    expect(
+      (await serveWorkspaceCapture(makeRow({ leaseEpoch: 6 }), storage, cache)).available,
+    ).toBe(false);
+    expect(storage.reads).toEqual([MANIFEST_KEY, MANIFEST_KEY]);
+  });
+
+  test("the manifest cache evicts least-recently-used entries at its byte bound", async () => {
+    const manifest = makeManifest([fileEntry({})]);
+    const bytes = new TextEncoder().encode(JSON.stringify(manifest));
+    const secondKey = `${MANIFEST_KEY}.second`;
+    const storage = fakeStorage({ [MANIFEST_KEY]: bytes, [secondKey]: bytes });
+    const cache = new WorkspaceCaptureManifestCache(2, bytes.byteLength);
+
+    expect((await serveWorkspaceCapture(makeRow(), storage, cache)).available).toBe(true);
+    expect(
+      (
+        await serveWorkspaceCapture(
+          makeRow({ id: "row-2", manifestKey: secondKey }),
+          storage,
+          cache,
+        )
+      ).available,
+    ).toBe(true);
+    expect((await serveWorkspaceCapture(makeRow(), storage, cache)).available).toBe(true);
+    expect(storage.reads).toEqual([MANIFEST_KEY, secondKey, MANIFEST_KEY]);
   });
 
   test("manifest above the inline cap → signed URL, manifest omitted", async () => {

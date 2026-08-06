@@ -2,10 +2,8 @@
 // spawned workers. It is deliberately DECOUPLED from goals — a session's agent
 // tree is orthogonal to whether it carries a goal. One compact tree component
 // ({@link SubagentTree}) backs its single home:
-//   - ComposerAgentsPill (./composer-agents-pill.tsx) — the floating "N agents"
-//     pill above the composer that EXPANDS upward into the lineage popover (the
-//     glanceable, front-and-center hero); reuses {@link SubagentTree} +
-//     {@link SubagentsLabel} from here.
+//   - SessionChrome agents segment (production) — host passes SubagentTree as
+//     `agentsPanel`; the dock chip opens that panel in-place.
 // SpawnedByBreadcrumb is the inverse link a child session shows back to the
 // manager that spawned it.
 //
@@ -69,6 +67,8 @@ export function SubagentTree({
   nodes: LineageNode[];
   onNavigate?: (() => void) | undefined;
 }) {
+  // Flat fleets (no grandchildren) skip the expander gutter so chrome stays dense.
+  const showLead = nodes.some((node) => node.children.length > 0);
   return (
     <ul className="flex flex-col gap-px">
       {nodes.map((node) => (
@@ -77,6 +77,7 @@ export function SubagentTree({
           node={node}
           workspaceId={workspaceId}
           depth={0}
+          showLead={showLead}
           onNavigate={onNavigate}
         />
       ))}
@@ -88,11 +89,13 @@ function SubagentRow({
   node,
   workspaceId,
   depth,
+  showLead,
   onNavigate,
 }: {
   node: LineageNode;
   workspaceId: string;
   depth: number;
+  showLead: boolean;
   onNavigate?: (() => void) | undefined;
 }) {
   const [open, setOpen] = useState(false);
@@ -123,35 +126,36 @@ function SubagentRow({
       {/* The container owns the hover wash + focus ring so the WHOLE row lights
           as one target; the Link inside covers dot→title→hint (the nav hit
           area), the chevron toggles without navigating. */}
-      <div className="group/row flex h-7 items-center gap-1.5 rounded-md pr-1.5 transition-colors hover:bg-surface-2 has-[a:focus-visible]:bg-surface-2">
-        {/* Lead cluster: the expand chevron + child-count grouped as the "has N
-            children" affordance, at a fixed width so every dot column lines up
-            whether or not a row has children. */}
-        <span className="flex w-7 shrink-0 items-center gap-0.5">
-          {canExpand ? (
-            <>
-              <button
-                type="button"
-                aria-label={open ? "Collapse" : "Expand"}
-                onClick={() => setOpen((prev) => !prev)}
-                className="inline-flex size-4 shrink-0 items-center justify-center rounded text-fg-subtle/50 outline-none transition-colors hover:text-fg group-hover/row:text-fg-subtle focus-visible:text-fg"
-              >
-                <ChevronRightIcon
-                  className={cn("size-3 transition-transform", open && "rotate-90")}
-                />
-              </button>
-              <span className="text-2xs leading-none tabular-nums text-fg-subtle/60">
-                {node.children.length}
-              </span>
-            </>
-          ) : null}
-        </span>
+      <div className="group/row flex h-7 items-center gap-1.5 rounded-md pr-1.5 transition-colors hover:bg-surface-2 has-[a:focus-visible]:bg-surface-2 max-sm:h-11">
+        {/* Lead cluster: expand chevron + child-count. Omitted entirely for
+            flat fleets so the chrome agents panel stays dense. */}
+        {showLead ? (
+          <span className="flex w-7 shrink-0 items-center gap-0.5">
+            {canExpand ? (
+              <>
+                <button
+                  type="button"
+                  aria-label={open ? "Collapse" : "Expand"}
+                  onClick={() => setOpen((prev) => !prev)}
+                  className="inline-flex size-4 shrink-0 items-center justify-center rounded text-fg-subtle/50 outline-none transition-colors hover:text-fg group-hover/row:text-fg-subtle focus-visible:text-fg max-sm:size-11"
+                >
+                  <ChevronRightIcon
+                    className={cn("size-3 transition-transform", open && "rotate-90")}
+                  />
+                </button>
+                <span className="text-2xs leading-none tabular-nums text-fg-subtle/60">
+                  {node.children.length}
+                </span>
+              </>
+            ) : null}
+          </span>
+        ) : null}
         <Link
           to="/workspaces/$workspaceId/sessions/$sessionId"
           params={{ workspaceId, sessionId: node.session.id }}
           onClick={() => onNavigate?.()}
           title={title}
-          className="flex min-w-0 flex-1 items-center gap-2 text-xs text-fg-muted outline-none group-hover/row:text-fg"
+          className="flex h-full min-w-0 flex-1 items-center gap-2 text-xs text-fg-muted outline-none group-hover/row:text-fg"
         >
           <StatusDot tone={tone} pulse={live} className="size-1.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{title}</span>
@@ -170,6 +174,7 @@ function SubagentRow({
               node={child}
               workspaceId={workspaceId}
               depth={depth + 1}
+              showLead={showLead}
               onNavigate={onNavigate}
             />
           ))}
@@ -194,14 +199,40 @@ export function SubagentsLabel({ count }: { count: number }) {
 
 export function SessionAncestryBreadcrumb({
   workspaceId,
+  parentSessionId,
   ancestors,
+  loading,
   error,
 }: {
   workspaceId: string;
+  /** Known from the current session even before the lineage request settles. */
+  parentSessionId: string | null;
   /** Root-to-direct-parent order. */
   ancestors: SessionSummary[];
+  loading?: boolean;
   error?: Error | null;
 }): ReactNode {
+  if (parentSessionId && (loading || error)) {
+    const state = error ? "unavailable" : "loading";
+    return (
+      <nav
+        aria-label="Session ancestry"
+        className="flex min-w-0 items-center text-2xs text-fg-muted"
+      >
+        <Link
+          to="/workspaces/$workspaceId/sessions/$sessionId"
+          params={{ workspaceId, sessionId: parentSessionId }}
+          aria-label={`Back to parent session; ancestry ${state}`}
+          className="inline-flex min-w-0 max-w-full items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg"
+        >
+          <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
+          <span className={error ? "truncate text-status-failed" : "truncate"}>
+            Back · Parent {state}
+          </span>
+        </Link>
+      </nav>
+    );
+  }
   if (error) {
     return <span className="text-2xs text-status-failed">Session ancestry unavailable</span>;
   }
@@ -209,17 +240,21 @@ export function SessionAncestryBreadcrumb({
     return null;
   }
   const parent = ancestors.at(-1)!;
+  const parentLabel = lineageLabel(parent);
   const middle = ancestors.slice(1, -1);
   return (
     <nav aria-label="Session ancestry" className="flex min-w-0 items-center text-2xs text-fg-muted">
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: parent.id }}
-        title={`Back to ${lineageLabel(parent)}`}
-        className="inline-flex min-w-0 items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg sm:hidden"
+        aria-label={`Back to ${parentLabel}`}
+        className="inline-flex min-w-0 max-w-full items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg sm:hidden"
       >
         <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
-        <span className="truncate">{lineageLabel(parent)}</span>
+        <span className="shrink-0 font-medium text-fg">Back ·</span>
+        <bdi dir="auto" className="min-w-0 truncate">
+          {parentLabel}
+        </bdi>
       </Link>
       <div className="hidden min-w-0 items-center sm:flex">
         <BreadcrumbLink workspaceId={workspaceId} session={ancestors[0]!} />
@@ -242,9 +277,10 @@ export function SessionAncestryBreadcrumb({
                     <Link
                       to="/workspaces/$workspaceId/sessions/$sessionId"
                       params={{ workspaceId, sessionId: session.id }}
+                      dir="auto"
                       className="min-w-0"
                     >
-                      <span className="truncate">{lineageLabel(session)}</span>
+                      {lineageLabel(session)}
                     </Link>
                   </DropdownMenuItem>
                 ))}
@@ -270,14 +306,16 @@ function BreadcrumbLink({
   workspaceId: string;
   session: SessionSummary;
 }) {
+  const label = lineageLabel(session);
   return (
     <Link
       to="/workspaces/$workspaceId/sessions/$sessionId"
       params={{ workspaceId, sessionId: session.id }}
-      title={lineageLabel(session)}
-      className="max-w-40 truncate outline-none transition-colors hover:text-fg focus-visible:text-fg"
+      title={label}
+      dir="auto"
+      className="inline-flex max-w-40 items-center truncate outline-none transition-colors hover:text-fg focus-visible:text-fg max-sm:min-h-11"
     >
-      {lineageLabel(session)}
+      {label}
     </Link>
   );
 }

@@ -50,6 +50,7 @@ async function bearer(permissions: Permission[]): Promise<string> {
     workspaceId: WS,
     subjectId: "tester",
     permissions,
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   return `Bearer ${token}`;
@@ -76,8 +77,6 @@ function account(
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
-    connectorNamespaces: null,
-    connectorsCheckedAt: null,
     ...over,
   };
 }

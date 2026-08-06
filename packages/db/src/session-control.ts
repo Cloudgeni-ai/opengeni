@@ -1,17 +1,28 @@
 import { createHash } from "node:crypto";
 import {
   boundWorkspaceControlEvent,
+  McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./index";
+import type { Database } from "./database";
+import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
+import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import {
+  mirrorSessionRealtimeContextInTransaction,
+  renderRealtimeHumanInputResponseContext,
+} from "./session-realtime-mirror";
+
+type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
+  payload: unknown;
+};
 
 export const SESSION_ANCESTRY_LIMIT = 10_000;
 
-export type WorkspaceControlLockMode = "share" | "update";
+export type WorkspaceControlLockMode = "none" | "share" | "update";
 export type EffectiveControlState = "active" | "paused";
 export type SessionCommandActor =
   | { type: "human" | "operator"; subjectId: string }
@@ -34,6 +45,7 @@ export type SessionTurnAttemptOutcome =
   | "cancelled"
   | "superseded"
   | "requires_action"
+  | "waiting_capacity"
   | "interrupted_recoverable"
   | "lease_lost_recoverable"
   | "pre_cutover_closed";
@@ -202,9 +214,12 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message";
+    action: "pause" | "resume" | "steer" | "message" | "goal";
   },
 ): Promise<void> {
+  if (input.action === "goal" && input.targetSessionId !== input.actor.sessionId) {
+    throw new SessionControlInvariantError("An agent goal command must target its own session");
+  }
   // Every command caller establishes the control/workspace prefix first.
   // Reusing the event-write helper here keeps cross-session actor authority on
   // the same UUID-ordered session -> exact turn -> exact attempt suffix.
@@ -355,6 +370,7 @@ function controlEtag(value: unknown): string {
 }
 
 function lockClause(mode: WorkspaceControlLockMode) {
+  if (mode === "none") return sql.empty();
   return mode === "update" ? sql.raw("for update") : sql.raw("for share");
 }
 
@@ -514,6 +530,7 @@ export async function registerSessionTurnAttemptClaim(
     temporalActivityId: string;
     verifiedControlRevision: number;
     mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy>;
+    connectorActionPolicies: schema.ConnectorActionPolicySnapshotEntry[];
   },
 ): Promise<typeof schema.sessionTurnAttempts.$inferSelect> {
   const [inserted] = await db
@@ -549,6 +566,8 @@ export async function registerSessionTurnAttemptClaim(
     existing.temporalWorkflowId !== input.temporalWorkflowId ||
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
+    JSON.stringify(existing.connectorActionPolicies) !==
+      JSON.stringify(input.connectorActionPolicies) ||
     existing.state === "closed"
   ) {
     throw new SessionControlInvariantError(
@@ -1345,26 +1364,32 @@ async function findCommandReceipt(
     targetSessionId: string | null;
     targetTurnId: string | null;
     operationKey: string;
+    identityScope: "actor" | "goal_operation";
   },
 ): Promise<SessionCommandReceiptRow | null> {
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
   const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
-  const rows = await db
-    .select()
-    .from(schema.sessionCommandReceipts)
-    .where(
-      and(
-        eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
-        eq(schema.sessionCommandReceipts.actorType, input.actor.type),
-        sql`${schema.sessionCommandReceipts.actorSubjectId} is not distinct from ${actorSubjectId}`,
-        sql`${schema.sessionCommandReceipts.actorAttemptId} is not distinct from ${actorAttemptId}::uuid`,
-        eq(schema.sessionCommandReceipts.action, input.action),
-        sql`${schema.sessionCommandReceipts.targetSessionId} is not distinct from ${input.targetSessionId}::uuid`,
-        sql`${schema.sessionCommandReceipts.targetTurnId} is not distinct from ${input.targetTurnId}::uuid`,
-        eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
-      ),
-    )
-    .for("update");
+  const identity =
+    input.identityScope === "goal_operation"
+      ? and(
+          eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
+          eq(schema.sessionCommandReceipts.actorType, "agent_attempt"),
+          eq(schema.sessionCommandReceipts.action, input.action),
+          eq(schema.sessionCommandReceipts.targetSessionId, input.targetSessionId!),
+          sql`${schema.sessionCommandReceipts.targetTurnId} is null`,
+          eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
+        )
+      : and(
+          eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
+          eq(schema.sessionCommandReceipts.actorType, input.actor.type),
+          sql`${schema.sessionCommandReceipts.actorSubjectId} is not distinct from ${actorSubjectId}`,
+          sql`${schema.sessionCommandReceipts.actorAttemptId} is not distinct from ${actorAttemptId}::uuid`,
+          eq(schema.sessionCommandReceipts.action, input.action),
+          sql`${schema.sessionCommandReceipts.targetSessionId} is not distinct from ${input.targetSessionId}::uuid`,
+          sql`${schema.sessionCommandReceipts.targetTurnId} is not distinct from ${input.targetTurnId}::uuid`,
+          eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
+        );
+  const rows = await db.select().from(schema.sessionCommandReceipts).where(identity).for("update");
   return rows[0] ?? null;
 }
 
@@ -1379,9 +1404,22 @@ export async function reserveSessionCommandReceipt(
     targetTurnId: string | null;
     operationKey: string;
     canonicalRequestHash: string;
+    identityScope?: "actor" | "goal_operation";
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  const identityScope = input.identityScope ?? "actor";
+  if (
+    identityScope === "goal_operation" &&
+    (input.actor.type !== "agent_attempt" ||
+      input.action !== "goal.update" ||
+      input.targetSessionId === null ||
+      input.targetTurnId !== null)
+  ) {
+    throw new SessionControlInvariantError(
+      "Target-scoped receipt identity is reserved for agent goal.update commands",
+    );
+  }
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
   const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
   const [inserted] = await db
@@ -1409,6 +1447,7 @@ export async function reserveSessionCommandReceipt(
       targetSessionId: input.targetSessionId,
       targetTurnId: input.targetTurnId,
       operationKey: input.operationKey,
+      identityScope,
     }));
   if (!receipt) throw new SessionControlInvariantError("Command receipt conflict was not readable");
   if (receipt.canonicalRequestHash !== input.canonicalRequestHash) {
@@ -1460,12 +1499,13 @@ async function registerContinuableWakes(
       )
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
-        session_id, account_id, workspace_id, temporal_workflow_id, reason
+        session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
       )
-      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}
+      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}, 1
       from eligible
       on conflict (session_id) do update set
         wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+        control_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
         temporal_workflow_id = excluded.temporal_workflow_id,
         reason = excluded.reason,
         attempts = 0,
@@ -1547,6 +1587,56 @@ async function registerInterruptionWakes(
   return Number(rows[0]?.wakeCount ?? 0);
 }
 
+/**
+ * Terminal cancellation must wake every affected workflow, including sessions
+ * parked at an approval, capacity, or other no-active-attempt boundary. Those
+ * sessions have no new interruption row, so the ordinary Pause wake selector
+ * cannot discover them. Signal-with-start is intentional here: a closed
+ * workflow cheaply re-reads the terminal row and exits, while an open workflow
+ * is released from an otherwise unbounded durable wait.
+ */
+async function registerCancellationWakes(
+  db: Database,
+  input: { workspaceId: string; sessionIds: string[] },
+): Promise<number> {
+  if (input.sessionIds.length === 0) return 0;
+  const sessionIds = sql.join(
+    input.sessionIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+  const rows = await db.execute<{ wakeCount: number | string }>(sql`
+    with eligible as (
+      select
+        session.id as session_id,
+        session.account_id,
+        session.workspace_id,
+        coalesce(session.temporal_workflow_id, 'session-' || session.id::text)
+          as temporal_workflow_id
+      from ${schema.sessions} session
+      where session.workspace_id = ${input.workspaceId}
+        and session.id in (${sessionIds})
+    ), upserted as (
+      insert into ${schema.sessionWorkflowWakeOutbox} (
+        session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
+      )
+      select session_id, account_id, workspace_id, temporal_workflow_id, 'session_cancelled', 1
+      from eligible
+      on conflict (session_id) do update set
+        wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+        control_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+        temporal_workflow_id = excluded.temporal_workflow_id,
+        reason = excluded.reason,
+        attempts = 0,
+        next_attempt_at = now(),
+        last_error = null,
+        updated_at = now()
+      returning session_id
+    )
+    select count(*)::bigint as "wakeCount" from upserted
+  `);
+  return Number(rows[0]?.wakeCount ?? 0);
+}
+
 /** Register one exact post-commit Temporal nudge without encoding eligibility in
  * the transport. The workflow re-reads canonical Postgres state; coalescing is
  * revisioned so a lost or stale delivery cannot hide a later mutation. */
@@ -1558,6 +1648,7 @@ export async function registerSessionWorkflowWakeInTransaction(
     sessionId: string;
     temporalWorkflowId: string;
     reason: string;
+    controlRequested?: boolean;
   },
 ): Promise<number> {
   const [row] = await db
@@ -1567,6 +1658,7 @@ export async function registerSessionWorkflowWakeInTransaction(
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       temporalWorkflowId: input.temporalWorkflowId,
+      controlRevision: input.controlRequested ? 1 : 0,
       reason: input.reason,
     })
     .onConflictDoUpdate({
@@ -1574,6 +1666,9 @@ export async function registerSessionWorkflowWakeInTransaction(
       set: {
         temporalWorkflowId: input.temporalWorkflowId,
         wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
+        controlRevision: input.controlRequested
+          ? sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`
+          : sql`${schema.sessionWorkflowWakeOutbox.controlRevision}`,
         reason: input.reason,
         attempts: 0,
         nextAttemptAt: new Date(),
@@ -1758,8 +1853,526 @@ export type SessionControlMutationResult = {
   workspaceControlEventId: string;
   interruptionCount: number;
   wakeCount: number;
+  cancelledSessionCount: number;
+  cancelledTurnCount: number;
+  affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
   replay: boolean;
 };
+
+async function loadSessionSubtreeIds(
+  db: Database,
+  workspaceId: string,
+  rootSessionId: string,
+): Promise<{ sessionIds: string[]; rootParentSessionId: string | null }> {
+  const rows: Array<{
+    id: string;
+    rootParentSessionId: string | null;
+    depth: number | string;
+    cycle: boolean;
+  }> = await db.execute(sql`
+    with recursive subtree(id, root_parent_session_id, depth, path, cycle) as (
+      select session.id, session.parent_session_id, 0::integer, array[session.id]::uuid[], false
+      from ${schema.sessions} session
+      where session.workspace_id = ${workspaceId} and session.id = ${rootSessionId}
+      union all
+      select child.id, parent.root_parent_session_id, parent.depth + 1,
+             parent.path || child.id, child.id = any(parent.path)
+      from subtree parent
+      join ${schema.sessions} child
+        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.id
+      where parent.depth < ${SESSION_ANCESTRY_LIMIT} and not parent.cycle
+    )
+    select id, root_parent_session_id as "rootParentSessionId", depth, cycle
+    from subtree
+    order by id
+  `);
+  if (rows.length === 0) {
+    throw new SessionControlInvariantError(`Session ${rootSessionId} does not exist`);
+  }
+  if (rows.some((row) => row.cycle || Number(row.depth) >= SESSION_ANCESTRY_LIMIT)) {
+    throw new SessionControlInvariantError(`Session ${rootSessionId} subtree is invalid`);
+  }
+  return {
+    sessionIds: rows.map((row) => row.id),
+    rootParentSessionId: rows[0]?.rootParentSessionId ?? null,
+  };
+}
+
+const TERMINAL_CANCELLATION_LIVE_TURN_STATUSES = [
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+];
+
+async function loadCancellationTurnIds(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        inArray(schema.sessionTurns.sessionId, sessionIds),
+        inArray(schema.sessionTurns.status, TERMINAL_CANCELLATION_LIVE_TURN_STATUSES),
+      ),
+    )
+    .orderBy(schema.sessionTurns.id);
+  return rows.map((row) => row.id);
+}
+
+async function enqueueCancelledChildOutboxInTransaction(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rootSession: typeof schema.sessions.$inferSelect;
+    parentSession: typeof schema.sessions.$inferSelect | null;
+  },
+): Promise<void> {
+  const parentSessionId = input.rootSession.parentSessionId;
+  if (!parentSessionId) return;
+  if (!input.parentSession || input.parentSession.id !== parentSessionId) {
+    throw new SessionControlInvariantError(
+      `Parent session ${parentSessionId} was not locked with cancellation root ${input.rootSession.id}`,
+    );
+  }
+  if (input.parentSession.status === "cancelled") return;
+  let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
+    [];
+  if (input.rootSession.parentTurnId) {
+    const [parentTurn] = await db
+      .select({
+        delegations: schema.sessionTurns.personalConnectionDelegations,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, parentSessionId),
+          eq(schema.sessionTurns.id, input.rootSession.parentTurnId),
+        ),
+      )
+      .limit(1);
+    if (parentTurn) {
+      const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
+      if (!parsed.success) {
+        throw new SessionControlInvariantError(
+          `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.rootSession.parentTurnId}`,
+        );
+      }
+      personalConnectionDelegations = parsed.data.map((delegation) => ({
+        ...delegation,
+      }));
+    }
+  }
+  await db
+    .insert(schema.sessionSystemUpdateOutbox)
+    .values(
+      withLosslessContentWriteVersion(
+        withLosslessContentWriteVersion(
+          {
+            accountId: input.rootSession.accountId,
+            workspaceId: input.workspaceId,
+            sourceSessionId: input.rootSession.id,
+            targetSessionId: parentSessionId,
+            dedupeKey: `child-completion:${input.rootSession.id}:cancelled`,
+            kind: "child_terminal_result",
+            classification: "info",
+            sourceId: input.rootSession.id,
+            summary: "Child session was terminally cancelled.",
+            payload: {
+              type: "child_terminal_result",
+              childSessionId: input.rootSession.id,
+              status: "cancelled",
+            },
+            lineage: {
+              childSessionId: input.rootSession.id,
+              parentSessionId,
+              ...(input.rootSession.parentTurnId
+                ? { parentTurnId: input.rootSession.parentTurnId }
+                : {}),
+            },
+            personalConnectionDelegations,
+          },
+          "summary",
+          "summaryCodecVersion",
+        ),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
+    .onConflictDoNothing({
+      target: [
+        schema.sessionSystemUpdateOutbox.workspaceId,
+        schema.sessionSystemUpdateOutbox.dedupeKey,
+      ],
+    });
+}
+
+async function assertSessionBranchIsNotCancelled(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  const rows = await db.execute<{
+    cancelled: boolean;
+    invalid: boolean;
+  }>(sql`
+    with recursive ancestry(id, parent_id, status, depth, path, cycle) as (
+      select session.id, session.parent_session_id, session.status, 0::integer,
+             array[session.id]::uuid[], false
+      from ${schema.sessions} session
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+      union all
+      select parent.id, parent.parent_session_id, parent.status, child.depth + 1,
+             child.path || parent.id, parent.id = any(child.path)
+      from ancestry child
+      join ${schema.sessions} parent
+        on parent.workspace_id = ${workspaceId} and parent.id = child.parent_id
+      where child.depth < ${SESSION_ANCESTRY_LIMIT} and not child.cycle
+    )
+    select
+      coalesce(bool_or(status = 'cancelled'), false) as cancelled,
+      count(*) = 0 or coalesce(bool_or(cycle), false)
+        or coalesce(max(depth), 0) >= ${SESSION_ANCESTRY_LIMIT} as invalid
+    from ancestry
+  `);
+  if (rows[0]?.invalid) {
+    throw new SessionControlInvariantError(`Session ${sessionId} ancestry is invalid`);
+  }
+  if (rows[0]?.cancelled) {
+    throw new SessionControlConflictError("Cancelled session subtree cannot accept work");
+  }
+}
+
+async function cancelSessionSubtreeInTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    rootSessionId: string;
+    sessionIds: string[];
+    lockedSessions: Array<typeof schema.sessions.$inferSelect>;
+    candidateTurnIds: string[];
+    lockedTurns: Array<typeof schema.sessionTurns.$inferSelect>;
+    actor: string;
+    reason: string | null;
+    operationId: string;
+    rootControlEventId: string;
+  },
+): Promise<{
+  cancelledSessionCount: number;
+  cancelledTurnCount: number;
+  affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
+}> {
+  const candidateTurnIdSet = new Set(input.candidateTurnIds);
+  const candidateTurns = input.lockedTurns.filter((turn) => candidateTurnIdSet.has(turn.id));
+  if (candidateTurns.length !== candidateTurnIdSet.size) {
+    throw new SessionControlInvariantError("Cancellation candidate turns changed while locking");
+  }
+  // The outer command acquired every session and candidate turn in one UUID-
+  // sorted call before the actor attempt. Repeat only those already-held locks
+  // so this event-writing suffix retains a directly auditable lock contract;
+  // this call must never discover or acquire a new row.
+  const suffixLocks = await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    sessionIds: input.lockedSessions.map((session) => session.id),
+    turnIds: input.candidateTurnIds,
+  });
+  if (
+    suffixLocks.sessions.length !== input.lockedSessions.length ||
+    suffixLocks.turns.length !== candidateTurnIdSet.size
+  ) {
+    throw new SessionControlInvariantError("Cancellation rows changed under canonical locks");
+  }
+  const sessionIdSet = new Set(input.sessionIds);
+  const rootSession = input.lockedSessions.find((session) => session.id === input.rootSessionId);
+  if (!rootSession) {
+    throw new SessionControlInvariantError(
+      `Cancellation root ${input.rootSessionId} was not locked with its subtree`,
+    );
+  }
+  const rootParentSession = rootSession.parentSessionId
+    ? (input.lockedSessions.find((session) => session.id === rootSession.parentSessionId) ?? null)
+    : null;
+  const candidateTurnById = new Map(candidateTurns.map((turn) => [turn.id, turn]));
+  const liveTurnIds = new Set(
+    input.lockedSessions
+      .filter((session) => session.activeTurnId !== null)
+      .flatMap((session) => {
+        const turn = session.activeTurnId ? candidateTurnById.get(session.activeTurnId) : undefined;
+        if (turn?.activeAttemptId === null) return [];
+        return turn ? [turn.id] : [];
+      }),
+  );
+  const immediatelyCancelledTurns = candidateTurns.filter((turn) => !liveTurnIds.has(turn.id));
+  const cancelledTurnsBySession = new Map<string, typeof immediatelyCancelledTurns>();
+  for (const turn of immediatelyCancelledTurns) {
+    const turns = cancelledTurnsBySession.get(turn.sessionId);
+    if (turns) turns.push(turn);
+    else cancelledTurnsBySession.set(turn.sessionId, [turn]);
+  }
+  const immediatelyCancelledTurnIds = immediatelyCancelledTurns.map((turn) => turn.id);
+  const now = new Date();
+  let cancelledHumanInputs: Array<{
+    id: string;
+    sessionId: string;
+    turnId: string;
+    questions: (typeof schema.sessionHumanInputRequests.$inferSelect)["questions"];
+  }> = [];
+  if (immediatelyCancelledTurnIds.length > 0) {
+    await db
+      .update(schema.sessionTurns)
+      .set({
+        status: "cancelled",
+        activeAttemptId: null,
+        cancelledBy: input.actor,
+        cancelReason: input.reason ?? "session_cancelled",
+        version: sql`${schema.sessionTurns.version} + 1`,
+        finishedAt: now,
+        updatedAt: now,
+      })
+      .where(inArray(schema.sessionTurns.id, immediatelyCancelledTurnIds));
+    cancelledHumanInputs = await db
+      .update(schema.sessionHumanInputRequests)
+      .set({
+        status: "cancelled",
+        response: { outcome: "cancelled" },
+        respondedBy: input.actor,
+        respondedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+          inArray(schema.sessionHumanInputRequests.turnId, immediatelyCancelledTurnIds),
+          eq(schema.sessionHumanInputRequests.status, "pending"),
+        ),
+      )
+      .returning({
+        id: schema.sessionHumanInputRequests.id,
+        sessionId: schema.sessionHumanInputRequests.sessionId,
+        turnId: schema.sessionHumanInputRequests.turnId,
+        questions: schema.sessionHumanInputRequests.questions,
+      });
+    await db
+      .update(schema.codexCapacityWaiters)
+      .set({
+        status: "superseded",
+        lastWakeReason: "session_cancelled",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+          inArray(schema.codexCapacityWaiters.blockedTurnId, immediatelyCancelledTurnIds),
+          eq(schema.codexCapacityWaiters.status, "waiting"),
+        ),
+      );
+  }
+  const cancelledSystemUpdates = await db
+    .update(schema.sessionSystemUpdates)
+    .set({ state: "cancelled" })
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+        inArray(schema.sessionSystemUpdates.sessionId, input.sessionIds),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+      ),
+    )
+    .returning({
+      id: schema.sessionSystemUpdates.id,
+      sessionId: schema.sessionSystemUpdates.sessionId,
+    });
+  const humanInputsByTurn = new Map<string, typeof cancelledHumanInputs>();
+  for (const humanInput of cancelledHumanInputs) {
+    const inputs = humanInputsByTurn.get(humanInput.turnId);
+    if (inputs) inputs.push(humanInput);
+    else humanInputsByTurn.set(humanInput.turnId, [humanInput]);
+  }
+  const systemUpdatesBySession = new Map<string, typeof cancelledSystemUpdates>();
+  for (const update of cancelledSystemUpdates) {
+    const updates = systemUpdatesBySession.get(update.sessionId);
+    if (updates) updates.push(update);
+    else systemUpdatesBySession.set(update.sessionId, [update]);
+  }
+
+  const affectedSessionEvents: Array<{
+    sessionId: string;
+    eventIds: string[];
+  }> = [];
+  for (const session of input.lockedSessions) {
+    if (!sessionIdSet.has(session.id)) continue;
+    let sequence = session.lastSequence + (session.id === input.rootSessionId ? 1 : 0);
+    const cancelledTurns = cancelledTurnsBySession.get(session.id) ?? [];
+    const preinsertedEvents: Array<{ id: string; sequence: number }> = [];
+    const eventValues: SessionEventInsertWithPayload[] = [];
+    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
+      left.id.localeCompare(right.id),
+    )) {
+      eventValues.push({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sequence: ++sequence,
+        type: "system.update.cancelled",
+        payload: { updateId: update.id, reason: "session_cancelled" },
+        occurredAt: now,
+      });
+    }
+    for (const turn of cancelledTurns) {
+      const closedTools = await closePendingSessionToolCallsInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+        reason: "session_cancelled",
+        sequence,
+        now,
+      });
+      sequence = closedTools.sequence;
+      preinsertedEvents.push(
+        ...closedTools.events.map((event) => ({
+          id: event.id,
+          sequence: event.sequence,
+        })),
+      );
+      for (const humanInput of (humanInputsByTurn.get(turn.id) ?? []).sort((left, right) =>
+        left.id.localeCompare(right.id),
+      )) {
+        eventValues.push({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: session.id,
+          sequence: ++sequence,
+          type: "user.humanInputResponse",
+          turnId: turn.id,
+          turnGeneration: turn.executionGeneration,
+          ...(turn.id === session.activeTurnId ? { turnAssociation: "current" as const } : {}),
+          payload: {
+            requestId: humanInput.id,
+            response: { outcome: "cancelled" },
+          },
+          occurredAt: now,
+        });
+      }
+      eventValues.push({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sequence: ++sequence,
+        type: "turn.cancelled",
+        turnId: turn.id,
+        turnGeneration: turn.executionGeneration,
+        ...(turn.id === session.activeTurnId ? { turnAssociation: "current" as const } : {}),
+        payload: {
+          reason: input.reason ?? "session_cancelled",
+          operationId: input.operationId,
+        },
+        occurredAt: now,
+      });
+    }
+    if (session.status !== "cancelled") {
+      eventValues.push({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sequence: ++sequence,
+        type: "session.status.changed",
+        payload: {
+          status: "cancelled",
+          reason: input.reason ?? "session_cancelled",
+          operationId: input.operationId,
+        },
+        occurredAt: now,
+      });
+    }
+    const inserted =
+      eventValues.length > 0
+        ? await db
+            .insert(schema.sessionEvents)
+            .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+            .returning({
+              id: schema.sessionEvents.id,
+              sequence: schema.sessionEvents.sequence,
+              type: schema.sessionEvents.type,
+              turnId: schema.sessionEvents.turnId,
+              payload: schema.sessionEvents.payload,
+            })
+        : [];
+    const cancelledHumanInputsById = new Map(
+      cancelledHumanInputs
+        .filter((request) => request.sessionId === session.id)
+        .map((request) => [request.id, request]),
+    );
+    for (const event of inserted) {
+      if (event.type !== "user.humanInputResponse") continue;
+      const payload = event.payload as { requestId?: unknown };
+      const request =
+        typeof payload.requestId === "string"
+          ? cancelledHumanInputsById.get(payload.requestId)
+          : null;
+      if (!request) continue;
+      await mirrorSessionRealtimeContextInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sourceKind: "human_input_response",
+        sourceId: event.id,
+        turnId: event.turnId,
+        channel: null,
+        text: renderRealtimeHumanInputResponseContext({
+          requestId: request.id,
+          questions: request.questions,
+          response: { outcome: "cancelled" },
+        }),
+        payload: {
+          requestId: request.id,
+          outcome: "cancelled",
+          sourceEventId: event.id,
+        },
+        now,
+      });
+    }
+    const liveTurnId =
+      session.activeTurnId && liveTurnIds.has(session.activeTurnId) ? session.activeTurnId : null;
+    await db
+      .update(schema.sessions)
+      .set({
+        status: "cancelled",
+        activeTurnId: liveTurnId,
+        queueVersion: sql`${schema.sessions.queueVersion} + 1`,
+        queueHeadPosition: 0,
+        queueTailPosition: 0,
+        lastSequence: sequence,
+        updatedAt: now,
+      })
+      .where(
+        and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, session.id)),
+      );
+    const eventIds = [...preinsertedEvents, ...inserted]
+      .sort((left, right) => left.sequence - right.sequence)
+      .map((event) => event.id);
+    if (session.id === input.rootSessionId) eventIds.unshift(input.rootControlEventId);
+    if (eventIds.length > 0) affectedSessionEvents.push({ sessionId: session.id, eventIds });
+  }
+  await enqueueCancelledChildOutboxInTransaction(db, {
+    workspaceId: input.workspaceId,
+    rootSession,
+    parentSession: rootParentSession,
+  });
+  return {
+    cancelledSessionCount: input.sessionIds.length,
+    cancelledTurnCount: candidateTurns.length,
+    affectedSessionEvents,
+  };
+}
 
 export async function mutateSessionControlInTransaction(
   db: Database,
@@ -1769,22 +2382,53 @@ export async function mutateSessionControlInTransaction(
     sessionId: string;
     actor: SessionCommandActor;
     operationKey: string;
-    action: "pause" | "resume";
+    action: "pause" | "resume" | "cancel";
     reason?: string | null;
     expectedControlEtag?: string | null;
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
-  await lockSessionEventWriteRows(db, {
+  const cancellationSubtree =
+    input.action === "cancel"
+      ? await loadSessionSubtreeIds(db, input.workspaceId, input.sessionId)
+      : { sessionIds: [input.sessionId], rootParentSessionId: null };
+  const cancellationSessionIds = cancellationSubtree.sessionIds;
+  const cancellationTurnIds =
+    input.action === "cancel"
+      ? await loadCancellationTurnIds(db, input.workspaceId, cancellationSessionIds)
+      : [];
+  const locks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds:
       input.actor.type === "agent_attempt"
-        ? [input.actor.sessionId, input.sessionId]
-        : [input.sessionId],
-    turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
+        ? [
+            input.actor.sessionId,
+            ...cancellationSessionIds,
+            ...(cancellationSubtree.rootParentSessionId
+              ? [cancellationSubtree.rootParentSessionId]
+              : []),
+          ]
+        : [
+            ...cancellationSessionIds,
+            ...(cancellationSubtree.rootParentSessionId
+              ? [cancellationSubtree.rootParentSessionId]
+              : []),
+          ],
+    turnIds:
+      input.actor.type === "agent_attempt"
+        ? [input.actor.turnId, ...cancellationTurnIds]
+        : cancellationTurnIds,
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
+  if (input.action === "cancel") {
+    const rootSession = locks.sessions.find((session) => session.id === input.sessionId);
+    if (!rootSession || rootSession.parentSessionId !== cancellationSubtree.rootParentSessionId) {
+      throw new SessionControlInvariantError(
+        `Session ${input.sessionId} parent changed while establishing cancellation locks`,
+      );
+    }
+  }
   const hash = canonicalSessionCommandHash({
     action: input.action,
     reason: input.reason ?? null,
@@ -1820,6 +2464,14 @@ export async function mutateSessionControlInTransaction(
       workspaceControlEventId,
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
       wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
+      cancelledSessionCount: Number(reserved.receipt.result.cancelledSessionCount ?? 0),
+      cancelledTurnCount: Number(reserved.receipt.result.cancelledTurnCount ?? 0),
+      affectedSessionEvents: Array.isArray(reserved.receipt.result.affectedSessionEvents)
+        ? (reserved.receipt.result.affectedSessionEvents as Array<{
+            sessionId: string;
+            eventIds: string[];
+          }>)
+        : [{ sessionId: input.sessionId, eventIds: [sessionControlEventId] }],
       replay: true,
     };
   }
@@ -1828,8 +2480,11 @@ export async function mutateSessionControlInTransaction(
       workspaceId: input.workspaceId,
       actor: input.actor,
       targetSessionId: input.sessionId,
-      action: input.action,
+      action: input.action === "cancel" ? "pause" : input.action,
     });
+  }
+  if (input.action === "resume") {
+    await assertSessionBranchIsNotCancelled(db, input.workspaceId, input.sessionId);
   }
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl: workspace,
@@ -1840,10 +2495,10 @@ export async function mutateSessionControlInTransaction(
 
   const revision = nextRevision(workspace);
   await advanceWorkspaceRevision(db, input.workspaceId, revision);
-  const [updated] = await db
+  const updatedRows = await db
     .update(schema.sessions)
     .set(
-      input.action === "pause"
+      input.action === "pause" || input.action === "cancel"
         ? {
             directControlState: "paused",
             directPauseRevision: revision,
@@ -1873,13 +2528,16 @@ export async function mutateSessionControlInTransaction(
     .where(
       and(
         eq(schema.sessions.workspaceId, input.workspaceId),
-        eq(schema.sessions.id, input.sessionId),
+        input.action === "cancel"
+          ? inArray(schema.sessions.id, cancellationSessionIds)
+          : eq(schema.sessions.id, input.sessionId),
       ),
     )
     .returning({
       id: schema.sessions.id,
       lastSequence: schema.sessions.lastSequence,
     });
+  const updated = updatedRows.find((row) => row.id === input.sessionId);
   if (!updated) throw new SessionControlInvariantError(`Session ${input.sessionId} disappeared`);
 
   const actor =
@@ -1892,14 +2550,14 @@ export async function mutateSessionControlInTransaction(
     revision,
     scope: "session",
     rootSessionId: input.sessionId,
-    action: input.action,
+    action: input.action === "cancel" ? "pause" : input.action,
     automatic: false,
     reason: input.reason ?? null,
     actor,
   });
 
   const interruptionCount =
-    input.action === "pause"
+    input.action === "pause" || input.action === "cancel"
       ? await interruptDescendantAttempts(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -1910,33 +2568,48 @@ export async function mutateSessionControlInTransaction(
         })
       : 0;
   const wakeCount =
-    input.action === "pause"
-      ? await registerInterruptionWakes(db, {
-          operationId: reserved.receipt.id,
-          reason: "session_pause_interruption",
-        })
-      : await registerDescendantWakes(db, {
+    input.action === "cancel"
+      ? await registerCancellationWakes(db, {
           workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          reason: "session_resume",
-        });
+          sessionIds: cancellationSessionIds,
+        })
+      : input.action === "pause"
+        ? await registerInterruptionWakes(db, {
+            operationId: reserved.receipt.id,
+            reason: "session_pause_interruption",
+          })
+        : await registerDescendantWakes(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            reason: "session_resume",
+          });
   const [controlEvent] = await db
     .insert(schema.sessionEvents)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sequence: updated.lastSequence + 1,
-      type: input.action === "pause" ? "session.control.paused" : "session.control.resumed",
-      payload: {
-        operationId: reserved.receipt.id,
-        revision,
-        actor,
-        ...(input.reason ? { reason: input.reason } : {}),
-        interruptionCount,
-      },
-      occurredAt: new Date(),
-    })
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sequence: updated.lastSequence + 1,
+          type:
+            input.action === "pause" || input.action === "cancel"
+              ? "session.control.paused"
+              : "session.control.resumed",
+          payload: {
+            operationId: reserved.receipt.id,
+            revision,
+            actor,
+            ...(input.reason ? { reason: input.reason } : {}),
+            ...(input.action === "cancel" ? { terminal: true } : {}),
+            interruptionCount,
+          },
+          occurredAt: new Date(),
+        },
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionEvents.id });
   if (!controlEvent)
     throw new SessionControlInvariantError("Session control event was not inserted");
@@ -1944,27 +2617,53 @@ export async function mutateSessionControlInTransaction(
     .update(schema.sessions)
     .set({ lastSequence: updated.lastSequence + 1, updatedAt: new Date() })
     .where(eq(schema.sessions.id, input.sessionId));
-  await db.insert(schema.auditEvents).values({
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: actor,
-    action: `session.control.${input.action}`,
-    targetType: "session",
-    targetId: input.sessionId,
-    metadata: {
-      operationId: reserved.receipt.id,
-      revision,
-      interruptionCount,
-      ...(input.actor.type === "agent_attempt"
-        ? {
-            callerSessionId: input.actor.sessionId,
-            callerTurnId: input.actor.turnId,
-            callerAttemptId: input.actor.attemptId,
-            callerExecutionGeneration: input.actor.executionGeneration,
-          }
-        : {}),
-    },
-  });
+  await db.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: actor,
+        action: `session.control.${input.action}`,
+        targetType: "session",
+        targetId: input.sessionId,
+        metadata: {
+          operationId: reserved.receipt.id,
+          revision,
+          interruptionCount,
+          ...(input.actor.type === "agent_attempt"
+            ? {
+                callerSessionId: input.actor.sessionId,
+                callerTurnId: input.actor.turnId,
+                callerAttemptId: input.actor.attemptId,
+                callerExecutionGeneration: input.actor.executionGeneration,
+              }
+            : {}),
+        },
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
+  const cancellation =
+    input.action === "cancel"
+      ? await cancelSessionSubtreeInTransaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          rootSessionId: input.sessionId,
+          sessionIds: cancellationSessionIds,
+          lockedSessions: locks.sessions,
+          candidateTurnIds: cancellationTurnIds,
+          lockedTurns: locks.turns,
+          actor,
+          reason: input.reason ?? null,
+          operationId: reserved.receipt.id,
+          rootControlEventId: controlEvent.id,
+        })
+      : {
+          cancelledSessionCount: 0,
+          cancelledTurnCount: 0,
+          affectedSessionEvents: [{ sessionId: input.sessionId, eventIds: [controlEvent.id] }],
+        };
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: revision,
     result: {
@@ -1972,6 +2671,9 @@ export async function mutateSessionControlInTransaction(
       wakeCount,
       eventId: controlEvent.id,
       workspaceControlEventId,
+      cancelledSessionCount: cancellation.cancelledSessionCount,
+      cancelledTurnCount: cancellation.cancelledTurnCount,
+      affectedSessionEvents: cancellation.affectedSessionEvents,
     },
   });
   const control = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
@@ -1984,6 +2686,9 @@ export async function mutateSessionControlInTransaction(
     workspaceControlEventId,
     interruptionCount,
     wakeCount,
+    cancelledSessionCount: cancellation.cancelledSessionCount,
+    cancelledTurnCount: cancellation.cancelledTurnCount,
+    affectedSessionEvents: cancellation.affectedSessionEvents,
     replay: false,
   };
 }
@@ -2004,6 +2709,7 @@ export async function autoResumeSessionBranchInTransaction(
   workspaceControlEventId: string | null;
 }> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await assertSessionBranchIsNotCancelled(db, input.workspaceId, input.sessionId);
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     lock: "share",
   });

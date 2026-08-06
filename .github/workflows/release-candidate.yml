@@ -9,13 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact current versioned main SHA; dispatch this workflow from that same ref.
+        description: Exact retained versioned-main SHA; dispatch this workflow from that same ref.
         required: true
-        type: string
-      expected_packages:
-        description: Exact comma-separated package set intended for npm publication; leave empty for an application-only release.
-        required: false
-        default: ""
         type: string
 
 concurrency:
@@ -47,7 +42,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate exact versioned main source
+      - name: Validate exact retained versioned main source
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -65,8 +60,8 @@ jobs:
             exit 1
           }
           git fetch --no-tags origin main
-          [ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ] || {
-            echo "release candidates must start from the current main head" >&2
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "release candidate source must remain in current main ancestry" >&2
             exit 1
           }
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
@@ -108,7 +103,7 @@ jobs:
         id: package-plan
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
-          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED: "true"
           OPENGENI_RELEASE_PACKAGE_PHASE: plan
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
         run: bun scripts/verify-release-packages.ts
@@ -123,6 +118,9 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "candidate_tag=candidate-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "source_tree_sha=$(git rev-parse "$SOURCE_SHA^{tree}")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -155,7 +153,7 @@ jobs:
               exit 1
             fi
           done
-          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}"
+          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_digest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$chart_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "product release version ${RELEASE_VERSION} is already occupied by ${chart_ref}" >&2
@@ -196,7 +194,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: api
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
@@ -238,7 +236,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: worker
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
@@ -277,7 +275,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: web
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             OPENGENI_DEPLOYMENT_REVISION=${{ steps.meta.outputs.version }}
@@ -316,7 +314,7 @@ jobs:
         with:
           context: .
           file: docker/sandbox.Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
 
@@ -352,7 +350,7 @@ jobs:
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
 

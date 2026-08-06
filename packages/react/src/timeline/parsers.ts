@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import { normalizeMcpOutput, type GitFileDiff } from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
 
 /* ----------------------------------------------------------------------------
@@ -210,51 +210,231 @@ export function v4aToGitFileDiff(op: ApplyPatchOperation): GitFileDiff {
   };
 }
 
-/**
- * Extract the `apply_patch` operations from a provider-native tool item's `raw`
- * payload, normalizing the two wire shapes (`raw.operations[]` for a multi-file
- * patch, `raw.operation` for a single op). The single owner of this shape so the
- * renderer and the turn-summary facet counter never drift.
- */
-export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
-  const r = (raw ?? {}) as {
-    operation?: ApplyPatchOperation;
-    operations?: ApplyPatchOperation[];
-  };
-  if (Array.isArray(r.operations)) {
-    return r.operations;
+const BEGIN_PATCH = "*** Begin Patch";
+const END_PATCH = "*** End Patch";
+const ADD_FILE = "*** Add File: ";
+const DELETE_FILE = "*** Delete File: ";
+const UPDATE_FILE = "*** Update File: ";
+const MOVE_TO = "*** Move to: ";
+
+const APPLY_PATCH_OP_TYPES = new Set(["create_file", "update_file", "delete_file"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Freeform / `{ patch }` / command payloads — tolerate leading whitespace. */
+function freeformApplyPatchOps(rawPatch: string): ApplyPatchOperation[] {
+  return parseFreeformApplyPatch(rawPatch.trimStart());
+}
+
+function asApplyPatchOperation(value: unknown): ApplyPatchOperation | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.type !== "string" || !APPLY_PATCH_OP_TYPES.has(value.type)) {
+    return null;
   }
-  return r.operation ? [r.operation] : [];
+  if (typeof value.path !== "string" || !value.path) {
+    return null;
+  }
+  const op: ApplyPatchOperation = {
+    type: value.type as ApplyPatchOperation["type"],
+    path: value.path,
+  };
+  if (typeof value.diff === "string") op.diff = value.diff;
+  if (typeof value.moveTo === "string" && value.moveTo.length > 0) op.moveTo = value.moveTo;
+  return op;
+}
+
+function parseStructuredOperations(payloads: unknown[]): ApplyPatchOperation[] {
+  if (payloads.length === 0) return [];
+  const operations: ApplyPatchOperation[] = [];
+  for (const payload of payloads) {
+    const op = asApplyPatchOperation(payload);
+    if (!op) return [];
+    operations.push(op);
+  }
+  return operations;
 }
 
 /**
- * True when a tool item is an `apply_patch_call` — by its provider-native
- * `raw.type` (the live-wire source of truth) or by tool `name` (first-party
- * replays that omit `raw`). Centralizes the rawType-or-name check.
+ * Mirror of `@openai/agents-core` freeform `*** Begin Patch` → ops. Kept here so
+ * the timeline can render Codex function-tool apply_patch without importing the
+ * server SDK package.
+ */
+export function parseFreeformApplyPatch(rawPatch: string): ApplyPatchOperation[] {
+  const lines = rawPatch.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  if (lines[0] !== BEGIN_PATCH) return [];
+  if (lines.length < 2 || lines.at(-1) !== END_PATCH) return [];
+
+  const operations: ApplyPatchOperation[] = [];
+  let index = 1;
+  while (index < lines.length - 1) {
+    const line = lines[index]!;
+    let parsed: { operation: ApplyPatchOperation; nextIndex: number } | { error: true } | null =
+      null;
+    if (line.startsWith(ADD_FILE)) parsed = parseAddFilePatch(lines, index);
+    else if (line.startsWith(DELETE_FILE)) parsed = parseDeleteFilePatch(lines, index);
+    else if (line.startsWith(UPDATE_FILE)) parsed = parseUpdateFilePatch(lines, index);
+    else return [];
+    if (!parsed || "error" in parsed) return [];
+    operations.push(parsed.operation);
+    index = parsed.nextIndex;
+  }
+  // Match the SDK: Begin/End with no file ops is not a valid patch.
+  return operations.length > 0 ? operations : [];
+}
+
+function parsePatchHeader(line: string, prefix: string): string | null {
+  const path = line.slice(prefix.length).trim();
+  return path || null;
+}
+
+function isFileOperationHeader(line: string): boolean {
+  return line.startsWith(ADD_FILE) || line.startsWith(DELETE_FILE) || line.startsWith(UPDATE_FILE);
+}
+
+function joinDiff(lines: string[]): string {
+  return `${lines.join("\n")}\n`;
+}
+
+function parseAddFilePatch(
+  lines: string[],
+  index: number,
+): { operation: ApplyPatchOperation; nextIndex: number } | { error: true } {
+  const path = parsePatchHeader(lines[index]!, ADD_FILE);
+  if (!path) return { error: true };
+  index += 1;
+  const diffLines: string[] = [];
+  while (index < lines.length - 1 && !isFileOperationHeader(lines[index]!)) {
+    const line = lines[index]!;
+    if (!line.startsWith("+")) return { error: true };
+    diffLines.push(line);
+    index += 1;
+  }
+  if (diffLines.length === 0) return { error: true };
+  return {
+    operation: { type: "create_file", path, diff: joinDiff(diffLines) },
+    nextIndex: index,
+  };
+}
+
+function parseDeleteFilePatch(
+  lines: string[],
+  index: number,
+): { operation: ApplyPatchOperation; nextIndex: number } | { error: true } {
+  const path = parsePatchHeader(lines[index]!, DELETE_FILE);
+  if (!path) return { error: true };
+  index += 1;
+  if (index < lines.length - 1 && !isFileOperationHeader(lines[index]!)) {
+    return { error: true };
+  }
+  return { operation: { type: "delete_file", path }, nextIndex: index };
+}
+
+function parseUpdateFilePatch(
+  lines: string[],
+  index: number,
+): { operation: ApplyPatchOperation; nextIndex: number } | { error: true } {
+  const path = parsePatchHeader(lines[index]!, UPDATE_FILE);
+  if (!path) return { error: true };
+  index += 1;
+  let moveTo: string | undefined;
+  if (index < lines.length - 1 && lines[index]!.startsWith(MOVE_TO)) {
+    const parsedMoveTo = parsePatchHeader(lines[index]!, MOVE_TO);
+    if (!parsedMoveTo) return { error: true };
+    moveTo = parsedMoveTo;
+    index += 1;
+  }
+  const diffLines: string[] = [];
+  while (index < lines.length - 1 && !isFileOperationHeader(lines[index]!)) {
+    diffLines.push(lines[index]!);
+    index += 1;
+  }
+  if (diffLines.length === 0 && !moveTo) return { error: true };
+  return {
+    operation: {
+      type: "update_file",
+      path,
+      diff: diffLines.length > 0 ? joinDiff(diffLines) : "",
+      ...(moveTo ? { moveTo } : {}),
+    },
+    nextIndex: index,
+  };
+}
+
+/**
+ * Normalize every apply_patch payload the Agents SDK accepts into structured
+ * ops — hosted `{ operation }` / `{ operations }`, function-tool `{ patch }`,
+ * `command` tuple, flat op, freeform string, or op array.
+ */
+export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
+  if (raw == null) return [];
+  if (typeof raw === "string") {
+    const trimmed = raw.trimStart();
+    if (trimmed.startsWith(BEGIN_PATCH)) return freeformApplyPatchOps(trimmed);
+    const parsed = tryParseJson(trimmed);
+    return parsed === undefined ? [] : applyPatchOps(parsed);
+  }
+  if (Array.isArray(raw)) return parseStructuredOperations(raw);
+  if (!isRecord(raw)) return [];
+
+  if (typeof raw.patch === "string") return freeformApplyPatchOps(raw.patch);
+  if (Array.isArray(raw.command)) {
+    const [commandName, patch] = raw.command;
+    if (commandName === "apply_patch" && typeof patch === "string") {
+      return freeformApplyPatchOps(patch);
+    }
+  }
+  // Empty `operations: []` is not authoritative — fall through to operation/flat.
+  if (Array.isArray(raw.operations) && raw.operations.length > 0) {
+    return parseStructuredOperations(raw.operations);
+  }
+  if (raw.operation !== undefined) {
+    const op = asApplyPatchOperation(raw.operation);
+    return op ? [op] : [];
+  }
+  // Flat single op: `{ type, path, diff?, moveTo? }`.
+  const flat = asApplyPatchOperation(raw);
+  return flat ? [flat] : [];
+}
+
+/** Ops from provider `raw` and/or function-tool arguments (Codex path). */
+export function applyPatchOpsFromToolItem(item: {
+  raw: unknown;
+  arguments: unknown;
+}): ApplyPatchOperation[] {
+  const fromRaw = applyPatchOps(item.raw);
+  if (fromRaw.length > 0) return fromRaw;
+
+  // function_call envelopes sometimes keep the payload only under raw.arguments.
+  if (isRecord(item.raw)) {
+    const nested = item.raw.arguments ?? item.raw.input;
+    if (nested !== undefined && nested !== item.arguments) {
+      const fromNested = applyPatchOps(nested);
+      if (fromNested.length > 0) return fromNested;
+    }
+  }
+
+  if (item.arguments !== undefined && item.arguments !== null) {
+    return applyPatchOps(item.arguments);
+  }
+  return [];
+}
+
+/**
+ * True when a tool item is apply_patch — hosted `raw.type === "apply_patch_call"`,
+ * function-tool `name` `apply_patch` / `apply_patch_call`, or an MCP-prefixed
+ * `…__apply_patch` leaf. Centralizes the rawType-or-name check.
  */
 export function isApplyPatch(item: { name: string; raw: unknown }): boolean {
   const type =
     item.raw && typeof item.raw === "object" ? (item.raw as { type?: unknown }).type : undefined;
-  return type === "apply_patch_call" || item.name === "apply_patch_call";
-}
-
-/* --- secret redaction ------------------------------------------------------- */
-
-const SECRET_KEY = /^(value|secret|token|password|api[_-]?key|signing[_-]?key)$/i;
-
-/** Deep-redact secret-looking values so arguments never leak a key into the UI. */
-export function redactSecrets(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(redactSecrets);
+  if (type === "apply_patch_call") {
+    return true;
   }
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = SECRET_KEY.test(k) ? "••••" : redactSecrets(v);
-    }
-    return out;
-  }
-  return value;
+  const name = item.name;
+  return name === "apply_patch_call" || name === "apply_patch" || name.endsWith("__apply_patch");
 }
 
 /** Parse tool arguments that may arrive as a JSON string or an object. */
@@ -288,36 +468,8 @@ export function unwrapMcpOutput(output: unknown): {
   text: string;
   isError: boolean;
 } {
-  // Managed MCP events persist a normalized single text part as
-  // `{ type: "text", text }`; accept it alongside the SDK-native content array.
-  if (
-    output &&
-    typeof output === "object" &&
-    (output as { type?: unknown }).type === "text" &&
-    typeof (output as { text?: unknown }).text === "string"
-  ) {
-    const record = output as { text: string; isError?: unknown };
-    return { text: record.text, isError: Boolean(record.isError) };
-  }
-  if (output && typeof output === "object" && "content" in output) {
-    const record = output as { content?: unknown; isError?: unknown };
-    const isError = Boolean(record.isError);
-    if (Array.isArray(record.content)) {
-      const textPart = record.content.find(
-        (part): part is { type: string; text: string } =>
-          !!part && typeof part === "object" && (part as { type?: unknown }).type === "text",
-      );
-      return {
-        text: textPart ? String(textPart.text) : JSON.stringify(output),
-        isError,
-      };
-    }
-    return { text: JSON.stringify(output), isError };
-  }
-  return {
-    text: typeof output === "string" ? output : output == null ? "" : JSON.stringify(output),
-    isError: false,
-  };
+  const normalized = normalizeMcpOutput(output);
+  return { text: normalized.text, isError: normalized.isError };
 }
 
 /* --- computer-use screenshot extraction ------------------------------------- */

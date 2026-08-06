@@ -138,6 +138,9 @@ function validBundle(): WorkbenchAcceptanceBundle {
     },
     productionCanary: {
       sourceSha,
+      sourceTreeSha,
+      imageDigests: images(),
+      chart,
       startedAt: "2026-07-01T00:00:00.000Z",
       endedAt: "2026-07-04T00:00:00.000Z",
       expectedCycles: 72,
@@ -207,6 +210,18 @@ describe("workbench acceptance bundle", () => {
     const chartBytesDrift = validBundle();
     chartBytesDrift.staging.chart.bytesSha256 = "f".repeat(64);
     expect(() => validate(chartBytesDrift)).toThrow("chart bytesSha256 differs");
+
+    const canaryTreeDrift = validBundle();
+    canaryTreeDrift.productionCanary.sourceTreeSha = "e".repeat(40);
+    expect(() => validate(canaryTreeDrift)).toThrow("productionCanary.sourceTreeSha");
+
+    const canaryImageDrift = validBundle();
+    canaryImageDrift.productionCanary.imageDigests.worker = `sha256:${"e".repeat(64)}`;
+    expect(() => validate(canaryImageDrift)).toThrow("candidate and production canary");
+
+    const canaryChartDrift = validBundle();
+    canaryChartDrift.productionCanary.chart.bytesSha256 = "e".repeat(64);
+    expect(() => validate(canaryChartDrift)).toThrow("candidate and production canary");
   });
 
   test("fails closed on candidate-receipt drift, missing/extra roles, or migration drift", () => {
@@ -226,6 +241,10 @@ describe("workbench acceptance bundle", () => {
     const migration = validBundle();
     migration.production.imageDigests.migration = `sha256:${"f".repeat(64)}`;
     expect(() => validate(migration)).toThrow("migration must equal");
+
+    const canaryMissing = validBundle() as any;
+    delete canaryMissing.productionCanary.imageDigests.sandbox;
+    expect(() => validate(canaryMissing)).toThrow("must contain exactly");
   });
 
   test("rejects repeated attempts and insufficient live measurement samples", () => {
@@ -274,8 +293,24 @@ describe("workbench acceptance bundle", () => {
     const capture = slow.results.find(
       (item) => item.requirementId === "performance.capture-api-response",
     )!;
-    capture.measurement!.p95 = 201;
-    expect(() => validate(slow)).toThrow("exceeds 200 ms");
+    capture.measurement!.p95 = 401;
+    expect(() => validate(slow)).toThrow("exceeds 400 ms");
+
+    const slowWorkbench = validBundle();
+    const workbench = slowWorkbench.results.find(
+      (item) => item.requirementId === "performance.capture-usable-workbench",
+    )!;
+    workbench.measurement!.p95 = 10_001;
+    workbench.measurement!.p99 = 10_001;
+    workbench.measurement!.worst = 10_001;
+    expect(() => validate(slowWorkbench)).toThrow("exceeds 10000 ms");
+
+    const slowCancellation = validBundle();
+    const cancellation = slowCancellation.results.find(
+      (item) => item.requirementId === "performance.control-cancellation",
+    )!;
+    cancellation.measurement!.worst = 4_001;
+    expect(() => validate(slowCancellation)).toThrow("exceeds 4000 ms");
 
     const secret = validBundle() as any;
     secret.cookie = "session=not-allowed";

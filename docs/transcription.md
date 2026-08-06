@@ -1,153 +1,233 @@
-# Composer transcription capability
+# Composer voice input
 
-Voice transcription is a distinct, provider-agnostic capability for turning host-captured audio
-into editable composer text. It is not a turn-model feature, does not authorize a coding model, and
-does not send a message by itself.
+Native voice input turns browser-captured audio into editable composer text. It is
+not a turn-model feature, does not authorize a coding model, and never sends a
+message by itself.
 
 ## Product contract
 
-- The ordinary composer presents **one microphone control** and **one editable draft**. Provider,
-  model, credential, region, retention, privacy, fallback, and cost choices do not appear beside the
-  microphone; they live only in Workspace settings.
-- Partial transcripts are ephemeral UI state. They are cleared on reconnect, cancellation, error,
-  close, policy replacement, or component unmount and are never inserted into the message draft.
-- Each accepted final is deduplicated by the adapter's stable acceptance ID and appended to the
-  draft exactly once. An empty/whitespace final is not an acceptance and does not consume its ID,
-  so a later non-empty correction with the same ID can still be inserted once. The user can edit or
-  delete accepted text before using the ordinary Send action.
-- Partial and final events may carry provider-neutral detected-language, result-span, confidence,
-  speaker, and word-span metadata. Unsupported fields are omitted; provider-specific payload bags
-  and display strings are not part of the event contract.
-- Escape cancels an active session. Cancellation and policy replacement locally fence late adapter
-  callbacks even if remote cleanup fails. Pending starts receive an abort signal, start has a local
-  deadline, and detached `cancel`/`close` cleanup is invoked independently under bounded waits.
-- Adapter errors reach the composer only as controlled error codes mapped to local UI copy. Raw
-  adapter detail is never rendered; an optional diagnostic callback receives only bounded,
-  redacted non-UI detail.
-- Transcription is disabled and unaccepted by default. Missing, malformed, or mismatched policy and
-  adapter state fails closed.
+- The ordinary composer presents **one microphone control** and **one editable
+  draft**. Recording chrome exposes separate **Cancel** and **Stop** actions;
+  provider, model, credential, and region choices remain server-private.
+- The browser writes five-second `MediaRecorder` chunks and SHA-256 integrity
+  metadata to IndexedDB before reporting the audio locally saved. Stop waits for
+  pending writes, finalizes automatically, and appends the resulting text to the
+  draft. Ordinary Send remains a separate user action.
+- New servers and SDK clients use the resumable server path advertised by
+  `ClientConfig.voiceInput.resumable`. Older clients or deployments without that
+  capability retain the existing one-shot multipart path and its 25 MiB / 600
+  second client maximum.
+- The resumable default is two hours, 512 MiB total, 8 MiB per browser chunk, and
+  24-hour server retention. Contract hard limits permit at most eight hours,
+  512 MiB, and 1,000 normalized provider segments.
+- Interrupted upload, segmentation, or transcription reuses the same recording
+  UUID. Duplicate chunks are accepted only when sequence, size, SHA-256, and
+  timing metadata match exactly; conflicting retries fail closed.
+- Provider selection occurs once for the whole server recording before its first
+  segment is sent. The private provider id is persisted and every later segment
+  or retry remains pinned to it; a possibly-started recording never falls through
+  to another vendor.
+- Provider results are persisted server-side so another browser carrying the same
+  exact authenticated subject can list and resume an unexpired recording. The
+  local browser still persists the final transcript before mutating the draft.
+  After an uncertain handoff, reload exposes an explicit saved-transcript insert
+  action rather than automatically retranscribing or appending again.
+- Controlled error codes and retryability cross the API. Raw provider detail,
+  object keys, credentials, provider ids, audio bytes, and transcript bodies are
+  excluded from logs and client capability configuration.
 
 ## Trust boundary and data flow
 
 ```text
-workspace.settings.transcription
-  -> strict policy validation + exact acceptanceId
-  -> host selects and injects an exact matching TranscriptionAdapter
-  -> host adapter owns microphone/audio transport/provider credentials
-  -> partial events render ephemerally beside the composer
-  -> accepted final events append once to the editable draft
-  -> the user edits and invokes ordinary Send
-  -> only then does normal message/session handling begin
+Browser MediaRecorder (5s chunks)
+  -> IndexedDB manifest + Blob chunks + timing + SHA-256
+  -> POST /v1/workspaces/:workspaceId/transcription-recordings
+  -> ordered PUT .../:recordingId/chunks/:chunkNumber
+  -> object storage (tenant-derived opaque keys)
+  -> POST .../:recordingId/finalize
+  -> API ffmpeg: mono 16 kHz PCM WAV segments (bounded to <= 1,000)
+  -> POST .../:recordingId/process-next
+  -> one recording-wide pinned provider
+  -> Postgres segment results + deterministic transcript assembly
+  -> { transcriptText, languages } persisted locally before draft mutation
+  -> editable composer draft
+  -> ordinary user Send
 ```
 
-The workspace policy and adapter descriptor must match on provider, model, credential mode, and
-region. The session request also carries the exact accepted policy identity; fixed-language or
-explicit automatic-language acceptance; diarization acceptance and optional speaker limit;
-retention, privacy, and cost commitments; target selection; and sequence floor. An enabled policy
-must accept exactly one of a fixed BCP 47 language or automatic detection. Speaker diarization is
-off unless explicitly accepted, and a maximum-speaker value is valid only when diarization is on.
-Changing any accepted policy field revokes the active session; a new session must bind the new
-acceptance ID.
+Legacy fallback when `voiceInput.resumable` is absent:
 
-This authorization is intentionally separate from workspace turn-model policy and from the model
-chosen for an agent turn. A transcription target cannot inherit agent model-routing permission,
-and no audio is routed through coding-model inference. A Codex-subscription transcription adapter
-is not included because no stable authorized audio-transcription entitlement has been established.
+```text
+IndexedDB chunks
+  -> one Blob
+  -> OpenGeniClient.transcribeAudio
+  -> POST /v1/workspaces/:workspaceId/transcriptions
+  -> one server-selected provider
+  -> { text, languages }
+```
 
-The policy contains only a workspace connection UUID for a BYOK target, never a credential value.
-The current client seam does not resolve that reference itself: an authorized host adapter must use
-its own credential broker without exposing secrets to the composer or public event payloads.
+Every resumable route first resolves the normal `sessions:create` access grant.
+Persistence binds the immutable recording id to the exact
+`(accountId, workspaceId, subjectId)` authority tuple. All four recording tables
+use FORCE RLS for both workspace/account visibility and exact subject equality.
+The collection route returns at most 50 unexpired, non-discarded recordings for
+that subject; possession of a recording UUID alone is not authority.
+
+## Client capability
+
+`GET /v1/config/client` projects only public limits:
+
+```ts
+voiceInput: {
+  available: boolean;
+  maxDurationSeconds: number;
+  maxSizeBytes: number;
+  acceptedMimeTypes: string[];
+  resumable?: {
+    maxDurationSeconds: number;
+    maxSizeBytes: number;
+    maxChunkSizeBytes: number;
+    providerSegmentSeconds: number;
+  };
+}
+```
+
+The optional `resumable` member appears only when object storage, ffmpeg, and at
+least one transcription provider are ready. Workspace settings store only
+`{ voiceInput: { enabled: boolean } }`. Legacy
+`settings.transcription.enabled` maps forward for one compatibility release;
+new writes use `voiceInput`.
+
+## Server lifecycle
+
+| State | Meaning |
+| --- | --- |
+| `uploading` | Manifest exists; the next contiguous chunk number is authoritative. |
+| `segmenting` | One generation/owner lease is validating chunks and preparing normalized WAV segments. |
+| `ready` | At least one provider segment is pending and no segment call is active. |
+| `transcribing` | One attempt lease owns the next segment. |
+| `complete` | Every segment completed and transcript/languages were assembled in segment order. |
+| `failed` | A typed retryable or terminal assembly/provider failure is persisted. |
+| `discarded` | The user discarded the recording or retention expired. |
+
+Finalization verifies the client totals against durable upload truth, reads every
+chunk from object storage, and checks exact byte length and SHA-256 before ffmpeg
+sees it. Segmentation produces mono 16 kHz PCM WAV output. The segment duration
+is the lower of the OpenGeni 50-second target and the selected service's maximum;
+recordings that would require more than 1,000 segments fail before ffmpeg starts.
+Generation and pre-provider attempt leases become reclaimable after 15 minutes.
+Immediately before a provider call, the server refreshes the durable attempt
+lease origin and persists an absolute 10-minute server-owned provider deadline.
+After that refresh transaction returns, the service computes the remaining time
+against the persisted deadline and arms its AbortController for only that
+remaining duration; if the deadline has already passed, it refuses to invoke
+the provider. Reclaim is therefore impossible until at least five minutes after
+that provider deadline, even when object reads, handler setup, or refresh/commit
+latency consumed most of the original lease.
+Request/network aborts do not cancel this server-owned provider work: the same
+recording UUID remains retryable and its objects remain retained. Only explicit
+Discard is destructive. Stale callbacks cannot settle a successor generation or
+attempt.
+
+Each `process-next` request claims at most one segment. The first claim persists
+the recording-wide provider pin. Retryable `network`, `timeout`, `unavailable`,
+and `provider` failures retain the same segment, pin, object, and recording UUID.
+Successful segment text is stored separately; final assembly sorts by segment
+number, trims empty text, joins nonempty segments with a blank line, and preserves
+the first occurrence of each nonempty language.
+
+## Retention and cleanup
+
+- Chunk and normalized segment objects are registered in a durable object ledger
+  before upload. Object keys include account/workspace/recording lineage and a
+  sequence/hash component, but keys never appear in client responses.
+- Completion, explicit discard, and non-retryable failure make every remaining
+  object immediately cleanup-eligible. The request path attempts deletion and
+  settles each object independently; a partial provider outage never marks an
+  undeleted object cleaned.
+- Abandoned recordings become cleanup-eligible at
+  `OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS` (24 hours by default).
+  The existing Temporal file-upload reaper claims recording rows before object
+  rows with `SKIP LOCKED`, uses reclaimable claim ids/timeouts, deletes one object
+  at a time, and settles only successful provider deletes.
+- After retention plus the reaper grace window, a bounded security-definer purge
+  removes an expired recording only when no uncleaned object remains. That purge
+  deletes chunk/segment metadata, the private provider pin, and persisted
+  transcript/language results. A metadata purge can never hide an object that
+  still requires provider cleanup.
+- Server transcript state is only the resumable recovery/result record. It is not
+  appended to session history, documents, knowledge, memory, or an agent turn;
+  only the user's later ordinary Send can create message truth.
+
+## Provider paths
+
+| Provider | When selected | Notes |
+| --- | --- | --- |
+| `codex-subscription` | Subscription routing is enabled and the workspace has an active attached Codex credential. | Undocumented ChatGPT `/backend-api/transcribe`; preferred by default when attached. |
+| `openai` | A usable ordinary or voice-specific OpenAI key is configured. | `POST /v1/audio/transcriptions`, default model `gpt-transcribe`. |
+| `azure-openai` | Azure endpoint, deployment, and key or AD token are configured. | Deployment-scoped `/openai/deployments/{deployment}/audio/transcriptions`. |
+
+Selection uses `OPENGENI_VOICE_INPUT_PROVIDER_ORDER` (default
+`codex-subscription,openai,azure-openai`). Template placeholder values are
+ignored. The first ready provider wins before any segment is sent, is persisted
+on the recording, and remains authoritative until that recording is complete or
+discarded.
+
+## Operator configuration
+
+See `.env.example` for:
+
+- one-shot limits:
+  `OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS`,
+  `OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES`;
+- resumable enablement, duration/size/chunk limits, and retention:
+  `OPENGENI_VOICE_INPUT_RESUMABLE_*`;
+- `OPENGENI_VOICE_INPUT_FFMPEG_PATH` (the API image installs ffmpeg; custom
+  deployments must provide a compatible executable);
+- `OPENGENI_VOICE_INPUT_PROVIDER_ORDER` and provider-specific OpenAI/Azure
+  overrides;
+- object-storage backend, bucket/container, and server-side credentials.
+
+The resumable capability is hidden rather than degraded to memory-only behavior
+when object storage or ffmpeg is unavailable. The one-shot endpoint may remain
+available independently when a provider is ready.
+
+## Browser lifecycle requirements
+
+1. Create the local manifest before microphone capture and negotiate MIME type in
+   order: `webm/opus`, `mp4`, then `ogg/opus`.
+2. Persist every chunk, sequence, timing range, size, codec, and SHA-256 before
+   reporting it saved. Storage failure stops capture and fails closed.
+3. Use resumable limits only when both the server capability and all resumable SDK
+   methods exist; otherwise enforce the legacy one-shot limit.
+4. On resumable retry, recreate/reconcile the same server recording, skip only
+   already accepted contiguous chunks, finalize with exact durable totals, and
+   poll/claim until complete or a typed failure is persisted.
+5. Keep a reload-stable owner id behind a document Web Lock or BroadcastChannel
+   handshake plus stale heartbeat. Another live tab cannot retry or discard local
+   work, but any browser with the same authenticated server subject can discover
+   and resume the server manifest through the SDK list/get methods.
+6. Persist a successful transcript locally before draft mutation. A reload never
+   auto-retranscribes or auto-appends an uncertain result.
+7. Fence every permission, recorder-stop, persistence, upload, polling, handoff,
+   and cleanup callback by workspace/generation/owner identity. Escape, unmount,
+   or workspace replacement cannot restore or settle stale work.
+8. Empty or whitespace-only transcripts do not change the draft. Workspace policy
+   disablement and missing deployment readiness hide or block the mic without
+   exposing provider controls.
 
 ## Canonical implementation
 
 | Concern | Canonical source |
 | --- | --- |
-| Stored workspace schema and PATCH validation | `packages/contracts/src/index.ts` (`WorkspaceTranscriptionPolicy`) |
-| Browser-global-free adapter, authorization, event, and session contracts | `packages/sdk/src/transcription.ts` |
-| React lifecycle, sequence/generation fences, and final insertion | `packages/react/src/hooks/use-transcription.ts` |
-| One accessible microphone control | `packages/react/src/components/composer-transcription-control.tsx` |
-| Ordinary composer integration | `packages/react/src/components/chat-composer.tsx` |
-| Workspace-only policy editor | `apps/web/src/components/transcription-settings.tsx` |
-| Deterministic browser fixture | `packages/react/demo/transcription-harness.tsx` |
+| Public contracts and limits | `packages/contracts/src/transcription-recordings.ts`, `packages/contracts/src/index.ts` |
+| Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
+| Service and segmenter ports | `packages/core/src/transcription.ts` |
+| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
+| API routes and ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `apps/api/src/transcription/segmenter.ts` |
+| SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
+| React capture/recovery/handoff | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
+| Global provider-object reaper | `apps/worker/src/activities/file-upload-reaper.ts` |
+| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `apps/web/src/components/transcription-settings.tsx` |
 
-`@opengeni/sdk` deliberately references no browser or native microphone API. Web, desktop, native,
-and mobile hosts implement the same `TranscriptionAdapter`/`TranscriptionSession` seam and emit the
-same ordered lifecycle events. `@opengeni/react` supplies the web composer lifecycle and UI; a
-native UI can consume the SDK contract directly.
-
-The OpenGeni web bundle currently injects no production adapter. Its microphone therefore explains
-that an approved adapter is required rather than touching a microphone, network, provider, or
-credential. The demo/e2e adapter is local deterministic fixture code only.
-
-## Lifecycle requirements for host adapters
-
-1. `start` receives an already-authorized, immutable session request, an event listener, and a
-   `TranscriptionAdapterStartContext`. The context's `AbortSignal` is aborted on local cancellation,
-   policy replacement, start timeout, or component unmount. Adapters must stop microphone/audio and
-   network acquisition promptly when it aborts and must consume any later provider settlement.
-2. Events use one `localSessionId` and a strictly increasing safe-integer `sequence`, including
-   reconnects. Replayed or stale sequences are ignored.
-3. Partials are replaceable hints. Finals need a stable `providerAcceptanceId`; replaying a
-   non-empty final with that ID must not create a second insertion. Empty/whitespace finals do not
-   reserve the ID.
-4. Optional `metadata` on partials and finals uses only neutral structures: `detectedLanguage`, a
-   nonnegative ordered result `span`, confidence in the inclusive 0–1 range, a session-local
-   `speaker`, and ordered `words` whose spans fit inside the result span. Metadata is informational
-   and does not change final acceptance or draft insertion semantics.
-5. Recoverable errors enter reconnecting state. Non-recoverable errors and closed sessions are
-   terminal and release the stored session handle. Events carry a controlled error code and
-   recoverability only, never adapter-owned display text.
-6. `cancel` and `close` must be idempotent. React invokes them independently, does not await them to
-   restore idle UI/focus, and bounds each detached cleanup observation (2 seconds by default). A
-   hanging or rejected method must not prevent the other from being invoked.
-7. React bounds `start` locally (15 seconds by default). A timeout aborts the start context, fences
-   late callbacks, and maps to controlled retry UI. A handle that resolves after a timeout,
-   cancellation, policy replacement, or unmount is detached and cleaned rather than retained.
-8. `reportDiagnostic` is an observability seam, not a UI channel. React strips control characters,
-   redacts bearer/token/key/secret patterns, caps detail at 512 characters, and contains callback
-   failures. Hosts must still avoid submitting unnecessary provider payloads or credentials.
-9. A fallback is never selected silently. The workspace must accept explicit fallback targets and
-   the host must request one exact accepted index.
-10. The host adapter is responsible for enforcing provider-specific retention/privacy commitments
-   and cost ceilings before and during capture. The generic SDK passes these values through but has
-   no provider meter or billing integration of its own.
-
-## Provider research matrix
-
-Research below is limited to the vendors' public documentation, accessed **2026-07-21**. It is an
-integration-planning matrix, not an endorsement or a claim of verified runtime behavior.
-
-| Candidate | Documented integration shape | OpenGeni adapter considerations | Current status |
-| --- | --- | --- | --- |
-| OpenAI speech/transcription | Hosted speech-to-text APIs plus documented realtime transcription; separate data-control and API-pricing documentation | A future host adapter would need an authorized API credential path, exact model binding, documented retention/privacy acceptance, and independent cost enforcement. A coding-model or Codex subscription is not a substitute. | No adapter; no entitlement, provider call, or benchmark verified. |
-| Deepgram | Hosted live-streaming audio interface with separate published pricing | A host adapter would own live audio transport, credential brokerage, reconnect ordering, region/privacy review, and usage/cost enforcement. | No adapter or benchmark. |
-| Azure Speech | Speech-to-text SDK/service documentation and a separately documented container option | OpenGeni policy permits `azure-speech` only with a workspace BYOK connection. Region and deployment mode must be exact; selecting Azure Speech never authorizes Azure-hosted model inference. | No adapter, container integration, or benchmark. |
-| AssemblyAI | Hosted streaming transcription interface with separate published pricing | A host adapter would own streaming transport, credential brokerage, reconnect/dedupe behavior, privacy review, and usage/cost enforcement. | No adapter or benchmark. |
-| Self-hosted Whisper-class | Open-source Whisper model/code suitable for operator-owned inference; the upstream repository does not establish an OpenGeni streaming service contract | A host must own model packaging, audio capture, segmentation/streaming strategy, compute, region, observability, and stable acceptance IDs. Self-hosting reduces vendor coupling but does not by itself prove privacy, latency, or cost. | No packaged service or adapter; no hardware benchmark. |
-
-Official references:
-
-- OpenAI: [speech to text](https://platform.openai.com/docs/guides/speech-to-text),
-  [realtime transcription](https://platform.openai.com/docs/guides/realtime-transcription),
-  [data controls](https://platform.openai.com/docs/guides/your-data), and
-  [API pricing](https://openai.com/api/pricing/)
-- Deepgram: [live streaming audio](https://developers.deepgram.com/docs/getting-started-with-live-streaming-audio)
-  and [pricing](https://deepgram.com/pricing)
-- Microsoft: [Azure Speech to text](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/get-started-speech-to-text),
-  [Speech containers](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-container-howto),
-  and [Speech pricing](https://azure.microsoft.com/en-us/pricing/details/cognitive-services/speech-services/)
-- AssemblyAI: [streaming transcription](https://www.assemblyai.com/docs/getting-started/transcribe-streaming-audio)
-  and [pricing](https://www.assemblyai.com/pricing)
-- OpenAI Whisper: [source repository and model card](https://github.com/openai/whisper)
-
-## Honest runtime gaps
-
-- No production browser, desktop, native, mobile, server, or provider adapter ships today.
-- No provider credential has been resolved through this seam, and no paid/provider call was made
-  while implementing or testing it.
-- Provider accuracy, language coverage, latency, reconnect behavior, region availability, privacy,
-  retention, and cost have not been benchmarked or operationally verified.
-- Cost policy is carried to an adapter but cannot be metered or enforced without a real adapter and
-  provider-specific usage accounting.
-- The workspace editor currently accepts one explicit fallback target; the underlying contract can
-  represent more, but there is no automatic fallback coordinator.
+Deprecated host-adapter types remain exported from
+`packages/sdk/src/transcription.ts` for one compatibility release.

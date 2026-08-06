@@ -109,11 +109,15 @@ async function seedRunningSession(
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
       sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
-      parent_session_id
+      parent_session_id, tool_policy
     ) values (
       ${sessionId}, ${owner.accountId}, ${owner.workspaceId}, 'event-ordering invariant race',
       'codex/gpt-5.6-sol', 'modal', ${sandboxGroupId}, 'running', ${workflowId},
-      ${options.parentSessionId ?? null}
+      ${options.parentSessionId ?? null},
+      jsonb_build_object(
+        'mode', 'explicit',
+        'inheritedFromSessionId', ${options.parentSessionId ?? null}::uuid
+      )
     )
   `;
   await admin.begin(async (tx) => {
@@ -163,11 +167,15 @@ async function seedIdleChild(
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
       sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
-      parent_session_id
+      parent_session_id, tool_policy
     ) values (
       ${sessionId}, ${workspace.accountId}, ${workspace.workspaceId}, 'event-ordering invariant idle child',
       'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${`session-${sessionId}`},
-      ${parentSessionId}
+      ${parentSessionId},
+      jsonb_build_object(
+        'mode', 'explicit',
+        'inheritedFromSessionId', ${parentSessionId}::uuid
+      )
     )
   `;
   return { ...workspace, sessionId };
@@ -192,11 +200,12 @@ async function seedSandboxGroupMember(
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, temporal_workflow_id
+      sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
     ) values (
       ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId}, 'event-ordering invariant group join',
       'codex/gpt-5.6-sol', 'modal', ${fixture.sandboxGroupId}, 'idle',
-      ${`session-${sessionId}`}
+      ${`session-${sessionId}`},
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
     )
   `;
   return sessionId;
@@ -297,6 +306,26 @@ async function pauseSession(fixture: RunningFixture): Promise<unknown> {
             operationKey: crypto.randomUUID(),
             action: "pause",
             reason: "event-ordering invariant capacity control barrier",
+          }),
+      ),
+  );
+}
+
+async function resumeSession(fixture: RunningFixture): Promise<unknown> {
+  return await withWorkspaceRls(
+    db,
+    fixture.workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) =>
+          await mutateSessionControlInTransaction(tx as unknown as Database, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sessionId: fixture.sessionId,
+            actor: { type: "human", subjectId: "eventorder-capacity-resume-race" },
+            operationKey: crypto.randomUUID(),
+            action: "resume",
+            reason: "event-ordering invariant capacity resume barrier",
           }),
       ),
   );
@@ -1078,15 +1107,73 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       expect(armResult.action).toBe("waiting");
       if (armResult.action !== "waiting") throw new Error("capacity wait did not arm");
       const reconciled = await reconcileAvailableCapacity(fixture, armResult.waiter);
-      expect(reconciled.action).toBe("superseded");
+      expect(reconciled.action).toBe("paused");
       expect((pauseResult as { interruptionCount?: number }).interruptionCount).toBe(0);
-      expect(await assertCommittedSequence(fixture, 5)).toMatchObject([
-        { sequence: 1, type: "turn.failed" },
-        { sequence: 2, type: "codex.capacity.waiting" },
-        { sequence: 3, type: "session.status.changed" },
-        { sequence: 4, type: "session.control.paused" },
-        { sequence: 5, type: "codex.capacity.superseded" },
+      const pausedEvents = await assertCommittedSequence(fixture, 3);
+      expect(pausedEvents.map((event) => event.type)).toEqual([
+        "codex.capacity.waiting",
+        "session.status.changed",
+        "session.control.paused",
       ]);
+      const [pausedState] = await admin<
+        {
+          waiter_status: string;
+          turn_status: string;
+          session_status: string;
+          active_turn_id: string | null;
+        }[]
+      >`
+        select waiter.status as waiter_status,
+               turn_row.status as turn_status,
+               session_row.status as session_status,
+               session_row.active_turn_id
+        from codex_capacity_waiters waiter
+        join session_turns turn_row on turn_row.id = waiter.blocked_turn_id
+        join sessions session_row on session_row.id = waiter.session_id
+        where waiter.id = ${armResult.waiter.id}
+      `;
+      expect(pausedState).toEqual({
+        waiter_status: "waiting",
+        turn_status: "waiting_capacity",
+        session_status: "waiting_capacity",
+        active_turn_id: fixture.turnId,
+      });
+
+      await resumeSession(fixture);
+      const resumed = await reconcileAvailableCapacity(fixture, armResult.waiter);
+      expect(resumed.action).toBe("resumed");
+      const resumedEvents = await assertCommittedSequence(fixture, 6);
+      expect(resumedEvents.map((event) => event.type)).toEqual([
+        "codex.capacity.waiting",
+        "session.status.changed",
+        "session.control.paused",
+        "session.control.resumed",
+        "codex.capacity.resumed",
+        "session.status.changed",
+      ]);
+      const [resumedState] = await admin<
+        {
+          waiter_status: string;
+          turn_status: string;
+          session_status: string;
+          active_turn_id: string | null;
+        }[]
+      >`
+        select waiter.status as waiter_status,
+               turn_row.status as turn_status,
+               session_row.status as session_status,
+               session_row.active_turn_id
+        from codex_capacity_waiters waiter
+        join session_turns turn_row on turn_row.id = waiter.blocked_turn_id
+        join sessions session_row on session_row.id = waiter.session_id
+        where waiter.id = ${armResult.waiter.id}
+      `;
+      expect(resumedState).toEqual({
+        waiter_status: "resumed",
+        turn_status: "recovering",
+        session_status: "recovering",
+        active_turn_id: fixture.turnId,
+      });
     }
   }, 120_000);
 
@@ -1109,46 +1196,66 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       >;
 
       if (first === "pause") {
-        expect(reconcileResult.action).toBe("superseded");
-        expect(await assertCommittedSequence(fixture, 5)).toMatchObject([
-          { sequence: 1, type: "turn.failed" },
-          { sequence: 2, type: "codex.capacity.waiting" },
-          { sequence: 3, type: "session.status.changed" },
-          { sequence: 4, type: "session.control.paused" },
-          { sequence: 5, type: "codex.capacity.superseded" },
+        expect(reconcileResult.action).toBe("paused");
+        const pausedEvents = await assertCommittedSequence(fixture, 3);
+        expect(pausedEvents.map((event) => event.type)).toEqual([
+          "codex.capacity.waiting",
+          "session.status.changed",
+          "session.control.paused",
+        ]);
+        await resumeSession(fixture);
+        const resumed = await reconcileAvailableCapacity(fixture, armed.waiter);
+        expect(resumed.action).toBe("resumed");
+        const resumedEvents = await assertCommittedSequence(fixture, 6);
+        expect(resumedEvents.map((event) => event.type)).toEqual([
+          "codex.capacity.waiting",
+          "session.status.changed",
+          "session.control.paused",
+          "session.control.resumed",
+          "codex.capacity.resumed",
+          "session.status.changed",
         ]);
       } else {
         expect(reconcileResult.action).toBe("resumed");
-        expect(await assertCommittedSequence(fixture, 6)).toMatchObject([
-          { sequence: 1, type: "turn.failed" },
-          { sequence: 2, type: "codex.capacity.waiting" },
-          { sequence: 3, type: "session.status.changed" },
-          { sequence: 4, type: "system.update.pending" },
-          { sequence: 5, type: "codex.capacity.resumed" },
-          { sequence: 6, type: "session.control.paused" },
+        const resumedEvents = await assertCommittedSequence(fixture, 5);
+        expect(resumedEvents.map((event) => event.type)).toEqual([
+          "codex.capacity.waiting",
+          "session.status.changed",
+          "codex.capacity.resumed",
+          "session.status.changed",
+          "session.control.paused",
         ]);
       }
 
       const [state] = await admin<
         {
+          waiter_status: string;
+          turn_status: string;
           status: string;
           active_turn_id: string | null;
           pending_updates: number;
         }[]
       >`
-        select session.status, session.active_turn_id,
+        select waiter.status as waiter_status,
+               turn_row.status as turn_status,
+               session.status,
+               session.active_turn_id,
                (select count(*)::int from session_system_updates update_row
                 where update_row.workspace_id = session.workspace_id
                   and update_row.session_id = session.id
                   and update_row.state = 'pending') as pending_updates
         from sessions session
+        join session_turns turn_row on turn_row.id = session.active_turn_id
+        join codex_capacity_waiters waiter on waiter.blocked_turn_id = turn_row.id
         where session.workspace_id = ${fixture.workspaceId}
           and session.id = ${fixture.sessionId}
       `;
       expect(state).toEqual({
-        status: first === "reconcile" ? "queued" : "idle",
-        active_turn_id: null,
-        pending_updates: first === "reconcile" ? 1 : 0,
+        waiter_status: "resumed",
+        turn_status: "recovering",
+        status: "recovering",
+        active_turn_id: fixture.turnId,
+        pending_updates: 0,
       });
     }
   }, 120_000);
@@ -1693,7 +1800,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
     }
   }, 60_000);
 
-  test("sanitizes an exhausted Agent command persistence failure before external effects", async () => {
+  test("preserves an exhausted Agent command persistence failure before external effects", async () => {
     const workspace = await freshWorkspace();
     const ids = orderedParentChildIds("child-first");
     const actor = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
@@ -1729,8 +1836,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       details: (error as SessionEventPersistenceError).details,
       cause: (error as Error & { cause?: unknown }).cause,
     });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
+    expect(observable).toContain("private-token");
+    expect(observable).toContain("insert into");
     expect(wakes).toBe(0);
     expect(bus.published).toHaveLength(0);
     expect(await assertCommittedSequence(target, 0)).toEqual([]);
@@ -1812,6 +1919,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
                   childSessionId: child.sessionId,
                   parentSessionId: parent.sessionId,
                 },
+                personalConnectionDelegations: [],
               });
           }
         };
@@ -1925,7 +2033,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
     }
   }, 60_000);
 
-  test("sanitizes exhausted lifecycle persistence failures", async () => {
+  test("preserves exact exhausted lifecycle persistence failures", async () => {
     const workspace = await freshWorkspace();
     const parent = await seedRunningSession(workspace);
     const child = await seedRunningSession(workspace, { parentSessionId: parent.sessionId });
@@ -1960,8 +2068,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       details: (error as SessionEventPersistenceError).details,
       cause: (error as Error & { cause?: unknown }).cause,
     });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
+    expect(observable).toContain("private-token");
+    expect(observable).toContain("insert into");
     expect(await assertCommittedSequence(child, 0)).toEqual([]);
   }, 60_000);
 
@@ -2051,7 +2159,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
     }
   }, 60_000);
 
-  test("sanitizes an exhausted generic append with exact stage and SQLSTATE", async () => {
+  test("preserves an exhausted generic append with exact stage and SQLSTATE", async () => {
     const fixture = await seedRunningSession();
     const error = await appendSessionEvents(db, fixture.workspaceId, fixture.sessionId, [
       {
@@ -2076,8 +2184,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       details: (error as SessionEventPersistenceError).details,
       cause: (error as Error & { cause?: unknown }).cause,
     });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
+    expect(observable).toContain("private-token");
+    expect(observable).toContain("insert into");
     expect(await assertCommittedSequence(fixture, 0)).toEqual([]);
   }, 60_000);
 });

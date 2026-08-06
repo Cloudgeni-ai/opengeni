@@ -1,6 +1,7 @@
 import {
   dbSearchPath,
   getSettings,
+  organizationGovernanceDatabaseUrl,
   resolveNatsCalloutConfig,
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
@@ -12,7 +13,15 @@ import type {
   ScheduledTaskOverlapPolicy,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
-import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  markSessionWorkflowWakeDelivered,
+  ORGANIZATION_GOVERNANCE_PROTECTED_TABLES,
+  ORGANIZATION_GOVERNANCE_TABLE_PRIVILEGES,
+  runtimeDatabaseReadyCheck,
+  type Database,
+} from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
 import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
@@ -24,10 +33,11 @@ import {
   WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
-import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
 import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
+import { startSlackInteractionPump } from "./integrations/slack-interactions";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -165,13 +175,17 @@ export async function createTemporalWorkflowClient(
         .delete()
         .catch(() => undefined);
     },
-    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey, triggerWorkflowId }) => {
+    triggerScheduledTask: async ({
+      task,
+      agentRunUsageIdempotencyKey,
+      triggerWorkflowId,
+      initiator,
+    }) => {
       // Deterministic workflowId (derived from the trigger token by the
       // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
       // the second start collides on the id and is rejected instead of
       // spawning a second run. The shared idempotency key dedupes the charge.
-      const workflowId =
-        triggerWorkflowId ?? `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`;
+      const workflowId = triggerWorkflowId;
       try {
         await temporal.workflow.start("scheduledTaskFireWorkflow", {
           taskQueue: settings.temporalTaskQueue,
@@ -184,6 +198,7 @@ export async function createTemporalWorkflowClient(
               taskId: task.id,
               triggerType: "manual",
               agentRunUsageIdempotencyKey,
+              initiator,
             },
           ],
         });
@@ -219,12 +234,13 @@ export async function createTemporalWorkflowClient(
     },
   };
   const documentIndexer: DocumentIndexClient = {
-    indexDocument: async ({ accountId, workspaceId, documentId }) => {
+    indexDocument: async (input) => {
+      const { documentId } = input;
       const workflowId = `document-index-${documentId}-${crypto.randomUUID()}`;
       await temporal.workflow.start("documentIndexWorkflow", {
         taskQueue: settings.temporalTaskQueue,
         workflowId,
-        args: [{ accountId, workspaceId, documentId }],
+        args: [input],
       });
     },
   };
@@ -248,16 +264,46 @@ export async function startApi() {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
+  const governanceDbClient = settings.organizationGovernanceEnabled
+    ? createDb(organizationGovernanceDatabaseUrl(settings), {
+        ...(searchPath ? { searchPath } : {}),
+        rlsStrategy: settings.rlsStrategy,
+      })
+    : null;
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
+  const databasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.runtimeDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+  } as const;
+  const governanceDatabasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.organizationGovernanceDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+    protectedTables: ORGANIZATION_GOVERNANCE_PROTECTED_TABLES,
+    tablePrivileges: ORGANIZATION_GOVERNANCE_TABLE_PRIVILEGES,
+  } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
   // request `agent.*.rpc`. Null in local dev (anonymous connect — the bus default).
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   try {
+    await retryStartupDependency(
+      "PostgreSQL runtime posture",
+      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      { ...retryOptions, onRetry },
+    );
+    if (governanceDbClient) {
+      await retryStartupDependency(
+        "organization governance PostgreSQL runtime posture",
+        () => assertRuntimeDatabasePosture(governanceDbClient.db, governanceDatabasePosture),
+        { ...retryOptions, onRetry },
+      );
+    }
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -282,20 +328,34 @@ export async function startApi() {
       },
     );
   } catch (error) {
-    await Promise.allSettled([bus?.close(), workflowClient?.close(), dbClient.close()]);
+    await Promise.allSettled([
+      bus?.close(),
+      workflowClient?.close(),
+      dbClient.close(),
+      governanceDbClient?.close(),
+    ]);
     throw error;
   }
   if (!bus || !workflowClient) {
-    await dbClient.close();
+    await Promise.all([dbClient.close(), governanceDbClient?.close()]);
     throw new Error("OpenGeni API startup dependencies were not initialized");
   }
-  const app = createApp({
+  const { app, routeDeps } = createAppComposition({
     settings,
     db: dbClient.db,
+    ...(governanceDbClient ? { governanceDb: governanceDbClient.db } : {}),
     bus,
     workflowClient: workflowClient.client,
     documentIndexer: workflowClient.documentIndexer,
     observability,
+    readinessChecks: {
+      db: async () => {
+        await runtimeDatabaseReadyCheck(dbClient.db, databasePosture)();
+        if (governanceDbClient) {
+          await runtimeDatabaseReadyCheck(governanceDbClient.db, governanceDatabasePosture)();
+        }
+      },
+    },
   });
   const server = Bun.serve({
     hostname: settings.apiHost,
@@ -303,6 +363,9 @@ export async function startApi() {
     idleTimeout: 255,
     fetch: app.fetch,
   });
+  const stopSlackInteractionPump = settings.slackSigningSecret
+    ? startSlackInteractionPump(routeDeps)
+    : undefined;
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -318,8 +381,16 @@ export async function startApi() {
   // user), separate from the privileged control-plane bus.
   let authCalloutResponder: ResponderConnection | undefined;
   if (settings.sandboxSelfhostedEnabled) {
-    stopMetricsIngestion = startMetricsIngestion({ db: dbClient.db, bus, observability });
-    stopHelloIngestion = startHelloIngestion({ db: dbClient.db, bus, observability });
+    stopMetricsIngestion = startMetricsIngestion({
+      db: dbClient.db,
+      bus,
+      observability,
+    });
+    stopHelloIngestion = startHelloIngestion({
+      db: dbClient.db,
+      bus,
+      observability,
+    });
     observability.info("OpenGeni machine-metrics + hello ingestion consumers started", {});
 
     const callout = resolveNatsCalloutConfig(settings);
@@ -329,11 +400,13 @@ export async function startApi() {
           { db: dbClient.db, settings, callout, observability },
           settings.natsUrl,
         );
-      } catch (error) {
+      } catch {
         // A responder start failure must not crash the API (other planes work); log
         // loudly — selfhosted agents will fail to connect until it is up.
         observability.error("OpenGeni NATS auth-callout responder failed to start", {
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "NatsAuthCalloutOperationError",
+          errorCode: "nats_auth_callout_start_failed",
+          origin: "api",
         });
       }
     } else {
@@ -351,6 +424,7 @@ export async function startApi() {
     server,
     close: async () => {
       server.stop(true);
+      stopSlackInteractionPump?.();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await Promise.allSettled([
@@ -384,7 +458,7 @@ export function shouldCreateScheduleAfterUpdateError(error: unknown): boolean {
 export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): ScheduleSpec {
   if (schedule.type === "interval") {
     return {
-      intervals: [{ every: `${schedule.everySeconds}s` }],
+      intervals: [temporalIntervalSpec(schedule)],
       ...(schedule.startAt ? { startAt: new Date(schedule.startAt) } : {}),
       ...(schedule.endAt ? { endAt: new Date(schedule.endAt) } : {}),
     };
@@ -415,6 +489,29 @@ export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): Sched
       },
     ],
     timezone: "UTC",
+  };
+}
+
+function temporalIntervalSpec(
+  schedule: Extract<ScheduledTaskScheduleSpec, { type: "interval" }>,
+): NonNullable<ScheduleSpec["intervals"]>[number] {
+  const every = `${schedule.everySeconds}s` as `${number}s`;
+  if (!schedule.startAt) {
+    return { every };
+  }
+
+  // Temporal interval schedules match Epoch + (n * every) + offset. Its
+  // top-level startAt only filters matching times before that boundary, so it
+  // does not itself anchor the cadence. Derive the phase from startAt to make
+  // the stored OpenGeni timestamp the first interval boundary rather than the
+  // next epoch-aligned match.
+  const everyMilliseconds = BigInt(schedule.everySeconds) * 1_000n;
+  const startMilliseconds = BigInt(new Date(schedule.startAt).getTime());
+  const offsetMilliseconds =
+    ((startMilliseconds % everyMilliseconds) + everyMilliseconds) % everyMilliseconds;
+  return {
+    every,
+    ...(offsetMilliseconds === 0n ? {} : { offset: `${offsetMilliseconds}ms` as `${number}ms` }),
   };
 }
 

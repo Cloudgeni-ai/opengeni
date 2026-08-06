@@ -12,6 +12,11 @@ const SESSION_REPLAY_PAGE_SIZE = 100;
 const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
+export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+const activeSseStreams: Record<"session" | "workspace_control", number> = {
+  session: 0,
+  workspace_control: 0,
+};
 
 export type SseDeliveryBoundObservation = {
   reason: "desired_size_non_positive" | "stall_timeout" | "frame_too_large";
@@ -251,6 +256,7 @@ export async function sseSessionStream(
   signal: AbortSignal,
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   if (
     options.reauthorize &&
     options.reauthorizeAfterMs !== undefined &&
@@ -266,12 +272,19 @@ export async function sseSessionStream(
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<SessionEvent> | null = null;
   let reauthorizationTimer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
+  let closeMetrics = () => {};
   const stopUpstream = () => {
+    closeMetrics();
     detachAbortListener();
     if (reauthorizationTimer) {
       clearTimeout(reauthorizationTimer);
       reauthorizationTimer = null;
+    }
+    if (heartbeatTimer) {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = null;
     }
     delivery?.stop();
     const release = unsubscribe;
@@ -284,6 +297,7 @@ export async function sseSessionStream(
     onObservation: sseObservationReporter("session", options),
     onStop: stopUpstream,
   });
+  closeMetrics = observeSseConnection("session", after, options.observability);
 
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("session event stream delivery failed", error));
@@ -299,10 +313,24 @@ export async function sseSessionStream(
     }, interval);
   };
   scheduleReauthorization();
-  const writeFrame = async (frame: string) => {
-    if (!(await channel.write(frame))) {
-      throw new SseStreamStoppedError();
-    }
+  let writeTail = Promise.resolve();
+  const writeFrame = (frame: string): Promise<void> => {
+    const write = writeTail.then(async () => {
+      if (!(await channel.write(frame))) throw new SseStreamStoppedError();
+    });
+    writeTail = write.catch(() => {});
+    return write;
+  };
+  const scheduleHeartbeat = () => {
+    if (channel.stopped()) return;
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null;
+      void writeFrame(": heartbeat\n\n")
+        .then(scheduleHeartbeat)
+        .catch((error) => {
+          if (!(error instanceof SseStreamStoppedError)) fail(error);
+        });
+    }, heartbeatIntervalMs);
   };
   const send = async (event: SessionEvent) => {
     if (event.sequence <= lastSent) return;
@@ -362,6 +390,7 @@ export async function sseSessionStream(
       SESSION_REPLAY_PAGE_SIZE,
     );
     await writeFrame(": connected\n\n");
+    scheduleHeartbeat();
     bootstrapping = false;
     const buffered = newestBuffered;
     newestBuffered = null;
@@ -425,14 +454,22 @@ export async function sseWorkspaceControlStream(
   signal: AbortSignal,
   options: SseDeliveryOptions = {},
 ): Promise<Response> {
+  const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: WorkspaceControlEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<WorkspaceControlEvent> | null = null;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
+  let closeMetrics = () => {};
   const stopUpstream = () => {
+    closeMetrics();
     detachAbortListener();
+    if (heartbeatTimer) {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = null;
+    }
     delivery?.stop();
     const release = unsubscribe;
     unsubscribe = null;
@@ -444,12 +481,29 @@ export async function sseWorkspaceControlStream(
     onObservation: sseObservationReporter("workspace_control", options),
     onStop: stopUpstream,
   });
+  closeMetrics = observeSseConnection("workspace_control", after, options.observability);
 
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("workspace control stream delivery failed", error));
   };
-  const writeFrame = async (frame: string) => {
-    if (!(await channel.write(frame))) throw new SseStreamStoppedError();
+  let writeTail = Promise.resolve();
+  const writeFrame = (frame: string): Promise<void> => {
+    const write = writeTail.then(async () => {
+      if (!(await channel.write(frame))) throw new SseStreamStoppedError();
+    });
+    writeTail = write.catch(() => {});
+    return write;
+  };
+  const scheduleHeartbeat = () => {
+    if (channel.stopped()) return;
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null;
+      void writeFrame(": heartbeat\n\n")
+        .then(scheduleHeartbeat)
+        .catch((error) => {
+          if (!(error instanceof SseStreamStoppedError)) fail(error);
+        });
+    }, heartbeatIntervalMs);
   };
   const send = async (event: WorkspaceControlEvent) => {
     if (event.sequence <= lastSent) return;
@@ -505,6 +559,7 @@ export async function sseWorkspaceControlStream(
       WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
     );
     await writeFrame(": connected\n\n");
+    scheduleHeartbeat();
     bootstrapping = false;
     const buffered = newestBuffered;
     newestBuffered = null;
@@ -529,6 +584,37 @@ export async function sseWorkspaceControlStream(
       Connection: "keep-alive",
     },
   });
+}
+
+function observeSseConnection(
+  stream: "session" | "workspace_control",
+  after: number,
+  observability: Observability | undefined,
+): () => void {
+  activeSseStreams[stream] += 1;
+  observability?.incrementCounter({
+    name: "opengeni_sse_connections_total",
+    help: "SSE connections opened at the API boundary.",
+    labels: { stream, resume: after > 0 ? "resumed" : "fresh" },
+  });
+  observability?.setGauge?.({
+    name: "opengeni_sse_connections_active",
+    help: "Currently active SSE connections at the API boundary.",
+    labels: { stream },
+    value: activeSseStreams[stream],
+  });
+  let closed = false;
+  return () => {
+    if (closed) return;
+    closed = true;
+    activeSseStreams[stream] = Math.max(0, activeSseStreams[stream] - 1);
+    observability?.setGauge?.({
+      name: "opengeni_sse_connections_active",
+      help: "Currently active SSE connections at the API boundary.",
+      labels: { stream },
+      value: activeSseStreams[stream],
+    });
+  };
 }
 
 async function replayWorkspaceControlEvents(
@@ -561,6 +647,7 @@ class SseStreamStoppedError extends Error {}
 export type SseDeliveryOptions = {
   maxQueuedBytes?: number;
   stallTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
   observability?: Observability | undefined;
   onObservation?: ((observation: SseDeliveryBoundObservation) => void) | undefined;
 };
@@ -596,4 +683,12 @@ function sseObservationReporter(
 
 function retryableSseFailure(message: string, error: unknown): TypeError {
   return error instanceof TypeError ? error : new TypeError(message, { cause: error });
+}
+
+function resolveHeartbeatInterval(value: number | undefined): number {
+  const interval = value ?? SSE_HEARTBEAT_INTERVAL_MS;
+  if (!Number.isSafeInteger(interval) || interval < 1_000 || interval > 60_000) {
+    throw new RangeError("SSE heartbeat interval must be between 1000 and 60000ms");
+  }
+  return interval;
 }

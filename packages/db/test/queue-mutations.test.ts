@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ReasoningEffort, ResourceRef, ToolRef } from "@opengeni/contracts";
 import { and, asc, eq, inArray } from "drizzle-orm";
+import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   applySessionTurnSettlement,
@@ -305,7 +306,6 @@ describe("canonical queue commands", () => {
             expectedRevision: edited.draft.revision,
             text: "edited prompt with replacement content",
             resources: [],
-            tools: [],
             model: "edited-model",
             reasoningEffort: "medium",
           }),
@@ -408,7 +408,6 @@ describe("canonical queue commands", () => {
             text: "direct prompt",
             turnInstructions: "direct explicit context",
             resources: [],
-            tools: [],
             reasoningEffortFallback: "medium",
             source: "user",
           }),
@@ -462,7 +461,6 @@ describe("canonical queue commands", () => {
             expectedDraftRevision: edited.draft.revision,
             text: edited.draft.text,
             resources: edited.draft.resources as ResourceRef[],
-            tools: edited.draft.tools as ToolRef[],
             model: edited.draft.model,
             reasoningEffort: edited.draft.reasoningEffort as ReasoningEffort,
             reasoningEffortFallback: "medium",
@@ -917,6 +915,402 @@ describe("canonical queue commands", () => {
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
   });
 
+  for (const attachmentSource of ["chooser", "drop", "paste"] as const) {
+    test(`Send admits and replays the ${attachmentSource} bare file draft as its canonical default mount`, async () => {
+      const value = await fixture(1);
+      const fileId = crypto.randomUUID();
+      const bareResource = { kind: "file" as const, fileId };
+      const canonicalResource = {
+        ...bareResource,
+        mountPath: `.opengeni/files/${fileId}`,
+      };
+      const draft = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            saveComposerDraftInTransaction(tx as typeof db, {
+              accountId: value.grant.accountId,
+              workspaceId: value.grant.workspaceId!,
+              sessionId: value.session.id,
+              subjectId: value.grant.subjectId,
+              expectedRevision: 0,
+              text: `${attachmentSource} attachment`,
+              resources: [bareResource],
+              model: "scripted-model",
+              reasoningEffort: "low",
+            }),
+          ),
+      );
+      expect(draft.resources).toEqual([canonicalResource]);
+
+      const operationKey = crypto.randomUUID();
+      const command = {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+        actor: value.actor,
+        operationKey,
+        delivery: "send" as const,
+        expectedDraftRevision: draft.revision,
+        text: draft.text,
+        resources: [canonicalResource],
+        model: "scripted-model",
+        reasoningEffort: "low" as const,
+        reasoningEffortFallback: "medium" as const,
+        source: "user" as const,
+      };
+      const submitted = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      );
+      expect(submitted.replay).toBe(false);
+      expect(
+        (await getSessionTurn(client.db, value.grant.workspaceId!, submitted.turnId))?.resources,
+      ).toEqual([canonicalResource]);
+
+      const replay = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as typeof db, {
+              ...command,
+              resources: [bareResource],
+            }),
+          ),
+      );
+      expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+    });
+  }
+
+  test("Send and Steer admit and replay one reconnected ready file across bare/canonical forms", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const value = await fixture(1);
+      const fileId = crypto.randomUUID();
+      const bareResource = { kind: "file" as const, fileId };
+      const canonicalResource = {
+        ...bareResource,
+        mountPath: `.opengeni/files/${fileId}`,
+      };
+      const draft = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            saveComposerDraftInTransaction(tx as typeof db, {
+              accountId: value.grant.accountId,
+              workspaceId: value.grant.workspaceId!,
+              sessionId: value.session.id,
+              subjectId: value.grant.subjectId,
+              expectedRevision: 0,
+              text: `inspect the reconnected attachment via ${delivery}`,
+              // The durable reload owns the canonical ref while the still-live
+              // upload card owns the bare ref for the same finalized file.
+              resources: [canonicalResource, bareResource],
+              model: "scripted-model",
+              reasoningEffort: "low",
+            }),
+          ),
+      );
+      expect(draft.resources).toEqual([canonicalResource]);
+
+      const operationKey = crypto.randomUUID();
+      const command = {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+        actor: value.actor,
+        operationKey,
+        delivery,
+        expectedDraftRevision: draft.revision,
+        text: draft.text,
+        // Core admission has already normalized the command to one ref.
+        resources: [canonicalResource],
+        model: "scripted-model",
+        reasoningEffort: "low" as const,
+        reasoningEffortFallback: "medium" as const,
+        source: "user" as const,
+      };
+      const submitted = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      );
+      expect(submitted.replay).toBe(false);
+      expect(
+        (await getSessionTurn(client.db, value.grant.workspaceId!, submitted.turnId))?.resources,
+      ).toEqual([canonicalResource]);
+
+      const replay = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as typeof db, {
+              ...command,
+              resources: [bareResource],
+            }),
+          ),
+      );
+      expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+    }
+  });
+
+  test("Send keeps custom file mounts distinct and rejects genuinely changed drafts", async () => {
+    const value = await fixture(1);
+    const fileId = crypto.randomUUID();
+    const customResource = {
+      kind: "file" as const,
+      fileId,
+      mountPath: `evidence/${fileId}`,
+    };
+    const draft = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          saveComposerDraftInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            expectedRevision: 0,
+            text: "inspect the custom mount",
+            resources: [customResource],
+            model: "scripted-model",
+            reasoningEffort: "low",
+          }),
+        ),
+    );
+    const submit = (overrides: { text?: string; resources?: ResourceRef[] }) =>
+      withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            expectedDraftRevision: draft.revision,
+            text: overrides.text ?? draft.text,
+            resources: overrides.resources ?? (draft.resources as ResourceRef[]),
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+      );
+
+    for (const changed of [
+      {
+        resources: [{ kind: "file" as const, fileId, mountPath: `files/${fileId}` }],
+      },
+      { text: "inspect different content" },
+    ]) {
+      try {
+        await submit(changed);
+        throw new Error("changed draft unexpectedly admitted");
+      } catch (error) {
+        expect(error).toBeInstanceOf(QueueCommandConflictError);
+        expect((error as QueueCommandConflictError).code).toBe("DRAFT_CHANGED");
+      }
+    }
+  });
+
+  test("Send stores no private turn tools and never mutates the session policy", async () => {
+    const value = await fixture(1);
+    const workspaceId = value.grant.workspaceId!;
+    const selected = [{ kind: "mcp" as const, id: "cap-docs" }];
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .update(schema.sessions)
+        .set({
+          tools: selected,
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        })
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "inherits the durable session tools",
+            resources: [],
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+
+    const [turn] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({
+          id: schema.sessionTurns.id,
+          tools: schema.sessionTurns.tools,
+          toolsProvided: schema.sessionTurns.toolsProvided,
+        })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, submitted.turnId)),
+    );
+    expect(turn).toEqual({ id: submitted.turnId, tools: [], toolsProvided: false });
+
+    const [event] = await storedEvents(workspaceId, [submitted.acceptedEventId]);
+    expect(Object.hasOwn(event!.payload as object, "tools")).toBe(false);
+
+    const [storedSession] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({ tools: schema.sessions.tools, toolPolicy: schema.sessions.toolPolicy })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+    expect(storedSession).toEqual({
+      tools: selected,
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    });
+  });
+
+  test("Send and Steer persist canonical execution identity and replay its original evidence", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const value = await fixture();
+      const operationKey = crypto.randomUUID();
+      const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+        schemaVersion: 1,
+        productModelId: "xai/grok-4.5",
+        requestedModelId: "grok-4.5",
+        modelSource: "explicit",
+        reasoningEffort: "high",
+        reasoningSource: "explicit",
+        providerId: "xai",
+        upstreamModelId: "grok-4.5",
+        wireApi: "responses",
+        credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+        billing: { upstreamPayer: "workspace", metering: "external" },
+        definitionVersion: `sha256:${"b".repeat(64)}`,
+      });
+      const command = {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+        actor: value.actor,
+        operationKey,
+        delivery,
+        text: `${delivery} with explicit alias`,
+        resources: [],
+        tools: [],
+        // Core canonicalizes the requested alias before this DB transaction;
+        // the frozen policy intentionally retains the raw accepted alias.
+        model: "xai/grok-4.5",
+        reasoningEffort: "high" as const,
+        reasoningEffortFallback: "medium" as const,
+        turnExecutionPolicy,
+        source: "user" as const,
+      };
+      const submitted = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      );
+      expect(submitted.replay).toBe(false);
+
+      const [storedTurn, audit] = await withWorkspaceRls(
+        client.db,
+        value.grant.workspaceId!,
+        async (db) => {
+          const [turn] = await db
+            .select()
+            .from(schema.sessionTurns)
+            .where(eq(schema.sessionTurns.id, submitted.turnId));
+          const [auditRow] = await db
+            .select()
+            .from(schema.auditEvents)
+            .where(eq(schema.auditEvents.targetId, submitted.turnId));
+          return [turn!, auditRow!] as const;
+        },
+      );
+      expect(storedTurn).toMatchObject({
+        model: "xai/grok-4.5",
+        reasoningEffort: "high",
+        initiatorKind: "subject",
+        initiatorSubjectId: value.grant.subjectId,
+        initiatingHumanSubjectId: value.grant.subjectId,
+      });
+      expect(readTurnExecutionPolicyV1(storedTurn.metadata)).toEqual({
+        kind: "valid",
+        policy: turnExecutionPolicy,
+      });
+      const expectedEvidence = expect.objectContaining({
+        turnId: submitted.turnId,
+        requestedModelId: "grok-4.5",
+        effectiveModelId: "xai/grok-4.5",
+        modelSource: "explicit",
+        effectiveReasoningEffort: "high",
+        reasoningSource: "explicit",
+        providerId: "xai",
+        credentialSourceKind: "workspace_connection",
+        credentialSourceMechanism: "api_key",
+        billingOwner: "workspace",
+        billingMetering: "external",
+        definitionVersion: turnExecutionPolicy.definitionVersion,
+      });
+      expect(audit.metadata).toEqual(expectedEvidence);
+      expect(submitted.receipt.result.executionPolicy).toEqual(expectedEvidence);
+
+      const retryPolicy = TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        definitionVersion: `sha256:${"c".repeat(64)}`,
+      });
+      const replay = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as typeof db, {
+              ...command,
+              turnExecutionPolicy: retryPolicy,
+            }),
+          ),
+      );
+      expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+      expect(replay.receipt.result.executionPolicy).toEqual(
+        submitted.receipt.result.executionPolicy,
+      );
+      expect(readTurnExecutionPolicyV1(storedTurn.metadata)).toEqual({
+        kind: "valid",
+        policy: turnExecutionPolicy,
+      });
+    }
+  });
+
   test("an observing Send loses to an unseen newer Pause without consuming the draft", async () => {
     const value = await fixture();
     const observed = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
@@ -935,7 +1329,6 @@ describe("canonical queue commands", () => {
           revision: 1,
           text: "preserve me",
           resources: [],
-          tools: [],
           model: "scripted-model",
           reasoningEffort: "low",
         }),
@@ -967,7 +1360,6 @@ describe("canonical queue commands", () => {
             expectedDraftRevision: 1,
             text: "preserve me",
             resources: [],
-            tools: [],
             model: "scripted-model",
             reasoningEffort: "low",
             reasoningEffortFallback: "medium",

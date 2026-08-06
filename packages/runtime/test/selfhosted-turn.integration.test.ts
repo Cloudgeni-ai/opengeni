@@ -158,75 +158,35 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     expect(typeof s).toBe("string");
   });
 
-  test("TOOLSPACE DELIVERY: the token seed is written to the machine over the exec channel, with NO platform setup", async () => {
-    // Selfhosted parity: a connected-machine turn now receives the toolspace token
-    // (activeSandboxBackend "selfhosted" + a per-turn seed). The runtime seeds it
-    // over the SAME exec channel the docker path uses — off-manifest — while the
-    // platform setup hooks (repository clone, az login) stay OFF the user's real
-    // machine. Record every exec the machine received and assert both halves.
-    const execLog: string[] = [];
-    const responder = new MockAgentResponder({
-      hostname: "vm2",
-      exec: (req) => {
-        execLog.push(req.command.join(" "));
-        return {
-          exitCode: 0,
-          stdout: new TextEncoder().encode(""),
-          stderr: new Uint8Array(0),
-          timedOut: false,
-          durationMs: "1",
-        };
-      },
-    });
-    let renewalSessionIsRouted = false;
+  test("an offline machine cannot block a text-only model turn, even if a Toolspace seed is supplied accidentally", async () => {
+    let renewalSessionWasPublished = false;
     await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
       toolspaceTokenSeed: "ogd_selfhosted_seed",
-      responder,
+      responder: new MockAgentResponder({ online: false }),
       activeSandboxBackend: "selfhosted",
-      onToolspaceTokenSessionReady: (session) => {
-        renewalSessionIsRouted = session instanceof RoutingSandboxSession;
+      onToolspaceTokenSessionReady: () => {
+        renewalSessionWasPublished = true;
       },
     });
-    // The seed hook ran over the machine's exec channel and carried the token value.
-    expect(
-      execLog.some(
-        (c) => c.includes("OPENGENI_TOOLSPACE_TOKEN_SEED") && c.includes("ogd_selfhosted_seed"),
-      ),
-    ).toBe(true);
-    // But NO platform setup ran against the user's real computer.
-    expect(execLog.some((c) => c.includes("git clone"))).toBe(false);
-    expect(execLog.some((c) => c.includes("az login") || c.includes("az account"))).toBe(false);
-    expect(renewalSessionIsRouted).toBe(true);
+    expect(renewalSessionWasPublished).toBe(false);
   });
 
-  test("NO-TOOLSPACE selfhosted turn seeds nothing (the hook list is empty without a token)", async () => {
-    const execLog: string[] = [];
-    const responder = new MockAgentResponder({
-      hostname: "vm2",
-      exec: (req) => {
-        execLog.push(req.command.join(" "));
-        return {
-          exitCode: 0,
-          stdout: new TextEncoder().encode(""),
-          stderr: new Uint8Array(0),
-          timedOut: false,
-          durationMs: "1",
-        };
+  test("an offline machine tool call is returned to the model in-band and the model loop continues", async () => {
+    const serialized = await runPinnedToVmTurn(
+      new ScriptedModel([
+        { output: [functionCall("exec_command", { cmd: "hostname" })] },
+        { output: [assistantMessage("the machine is offline; I can recover elsewhere")] },
+      ]),
+      {
+        responder: new MockAgentResponder({ online: false }),
+        activeSandboxBackend: "selfhosted",
       },
-    });
-    await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
-      responder,
-      activeSandboxBackend: "selfhosted",
-    });
-    expect(execLog.some((c) => c.includes("OPENGENI_TOOLSPACE_TOKEN_SEED"))).toBe(false);
+    );
+    expect(typeof serialized).toBe("string");
   });
 
-  test("selfhosted exec exports ONLY the allowlisted toolspace pointers to the machine (not HOME/GIT_*)", async () => {
-    // ogtool on the machine reads $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE from its
-    // shell env, but selfhosted exec does not consume the manifest env wholesale
-    // (pushing HOME=/workspace onto a real computer would break it). Prove the
-    // exec carries exactly the two non-secret toolspace pointers and nothing else.
-    let capturedEnv: Record<string, string> = {};
+  test("selfhosted exec exports no platform manifest environment to the machine", async () => {
+    let capturedEnv: Record<string, string> = { unexpected: "unreplaced" };
     const responder = new MockAgentResponder({
       exec: (req) => {
         capturedEnv = req.env;
@@ -253,13 +213,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       },
     });
     await self.exec({ cmd: "ogtool list" });
-    expect(capturedEnv.OPENGENI_TOOLSPACE_URL).toBe(
-      "https://app.opengeni.example/v1/workspaces/ws/mcp",
-    );
-    expect(capturedEnv.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
-    expect(capturedEnv.OPENGENI_OGTOOL_PACKAGE_SPEC).toBe("@opengeni/ogtool@0.1.0");
-    expect(capturedEnv.HOME).toBeUndefined();
-    expect(capturedEnv.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(capturedEnv).toEqual({});
   });
 
   test("REGRESSION (focused): the selfhosted state carries the `environment` field the GROUP client's serialize reads", () => {

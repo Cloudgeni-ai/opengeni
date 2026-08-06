@@ -5,15 +5,18 @@
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
+import { act as reactAct } from "react";
 import { startTransition, Suspense, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type {
   ComposerDraft,
+  SendMessageInput,
   SessionEvent,
   SessionControlResponse,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
+  SessionListResponse,
   SessionMcpApprovalPolicy,
   SessionMcpServerMetadata,
   SessionTurn,
@@ -56,6 +59,31 @@ function makeEvent(
 
 const noEvents: SessionEvent[] = [];
 
+function gatewayError(status = 502): OpenGeniApiError {
+  return new OpenGeniApiError(status, "", {
+    code: "upstream_unavailable",
+    retryable: true,
+    correlationId: `edge-${status}-safe`,
+    outcomeUnknown: true,
+    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+  });
+}
+
+function paymentRequiredError(): OpenGeniApiError {
+  return new OpenGeniApiError(
+    402,
+    JSON.stringify({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: "insufficient OpenGeni credits",
+        retryable: false,
+      },
+    }),
+    { mutation: true },
+  );
+}
+
 function queueSnapshot(
   items: SessionTurn[],
   overrides: Partial<SessionQueueSnapshot> = {},
@@ -76,11 +104,40 @@ function queueSnapshot(
     },
     stoppingPreviousAttempt: false,
     items,
+    pendingInputs: [],
+    pendingInputAttachment: null,
     ...overrides,
+    activePersonalConnections: overrides.activePersonalConnections ?? [],
   };
 }
 
 describe("useWorkspaceSessions", () => {
+  test("forwards pins-only mode without changing the historical visible-row projection", async () => {
+    const pinned = { id: "pin-only", pinned: true } as never;
+    let observedPinsOnly = false;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        observedPinsOnly = options?.pinsOnly === true;
+        return { pinned: [pinned], sessions: [], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useWorkspaceSessions({
+          client,
+          workspaceId: WORKSPACE_ID,
+          pinsOnly: true,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(observedPinsOnly).toBe(true);
+    expect(hook.result.current.sessions).toEqual([pinned]);
+    expect(hook.result.current.pinned).toEqual([pinned]);
+    await hook.unmount();
+  });
+
   test("keeps pinned rows in the historical sessions result while exposing the section", async () => {
     const pinned = { id: "pinned", pinned: true } as never;
     const ordinary = { id: "ordinary", pinned: false } as never;
@@ -105,6 +162,89 @@ describe("useWorkspaceSessions", () => {
     expect(hook.result.current.pinned.map((session) => session.id)).toEqual(["pinned"]);
     expect(hook.result.current.pinnedTruncated).toBe(true);
     expect(hook.result.current.nextCursor).toBe("next-page");
+    await hook.unmount();
+  });
+
+  test("treats the query-key transition render as loading", async () => {
+    const initial = { id: "initial", pinned: false } as never;
+    const searched = { id: "searched", pinned: false } as never;
+    let resolveSearch: (() => void) | null = null;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        if (options?.search === "needle") {
+          return await new Promise<SessionListResponse>((resolve) => {
+            resolveSearch = () =>
+              resolve({
+                pinned: [],
+                sessions: [searched],
+                nextCursor: null,
+              } as SessionListResponse);
+          });
+        }
+        return { pinned: [], sessions: [initial], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      (search: string) => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search }),
+      "" as string,
+    );
+    await flush();
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["initial"]);
+
+    await hook.rerender("needle");
+    await flush();
+    expect(hook.result.current.loading).toBe(true);
+    expect(hook.result.current.sessions).toEqual([]);
+
+    await reactAct(async () => {
+      resolveSearch!();
+    });
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["searched"]);
+    await hook.unmount();
+  });
+
+  test("keeps the last successful page visible when a poll fails", async () => {
+    const stable = { id: "stable", pinned: false } as never;
+    let calls = 0;
+    const client = fakeClient({
+      listSessionPage: async () => {
+        calls += 1;
+        if (calls > 1) throw new Error("poll unavailable");
+        return { pinned: [], sessions: [stable], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["stable"]);
+    expect(hook.result.current.error?.message).toBe("poll unavailable");
+    expect(hook.result.current.loading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("does not report a query transition as loading while disabled", async () => {
+    const client = fakeClient({
+      listSessionPage: async () => ({ pinned: [], sessions: [], nextCursor: null }),
+    });
+    const hook = await renderHook(
+      (search: string) =>
+        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search, enabled: false }),
+      "" as string,
+    );
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+
+    await hook.rerender("disabled-transition");
+    expect(hook.result.current.loading).toBe(false);
     await hook.unmount();
   });
 });
@@ -406,6 +546,7 @@ describe("useTurnQueue", () => {
           text: second.prompt,
           resources: [],
           tools: [],
+          toolsProvided: false,
           model: second.model,
           reasoningEffort: second.reasoningEffort,
           sourceTurnId: second.id,
@@ -895,6 +1036,45 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
+  test("turn, session, control, and system-update events refresh continuation truth", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        return fakeGoal({
+          continuation: {
+            state: "scheduled",
+            reason: "wake_pending",
+            wakeRevision: reads,
+            observedRevision: reads,
+            nextAttemptAt: null,
+            lastError: null,
+          },
+        });
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(0);
+
+    await hook.rerender([
+      makeEvent(1, "agent.message.delta"),
+      makeEvent(2, "turn.started"),
+      makeEvent(3, "session.status.changed"),
+      makeEvent(4, "session.control.paused"),
+      makeEvent(5, "system.update.pending"),
+    ]);
+    await flush(250);
+
+    expect(reads).toBe(1);
+    expect(hook.result.current.goal?.continuation?.state).toBe("scheduled");
+    await hook.unmount();
+  });
+
   test("shared-feed goal refreshes are discarded after the session changes", async () => {
     const initialSessionId: string = SESSION_ID;
     const otherSessionId = "33333333-3333-4333-8333-333333333333";
@@ -1075,7 +1255,9 @@ describe("useSessionMcpApprovalPolicy", () => {
     await flushing(async () => {
       await hook.result.current.update(["write_record"]);
     });
-    expect(reads).toBe(2);
+    // The authoritative post-mutation read queues behind the older read rather
+    // than overlapping it. The mutation response remains the visible truth.
+    expect(reads).toBe(1);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {
@@ -1085,6 +1267,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         mcpServers: [metadata(false)],
       });
     });
+    expect(reads).toBe(2);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {
@@ -1314,6 +1497,8 @@ describe("useSessionControl", () => {
       },
       interruptionCount: 0,
       wakeCount: controlState === "active" ? 1 : 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
     });
     const client = fakeClient({
       pauseSession: async (_ws, _session, options) => {
@@ -1461,6 +1646,8 @@ describe("useSessionControl", () => {
         },
         interruptionCount: 1,
         wakeCount: 0,
+        cancelledSessionCount: 0,
+        cancelledTurnCount: 0,
       });
       expect(await stalePause).toBeNull();
     });
@@ -1516,169 +1703,405 @@ describe("useComposer queue-vs-steer", () => {
     expect(typeof input.clientEventId).toBe("string");
     await hook.unmount();
   });
+
+  test("projects Steer immediately, keeps it accepted, then settles when execution starts", async () => {
+    let resolveSteer!: (value: { accepted: SessionEvent; turn: SessionTurn }) => void;
+    const pendingSteer = new Promise<{ accepted: SessionEvent; turn: SessionTurn }>((resolve) => {
+      resolveSteer = resolve;
+    });
+    const turn = fakeTurn({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+    const accepted = makeEvent(10, "user.message", { delivery: "steer" });
+    const client = fakeClient({
+      steerMessage: async () => await pendingSteer,
+    });
+    type Props = { events: SessionEvent[] };
+    const hook = await renderHook(
+      (props: Props) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+
+    let result!: Promise<boolean>;
+    await reactAct(async () => {
+      result = hook.result.current.steer("Focus on the authentication failure first");
+      await Promise.resolve();
+    });
+    expect(hook.result.current.steering).toMatchObject({
+      phase: "submitting",
+      text: "Focus on the authentication failure first",
+      turnId: null,
+    });
+
+    await reactAct(async () => {
+      resolveSteer({ accepted, turn });
+      expect(await result).toBe(true);
+    });
+    expect(hook.result.current.steering).toMatchObject({
+      phase: "accepted",
+      triggerEventId: accepted.id,
+      turnId: turn.id,
+    });
+
+    await hook.rerender({
+      events: [
+        accepted,
+        {
+          ...makeEvent(11, "turn.started", { triggerEventId: accepted.id }),
+          turnId: turn.id,
+        },
+      ],
+    });
+    expect(hook.result.current.steering).toBeNull();
+    await hook.unmount();
+  });
+
+  test("reconciles a Steer that started before a standalone event stream went live", async () => {
+    const turn = fakeTurn({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+    let accepted: SessionEvent | null = null;
+    let reconciliations = 0;
+    const client = fakeClient({
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        accepted = {
+          ...makeEvent(20, "user.message", { delivery: "steer" }),
+          clientEventId: typeof input === "string" ? undefined : input.clientEventId,
+        };
+        return { accepted, turn };
+      },
+      getSession: async () => ({ lastSequence: 21 }) as never,
+      listEvents: async () => {
+        reconciliations += 1;
+        return accepted
+          ? [
+              accepted,
+              {
+                ...makeEvent(21, "turn.started", { triggerEventId: accepted.id }),
+                turnId: turn.id,
+              },
+            ]
+          : [];
+      },
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          yield* [] as SessionEvent[];
+        })(),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+        }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.steer("Use the smaller patch")).toBe(true);
+    });
+    await flush();
+
+    expect(reconciliations).toBe(1);
+    expect(hook.result.current.steering).toBeNull();
+    await hook.unmount();
+  });
+
+  test("removes the optimistic Steer projection when admission fails", async () => {
+    const client = fakeClient({
+      steerMessage: async () => {
+        throw new Error("Steer was rejected");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await reactAct(async () => hook.result.current.setValue("Keep this draft"));
+    await flushing(async () => {
+      expect(await hook.result.current.steer()).toBe(false);
+    });
+    expect(hook.result.current.steering).toBeNull();
+    expect(hook.result.current.value).toBe("Keep this draft");
+    expect(hook.result.current.error?.message).toBe("Steer was rejected");
+    await hook.unmount();
+  });
 });
 
 describe("useComposer durable draft and control binding", () => {
-  test("providerless stream handoff reconciles a draft update already covered by lastSequence", async () => {
-    const draft = (revision: number, text: string): ComposerDraft => ({
-      revision,
-      text,
-      resources: [],
-      tools: [],
-      model: "model-x",
-      reasoningEffort: "medium",
-      sourceTurnId: null,
-      sourceTurnVersion: null,
-      updatedAt: new Date().toISOString(),
-    });
-    let current = draft(1, "stale first read");
+  test("historical feed hydration reconciles once without replaying every old event", async () => {
     let reads = 0;
     const client = fakeClient({
       getComposerDraft: async () => {
         reads += 1;
-        return current;
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
       },
-      getSession: async () => {
-        current = draft(2, "authoritative handoff state");
-        return { lastSequence: 42 } as never;
-      },
-      streamEvents: (_workspaceId, _sessionId, options) =>
-        (async function* () {
-          await options?.beforeLive?.();
-          const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), {
-              once: true,
-            });
-          });
-          if (event) yield event;
-        })(),
     });
-
+    const historical = Array.from({ length: 1_000 }, (_, index) =>
+      makeEvent(index + 1, "session.queue.changed", { operation: "edit" }),
+    );
     const hook = await renderHook(
-      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      undefined,
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
     );
     await flush();
+    expect(reads).toBe(1);
 
-    expect(reads).toBe(2);
-    expect(hook.result.current.draft?.revision).toBe(2);
-    expect(hook.result.current.value).toBe("authoritative handoff state");
-    await hook.unmount();
-  });
-
-  test("a delayed initial draft read cannot overwrite the newer handoff revision", async () => {
-    const draft = (revision: number, text: string): ComposerDraft => ({
-      revision,
-      text,
-      resources: [],
-      tools: [],
-      model: "model-x",
-      reasoningEffort: "medium",
-      sourceTurnId: null,
-      sourceTurnVersion: null,
-      updatedAt: new Date().toISOString(),
-    });
-    let reads = 0;
-    let resolveInitialRead: ((value: ComposerDraft) => void) | null = null;
-    let markHandoffComplete: (() => void) | null = null;
-    const initialRead = new Promise<ComposerDraft>((resolve) => {
-      resolveInitialRead = resolve;
-    });
-    const handoffComplete = new Promise<void>((resolve) => {
-      markHandoffComplete = resolve;
-    });
-    const client = fakeClient({
-      getComposerDraft: async () => {
-        reads += 1;
-        return reads === 1 ? await initialRead : draft(2, "authoritative handoff");
-      },
-      getSession: async () => ({ lastSequence: 42 }) as never,
-      streamEvents: (_workspaceId, _sessionId, options) =>
-        (async function* () {
-          await options?.beforeLive?.();
-          markHandoffComplete?.();
-          const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), {
-              once: true,
-            });
-          });
-          if (event) yield event;
-        })(),
-    });
-    const hook = await renderHook(
-      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    await flushing(async () => await handoffComplete);
-
-    expect(reads).toBe(2);
-    expect(hook.result.current.draft?.revision).toBe(2);
-    expect(hook.result.current.value).toBe("authoritative handoff");
-
-    await flushing(() => resolveInitialRead?.(draft(1, "obsolete initial read")));
-    expect(hook.result.current.draft?.revision).toBe(2);
-    expect(hook.result.current.value).toBe("authoritative handoff");
-    await hook.unmount();
-  });
-
-  test("a failed draft handoff rejects live, surfaces the error, then recovers", async () => {
-    const draft = (revision: number, text: string): ComposerDraft => ({
-      revision,
-      text,
-      resources: [],
-      tools: [],
-      model: "model-x",
-      reasoningEffort: "medium",
-      sourceTurnId: null,
-      sourceTurnVersion: null,
-      updatedAt: new Date().toISOString(),
-    });
-    let reads = 0;
-    let handoffRejections = 0;
-    let releaseRetry = (): void => undefined;
-    const retryGate = new Promise<void>((resolve) => {
-      releaseRetry = resolve;
-    });
-    const client = fakeClient({
-      getComposerDraft: async () => {
-        reads += 1;
-        if (reads === 2) throw new TypeError("draft handoff unavailable");
-        return reads === 1 ? draft(1, "stale") : draft(2, "recovered");
-      },
-      getSession: async () => ({ lastSequence: 42 }) as never,
-      streamEvents: (_workspaceId, _sessionId, options) =>
-        (async function* () {
-          try {
-            await options?.beforeLive?.();
-          } catch {
-            handoffRejections += 1;
-            await retryGate;
-            await options?.beforeLive?.();
-          }
-          const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), {
-              once: true,
-            });
-          });
-          if (event) yield event;
-        })(),
-    });
-    const hook = await renderHook(
-      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
+    await hook.rerender(historical);
     await flush();
+    expect(reads).toBe(2);
 
-    expect(handoffRejections).toBe(1);
-    expect(hook.result.current.value).toBe("stale");
-    expect(hook.result.current.error?.message).toContain("draft handoff unavailable");
-
-    releaseRetry();
+    await hook.rerender([
+      ...historical,
+      makeEvent(1_001, "session.queue.changed", { operation: "edit" }),
+    ]);
     await flush();
     expect(reads).toBe(3);
-    expect(hook.result.current.value).toBe("recovered");
-    expect(hook.result.current.draft?.revision).toBe(2);
-    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("soft draft reload after settle does not assert draftLoading", async () => {
+    let reads = 0;
+    let releaseSecond: (() => void) | null = null;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) {
+          await new Promise<void>((resolve) => {
+            releaseSecond = resolve;
+          });
+        }
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.draftLoading).toBe(false);
+
+    // Reconcile / queue-changed soft reload (loadOlder SSE reconnect path).
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+    expect(reads).toBe(2);
+    expect(hook.result.current.draftLoading).toBe(false);
+    expect(releaseSecond).not.toBeNull();
+    // Soft reload must not flip draftLoading. Resolve + settle under one act so
+    // the deferred read's setState commits never escape the warning-free gate.
+    await flushing(async () => {
+      releaseSecond!();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hook.result.current.draftLoading).toBe(false);
+    expect(hook.result.current.value).toBe("read-2");
+    await hook.unmount();
+  });
+
+  test("explicit reloadDraft still asserts draftLoading while in flight", async () => {
+    let reads = 0;
+    let releaseReload: (() => void) | null = null;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) {
+          await new Promise<void>((resolve) => {
+            releaseReload = resolve;
+          });
+        }
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.draftLoading).toBe(false);
+
+    let reloadDone: Promise<void> = Promise.resolve();
+    await flushing(() => {
+      reloadDone = hook.result.current.reloadDraft();
+    });
+    // In-flight hard reload must blank the picker (unlike soft reconcile).
+    expect(hook.result.current.draftLoading).toBe(true);
+    expect(reads).toBe(2);
+    expect(releaseReload).not.toBeNull();
+    // Resolving outside act was the clean-gate failure: draft setState escaped.
+    await flushing(async () => {
+      releaseReload!();
+      await reloadDone;
+    });
+    expect(hook.result.current.draftLoading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("draft hydration cannot overwrite a latency selection made while the read is in flight", async () => {
+    let resolveDraft!: (draft: ComposerDraft) => void;
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        await new Promise<ComposerDraft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+    });
+    const applied: ComposerDraft[] = [];
+    const hook = await renderHook<ReturnType<typeof useComposer>, "standard" | "fast">(
+      (latencyMode: "standard" | "fast") =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode },
+          onDraftApplied: (draft) => applied.push(draft),
+        }),
+      "standard",
+    );
+
+    await flush();
+    await hook.rerender("fast");
+    await flushing(async () => {
+      resolveDraft({
+        revision: 1,
+        text: "restored text",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      });
+      await Promise.resolve();
+    });
+
+    expect(hook.result.current.value).toBe("restored text");
+    expect(applied).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("history already present at mount is treated as a projection, not live traffic", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const historical = Array.from({ length: 1_000 }, (_, index) =>
+      makeEvent(index + 1, "session.queue.changed", { operation: "edit" }),
+    );
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      historical,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
+  test("callback churn does not reload drafts outside target, explicit, or event triggers", async () => {
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const reads: string[] = [];
+    const applied: string[] = [];
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        reads.push(sessionId);
+        return {
+          revision: reads.length,
+          text: `${sessionId}:read-${reads.length}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    type Props = {
+      sessionId: string;
+      policyVersion: number;
+      events: SessionEvent[];
+    };
+    const hook = await renderHook(
+      (props: Props) =>
+        useComposer(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: props.events,
+          onDraftApplied: (draft) => {
+            applied.push(`${props.policyVersion}:${draft.text}`);
+          },
+        }),
+      { sessionId: SESSION_ID, policyVersion: 0, events: noEvents },
+    );
+    await flush();
+    expect(reads).toEqual([SESSION_ID]);
+    expect(applied).toEqual([`0:${SESSION_ID}:read-1`]);
+
+    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 1, events: noEvents });
+    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 2, events: noEvents });
+    await flush();
+    expect(reads).toEqual([SESSION_ID]);
+
+    await flushing(async () => await hook.result.current.reloadDraft());
+    expect(reads).toEqual([SESSION_ID, SESSION_ID]);
+    expect(applied.at(-1)).toBe(`2:${SESSION_ID}:read-2`);
+
+    await hook.rerender({
+      sessionId: SESSION_ID,
+      policyVersion: 3,
+      events: [makeEvent(1, "session.queue.changed", { operation: "edit" })],
+    });
+    await flush();
+    expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID]);
+    expect(applied.at(-1)).toBe(`3:${SESSION_ID}:read-3`);
+
+    await hook.rerender({ sessionId: sessionB, policyVersion: 4, events: noEvents });
+    await flush();
+    expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID, sessionB]);
+    expect(applied.at(-1)).toBe(`4:${sessionB}:read-4`);
     await hook.unmount();
   });
 
@@ -1687,7 +2110,6 @@ describe("useComposer durable draft and control binding", () => {
       revision: 1,
       text: "first tab state",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -1735,9 +2157,9 @@ describe("useComposer durable draft and control binding", () => {
       revision: 4,
       text: "restored text",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
+      latencyMode: "fast" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -1763,7 +2185,7 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           effectiveControl: queueSnapshot([]).effectiveControl,
-          sendExtras: { model: "model-x", reasoningEffort: "medium" },
+          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode: "fast" },
         }),
       undefined,
     );
@@ -1774,12 +2196,126 @@ describe("useComposer durable draft and control binding", () => {
     expect(saved.at(-1)).toMatchObject({
       expectedRevision: 4,
       text: "edited locally",
+      latencyMode: "fast",
     });
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
     expect(sent.at(-1)).toMatchObject({
       text: "edited locally",
       expectedDraftRevision: 5,
       controlEtag: "control-3",
+      latencyMode: "fast",
+    });
+    await hook.unmount();
+  });
+
+  test("a reconnect does not duplicate a ready file across the durable draft and live attachment", async () => {
+    const fileId = "33333333-3333-4333-8333-333333333333";
+    const canonicalFile = {
+      kind: "file" as const,
+      mountPath: `.opengeni/files/${fileId}`,
+      fileId,
+    };
+    let serverDraft: ComposerDraft = {
+      revision: 0,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const canonicalizeResources = (
+      resources: ComposerDraft["resources"],
+    ): ComposerDraft["resources"] =>
+      resources.map((resource) =>
+        resource.kind === "file"
+          ? {
+              kind: "file" as const,
+              mountPath: resource.mountPath ?? `.opengeni/files/${resource.fileId}`,
+              fileId: resource.fileId,
+            }
+          : resource,
+      );
+    const admissionMismatches: string[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        expect(request.expectedRevision).toBe(serverDraft.revision);
+        serverDraft = {
+          ...serverDraft,
+          ...request,
+          revision: serverDraft.revision + 1,
+          resources: canonicalizeResources(request.resources),
+          updatedAt: new Date().toISOString(),
+        };
+        return serverDraft;
+      },
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        const submitted = input as SendMessageInput;
+        const normalizedResources = canonicalizeResources(submitted.resources ?? []).filter(
+          (resource, index, resources) =>
+            resources.findIndex(
+              (candidate) => JSON.stringify(candidate) === JSON.stringify(resource),
+            ) === index,
+        );
+        const savedContent = JSON.stringify({
+          text: serverDraft.text,
+          resources: serverDraft.resources,
+          model: serverDraft.model,
+          reasoningEffort: serverDraft.reasoningEffort,
+        });
+        const submittedContent = JSON.stringify({
+          text: submitted.text,
+          resources: normalizedResources,
+          model: submitted.model ?? "model-x",
+          reasoningEffort: submitted.reasoningEffort ?? "medium",
+        });
+        if (
+          submitted.expectedDraftRevision === serverDraft.revision &&
+          savedContent !== submittedContent
+        ) {
+          admissionMismatches.push("Submitted content is not the saved draft");
+          throw new Error("Submitted content is not the saved draft");
+        }
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId }],
+            model: "model-x",
+            reasoningEffort: "medium",
+          }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(() => hook.result.current.setValue("Inspect the attached image."));
+    await flush(600);
+    expect(serverDraft).toMatchObject({
+      revision: 1,
+      resources: [canonicalFile],
+    });
+
+    // Reconnect reconciliation reloads the canonical server resource while
+    // the browser-local ready attachment card still supplies its bare ref.
+    await flushing(async () => await hook.result.current.reloadDraft());
+    expect(hook.result.current.restoredResources).toEqual([canonicalFile]);
+
+    let accepted = false;
+    await flushing(async () => {
+      accepted = await hook.result.current.send();
+    });
+
+    expect({ accepted, admissionMismatches }).toEqual({
+      accepted: true,
+      admissionMismatches: [],
     });
     await hook.unmount();
   });
@@ -1791,7 +2327,6 @@ describe("useComposer durable draft and control binding", () => {
         revision: 4,
         text: "",
         resources: [],
-        tools: [],
         model: "model-x",
         reasoningEffort: "medium",
         sourceTurnId: null,
@@ -1804,7 +2339,6 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          tools: request.tools,
           model: request.model,
           reasoningEffort: request.reasoningEffort,
           revision: request.expectedRevision + 1,
@@ -1848,7 +2382,6 @@ describe("useComposer durable draft and control binding", () => {
       revision: 1,
       text: "",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -1863,7 +2396,6 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          tools: request.tools,
           model: request.model,
           reasoningEffort: request.reasoningEffort,
           revision: request.expectedRevision + 1,
@@ -1895,12 +2427,352 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("a transient draft save preserves text and resources without claiming a cross-tab conflict", async () => {
+    const resource = {
+      kind: "file" as const,
+      fileId: "33333333-3333-4333-8333-333333333333",
+    };
+    const initial: ComposerDraft = {
+      revision: 4,
+      text: "local draft",
+      resources: [resource],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async () => {
+        throw gatewayError(503);
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("local edit survives"));
+    await flush(600);
+
+    expect(hook.result.current.value).toBe("local edit survives");
+    expect(hook.result.current.restoredResources).toEqual([resource]);
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.error).toMatchObject({
+      status: 503,
+      retryable: true,
+      outcomeUnknown: true,
+    });
+    expect(hook.result.current.error?.message).toBe(
+      "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
+    );
+    await hook.unmount();
+  });
+
+  test("a failed draft reload never replaces newer local text or restored resources", async () => {
+    const resource = {
+      kind: "file" as const,
+      fileId: "44444444-4444-4444-8444-444444444444",
+    };
+    const initial: ComposerDraft = {
+      revision: 2,
+      text: "server draft",
+      resources: [resource],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 1) return initial;
+        throw gatewayError(504);
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("newer unsaved local edit"));
+    await flushing(async () => await hook.result.current.reloadDraft());
+
+    expect(hook.result.current.value).toBe("newer unsaved local edit");
+    expect(hook.result.current.restoredResources).toEqual([resource]);
+    expect(hook.result.current.error?.message).not.toContain("html");
+    expect(hook.result.current.error?.message.length).toBeLessThan(160);
+    await hook.unmount();
+  });
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} preserves its draft and file after a definite payment rejection, then retries once with Codex`, async () => {
+      const resource = {
+        kind: "file" as const,
+        fileId: "55555555-5555-4555-8555-555555555555",
+      };
+      let serverDraft: ComposerDraft = {
+        revision: 7,
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      let accepted = 0;
+      const deliver = async (input: string | SendMessageInput) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw paymentRequiredError();
+        accepted += 1;
+        return makeEvent(1, "user.message");
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => serverDraft,
+        saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+          serverDraft = {
+            ...serverDraft,
+            ...request,
+            revision: request.expectedRevision + 1,
+            updatedAt: new Date().toISOString(),
+          };
+          return serverDraft;
+        },
+        sendMessage: async (_workspaceId, _sessionId, input) => await deliver(input),
+        steerMessage: async (_workspaceId, _sessionId, input) => ({
+          accepted: await deliver(input),
+          turn: fakeTurn(),
+        }),
+      });
+      const hook = await renderHook(
+        (model: string) =>
+          useComposer(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            sendExtras: { model, reasoningEffort: "xhigh" },
+          }),
+        "gpt-5.6-sol" as string,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      expect(hook.result.current.error).toMatchObject({
+        status: 402,
+        code: "payment_required",
+        retryable: false,
+        outcomeUnknown: false,
+      });
+      expect(hook.result.current.value).toBe(serverDraft.text);
+      expect(hook.result.current.restoredResources).toEqual([resource]);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "gpt-5.6-sol",
+      });
+
+      await hook.rerender("codex/gpt-5.6-sol");
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toMatchObject({
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "codex/gpt-5.6-sol",
+      });
+      expect(attempts[1]!.clientEventId).not.toBe(attempts[0]!.clientEventId);
+      expect(accepted).toBe(1);
+      expect(hook.result.current.value).toBe("");
+      expect(hook.result.current.restoredResources).toEqual([]);
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} retries an outcome-unknown gateway failure with one idempotency key`, async () => {
+      const resource = {
+        kind: "file" as const,
+        fileId: "55555555-5555-4555-8555-555555555555",
+      };
+      const initial: ComposerDraft = {
+        revision: 7,
+        text: "do not duplicate this",
+        resources: [resource],
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      const deliver = async (input: string | SendMessageInput) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw gatewayError(502);
+        return makeEvent(1, "user.message");
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        sendMessage: async (_workspaceId, _sessionId, input) => await deliver(input),
+        steerMessage: async (_workspaceId, _sessionId, input) => ({
+          accepted: await deliver(input),
+          turn: fakeTurn(),
+        }),
+      });
+      const hook = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      expect(hook.result.current.value).toBe(initial.text);
+      expect(hook.result.current.restoredResources).toEqual([resource]);
+      expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]!.clientEventId).toBe(attempts[1]!.clientEventId);
+      expect(attempts[0]!.resources).toEqual([resource]);
+      expect(hook.result.current.value).toBe("");
+      expect(hook.result.current.restoredResources).toEqual([]);
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} reconciles an outcome-unknown request before retrying`, async () => {
+      const initial: ComposerDraft = {
+        revision: 9,
+        text: "do not send twice",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      let acceptedEvent: SessionEvent | null = null;
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        listEvents: async () => (acceptedEvent ? [acceptedEvent] : []),
+        sendMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(503);
+          return makeEvent(2, "user.message");
+        },
+        steerMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(503);
+          return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
+        },
+      });
+      const hook = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      acceptedEvent = {
+        ...makeEvent(1, "user.message"),
+        clientEventId: attempts[0]!.clientEventId,
+      };
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(1);
+      expect(hook.result.current.value).toBe("");
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} keeps the original key and payload across edit and remount`, async () => {
+      const originalResource = {
+        kind: "file" as const,
+        fileId: "66666666-6666-4666-8666-666666666666",
+      };
+      const newerResource = {
+        kind: "file" as const,
+        fileId: "77777777-7777-4777-8777-777777777777",
+      };
+      const initial: ComposerDraft = {
+        revision: 10,
+        text: "original uncertain prompt",
+        resources: [originalResource],
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        sendMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(502);
+          return makeEvent(2, "user.message");
+        },
+        steerMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(502);
+          return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
+        },
+      });
+
+      const first = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+      await flushing(async () => expect(await first.result.current[delivery]()).toBe(false));
+      await first.unmount();
+
+      const second = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+      expect(second.result.current.value).toBe("original uncertain prompt");
+      expect(second.result.current.restoredResources).toEqual([originalResource]);
+      await flushing(() =>
+        second.result.current.applyDraft({
+          ...initial,
+          text: "edited after timeout",
+          resources: [newerResource],
+        }),
+      );
+      expect(second.result.current.value).toBe("edited after timeout");
+      expect(second.result.current.restoredResources).toEqual([newerResource]);
+      await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
+      expect(attempts[1]!.text).toBe("original uncertain prompt");
+      expect(attempts[1]!.resources).toEqual([originalResource]);
+      expect(second.result.current.value).toBe("edited after timeout");
+      expect(second.result.current.restoredResources).toEqual([newerResource]);
+      await second.unmount();
+    });
+  }
+
   test("an autosave conflict preserves the local text and exposes both resolution choices", async () => {
     const initial = {
       revision: 1,
       text: "remote one",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
       sourceTurnId: null,
@@ -1910,7 +2782,12 @@ describe("useComposer durable draft and control binding", () => {
     const client = fakeClient({
       getComposerDraft: async () => initial,
       saveComposerDraft: async () => {
-        throw new OpenGeniApiError(409, "draft changed");
+        // Persistently conflict even after the stale-revision retry adopts
+        // the server revision — surfaces the keep_mine / use_remote banner.
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+        );
       },
     });
     const hook = await renderHook(
@@ -1921,7 +2798,57 @@ describe("useComposer durable draft and control binding", () => {
     await flushing(async () => hook.result.current.setValue("mine remains"));
     await flush(600);
     expect(hook.result.current.value).toBe("mine remains");
-    expect(hook.result.current.draftConflict?.message).toContain("409");
+    expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
+    await hook.unmount();
+  });
+
+  test("autosave recovers a stale revision after tab-sleep OCC without surfacing a conflict", async () => {
+    const initial = {
+      revision: 1,
+      text: "remote one",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let saves = 0;
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        saves === 0
+          ? initial
+          : {
+              ...initial,
+              revision: 2,
+              text: "remote one",
+            },
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        saves += 1;
+        if (request.expectedRevision === 1) {
+          throw new OpenGeniApiError(
+            409,
+            JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+          );
+        }
+        return {
+          ...initial,
+          revision: request.expectedRevision + 1,
+          text: request.text,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => hook.result.current.setValue("mine remains"));
+    await flush(600);
+    expect(hook.result.current.value).toBe("mine remains");
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.draft?.revision).toBe(3);
+    expect(saves).toBe(2);
     await hook.unmount();
   });
 
@@ -1932,7 +2859,6 @@ describe("useComposer durable draft and control binding", () => {
       revision: 1,
       text,
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -2078,7 +3004,6 @@ describe("session hook concurrent target ownership", () => {
       revision: 1,
       text: "A draft",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -2171,6 +3096,78 @@ describe("session hook concurrent target ownership", () => {
       globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
     }
   });
+
+  test("a suspended target render cannot retarget a committed draft callback", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const draftA: ComposerDraft = {
+      revision: 1,
+      text: "A draft",
+      resources: [],
+      model: "model-a",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let resolveA!: (draft: ComposerDraft) => void;
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        if (sessionId !== sessionA) throw new Error("uncommitted B must not read");
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveA = resolve;
+        });
+      },
+    });
+    const applied: string[] = [];
+    let setTarget!: (target: string) => void;
+    let renderedB = false;
+    const suspended = new Promise<never>(() => {});
+
+    function Harness() {
+      const [target, setTargetState] = useState(sessionA);
+      setTarget = setTargetState;
+      useComposer(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+        onDraftApplied: (draft) => applied.push(`${target}:${draft.text}`),
+      });
+      if (target === sessionB) {
+        renderedB = true;
+        throw suspended;
+      }
+      return null;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      flushSync(() => {
+        root.render(
+          <Suspense fallback={null}>
+            <Harness />
+          </Suspense>,
+        );
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      startTransition(() => setTarget(sessionB));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renderedB).toBe(true);
+
+      resolveA(draftA);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(applied).toEqual([`${sessionA}:A draft`]);
+    } finally {
+      flushSync(() => root.unmount());
+      container.remove();
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
 });
 
 describe("useComposer file-only send", () => {
@@ -2238,6 +3235,36 @@ describe("useComposer file-only send", () => {
     await hook.unmount();
   });
 
+  test("sendBlocked gates canSend and direct send() calls until the host resolves attachments", async () => {
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      (blocked: boolean) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "ready-file" }] }),
+          sendBlocked: () => blocked,
+        }),
+      true as boolean,
+    );
+
+    expect(hook.result.current.canSend).toBe(false);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(false));
+    expect(sent).toEqual([]);
+
+    await hook.rerender(false);
+    expect(hook.result.current.canSend).toBe(true);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(sent).toHaveLength(1);
+    await hook.unmount();
+  });
+
   test("sending a file-only message dispatches the resources with a minimal default text", async () => {
     const sent: { text: string; resources?: unknown }[] = [];
     const client = fakeClient({
@@ -2266,6 +3293,95 @@ describe("useComposer file-only send", () => {
     // Resources ride along, and the wire text is non-empty (contract: min(1)).
     expect(sent[0]!.resources).toEqual([{ kind: "file", fileId: "file-1" }]);
     expect(sent[0]!.text.trim().length).toBeGreaterThan(0);
+    await hook.unmount();
+  });
+  test("onSent receives the immutable input snapshot accepted before an in-flight edit", async () => {
+    let currentFileId = "accepted-file";
+    let releaseSend!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let accepted: SendMessageInput | undefined;
+    const client = fakeClient({
+      sendMessage: async () => {
+        markStarted();
+        await pending;
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: currentFileId }] }),
+          onSent: (_text, input) => {
+            accepted = input;
+          },
+        }),
+      undefined,
+    );
+
+    let result!: Promise<boolean>;
+    await flushing(() => {
+      result = hook.result.current.send();
+    });
+    await started;
+    currentFileId = "later-file";
+    await flushing(async () => {
+      releaseSend();
+      expect(await result).toBe(true);
+    });
+
+    expect(accepted?.resources).toEqual([{ kind: "file", fileId: "accepted-file" }]);
+    await hook.unmount();
+  });
+
+  test("persists the same file-only text that it submits", async () => {
+    const initial: ComposerDraft = {
+      revision: 3,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const saved: unknown[] = [];
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        saved.push(request);
+        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+      },
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+
+    expect(saved).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
     await hook.unmount();
   });
 });
@@ -2298,6 +3414,15 @@ describe("useEnvironments", () => {
         log.push(`set:${environmentId}:${name}`);
         return { name, version: 1, createdAt: "", updatedAt: "" };
       },
+      getVariableSetVariable: async (_ws, environmentId, name) => {
+        log.push(`read:${environmentId}:${name}`);
+        return {
+          variableSetId: environmentId,
+          name,
+          version: 1,
+          value: `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`,
+        };
+      },
       deleteEnvironmentVariable: async (_ws, environmentId, name) => {
         log.push(`unset:${environmentId}:${name}`);
       },
@@ -2322,6 +3447,13 @@ describe("useEnvironments", () => {
       "staging",
     ]);
     await flushing(async () => {
+      const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
+      expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
+    });
+    // Plaintext is returned directly to the caller and never triggers a
+    // metadata-cache refresh that could retain it.
+    expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");
+    await flushing(async () => {
       await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
       await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
       await hook.result.current.remove("env-1");
@@ -2330,6 +3462,7 @@ describe("useEnvironments", () => {
       "list",
       "create:staging",
       "list",
+      "read:env-1:EXAMPLE_TOKEN",
       "set:env-1:EXAMPLE_TOKEN",
       "list",
       "unset:env-1:EXAMPLE_TOKEN",

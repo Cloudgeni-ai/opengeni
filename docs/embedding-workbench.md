@@ -162,7 +162,16 @@ whole workbench. The high-value tokens:
 | `--og-color-status-running` / `--og-color-status-idle` / `--og-color-danger` | the machine chip dot, diff add/remove, and error text. |
 | `--og-color-diff-add-bg` / `--og-color-diff-del-bg` | the Changes diff add/remove backgrounds. |
 | `--og-font-sans` / `--og-font-mono` | UI vs. code/terminal typography. |
+| `--og-font-size-xs` … `--og-font-size-md` | the compact SDK text ramp. Matching `--og-line-height-*` tokens control rhythm. |
+| `--og-font-size-control` / `--og-font-size-menu` | compact chrome vs. dropdown/menu labels. |
+| `--og-font-size-composer` / `--og-font-size-composer-wide` | composer text on narrow and wide viewports. |
+| `--og-model-picker-*` | picker trigger height, menu width/padding, row padding, and effort-row height. |
 | `--og-radius-sm` … `--og-radius-xl` | corner rounding across the dock. |
 
 Light mode is a first-class opt-in: set `data-og-theme="light"` on any ancestor.
-Dark is the default.
+Dark is the default. Set `data-og-density="compact"` (or
+`class="og-density-compact"`) on an SDK ancestor for the supported embedded
+sidebar preset. The defaults stay render-compatible with the web app's
+current type sizes and control geometry. Portalled SDK surfaces copy all
+effective `--og-*` values from their trigger, so locally scoped theme and
+density overrides remain intact outside the ancestor DOM subtree.

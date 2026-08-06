@@ -1,5 +1,550 @@
 # @opengeni/events
 
+## 0.3.82
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+- Updated dependencies [1503151]
+- Updated dependencies [a296081]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/db@0.28.3
+
+## 0.3.81
+
+### Patch Changes
+
+- 5d1d0c2: Make browser live streams visibility-aware, share one routed session feed,
+  bound reconciliation and heartbeat recovery, coalesce overlapping reads, and
+  expose the append, publish, and SSE connection lifecycle in metrics.
+- Updated dependencies [110d255]
+- Updated dependencies [ce823ce]
+  - @opengeni/db@0.28.2
+  - @opengeni/contracts@0.39.1
+
+## 0.3.80
+
+### Patch Changes
+
+- Updated dependencies [55f6ad0]
+  - @opengeni/db@0.28.1
+
+## 0.3.79
+
+### Patch Changes
+
+- Updated dependencies [49c7f9c]
+- Updated dependencies [6eb0b23]
+- Updated dependencies [5b6d36e]
+  - @opengeni/db@0.28.0
+  - @opengeni/contracts@0.39.0
+
+## 0.3.78
+
+### Patch Changes
+
+- Updated dependencies [cbf165a]
+  - @opengeni/db@0.27.12
+
+## 0.3.77
+
+### Patch Changes
+
+- Updated dependencies [17643a5]
+  - @opengeni/db@0.27.11
+
+## 0.3.76
+
+### Patch Changes
+
+- Updated dependencies [69bc207]
+- Updated dependencies [144fd9e]
+- Updated dependencies [c0f8e40]
+  - @opengeni/db@0.27.10
+  - @opengeni/contracts@0.38.3
+
+## 0.3.75
+
+### Patch Changes
+
+- Updated dependencies [4502474]
+  - @opengeni/contracts@0.38.2
+  - @opengeni/db@0.27.9
+
+## 0.3.74
+
+### Patch Changes
+
+- Updated dependencies [dfa3aef]
+  - @opengeni/db@0.27.8
+
+## 0.3.73
+
+### Patch Changes
+
+- Updated dependencies [c29fd4c]
+  - @opengeni/db@0.27.7
+
+## 0.3.72
+
+### Patch Changes
+
+- @opengeni/db@0.27.6
+
+## 0.3.71
+
+### Patch Changes
+
+- Updated dependencies [c9d8b69]
+  - @opengeni/contracts@0.38.1
+  - @opengeni/db@0.27.5
+
+## 0.3.70
+
+### Patch Changes
+
+- Updated dependencies [b6e39fc]
+- Updated dependencies [bef5920]
+  - @opengeni/db@0.27.4
+  - @opengeni/contracts@0.38.0
+
+## 0.3.69
+
+### Patch Changes
+
+- @opengeni/db@0.27.3
+
+## 0.3.68
+
+### Patch Changes
+
+- Updated dependencies [fd13ba9]
+  - @opengeni/contracts@0.37.0
+  - @opengeni/db@0.27.2
+
+## 0.3.67
+
+### Patch Changes
+
+- Updated dependencies [abe0de6]
+  - @opengeni/contracts@0.36.1
+  - @opengeni/db@0.27.1
+
+## 0.3.66
+
+### Patch Changes
+
+- Updated dependencies [00f7d3b]
+  - @opengeni/contracts@0.36.0
+  - @opengeni/db@0.27.0
+
+## 0.3.65
+
+### Patch Changes
+
+- Updated dependencies [b121e7c]
+  - @opengeni/contracts@0.35.0
+  - @opengeni/db@0.26.0
+
+## 0.3.64
+
+### Patch Changes
+
+- Updated dependencies [b83af7a]
+  - @opengeni/contracts@0.34.0
+  - @opengeni/db@0.25.0
+
+## 0.3.63
+
+### Patch Changes
+
+- Updated dependencies [d1f0c3d]
+- Updated dependencies [1d0f2ae]
+- Updated dependencies [088d7cb]
+- Updated dependencies [3e4842d]
+  - @opengeni/contracts@0.33.0
+  - @opengeni/db@0.24.0
+
+## 0.3.62
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [acfcf38]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/db@0.23.0
+
+## 0.3.61
+
+### Patch Changes
+
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/db@0.22.3
+
+## 0.3.60
+
+### Patch Changes
+
+- Updated dependencies [9c4d73d]
+  - @opengeni/contracts@0.31.1
+  - @opengeni/db@0.22.2
+
+## 0.3.59
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/contracts@0.31.0
+  - @opengeni/db@0.22.1
+
+## 0.3.58
+
+### Patch Changes
+
+- Updated dependencies [e07eb52]
+  - @opengeni/db@0.22.0
+
+## 0.3.57
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+  - @opengeni/db@0.21.0
+
+## 0.3.56
+
+### Patch Changes
+
+- Updated dependencies [dd71248]
+- Updated dependencies [03ed7eb]
+  - @opengeni/contracts@0.29.0
+  - @opengeni/db@0.20.0
+
+## 0.3.55
+
+### Patch Changes
+
+- Updated dependencies [1a2d41f]
+  - @opengeni/db@0.19.0
+
+## 0.3.54
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/db@0.18.1
+
+## 0.3.53
+
+### Patch Changes
+
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/db@0.18.0
+
+## 0.3.52
+
+### Patch Changes
+
+- @opengeni/db@0.17.1
+
+## 0.3.51
+
+### Patch Changes
+
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/contracts@0.27.0
+  - @opengeni/db@0.17.0
+
+## 0.3.50
+
+### Patch Changes
+
+- Updated dependencies [c52acc0]
+  - @opengeni/contracts@0.26.1
+  - @opengeni/db@0.16.2
+
+## 0.3.49
+
+### Patch Changes
+
+- Updated dependencies [02fb98c]
+  - @opengeni/db@0.16.1
+
+## 0.3.48
+
+### Patch Changes
+
+- Updated dependencies [b5175a8]
+- Updated dependencies [f413e6c]
+  - @opengeni/db@0.16.0
+  - @opengeni/contracts@0.26.0
+
+## 0.3.47
+
+### Patch Changes
+
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [7b65614]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/db@0.15.6
+
+## 0.3.46
+
+### Patch Changes
+
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/db@0.15.5
+
+## 0.3.45
+
+### Patch Changes
+
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/db@0.15.4
+  - @opengeni/contracts@0.24.2
+
+## 0.3.44
+
+### Patch Changes
+
+- Updated dependencies [510eae3]
+  - @opengeni/db@0.15.3
+
+## 0.3.43
+
+### Patch Changes
+
+- Updated dependencies [ddff8db]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/db@0.15.2
+
+## 0.3.42
+
+### Patch Changes
+
+- Updated dependencies [6d167f4]
+  - @opengeni/db@0.15.1
+
+## 0.3.41
+
+### Patch Changes
+
+- Updated dependencies [a19971e]
+- Updated dependencies [1f6f13f]
+  - @opengeni/contracts@0.24.0
+  - @opengeni/db@0.15.0
+
+## 0.3.40
+
+### Patch Changes
+
+- Updated dependencies [848287f]
+  - @opengeni/db@0.14.7
+
+## 0.3.39
+
+### Patch Changes
+
+- Updated dependencies [2aca964]
+  - @opengeni/db@0.14.6
+
+## 0.3.38
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/db@0.14.5
+
+## 0.3.37
+
+### Patch Changes
+
+- Updated dependencies [ea38a4c]
+  - @opengeni/db@0.14.4
+
+## 0.3.36
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/db@0.14.3
+
+## 0.3.35
+
+### Patch Changes
+
+- Updated dependencies [1c4018e]
+  - @opengeni/contracts@0.22.1
+  - @opengeni/db@0.14.2
+
+## 0.3.34
+
+### Patch Changes
+
+- Updated dependencies [6908a7a]
+  - @opengeni/db@0.14.1
+
+## 0.3.33
+
+### Patch Changes
+
+- Updated dependencies [29ad09b]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/db@0.14.0
+
+## 0.3.32
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/db@0.13.4
+
+## 0.3.31
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/contracts@0.20.2
+  - @opengeni/db@0.13.3
+
+## 0.3.30
+
+### Patch Changes
+
+- Updated dependencies [8b8545e]
+  - @opengeni/db@0.13.2
+
+## 0.3.29
+
+### Patch Changes
+
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+  - @opengeni/db@0.13.1
+
+## 0.3.28
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/db@0.13.0
+
+## 0.3.27
+
+### Patch Changes
+
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/db@0.12.6
+
+## 0.3.26
+
+### Patch Changes
+
+- Updated dependencies [a0f2442]
+  - @opengeni/contracts@0.19.3
+  - @opengeni/db@0.12.5
+
+## 0.3.25
+
+### Patch Changes
+
+- Updated dependencies [85cb323]
+  - @opengeni/contracts@0.19.2
+  - @opengeni/db@0.12.4
+
+## 0.3.24
+
+### Patch Changes
+
+- Updated dependencies [1386679]
+- Updated dependencies [b7290a3]
+- Updated dependencies [dcde939]
+- Updated dependencies [5685f32]
+- Updated dependencies [de20184]
+  - @opengeni/db@0.12.3
+  - @opengeni/contracts@0.19.1
+
+## 0.3.23
+
+### Patch Changes
+
+- Updated dependencies [7c6aa7c]
+  - @opengeni/db@0.12.2
+
+## 0.3.22
+
+### Patch Changes
+
+- @opengeni/db@0.12.1
+
+## 0.3.21
+
+### Patch Changes
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+  - @opengeni/db@0.12.0
+
+## 0.3.20
+
+### Patch Changes
+
+- Updated dependencies [744a93d]
+- Updated dependencies [0ed0f01]
+- Updated dependencies [b32938f]
+  - @opengeni/contracts@0.18.1
+  - @opengeni/db@0.11.0
+
+## 0.3.19
+
+### Patch Changes
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+  - @opengeni/contracts@0.18.0
+  - @opengeni/db@0.10.7
+
+## 0.3.18
+
+### Patch Changes
+
+- Updated dependencies [524599e]
+  - @opengeni/contracts@0.17.3
+  - @opengeni/db@0.10.6
+
 ## 0.3.17
 
 ### Patch Changes

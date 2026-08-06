@@ -22,6 +22,7 @@ import {
   Document as ContractDocument,
   DocumentBase as ContractDocumentBase,
   DocumentSearchResult as ContractDocumentSearchResult,
+  DocumentSearchResponse as ContractDocumentSearchResponse,
   DocumentStatus as ContractDocumentStatus,
   EnableCapabilityRequest as ContractEnableCapabilityRequest,
   EnablePackRequest as ContractEnablePackRequest,
@@ -36,7 +37,9 @@ import {
   RetainedOutputUnavailableReason as ContractRetainedOutputUnavailableReason,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
   GitHubAppInfo as ContractGitHubAppInfo,
+  GitHubBindingStatus as ContractGitHubBindingStatus,
   GitHubInstallationBinding as ContractGitHubInstallationBinding,
+  GitHubInstallationLifecycle as ContractGitHubInstallationLifecycle,
   GitHubRepository as ContractGitHubRepository,
   GitHubRepositoryScope as ContractGitHubRepositoryScope,
   PackInstallation as ContractPackInstallation,
@@ -94,6 +97,7 @@ import type {
   Document,
   DocumentBase,
   DocumentSearchResult,
+  DocumentSearchResponse,
   DocumentStatus,
   EnableCapabilityRequest,
   EnablePackRequest,
@@ -106,7 +110,9 @@ import type {
   RetainedOutputUnavailableReason,
   GitHubRepository,
   GitHubAppInfo,
+  GitHubBindingStatus,
   GitHubInstallationBinding,
+  GitHubInstallationLifecycle,
   GitHubRepositoryScope,
   PackInstallation,
   PackInstallationStatus,
@@ -146,7 +152,12 @@ describe("SDK / contracts parity (full coverage)", () => {
 
   test("GitHub installation binding literals and response shapes match", () => {
     const scopes: readonly GitHubRepositoryScope[] = ContractGitHubRepositoryScope.options;
+    const statuses: readonly GitHubBindingStatus[] = ContractGitHubBindingStatus.options;
+    const lifecycles: readonly GitHubInstallationLifecycle[] =
+      ContractGitHubInstallationLifecycle.options;
     expect(scopes).toEqual(ContractGitHubRepositoryScope.options);
+    expect(statuses).toEqual(ContractGitHubBindingStatus.options);
+    expect(lifecycles).toEqual(ContractGitHubInstallationLifecycle.options);
     const acceptBinding = (
       value: z.infer<typeof ContractGitHubInstallationBinding>,
     ): GitHubInstallationBinding => value;
@@ -235,6 +246,16 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptSearchResult = (
       value: z.infer<typeof ContractDocumentSearchResult>,
     ): DocumentSearchResult => value;
+    const acceptContractDocument = (value: Document): z.infer<typeof ContractDocument> => value;
+    const acceptContractSearchResult = (
+      value: DocumentSearchResult,
+    ): z.infer<typeof ContractDocumentSearchResult> => value;
+    const acceptSearchResponse = (
+      value: z.infer<typeof ContractDocumentSearchResponse>,
+    ): DocumentSearchResponse => value;
+    const acceptContractSearchResponse = (
+      value: DocumentSearchResponse,
+    ): z.infer<typeof ContractDocumentSearchResponse> => value;
     const acceptPack = (value: z.infer<typeof ContractCapabilityPack>): CapabilityPack => value;
     const acceptRegisteredPack = (
       value: z.infer<typeof ContractWorkspaceRegisteredPack>,
@@ -270,6 +291,10 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptDocumentBase,
       acceptDocument,
       acceptSearchResult,
+      acceptContractDocument,
+      acceptContractSearchResult,
+      acceptSearchResponse,
+      acceptContractSearchResponse,
       acceptPack,
       acceptRegisteredPack,
       acceptPackInstallation,
@@ -383,6 +408,11 @@ describe("SDK / contracts parity (full coverage)", () => {
       role: "devops",
       category: "infrastructure",
       version: "1.0.0",
+      sandboxImage:
+        "ghcr.io/acme/devops@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sandboxProviderImages: {
+        modal: { imageId: "im-1234567890123456789012" },
+      },
       skills: [{ name: "runbooks", files: [{ path: "SKILL.md", content: "# Runbooks" }] }],
     };
     expect(ContractRegisterCapabilityPackRequest.safeParse(manifest).success).toBe(true);

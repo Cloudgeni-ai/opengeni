@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +49,7 @@ const PORT = 61440;
 const CONTAINER = `opengeni-shared-test-pg-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
+const GOVERNANCE_APP_PASSWORD = "governanceapppw";
 const IMAGE = "pgvector/pgvector:pg16";
 const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // A once-migrated database every test file clones from via `CREATE DATABASE ...
@@ -63,18 +65,22 @@ const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // is what lets concurrent clones proceed (they serialize on the source but do
 // not error) and guarantees every clone is byte-identical to the migrated schema.
 //
-// The name carries a FINGERPRINT of the migration chain (sorted file names +
-// contents). The container OUTLIVES checkouts — it persists across sessions and
+// The name carries a FINGERPRINT of every input that defines the template:
+// migration files, the migration runner, and the runtime-role provisioning
+// contract. The container OUTLIVES checkouts — it persists across sessions and
 // is shared by every worktree on the machine — so a bare name would freeze the
-// schema at whichever migration chain first built it: a branch that ADDS a
-// migration would then run all its tests against clones missing the new
-// column, failing on every touched table. Baking the fingerprint into the name
-// gives each distinct chain its own template (built on first use, coexisting
-// with older ones), with no rebuild races between checkouts.
+// schema/ACLs at whichever checkout first built it. Baking every template input
+// into the name gives each exact contract its own immutable template.
 const TEMPLATE_DB_PREFIX = "og_test_template_";
 
 /** The migrations dir this checkout's `migrate()` applies (@opengeni/db). */
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../db/drizzle", import.meta.url));
+const TEMPLATE_CONTRACT_FILES = [
+  fileURLToPath(new URL("../../db/src/migrate.ts", import.meta.url)),
+  fileURLToPath(new URL("../../db/src/provision-roles.ts", import.meta.url)),
+  fileURLToPath(new URL("../../db/src/runtime-posture.ts", import.meta.url)),
+  fileURLToPath(new URL("./shared-pg.ts", import.meta.url)),
+] as const;
 
 let templateDbNameMemo: string | undefined;
 
@@ -92,6 +98,12 @@ async function templateDbName(): Promise<string> {
     hasher.update(await readFile(join(MIGRATIONS_DIR, file)));
     hasher.update("\0");
   }
+  for (const file of TEMPLATE_CONTRACT_FILES) {
+    hasher.update(file);
+    hasher.update("\0");
+    hasher.update(await readFile(file));
+    hasher.update("\0");
+  }
   templateDbNameMemo = `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
   return templateDbNameMemo;
 }
@@ -107,6 +119,8 @@ export type SharedTestDatabase = {
   adminUrl: string;
   /** opengeni_app (non-superuser) URL for createDb() — FORCE RLS applies. */
   appUrl: string;
+  /** v2 organization-governance runtime role URL. */
+  governanceAppUrl?: string;
   /** Release this file's handle: closes admin + decrements the shared refcount. */
   release: () => Promise<void>;
 };
@@ -253,20 +267,16 @@ async function ensureTemplateBuilt(): Promise<void> {
   // 0000_initial inside migrate()).
   await migrate(templateUrl);
 
-  // Grant the non-superuser login role the same way each per-file database used
-  // to be granted (the migrations' grants are IF EXISTS-guarded and skipped in a
-  // fresh database); clones inherit these object grants from the template.
-  const grantsSql = postgres(templateUrl, { max: 1 });
-  try {
-    await grantsSql.unsafe(`
-      GRANT USAGE ON SCHEMA public TO opengeni_app;
-      GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-    `);
-  } finally {
-    await grantsSql.end().catch(() => undefined);
-  }
+  // Apply the exact production role/DML contract. Clones inherit these object
+  // grants from the template, including the intentional absence of access to
+  // schema_migrations and one-time repair-audit tables.
+  await provisionRoles(templateUrl, {
+    appRole: "opengeni_app",
+    appPassword: APP_PASSWORD,
+    organizationGovernanceRole: "opengeni_governance_app",
+    organizationGovernancePassword: GOVERNANCE_APP_PASSWORD,
+    rlsStrategy: "force",
+  });
 
   // Flip the ready sentinel. This must run with NO open connections to the
   // template; the migrate + grant pools above are already closed. Marking it a
@@ -341,7 +351,11 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
         await admin.unsafe(`
           DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-              CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
+              CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
+            ELSE
+              ALTER ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
             END IF;
           END $$;`);
       } finally {
@@ -451,6 +465,7 @@ export async function acquireSharedTestDatabase(
   const dbName = uniqueDbName(label);
   const adminUrl = `${ADMIN_BASE_URL}/${dbName}`;
   const appUrl = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/${dbName}`;
+  const governanceAppUrl = `postgres://opengeni_governance_app:${GOVERNANCE_APP_PASSWORD}@127.0.0.1:${PORT}/${dbName}`;
 
   try {
     // Clone this file's database from the once-migrated template. Postgres does a
@@ -465,6 +480,7 @@ export async function acquireSharedTestDatabase(
       admin,
       adminUrl,
       appUrl,
+      governanceAppUrl,
       release: async () => {
         if (released) {
           return;

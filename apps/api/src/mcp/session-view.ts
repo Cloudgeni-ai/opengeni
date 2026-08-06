@@ -564,6 +564,7 @@ export function boundSessionDetailMcp(
     lastSequence: session.lastSequence,
     codexPinnedCredentialId: session.codexPinnedCredentialId,
     codexLastCredentialId: session.codexLastCredentialId,
+    codexCompactionMode: session.codexCompactionMode,
     pinned: session.pinned,
     pinnedAt: session.pinnedAt,
     pinVersion: session.pinVersion,

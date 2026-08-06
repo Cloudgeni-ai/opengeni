@@ -5,9 +5,60 @@
 import type { Session } from "@/types";
 
 const SESSION_PIN_CHANNEL_PREFIX = "opengeni.session-pins";
+const SESSION_PIN_STORAGE_PREFIX = "opengeni.session-pins.changed";
+const outboundChannels = new Map<string, BroadcastChannel>();
+
+type SessionTreeStats = NonNullable<Session["treeStats"]>;
+
+type SessionPinChangeMessage = {
+  type: "session-pin.changed";
+  sessionId: string;
+  messageId: string;
+};
 
 function channelName(workspaceId: string): string {
   return `${SESSION_PIN_CHANNEL_PREFIX}:${workspaceId}`;
+}
+
+function storageKey(workspaceId: string): string {
+  return `${SESSION_PIN_STORAGE_PREFIX}:${workspaceId}`;
+}
+
+function newMessageId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function sessionPinChangeMessage(value: unknown): SessionPinChangeMessage | null {
+  const message = value as Partial<SessionPinChangeMessage> | null;
+  return message?.type === "session-pin.changed" &&
+    typeof message.sessionId === "string" &&
+    message.sessionId.length > 0 &&
+    typeof message.messageId === "string" &&
+    message.messageId.length > 0
+    ? (message as SessionPinChangeMessage)
+    : null;
+}
+
+function sameTreeStats(a: SessionTreeStats | undefined, b: SessionTreeStats | undefined): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+  return (
+    a.directChildren === b.directChildren &&
+    a.totalDescendants === b.totalDescendants &&
+    a.runningDescendants === b.runningDescendants &&
+    a.queuedDescendants === b.queuedDescendants &&
+    a.attentionDescendants === b.attentionDescendants &&
+    a.pausedDescendants === b.pausedDescendants &&
+    a.failedDescendants === b.failedDescendants &&
+    a.truncated === b.truncated
+  );
 }
 
 /**
@@ -44,6 +95,35 @@ export function applySessionPinProjection(
 }
 
 /**
+ * Merge a detail/SSE projection into the root context without allowing a
+ * slower detail read to erase a newer list or optimistic pin projection.
+ * Detail remains authoritative for every non-pin field; the current context
+ * contributes only its pin fields when that projection is newer or equal.
+ */
+export function mergeSessionContextProjection(
+  current: Session | null,
+  projected: Session | null,
+): Session | null {
+  if (!projected) {
+    return null;
+  }
+  return applySessionPinProjection(projected, current ?? projected) ?? projected;
+}
+
+/**
+ * Merge list-owned personal pin and hierarchy fields into route-owned session
+ * content. A route/SSE object must never overwrite a newer cross-device unpin,
+ * while a list poll must never regress lifecycle state or message content.
+ */
+export function applySessionRailProjection(current: Session, projected: Session): Session {
+  const merged = applySessionPinProjection(current, projected) ?? current;
+  if (sameTreeStats(merged.treeStats, projected.treeStats)) {
+    return merged;
+  }
+  return projected.treeStats ? { ...merged, treeStats: projected.treeStats } : merged;
+}
+
+/**
  * Reconcile the point read performed after a failed pin request.
  *
  * An optimistic first pin projects version 1 before the server responds. If the
@@ -76,36 +156,115 @@ export function reconcileFailedSessionPin(
   if (!stillExactOptimistic) {
     return applySessionPinProjection(current, authoritative);
   }
+  const authoritativePinned = Boolean(authoritative.pinned);
+  const authoritativePinnedAt = authoritative.pinnedAt ?? null;
+  const authoritativeVersion = authoritative.pinVersion ?? 0;
+  if (
+    Boolean(current.pinned) === authoritativePinned &&
+    (current.pinnedAt ?? null) === authoritativePinnedAt &&
+    (current.pinVersion ?? 0) === authoritativeVersion
+  ) {
+    return current;
+  }
   return {
     ...current,
-    pinned: Boolean(authoritative.pinned),
-    pinnedAt: authoritative.pinnedAt ?? null,
-    pinVersion: authoritative.pinVersion ?? 0,
+    pinned: authoritativePinned,
+    pinnedAt: authoritativePinnedAt,
+    pinVersion: authoritativeVersion,
   };
 }
 
 export function notifySessionPinChanged(workspaceId: string, sessionId: string): void {
-  if (typeof BroadcastChannel === "undefined") {
-    return;
+  const message: SessionPinChangeMessage = {
+    type: "session-pin.changed",
+    sessionId,
+    messageId: newMessageId(),
+  };
+  if (typeof BroadcastChannel !== "undefined") {
+    const name = channelName(workspaceId);
+    try {
+      let channel = outboundChannels.get(name);
+      if (!channel) {
+        // Closing immediately after postMessage is observably lossy in real
+        // browsers. Keep one document-scoped outbound channel alive instead.
+        channel = new BroadcastChannel(name);
+        outboundChannels.set(name, channel);
+      }
+      channel.postMessage(message);
+    } catch {
+      // localStorage below remains the cross-document fallback.
+    }
   }
-  const channel = new BroadcastChannel(channelName(workspaceId));
-  channel.postMessage({ type: "session-pin.changed", sessionId });
-  channel.close();
+
+  if (typeof window === "undefined") return;
+  const key = storageKey(workspaceId);
+  const serialized = JSON.stringify(message);
+  try {
+    window.localStorage.setItem(key, serialized);
+    // Removing synchronously can race delivery in sibling tabs. Leave the
+    // unique payload long enough to emit a storage event, then remove only the
+    // value written by this notification.
+    window.setTimeout(() => {
+      try {
+        if (window.localStorage.getItem(key) === serialized) {
+          window.localStorage.removeItem(key);
+        }
+      } catch {
+        // Storage may become unavailable after the page was backgrounded.
+      }
+    }, 1_000);
+  } catch {
+    // Private browsing and embedded contexts may deny localStorage entirely.
+  }
 }
 
 export function subscribeToSessionPinChanges(
   workspaceId: string,
   onChange: (sessionId: string) => void,
 ): () => void {
-  if (typeof BroadcastChannel === "undefined") {
-    return () => undefined;
-  }
-  const channel = new BroadcastChannel(channelName(workspaceId));
-  channel.addEventListener("message", (event: MessageEvent<unknown>) => {
-    const message = event.data as { type?: unknown; sessionId?: unknown } | null;
-    if (message?.type === "session-pin.changed" && typeof message.sessionId === "string") {
-      onChange(message.sessionId);
+  // BroadcastChannel and storage events can arrive in either order, and two
+  // rapid mutations can interleave those transports. Remember a small bounded
+  // window rather than only the immediately previous id so A, B, A still
+  // invalidates exactly once per mutation without growing for the tab's life.
+  const seenMessageIds = new Set<string>();
+  const receive = (value: unknown): void => {
+    const message = sessionPinChangeMessage(value);
+    if (!message || seenMessageIds.has(message.messageId)) return;
+    seenMessageIds.add(message.messageId);
+    if (seenMessageIds.size > 64) {
+      const oldest = seenMessageIds.values().next().value;
+      if (oldest !== undefined) seenMessageIds.delete(oldest);
     }
-  });
-  return () => channel.close();
+    onChange(message.sessionId);
+  };
+
+  let channel: BroadcastChannel | null = null;
+  if (typeof BroadcastChannel !== "undefined") {
+    try {
+      channel = new BroadcastChannel(channelName(workspaceId));
+      channel.addEventListener("message", (event: MessageEvent<unknown>) => receive(event.data));
+    } catch {
+      channel = null;
+    }
+  }
+
+  const key = storageKey(workspaceId);
+  const onStorage = (event: StorageEvent): void => {
+    if (event.key !== key || !event.newValue) return;
+    try {
+      receive(JSON.parse(event.newValue));
+    } catch {
+      // Ignore malformed or unrelated storage payloads.
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", onStorage);
+  }
+
+  return () => {
+    channel?.close();
+    if (typeof window !== "undefined") {
+      window.removeEventListener("storage", onStorage);
+    }
+  };
 }

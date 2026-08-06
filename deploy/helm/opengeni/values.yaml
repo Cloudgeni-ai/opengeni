@@ -15,10 +15,33 @@ serviceAccount:
   annotations: {}
   automountServiceAccountToken: false
 
+# Optional release-local Pod priority tiers. They do not reserve or cap CPU or
+# memory. They tell the kubelet which OpenGeni roles to evict first when the
+# node is under pressure. `Never` keeps priority from preempting a running pod
+# merely to admit another one.
+priorityClasses:
+  enabled: false
+  preemptionPolicy: Never
+  tiers:
+    presentation:
+      value: 1000
+      description: Restartable browser and live-stream presentation.
+    execution:
+      value: 2000
+      description: Restartable turn execution with durable Temporal recovery.
+    control:
+      value: 3000
+      description: API, machine transport, and orchestration control.
+    durable:
+      value: 4000
+      description: Durable database, workflow, object storage, and upgrade gates.
+
 networkPolicy:
   enabled: false
   egress:
     enabled: false
+    # Environment-specific rules appended after OpenGeni's canonical recording
+    # and alert rules. This list never replaces the built-in safety catalog.
     rules: []
   ingressController:
     namespaceSelector: {}
@@ -67,7 +90,9 @@ secret:
   create: false
   existingSecret: opengeni-runtime
   # Provide OPENGENI_ACCESS_KEY for deployment shared-key access.
-  # Provide OPENGENI_DELEGATION_SECRET for configured/managed product access.
+  # Provide OPENGENI_DELEGATION_SECRET in every access mode. API and workers
+  # share it to preserve narrowed permissions and signed session/turn identity
+  # on first-party MCP requests, including in local mode.
   # Managed organization recovery also requires
   # OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET: a separate,
   # stable base64-encoded 32-byte secret. Provision it before rolling out new
@@ -134,10 +159,10 @@ api:
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
+      memory: 1Gi
     limits:
       cpu: "1"
-      memory: 1Gi
+      memory: 2Gi
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 1000
@@ -185,6 +210,8 @@ api:
   service:
     type: ClusterIP
     port: 8000
+    # Optional fixed NodePort for single-node/private-edge deployments.
+    nodePort: null
   autoscaling:
     enabled: false
     minReplicas: 2
@@ -203,6 +230,7 @@ worker:
   containerPort: 8001
   control:
     replicaCount: 2
+    priorityClassName: ""
     strategy:
       type: RollingUpdate
       rollingUpdate:
@@ -228,6 +256,7 @@ worker:
       behavior: {}
   turns:
     replicaCount: 4
+    priorityClassName: ""
     strategy:
       type: RollingUpdate
       rollingUpdate:
@@ -301,6 +330,13 @@ worker:
 
 web:
   enabled: true
+  # Server-side target for the public React reference demo's same-origin
+  # /demo-api proxy. Empty uses this release's in-cluster API service when the
+  # API is enabled; set an explicit http(s) URL only for split deployments.
+  demoApiBaseUrl: ""
+  # Optional dedicated Secret containing `api-key` and/or `access-key` data
+  # entries. It is mounted read-only; do not reuse the full runtime Secret.
+  demoApiCredentialsSecret: ""
   replicaCount: 2
   strategy:
     type: RollingUpdate
@@ -368,6 +404,8 @@ web:
   service:
     type: ClusterIP
     port: 3000
+    # Optional fixed NodePort for single-node/private-edge deployments.
+    nodePort: null
   autoscaling:
     enabled: false
     minReplicas: 2
@@ -471,6 +509,8 @@ relay:
   service:
     type: ClusterIP
     port: 8443
+    # Optional fixed NodePort for single-node/private-edge deployments.
+    nodePort: null
   autoscaling:
     enabled: true
     minReplicas: 2
@@ -485,6 +525,7 @@ relay:
 
 migrations:
   enabled: true
+  priorityClassName: ""
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -492,10 +533,19 @@ migrations:
     digest: ""
     pullPolicy: IfNotPresent
   secret:
-    # Optional separate secret for migration/admin-only settings such as
-    # OPENGENI_MIGRATIONS_DATABASE_URL. If empty, the runtime secret is reused.
+    # Separate secret for migration/admin-only settings:
+    # OPENGENI_MIGRATIONS_DATABASE_URL plus the exact opengeni_app username and
+    # password consumed by db:provision-roles. Production must not reuse the
+    # runtime Secret here; API/worker receive only the restricted runtime URL.
+    # Empty reuse is retained only for disposable conformance fixtures.
     existingSecret: ""
-  command: ["bun", "run", "db:migrate"]
+  # The pre-upgrade hook is the rollout gate: schema first, then exact runtime
+  # grants, then a connection through the restricted runtime identity. Helm
+  # does not begin replacing API/worker pods unless all three steps succeed.
+  command:
+    - /bin/sh
+    - -ec
+    - bun run db:migrate && bun run db:provision-roles && bun run db:assert-runtime-posture
   backoffLimit: 6
   annotations:
     helm.sh/hook: post-install,pre-upgrade
@@ -509,10 +559,36 @@ migrations:
       cpu: 500m
       memory: 512Mi
 
-# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
-# Use managed Postgres, an existing database, or an upstream Postgres operator for production.
+# Import the reviewed, committed integrations snapshot into the global
+# capability catalog after installs and upgrades. The importer fingerprints the
+# snapshot and exits without database or object-storage writes when that exact
+# revision has already completed successfully.
+catalogImport:
+  enabled: true
+  snapshotPath: /app/data/catalog/integrations-snapshot.json
+  # Keep deployment success independent of hundreds of third-party logo hosts.
+  # Set false to fetch, validate, and self-host logos during the import.
+  skipLogos: true
+  backoffLimit: 3
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    # Migrations use -5 and the disposable MinIO bucket initializer uses 5.
+    helm.sh/hook-weight: "10"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Embedded Postgres for disposable conformance stacks and the persistent non-HA
+# single-machine profile. Multi-node deployments should use managed Postgres,
+# an existing database, or an upstream Postgres operator.
 postgres:
   enabled: false
+  priorityClassName: ""
   image:
     repository: pgvector/pgvector
     tag: pg17
@@ -523,6 +599,11 @@ postgres:
     password: opengeni
     existingSecret: ""
     passwordKey: POSTGRES_PASSWORD
+  runtime:
+    # When set, API/worker/migration Jobs read the restricted runtime URL from
+    # this Secret instead of constructing an owner URL from postgres.auth.
+    existingSecret: ""
+    databaseUrlKey: OPENGENI_DATABASE_URL
   service:
     port: 5432
   persistence:
@@ -540,10 +621,12 @@ postgres:
     fsGroup: 999
   securityContext: {}
 
-# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
-# Use Temporal Cloud, an existing Temporal endpoint, or the official Temporal chart for production.
+# Embedded Temporal for disposable conformance stacks and the persistent non-HA
+# single-machine profile. Multi-node deployments should use Temporal Cloud, an
+# existing Temporal endpoint, or the official Temporal chart.
 temporal:
   enabled: false
+  priorityClassName: ""
   image:
     repository: temporalio/auto-setup
     tag: "1.28"
@@ -571,10 +654,12 @@ temporal:
       drop:
         - ALL
 
-# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
-# Use Azure Blob, AWS S3, GCS, or another production object-store integration for production.
+# Embedded MinIO for disposable conformance stacks and the persistent non-HA
+# single-machine profile. Multi-node deployments should use Azure Blob, AWS S3,
+# GCS, or another external object store.
 minio:
   enabled: false
+  priorityClassName: ""
   image:
     repository: minio/minio
     tag: RELEASE.2025-09-07T16-13-09Z
@@ -596,6 +681,12 @@ minio:
   service:
     apiPort: 9000
     consolePort: 9001
+  # Optional one-port edge service. Keep the ordinary MinIO service private;
+  # this exposes only the signed object API, never the admin console.
+  edgeService:
+    enabled: false
+    type: ClusterIP
+    nodePort: null
   persistence:
     enabled: true
     size: 20Gi
@@ -701,10 +792,12 @@ ingress:
             service: api
     tls: []
 
-# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
-# Use an existing NATS endpoint or the official NATS chart for production.
+# Embedded NATS for disposable conformance stacks and the persistent non-HA
+# single-machine profile. Multi-node deployments should use an existing NATS
+# endpoint or the official NATS chart.
 nats:
   enabled: false
+  priorityClassName: ""
   url: ""
   image:
     repository: nats
@@ -713,6 +806,12 @@ nats:
   replicaCount: 1
   clientPort: 4222
   monitorPort: 8222
+  # Optional one-port edge service. Keep the ordinary NATS client and monitor
+  # ports private; connected machines need only the websocket listener.
+  websocketEdgeService:
+    enabled: false
+    type: ClusterIP
+    nodePort: null
   resources:
     requests:
       cpu: 100m
@@ -730,9 +829,9 @@ nats:
   # JWT. The secret VALUES (callout issuer public key, control/auth passwords)
   # come from the runtime secret via env-var expansion — never the configmap.
   #
-  # Production typically runs NATS outside this chart (nats.enabled=false) and
-  # folds the SAME auth-callout.conf into the platform NATS StatefulSet. This
-  # block is the in-chart fixture for preview/smoke + the documented config shape.
+  # Multi-node deployments typically run NATS outside this chart
+  # (nats.enabled=false) and fold the SAME auth-callout.conf into the platform
+  # NATS StatefulSet. This block is also the supported single-machine broker.
   authCallout:
     enabled: false
     # The websocket listener port (TLS terminates at the ingress; no_tls here).
@@ -806,6 +905,9 @@ observability:
     # Optional Prometheus Operator starter alerts. The template is also guarded
     # on monitoring.coreos.com/v1 being installed.
     enabled: false
+    # Must cover at least three configured sandbox reaper periods; Helm rejects
+    # an incompatible pairing before generating a rule that would age out live data.
+    inventoryFreshnessSeconds: 300
     labels: {}
     annotations: {}
     rules: []

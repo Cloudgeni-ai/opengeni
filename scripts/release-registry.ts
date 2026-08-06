@@ -31,6 +31,10 @@ export function releaseImageName(prefix: string, role: string): string {
 }
 
 export function releaseChartReference(prefix: string): string {
+  return `oci://${normalizeReleaseOciPrefix(prefix)}/charts/opengeni/opengeni`;
+}
+
+export function releaseChartPushTarget(prefix: string): string {
   return `oci://${normalizeReleaseOciPrefix(prefix)}/charts/opengeni`;
 }
 

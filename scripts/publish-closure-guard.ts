@@ -53,6 +53,7 @@ const SERVER_EMBED_PACKAGES = [
   "documents",
   "events",
   "github",
+  "network",
   "observability",
   "runtime",
   "storage",
@@ -176,7 +177,7 @@ if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
 }
 
 // CSS subpath imports must resolve in strict external TypeScript consumers as
-// well as bundlers. A bare string export ships runtime CSS but leaves tsgo/tsc
+// well as bundlers. A bare string export ships runtime CSS but leaves tsc
 // unable to type a side-effect import unless every consumer adds its own
 // wildcard declaration.
 const reactExports = (reactPkg as PackageJson & { exports?: Record<string, unknown> }).exports;

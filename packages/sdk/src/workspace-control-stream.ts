@@ -1,6 +1,11 @@
 import { isAbortError, isRetryableStreamError, OpenGeniStreamError } from "./errors";
 import { parseSseStream } from "./sse";
-import type { StreamSessionEventsOptions } from "./stream";
+import {
+  jitteredDelay,
+  runBeforeLive,
+  type StreamSessionEventsOptions,
+  withStreamInactivityTimeout,
+} from "./stream";
 import type { WorkspaceControlEvent } from "./types";
 
 export type WorkspaceControlStreamTransport = {
@@ -24,6 +29,9 @@ export async function* streamWorkspaceControlEvents(
   const reconnect = options.reconnect ?? true;
   const baseDelayMs = options.reconnectDelayMs ?? 500;
   const maxDelayMs = options.maxReconnectDelayMs ?? 10_000;
+  const jitterRatio = options.reconnectJitterRatio ?? 0.2;
+  const beforeLiveTimeoutMs = options.beforeLiveTimeoutMs ?? 15_000;
+  const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 45_000;
   const maxAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
   let cursor = options.after ?? 0;
   let failures = 0;
@@ -39,9 +47,11 @@ export async function* streamWorkspaceControlEvents(
       everConnected = true;
       failures = 0;
       delayMs = baseDelayMs;
-      await options.beforeLive?.();
+      await runBeforeLive(options.beforeLive, beforeLiveTimeoutMs, signal);
       options.onStateChange?.("live");
-      for await (const message of parseSseStream(body)) {
+      for await (const message of parseSseStream(
+        withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
+      )) {
         if (signal?.aborted) return;
         const event = parseWorkspaceControlEvent(message.data);
         if (!event || event.sequence <= cursor) continue;
@@ -49,7 +59,7 @@ export async function* streamWorkspaceControlEvents(
         yield event;
       }
       if (!reconnect) return;
-      if (cursor === cursorAtOpen) await sleep(baseDelayMs, signal);
+      if (cursor === cursorAtOpen) await sleep(jitteredDelay(baseDelayMs, jitterRatio), signal);
       continue;
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) return;
@@ -63,7 +73,7 @@ export async function* streamWorkspaceControlEvents(
         );
       }
     }
-    await sleep(delayMs, signal);
+    await sleep(jitteredDelay(delayMs, jitterRatio), signal);
     delayMs = Math.min(Math.max(delayMs * 2, baseDelayMs), maxDelayMs);
   }
 }

@@ -3,7 +3,11 @@ import { signDelegatedAccessToken, type AccessContext } from "@opengeni/contract
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
-import { requireAccessGrant, type AccessDeps } from "../src/access";
+import {
+  bindDirectManagedSessionEvidence,
+  requireAccessGrant,
+  type AccessDeps,
+} from "../src/access";
 import {
   requireOrganizationGovernanceAdmin,
   requireOrganizationGovernanceAdminOrLockedReplay,
@@ -31,6 +35,7 @@ async function lockedRequest(subjectId: string): Promise<Response> {
     workspaceId: WORKSPACE_ID,
     subjectId,
     permissions: ["workspace:read"],
+    principalKind: "service",
     exp: Math.floor(Date.now() / 1_000) + 60,
   });
   const app = new Hono();
@@ -117,6 +122,9 @@ describe("organization governance access fence", () => {
       },
       authorizationInvalidatedAt: null,
     });
+    const accepted = spyOn(opengeniDb, "isAcceptedOrganizationRecoveryCustodian").mockResolvedValue(
+      true,
+    );
     try {
       await expect(
         requireOrganizationRecoveryCustodian(deps(), delegatedContext, ACCOUNT_ID),
@@ -127,6 +135,10 @@ describe("organization governance access fence", () => {
         ...delegatedContext,
         accountGrants: [{ ...accountGrant, metadata: { authType: "managed" } }],
       };
+      bindDirectManagedSessionEvidence(directContext, {
+        userId: "custodian",
+        sessionId: "direct-session",
+      });
       await expect(
         requireOrganizationRecoveryCustodian(deps(), directContext, ACCOUNT_ID),
       ).resolves.toMatchObject({ accountId: ACCOUNT_ID, state: "governance_locked" });
@@ -160,6 +172,7 @@ describe("organization governance access fence", () => {
       expect(governance).toHaveBeenCalledTimes(3);
     } finally {
       governance.mockRestore();
+      accepted.mockRestore();
     }
   });
 

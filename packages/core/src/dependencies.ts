@@ -2,9 +2,11 @@ import type { Settings } from "@opengeni/config";
 import type {
   ConnectionCredentialsPort,
   Document,
+  DocumentAuthorityKind,
   GitHubAppApiPort,
   ScheduledTask,
   SessionAuthorizationPort,
+  TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
@@ -13,6 +15,7 @@ import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
+import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: {
@@ -53,8 +56,9 @@ export type SessionWorkflowClient = {
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;
-    agentRunUsageIdempotencyKey?: string;
-    triggerWorkflowId?: string;
+    agentRunUsageIdempotencyKey: string;
+    triggerWorkflowId: string;
+    initiator: TurnInitiator;
   }) => Promise<void>;
   startRigVerification: (input: {
     workspaceId: string;
@@ -70,12 +74,17 @@ export type DocumentIndexClient = {
     accountId: string;
     workspaceId: string;
     documentId: string;
+    authorityKind: DocumentAuthorityKind;
+    authorityWorkspaceId: string | null;
+    authoritySubjectId: string | null;
   }) => Promise<Document | void>;
 };
 
 export type AppDependencies = {
   settings: Settings;
   db: Database;
+  /** Separately verified v2 organization-governance authority plane. */
+  governanceDb?: Database;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
   /** Optional provider override for deterministic API/object-storage tests. */
@@ -106,6 +115,18 @@ export type AppDependencies = {
   managedAuth?: ManagedAuth | null;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
+  /** Injectable Slack Web API transport for deterministic bot-connection tests. */
+  slackFetch?: typeof fetch;
+  /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
+  googleDriveFetch?: typeof fetch;
+  /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
+  oauthStartDeadlineMs?: number;
+  /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
+  oauthCallbackDeadlineMs?: number;
+  /** Optional host-owned voice-input transcription service. */
+  transcription?: TranscriptionService | null;
+  /** Optional host-owned long-form audio normalization/segmentation service. */
+  transcriptionSegmenter?: TranscriptionSegmenter | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes

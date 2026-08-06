@@ -7,8 +7,19 @@
 // parsers are also unit-tested in isolation (no box) for the porcelain/numstat/
 // unified-diff shapes the Pierre diff consumes.
 
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import { testSettings } from "@opengeni/testing";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   SandboxChannelAService,
   ChannelANotFoundError,
@@ -28,6 +39,16 @@ import { createSandboxClientForBackend } from "../src/index";
 
 const NUL = String.fromCharCode(0);
 
+async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolean> {
+  let settled = false;
+  void promise.finally(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  return !settled;
+}
+
 // These cases execute real filesystem, Git, and shell processes against a local
 // sandbox. Their product-level commands retain tighter operation deadlines, while
 // the file-scoped test ceiling leaves enough room for cleanup under a loaded CI
@@ -41,6 +62,25 @@ type LiveLocalSession = ChannelASession & {
 };
 
 const liveSessions: LiveLocalSession[] = [];
+const temporaryRoots: string[] = [];
+const originalAgentsPython = process.env.OPENAI_AGENTS_PYTHON;
+
+beforeAll(() => {
+  if (originalAgentsPython !== undefined) return;
+  const python = Bun.which("python3");
+  if (python === null) {
+    throw new Error("real local sandbox tests require a Python 3 executable");
+  }
+  // The local sandbox intentionally supplies a minimal child PATH. Give the
+  // Agents SDK's host-side PTY bridge the absolute interpreter selected from
+  // the test runner's PATH so these tests are portable to Nix hosts as well.
+  process.env.OPENAI_AGENTS_PYTHON = python;
+});
+
+afterAll(() => {
+  if (originalAgentsPython === undefined) delete process.env.OPENAI_AGENTS_PYTHON;
+  else process.env.OPENAI_AGENTS_PYTHON = originalAgentsPython;
+});
 
 async function makeBox(): Promise<{ session: LiveLocalSession; root: string }> {
   const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
@@ -58,7 +98,162 @@ afterEach(async () => {
   for (const s of liveSessions.splice(0)) {
     if (!s.closed) await s.close().catch(() => undefined);
   }
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+function runFixtureCommand(root: string, command: string): void {
+  const result = Bun.spawnSync(["/bin/bash", "-c", command], {
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `fixture command failed (${result.exitCode}): ${Buffer.from(result.stderr).toString("utf8")}`,
+    );
+  }
+}
+
+function requireHostExecutable(name: string): string {
+  const executable = Bun.which(name);
+  if (executable === null) {
+    throw new Error(`Channel-A test requires ${name} on PATH`);
+  }
+  return executable;
+}
+
+function makeModalLikeExecOnlySession(
+  root: string,
+  options: {
+    pathPrefix?: string;
+    beforeExec?: () => void | Promise<void>;
+    env?: Record<string, string>;
+  } = {},
+): {
+  session: ChannelASession;
+  truncatedResponses: () => number;
+} {
+  const retainedOutputChars = 1024 * 1024;
+  let truncated = 0;
+  return {
+    session: {
+      execCommand: async (args) => {
+        await options.beforeExec?.();
+        const child = Bun.spawn(["/bin/bash", "-c", args.cmd], {
+          cwd: args.workdir ?? root,
+          env: {
+            ...process.env,
+            ...options.env,
+            // The production Modal image is Ubuntu/GNU. Keep this host-side
+            // adapter faithful when the test runs on macOS/BSD.
+            PATH: [
+              options.pathPrefix,
+              "/opt/homebrew/opt/coreutils/libexec/gnubin",
+              process.env.PATH ?? "",
+            ]
+              .filter(Boolean)
+              .join(":"),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        let output = [stdout, stderr]
+          .filter((value) => value.length > 0)
+          .map((value) => value.trimEnd())
+          .join("\n");
+        output += "\nmodal-like provider trailer";
+        if (output.length > retainedOutputChars) {
+          truncated += 1;
+          const dropped = output.length - retainedOutputChars;
+          output = `[...${dropped} characters truncated from process output...]\n${output.slice(
+            -retainedOutputChars,
+          )}`;
+        }
+        return [
+          "Chunk ID: modal-like",
+          "Wall time: 0.0000 seconds",
+          `Process exited with code ${exitCode}`,
+          "Output:",
+          output,
+        ].join("\n");
+      },
+    },
+    truncatedResponses: () => truncated,
+  };
+}
+
+function makeStockMacCommandSurface(root: string): { bin: string; log: string } {
+  const bin = join(root, "stock-macos-bin");
+  const log = join(root, "stock-macos-commands.log");
+  mkdirSync(bin);
+  const realStat = Bun.which("stat");
+  const realReadlink = Bun.which("readlink");
+  const realShasum = Bun.which("shasum");
+  if (!realStat || !realReadlink || !realShasum) {
+    throw new Error("stock-macOS simulation requires host stat, readlink, and shasum");
+  }
+  const writeCommand = (name: string, body: string): void => {
+    const path = join(bin, name);
+    writeFileSync(path, `#!/bin/bash\nset -eu\n${body}\n`);
+    chmodSync(path, 0o755);
+  };
+  writeCommand(
+    "sha256sum",
+    ["printf 'sha256sum\\n' >> \"$OPENGENI_STOCK_MAC_LOG\"", "exit 127"].join("\n"),
+  );
+  writeCommand(
+    "shasum",
+    [
+      "printf 'shasum\\n' >> \"$OPENGENI_STOCK_MAC_LOG\"",
+      `exec ${JSON.stringify(realShasum)} "$@"`,
+    ].join("\n"),
+  );
+  writeCommand(
+    "readlink",
+    [
+      'printf \'readlink %s\\n\' "$*" >> "$OPENGENI_STOCK_MAC_LOG"',
+      'if [ "${1:-}" = "-f" ]; then exit 1; fi',
+      `exec ${JSON.stringify(realReadlink)} "$@"`,
+    ].join("\n"),
+  );
+  writeCommand(
+    "stat",
+    [
+      'printf \'stat %s\\n\' "$*" >> "$OPENGENI_STOCK_MAC_LOG"',
+      'if [ "${1:-}" = "-Lc" ] || [ "${1:-}" = "-c" ]; then exit 1; fi',
+      'if [ "${1:-}" != "-f" ] || [ "$#" -ne 3 ]; then exit 64; fi',
+      'case "$2" in',
+      `  %d:%i) exec ${JSON.stringify(realStat)} -L -c '%d:%i' "$3" ;;`,
+      `  %z) exec ${JSON.stringify(realStat)} -L -c '%s' "$3" ;;`,
+      `  %Lp) exec ${JSON.stringify(realStat)} -L -c '%a' "$3" ;;`,
+      "  *) exit 64 ;;",
+      "esac",
+    ].join("\n"),
+  );
+  writeCommand(
+    "lsof",
+    [
+      'printf \'lsof %s\\n\' "$*" >> "$OPENGENI_STOCK_MAC_LOG"',
+      "pid= fd=",
+      'while [ "$#" -gt 0 ]; do case "$1" in -p) pid="$2"; shift 2 ;; -d) fd="$2"; shift 2 ;; *) shift ;; esac; done',
+      '[ -n "$pid" ] && [ -n "$fd" ] || exit 64',
+      `opened=$(${JSON.stringify(realReadlink)} -f "/proc/$pid/fd/$fd") || exit 1`,
+      'printf \'p%s\\0f%s\\0n%s\\0\\n\' "$pid" "$fd" "$opened"',
+    ].join("\n"),
+  );
+  return { bin, log };
+}
+
+function framedConfinedOutput(command: string, payload = "", status = 0, prelude = ""): string {
+  const frame = /__OPENGENI_FS_CONFINED_([a-f0-9]{32})_OK__/.exec(command)?.[1];
+  if (!frame) throw new Error("confined command did not contain a frame nonce");
+  return `${prelude}__OPENGENI_FS_CONFINED_${frame}_OK__\n${payload}__OPENGENI_FS_CONFINED_${frame}_END__:${status}__`;
+}
 
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
   test("write then read-back round-trips text", async () => {
@@ -385,12 +580,14 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
         exec: async (args) => {
           command = args.cmd;
           return {
-            stdout: [
-              "__OPENGENI_FS_CONFINED_OK__\n",
-              `d\t0\t1.0\t755\t./src${recordDelimiter}`,
-              `f\t1\t1.0\t644\t./src/a.ts${recordDelimiter}`,
-              `__OPENGENI_FS_LIST_TRUNCATED__${recordDelimiter}`,
-            ].join(""),
+            stdout: framedConfinedOutput(
+              args.cmd,
+              [
+                `d\t0\t1.0\t755\t./src${recordDelimiter}`,
+                `f\t1\t1.0\t644\t./src/a.ts${recordDelimiter}`,
+                `__OPENGENI_FS_LIST_TRUNCATED__${recordDelimiter}`,
+              ].join(""),
+            ),
             stderr: "",
             exitCode: 0,
           };
@@ -437,7 +634,7 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
           if (commands.length === 1) {
             return { stdout: "provider temporarily unavailable", stderr: "", exitCode: 1 };
           }
-          return { stdout: "__OPENGENI_FS_CONFINED_OK__\n", stderr: "", exitCode: 0 };
+          return { stdout: framedConfinedOutput(args.cmd), stderr: "", exitCode: 0 };
         },
       },
     });
@@ -445,6 +642,11 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const list = await svc.fsList({ path: "", depth: 1, maxEntries: 10, includeHidden: true });
     expect(list.root.children).toEqual([]);
     expect(commands).toHaveLength(2);
+    expect(
+      new Set(
+        commands.map((command) => /__OPENGENI_FS_CONFINED_([a-f0-9]{32})_OK__/.exec(command)?.[1]),
+      ).size,
+    ).toBe(2);
     for (const command of commands) {
       expect(command.startsWith("env -u BASH_ENV bash --noprofile --norc -c ")).toBe(true);
       expect(command).not.toContain("bash -lc");
@@ -455,10 +657,10 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     let calls = 0;
     const svc = new SandboxChannelAService({
       session: {
-        exec: async () => {
+        exec: async (args) => {
           calls += 1;
           return {
-            stdout: "provider prelude\n__OPENGENI_FS_CONFINED_OK__\n",
+            stdout: framedConfinedOutput(args.cmd, "", 0, "provider prelude\n"),
             stderr: "",
             exitCode: 0,
           };
@@ -469,6 +671,26 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const list = await svc.fsList({ path: ".", depth: 1, maxEntries: 10, includeHidden: true });
     expect(list.root.children).toEqual([]);
     expect(calls).toBe(1);
+  });
+
+  test("fsList rejects truncated or malformed confined end frames", async () => {
+    for (const corrupt of [
+      (frame: string) => frame.slice(0, -2),
+      (frame: string) => frame.replace(/:0__$/, ":256__"),
+    ]) {
+      const svc = new SandboxChannelAService({
+        session: {
+          exec: async (args) => ({
+            stdout: corrupt(framedConfinedOutput(args.cmd)),
+            stderr: "",
+            exitCode: 0,
+          }),
+        },
+      });
+      await expect(
+        svc.fsList({ path: ".", depth: 1, maxEntries: 10, includeHidden: true }),
+      ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    }
   });
 
   test("fsList classifies repeated unmarked provider results as unavailable, never bad input", async () => {
@@ -869,6 +1091,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       "__OPENGENI_FS_ESCAPE__",
       "__OPENGENI_FS_SYMLINK__",
       "__OPENGENI_FS_CONFINED_OK__",
+      "__OPENGENI_FS_CONFINED_END__:0__",
     ]) {
       await svc.fsWrite({
         path,
@@ -891,6 +1114,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         "__OPENGENI_FS_ESCAPE__",
         "__OPENGENI_FS_SYMLINK__",
         "__OPENGENI_FS_CONFINED_OK__",
+        "__OPENGENI_FS_CONFINED_END__:0__",
       ]),
     );
 
@@ -901,6 +1125,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         "__OPENGENI_FS_ESCAPE__",
         "__OPENGENI_FS_SYMLINK__",
         "__OPENGENI_FS_CONFINED_OK__",
+        "__OPENGENI_FS_CONFINED_END__:0__",
       ]),
     );
   });
@@ -1050,6 +1275,477 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       timeoutMs: 20_000,
       emitStream: false,
     });
+  });
+
+  test("execCommand-only Git capture stays below Modal's retained-output cap", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-modal-cap-"));
+    temporaryRoots.push(root);
+    const marker = "OPENGENI_MODAL_DIFF_TRANSPORT";
+    const outside = join(tmpdir(), `opengeni-channel-a-outside-${crypto.randomUUID()}.txt`);
+    temporaryRoots.push(outside);
+    runFixtureCommand(
+      root,
+      [
+        `printf 'outside secret' > '${outside}'`,
+        "git init -q",
+        "git config user.email test@opengeni.local",
+        "git config user.name OpenGeni",
+        "git config commit.gpgsign false",
+        `printf 'export const marker = "BASE";\\n' > server.ts`,
+        `printf 'base\\n' > staged-and-unstaged.txt`,
+        `printf 'delete me\\n' > deleted.txt`,
+        `printf 'rename me\\n' > old-name.txt`,
+        "git add -A",
+        "git commit -q -m baseline",
+        `printf 'export const marker = "${marker}";\\n' > server.ts`,
+        `printf 'staged ${marker}\\n' > staged-and-unstaged.txt`,
+        "git add staged-and-unstaged.txt",
+        `printf 'final ${marker}\\n' > staged-and-unstaged.txt`,
+        "git rm -q deleted.txt",
+        "git mv old-name.txt renamed.txt",
+        `printf 'untracked ${marker}\\n' > notes.txt`,
+        "head -c 2621440 /dev/zero > too-large.bin",
+        `ln -s server.ts internal-link`,
+        `ln -s '${outside}' external-link`,
+      ].join(" && "),
+    );
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 2 * 1024 * 1024,
+    });
+
+    expect(modalLike.truncatedResponses()).toBe(0);
+    expect(
+      diff.files
+        .find((file) => file.path === "server.ts")
+        ?.hunks.some((hunk) => hunk.lines.some((line) => line.text.includes(marker))),
+    ).toBe(true);
+    expect(diff.files.find((file) => file.path === "staged-and-unstaged.txt")?.status).toBe(
+      "modified",
+    );
+    expect(diff.files.find((file) => file.path === "deleted.txt")?.status).toBe("deleted");
+    expect(diff.files.find((file) => file.path === "renamed.txt")?.oldPath).toBe("old-name.txt");
+    expect(
+      diff.files
+        .find((file) => file.path === "notes.txt")
+        ?.hunks[0]?.lines.some((line) => line.text.includes(marker)),
+    ).toBe(true);
+    expect(diff.files.find((file) => file.path === "too-large.bin")).toMatchObject({
+      status: "untracked",
+      isBinary: true,
+      additions: 0,
+      truncated: true,
+      hunks: [],
+    });
+    expect(
+      diff.files
+        .find((file) => file.path === "internal-link")
+        ?.hunks[0]?.lines.map((line) => line.text),
+    ).toEqual(["server.ts"]);
+    const external = diff.files.find((file) => file.path === "external-link");
+    expect(external?.hunks[0]?.lines.map((line) => line.text)).toEqual([outside]);
+    expect(JSON.stringify(external)).not.toContain("outside secret");
+  });
+
+  test("exec-only untracked reads pin the opened descriptor across a symlink swap", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-symlink-race-"));
+    temporaryRoots.push(root);
+    const outside = join(tmpdir(), `opengeni-channel-a-secret-${crypto.randomUUID()}.txt`);
+    temporaryRoots.push(outside);
+    const victim = join(root, "victim.txt");
+    const safeContent = "safe payload\n";
+    const secretContent = "leak target!\n";
+    const realCat = requireHostExecutable("cat");
+    expect(Buffer.byteLength(safeContent)).toBe(Buffer.byteLength(secretContent));
+    writeFileSync(outside, secretContent);
+    runFixtureCommand(root, "git init -q");
+
+    const bin = join(root, "attack-bin");
+    const swaps = join(root, "swap-count");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "cat"),
+      [
+        "#!/bin/bash",
+        'rm -f -- "$OPENGENI_SWAP_VICTIM"',
+        'ln -s -- "$OPENGENI_SWAP_OUTSIDE" "$OPENGENI_SWAP_VICTIM"',
+        'printf x >> "$OPENGENI_SWAP_COUNT"',
+        `exec ${JSON.stringify(realCat)} "$@"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(bin, "cat"), 0o755);
+
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      pathPrefix: bin,
+      env: {
+        OPENGENI_SWAP_VICTIM: victim,
+        OPENGENI_SWAP_OUTSIDE: outside,
+        OPENGENI_SWAP_COUNT: swaps,
+      },
+      // Restore the regular file before every producer invocation. The fake
+      // cat swaps it only after fd 3 has been opened and identity-checked.
+      beforeExec: () => {
+        rmSync(victim, { force: true });
+        writeFileSync(victim, safeContent);
+      },
+    });
+    const outputs: string[] = [];
+    const execCommand = modalLike.session.execCommand!;
+    modalLike.session.execCommand = async (args) => {
+      const output = await execCommand(args);
+      outputs.push(output);
+      return output;
+    };
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: ["victim.txt"],
+      contextLines: 3,
+      maxBytesPerFile: 1024,
+    });
+
+    expect((await Bun.file(swaps).text()).length).toBeGreaterThan(0);
+    expect(diff.files[0]?.hunks[0]?.lines.map((line) => line.text)).toEqual(["safe payload"]);
+    expect(JSON.stringify(diff)).not.toContain(secretContent.trim());
+    expect(outputs.join("\n")).not.toContain(secretContent.trim());
+  });
+
+  test("stock macOS/BSD command surface preserves bounded descriptor confinement", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-stock-macos-"));
+    temporaryRoots.push(root);
+    const outside = join(tmpdir(), `opengeni-channel-a-stock-secret-${crypto.randomUUID()}.txt`);
+    temporaryRoots.push(outside);
+    const victim = join(root, "victim.txt");
+    const safeContent = "safe payload\n";
+    const secretContent = "leak target!\n";
+    const realCat = requireHostExecutable("cat");
+    expect(Buffer.byteLength(safeContent)).toBe(Buffer.byteLength(secretContent));
+    writeFileSync(outside, secretContent);
+    runFixtureCommand(root, "git init -q");
+
+    const surface = makeStockMacCommandSurface(root);
+    const swaps = join(root, "swap-count");
+    writeFileSync(
+      join(surface.bin, "cat"),
+      [
+        "#!/bin/bash",
+        'rm -f -- "$OPENGENI_SWAP_VICTIM"',
+        'ln -s -- "$OPENGENI_SWAP_OUTSIDE" "$OPENGENI_SWAP_VICTIM"',
+        'printf x >> "$OPENGENI_SWAP_COUNT"',
+        `exec ${JSON.stringify(realCat)} "$@"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(surface.bin, "cat"), 0o755);
+
+    const macLike = makeModalLikeExecOnlySession(root, {
+      pathPrefix: surface.bin,
+      env: {
+        OPENGENI_STOCK_MAC_LOG: surface.log,
+        OPENGENI_SWAP_VICTIM: victim,
+        OPENGENI_SWAP_OUTSIDE: outside,
+        OPENGENI_SWAP_COUNT: swaps,
+      },
+      beforeExec: () => {
+        rmSync(victim, { force: true });
+        writeFileSync(victim, safeContent);
+      },
+    });
+    const svc = new SandboxChannelAService({
+      session: macLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: ["victim.txt"],
+      contextLines: 3,
+      maxBytesPerFile: 1024,
+    });
+
+    const commands = await Bun.file(surface.log).text();
+    expect(commands).toContain("sha256sum");
+    expect(commands).toContain("shasum");
+    expect(commands).toContain("lsof");
+    expect(commands).toContain("stat -f %d:%i");
+    expect((await Bun.file(swaps).text()).length).toBeGreaterThan(0);
+    expect(diff.files[0]?.hunks[0]?.lines.map((line) => line.text)).toEqual(["safe payload"]);
+    expect(JSON.stringify(diff)).not.toContain(secretContent.trim());
+  });
+
+  test("a partial regular-file frame fails unavailable instead of authorizing an empty diff", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-regular-frame-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(root, "git init -q && printf 'frame body\\n' > notes.txt");
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const execCommand = modalLike.session.execCommand!;
+    let corrupted = false;
+    modalLike.session.execCommand = async (args) => {
+      const output = await execCommand(args);
+      if (!corrupted && args.cmd.includes("line_count=") && output.includes("GIT_CHUNK_END_V1")) {
+        corrupted = true;
+        return output.replace("__OPENGENI_GIT_CHUNK_END_V1__", "");
+      }
+      return output;
+    };
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: true,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(corrupted).toBe(true);
+  });
+
+  test("a malformed symlink frame fails unavailable instead of being skipped", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-symlink-frame-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(
+      root,
+      "git init -q && printf target > target.txt && ln -s target.txt link.txt",
+    );
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const execCommand = modalLike.session.execCommand!;
+    let corrupted = false;
+    modalLike.session.execCommand = async (args) => {
+      const output = await execCommand(args);
+      if (!corrupted && args.cmd.includes("readlink -n") && output.includes("GIT_CHUNK_V1")) {
+        corrupted = true;
+        return output.replace("__OPENGENI_GIT_CHUNK_V1__", "__OPENGENI_GIT_CHUNK_V0__");
+      }
+      return output;
+    };
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: true,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(corrupted).toBe(true);
+  });
+
+  test("tracked invalid-byte Git paths fail unavailable before pathspec replay", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-invalid-tracked-"));
+    temporaryRoots.push(root);
+    const invalidPath = Buffer.concat([Buffer.from(`${root}/tracked-`), Buffer.from([0xff])]);
+    runFixtureCommand(
+      root,
+      "git init -q && git config user.email test@opengeni.local && git config user.name OpenGeni && git config commit.gpgsign false",
+    );
+    writeFileSync(invalidPath, "base\n");
+    runFixtureCommand(root, "git add -A && git commit -q -m baseline");
+    writeFileSync(invalidPath, "changed\n");
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: false,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+  });
+
+  test("untracked invalid-byte Git paths fail unavailable before file reads", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-invalid-untracked-"));
+    temporaryRoots.push(root);
+    const invalidPath = Buffer.concat([Buffer.from(`${root}/untracked-`), Buffer.from([0xfe])]);
+    runFixtureCommand(root, "git init -q");
+    writeFileSync(invalidPath, "untracked\n");
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: true,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+  });
+
+  test("a per-chunk producer that emits bytes then exits 42 is rejected", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-exit-42-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(root, "git init -q && printf 'notes\\n' > notes.txt");
+    const bin = join(root, "producer-bin");
+    const count = join(root, "ls-files-count");
+    const realGit = requireHostExecutable("git");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      [
+        "#!/bin/bash",
+        'if [[ " $* " == *" ls-files "* ]]; then',
+        '  n=0; [ ! -f "$OPENGENI_GIT_COUNT" ] || n=$(<"$OPENGENI_GIT_COUNT")',
+        '  n=$((n + 1)); printf "%s" "$n" > "$OPENGENI_GIT_COUNT"',
+        `  ${JSON.stringify(realGit)} "$@"`,
+        "  status=$?",
+        '  if [ "$n" -ge 2 ]; then exit 42; fi',
+        '  exit "$status"',
+        "fi",
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      pathPrefix: bin,
+      env: { OPENGENI_GIT_COUNT: count },
+    });
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: true,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(Number(await Bun.file(count).text())).toBeGreaterThanOrEqual(2);
+  });
+
+  test("same-length producer drift between measurement and chunk is rejected", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-producer-drift-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(root, "git init -q && printf 'alpha\\n' > alpha.txt");
+    const bin = join(root, "producer-bin");
+    const count = join(root, "ls-files-count");
+    const realGit = requireHostExecutable("git");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      [
+        "#!/bin/bash",
+        'if [[ " $* " == *" ls-files "* ]]; then',
+        '  n=0; [ ! -f "$OPENGENI_GIT_COUNT" ] || n=$(<"$OPENGENI_GIT_COUNT")',
+        '  n=$((n + 1)); printf "%s" "$n" > "$OPENGENI_GIT_COUNT"',
+        '  if [ "$n" -eq 1 ]; then printf "alpha.txt\\0"; else printf "bravo.txt\\0"; fi',
+        "  exit 0",
+        "fi",
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      pathPrefix: bin,
+      env: { OPENGENI_GIT_COUNT: count },
+    });
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: true,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(Number(await Bun.file(count).text())).toBeGreaterThanOrEqual(2);
+  });
+
+  test("bounded Git capture preserves staged and untracked files before the first commit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-unborn-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(
+      root,
+      [
+        "git init -q",
+        `printf 'staged before HEAD\\n' > staged.txt`,
+        "git add staged.txt",
+        `printf 'untracked before HEAD\\n' > untracked.txt`,
+      ].join(" && "),
+    );
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 512 * 1024,
+    });
+
+    expect(modalLike.truncatedResponses()).toBe(0);
+    expect(diff.files.find((file) => file.path === "staged.txt")?.status).toBe("added");
+    expect(diff.files.find((file) => file.path === "untracked.txt")?.status).toBe("untracked");
   });
 
   test("git status outside a repo returns isRepo:false (not an error)", async () => {
@@ -1232,6 +1928,106 @@ describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () =>
       emitStream: false,
     });
     expect(out.exitCode).toBe(3);
+    expect(out.running).toBe(false);
+  });
+
+  test("terminal exec drains a provider yield and never exposes a running response", async () => {
+    let writes = 0;
+    const session: ChannelASession = {
+      supportsPty: () => true,
+      exec: async () => ({
+        stdout: "initial\n",
+        stderr: "warning\n",
+        exitCode: null,
+        sessionId: 81,
+      }),
+      writeStdin: async () => {
+        writes += 1;
+        return writes === 1
+          ? "Process running with session ID 81\n\nOutput:\nlater\n"
+          : "Process exited with code 7\n\nOutput:\ndone\n";
+      },
+    };
+
+    const out = await new SandboxChannelAService({ session }).terminalExec({
+      command: "eventually exits",
+      cwd: "",
+      timeoutMs: 10_000,
+      emitStream: false,
+    });
+
+    expect(out).toMatchObject({
+      stdout: "initial\nlater\ndone\n",
+      stderr: "warning\n",
+      exitCode: 7,
+      running: false,
+    });
+    expect(writes).toBe(2);
+  });
+
+  test("terminal timeout waits for retained-process settlement after group absence", async () => {
+    let processAlive = true;
+    let retained = true;
+    let allowSettlement = false;
+    let finalControlPolls = 0;
+    const session: ChannelASession = {
+      supportsPty: () => true,
+      hasRetainedProcess: (sessionId) => retained && sessionId === 82,
+      exec: async () => ({ stdout: "started\n", stderr: "", exitCode: null, sessionId: 82 }),
+      writeStdinForProcessControl: async () => {
+        if (processAlive) return "Process running with session ID 82\n\nOutput:\n";
+        finalControlPolls += 1;
+        if (!allowSettlement) throw new Error("settlement unavailable");
+        retained = false;
+        return "Process exited with code 137\n\nOutput:\n";
+      },
+      execCommandForProcessControl: async (_sessionId, args) => {
+        if (args.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return "Process exited with code 0\n\nOutput:\n6200 6200\n";
+        }
+        if (args.cmd.includes("command kill -KILL")) {
+          processAlive = false;
+          return "Process exited with code 0\n\nOutput:\n";
+        }
+        if (args.cmd.includes("command kill -0")) {
+          return `Process exited with code ${processAlive ? 75 : 0}\n\nOutput:\n`;
+        }
+        return "Process exited with code 0\n\nOutput:\n";
+      },
+    };
+
+    const response = new SandboxChannelAService({ session }).terminalExec({
+      command: "trap '' INT TERM; sleep 60",
+      cwd: "",
+      timeoutMs: 75,
+      emitStream: false,
+    });
+    await Bun.sleep(300);
+    expect(await pendingAfterMicrotasks(response)).toBe(true);
+    expect(processAlive).toBe(false);
+    expect(finalControlPolls).toBeGreaterThan(0);
+
+    allowSettlement = true;
+    expect(await response).toMatchObject({ exitCode: 124, running: false });
+    expect(retained).toBe(false);
+  });
+
+  test("terminal timeout kills a signal-ignoring local process before it can write later", async () => {
+    const { session, root } = await makeBox();
+    const sentinel = `${root}/terminal-timeout-${crypto.randomUUID()}`;
+    const startedAt = performance.now();
+
+    const out = await new SandboxChannelAService({ session }).terminalExec({
+      command: `trap '' INT TERM; sleep 1; printf late > '${sentinel}'`,
+      cwd: "",
+      timeoutMs: 200,
+      emitStream: false,
+    });
+
+    expect(out).toMatchObject({ exitCode: 124, running: false });
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    await Bun.sleep(1_100);
+    expect(existsSync(sentinel)).toBe(false);
   });
 
   test("PTY capability probe reports the local backend supports interactive input", async () => {
@@ -1389,11 +2185,12 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       supportsPty: () => true,
       exec: async (args) => {
         seen.push({ cmd: args.cmd, workdir: args.workdir, tty: args.tty });
+        const openingPty = args.cmd === "/bin/bash";
         return {
           stdout: "",
           stderr: "",
-          exitCode: args.tty ? null : 0,
-          sessionId: args.tty ? 12 : undefined,
+          exitCode: openingPty ? null : 0,
+          sessionId: openingPty ? 12 : undefined,
         };
       },
       writeStdin: async () => "",
@@ -1410,12 +2207,15 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       emitStream: false,
     });
 
-    expect(seen).toEqual([
-      { cmd: "pwd", workdir: "/workspace", tty: undefined },
-      { cmd: "pwd", workdir: "/workspace/sub", tty: undefined },
-      { cmd: "/bin/bash", workdir: "/workspace/sub", tty: true },
-      { cmd: "pwd", workdir: "/workspace/sub", tty: undefined },
-    ]);
+    expect(seen).toHaveLength(4);
+    expect(seen[0]).toMatchObject({ workdir: "/workspace", tty: true });
+    expect(seen[0]!.cmd).toContain("pwd");
+    expect(seen[0]!.cmd).toContain("/tmp/opengeni-turn-shell/");
+    expect(seen[1]).toMatchObject({ workdir: "/workspace/sub", tty: true });
+    expect(seen[1]!.cmd).toContain("pwd");
+    expect(seen[2]).toEqual({ cmd: "/bin/bash", workdir: "/workspace/sub", tty: true });
+    expect(seen[3]).toMatchObject({ workdir: "/workspace/sub", tty: true });
+    expect(seen[3]!.cmd).toContain("pwd");
   });
 
   test("dock fs/git operations still use repo-relative workspaceRoot mapping", async () => {
@@ -1431,13 +2231,23 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         paths.push(workdir ?? "");
         if (cmd.includes("git rev-parse")) {
           return {
-            stdout: "__OPENGENI_FS_CONFINED_OK__\ntrue\n",
+            stdout: framedConfinedOutput(cmd, "true\n"),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (cmd.includes("wc -c")) {
+          return {
+            stdout: framedConfinedOutput(
+              cmd,
+              "__OPENGENI_GIT_MEASURE_V1__\t0\t0\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
             stderr: "",
             exitCode: 0,
           };
         }
         return {
-          stdout: cmd.includes('cd -P -- "$target"') ? "__OPENGENI_FS_CONFINED_OK__\n" : "",
+          stdout: cmd.includes('cd -P -- "$target"') ? framedConfinedOutput(cmd) : "",
           stderr: "",
           exitCode: 0,
         };

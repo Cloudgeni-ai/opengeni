@@ -5,7 +5,14 @@ import {
   CancelledFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
-import { isTurnActivityFenceCancellation } from "../src/workflows/session";
+import {
+  escapedMcpTimeoutRecoveryDetail,
+  isTurnActivityFenceCancellation,
+} from "../src/workflows/session";
+import {
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+} from "../src/activities/types";
 
 function activityFailure(cause: Error): ActivityFailure {
   return new ActivityFailure(
@@ -64,5 +71,73 @@ describe("turn activity fence-cancellation arbitration", () => {
         activityFailure(new Error("wrapper", { cause: new CancelledFailure("hidden") })),
       ),
     ).toBe(false);
+  });
+});
+
+describe("escaped MCP timeout activity-failure recovery", () => {
+  const detail = {
+    turnId: "turn-2",
+    triggerEventId: "trigger-1",
+    executionGeneration: 2,
+  };
+  const escaped = () =>
+    activityFailure(
+      ApplicationFailure.create({
+        message: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+        type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+        nonRetryable: true,
+        details: [detail],
+      }),
+    );
+
+  test("accepts only the explicit generation-2 runAgentTurn wire contract", () => {
+    expect(escapedMcpTimeoutRecoveryDetail(escaped())).toEqual(detail);
+    expect(
+      escapedMcpTimeoutRecoveryDetail(
+        new ActivityFailure(
+          "Activity task failed",
+          "someOtherActivity",
+          "activity-1",
+          "IN_PROGRESS",
+          "worker-1",
+          (escaped().cause as ApplicationFailure) ?? undefined,
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryDetail(
+        activityFailure(
+          ApplicationFailure.create({
+            message: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+            type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+            details: [{ ...detail, executionGeneration: 1 }],
+          }),
+        ),
+      ),
+    ).toBeNull();
+  });
+
+  test("does not infer recovery from ambiguous -32001 or altered marker fields", () => {
+    expect(
+      escapedMcpTimeoutRecoveryDetail(
+        activityFailure(
+          ApplicationFailure.create({
+            message: "MCP transport operation failed (McpError -32001)",
+            type: "Error",
+          }),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryDetail(
+        activityFailure(
+          ApplicationFailure.create({
+            message: "different message",
+            type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+            details: [detail],
+          }),
+        ),
+      ),
+    ).toBeNull();
   });
 });

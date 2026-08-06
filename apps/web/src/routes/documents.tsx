@@ -1,27 +1,35 @@
-// Documents: indexed document bases for agent search, with upload, reindex,
-// and semantic search — all through the SDK client.
+// Documents: immediate upload into an internal Default collection, with
+// optional collections for organization, reindex, and semantic search — all
+// through the SDK client.
 import {
+  BotOffIcon,
   CheckIcon,
   FileSearchIcon,
   FilesIcon,
+  FolderInputIcon,
   Loader2Icon,
+  LockIcon,
   PlusIcon,
   RefreshCwIcon,
+  SparklesIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
-import { MemoryPane } from "@/components/knowledge/memory-pane";
 import { Button } from "@/components/ui/button";
+import { ContentPage, FormField, FormGrid } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
+import { usePageLiveActivity } from "@opengeni/react";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type {
+  DocumentAuthorityKind,
   DocumentBase,
   DocumentSearchMode,
   DocumentSearchResult,
@@ -40,19 +48,40 @@ const sourceKindOptions: KnowledgeSourceKind[] = [
   "other",
 ];
 
-export function DocumentsRoute({
-  workspaceId,
-  focusMemoryId,
-}: {
-  workspaceId: string;
-  focusMemoryId?: string | undefined;
-}) {
+export const DEFAULT_DOCUMENT_AUTHORITY_KIND: DocumentAuthorityKind = "workspace";
+
+export const DOCUMENT_AUTHORITY_OPTIONS = [
+  { value: "organization", label: "Company" },
+  { value: "workspace", label: "Current workspace" },
+  { value: "personal", label: "Only me" },
+] as const satisfies ReadonlyArray<{
+  value: DocumentAuthorityKind;
+  label: string;
+}>;
+
+export function documentAuthorityLabel(kind: DocumentAuthorityKind): string {
+  return DOCUMENT_AUTHORITY_OPTIONS.find((option) => option.value === kind)?.label ?? kind;
+}
+
+export function isDefaultDocumentCollection(base: Pick<DocumentBase, "name">): boolean {
+  return base.name.trim().toLowerCase() === "default";
+}
+
+export function resolveDocumentCollectionSelection(
+  currentId: string | null,
+  bases: DocumentBase[],
+): string | null {
+  if (currentId && bases.some((base) => base.id === currentId)) {
+    return currentId;
+  }
+  return bases.find(isDefaultDocumentCollection)?.id ?? bases[0]?.id ?? null;
+}
+
+export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const client = context.client;
+  const pageLive = usePageLiveActivity();
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
-  const memoryEnabled =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.settings
-      ?.memoryEnabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
   const [basesLoading, setBasesLoading] = useState(true);
   const [basesError, setBasesError] = useState<Error | null>(null);
@@ -71,8 +100,20 @@ export function DocumentsRoute({
   const [uploadSourceTitle, setUploadSourceTitle] = useState("");
   const [uploadSourceAuthor, setUploadSourceAuthor] = useState("");
   const [uploadAclTags, setUploadAclTags] = useState("");
+  const [uploadAuthorityKind, setUploadAuthorityKind] = useState<DocumentAuthorityKind>(
+    DEFAULT_DOCUMENT_AUTHORITY_KIND,
+  );
+  const [uploadAgentAccess, setUploadAgentAccess] = useState(true);
+  const [dropText, setDropText] = useState("");
+  const [dropAuthorityKind, setDropAuthorityKind] = useState<DocumentAuthorityKind>(
+    DEFAULT_DOCUMENT_AUTHORITY_KIND,
+  );
+  const [dropAgentAccess, setDropAgentAccess] = useState(true);
+  const [dropping, setDropping] = useState(false);
   const [creatingBase, setCreatingBase] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [movingIds, setMovingIds] = useState<Set<string>>(() => new Set());
+  const dropFileInputRef = useRef<HTMLInputElement | null>(null);
   const [searching, setSearching] = useState(false);
   // The query behind the results on screen, so a completed search that found
   // nothing reads as "No results" rather than the initial prompt.
@@ -87,8 +128,7 @@ export function DocumentsRoute({
   const selectedBase = bases.find((base) => base.id === selectedBaseId) ?? null;
   const failedDocuments = documents.filter((document) => document.status === "failed");
   // Honest list states: an initial fetch renders as loading and a failed load
-  // as an error with retry — never as "Create a document base to start." or
-  // "Upload files to index this base."
+  // as an error with retry — never as a mandatory collection-creation gate.
   const basesView = listViewState({
     loading: basesLoading,
     error: basesError,
@@ -106,10 +146,10 @@ export function DocumentsRoute({
       const next = await client.listDocumentBases(workspaceId);
       setBases(next);
       setBasesError(null);
-      setSelectedBaseId((current) => current ?? next[0]?.id ?? null);
+      setSelectedBaseId((current) => resolveDocumentCollectionSelection(current, next));
     } catch (error) {
       setBasesError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load document bases", { description: String(error) });
+      toast.error("Failed to load document collections", { description: String(error) });
     } finally {
       setBasesLoading(false);
     }
@@ -149,22 +189,34 @@ export function DocumentsRoute({
 
   useEffect(() => {
     if (
+      !pageLive ||
       !selectedBaseId ||
       !documents.some((document) => document.status === "queued" || document.status === "indexing")
     ) {
       return;
     }
-    const timer = window.setInterval(() => {
-      void client
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const load = async () => {
+      await client
         .listDocuments(workspaceId, selectedBaseId)
         .then((next) => {
-          setDocuments(next);
-          setPollFailed(false);
+          if (!cancelled) {
+            setDocuments(next);
+            setPollFailed(false);
+          }
         })
-        .catch(() => setPollFailed(true));
-    }, 1200);
-    return () => window.clearInterval(timer);
-  }, [client, workspaceId, selectedBaseId, documents]);
+        .catch(() => {
+          if (!cancelled) setPollFailed(true);
+        });
+      if (!cancelled) timer = setTimeout(() => void load(), 1_200);
+    };
+    timer = setTimeout(() => void load(), 1_200);
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [client, workspaceId, selectedBaseId, documents, pageLive]);
 
   async function handleCreateBase() {
     const trimmed = name.trim();
@@ -175,11 +227,11 @@ export function DocumentsRoute({
       setBases((current) => [...current, base]);
       setSelectedBaseId(base.id);
       setName("");
-      toast.success("Document base created", {
+      toast.success("Collection created", {
         description: `“${base.name}” is ready for uploads.`,
       });
     } catch (error) {
-      toast.error("Failed to create document base", {
+      toast.error("Failed to create collection", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -201,6 +253,8 @@ export function DocumentsRoute({
         const indexed = await client.addDocument(workspaceId, selectedBaseId, {
           fileId: asset.id,
           sourceKind: uploadSourceKind,
+          authorityKind: uploadAuthorityKind,
+          agentAccess: uploadAgentAccess,
           ...(uploadSourceUri.trim() ? { sourceUri: uploadSourceUri.trim() } : {}),
           ...(uploadSourceTitle.trim() ? { sourceTitle: uploadSourceTitle.trim() } : {}),
           ...(uploadSourceAuthor.trim() ? { sourceAuthor: uploadSourceAuthor.trim() } : {}),
@@ -216,6 +270,99 @@ export function DocumentsRoute({
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  // A drop can create Default or auto-file into any collection — re-pull the
+  // collection list and land the user where the document actually went.
+  async function finishDrop(document: IndexedDocument) {
+    try {
+      const nextBases = await client.listDocumentBases(workspaceId);
+      setBases(nextBases);
+    } catch {
+      // Base list refresh is cosmetic here; the document view below still lands.
+    }
+    setSelectedBaseId(document.baseId);
+    await refreshDocuments(document.baseId);
+  }
+
+  async function handleDropText() {
+    const text = dropText.trim();
+    if (!text) return;
+    setDropping(true);
+    try {
+      const document = await client.createKnowledgeDrop(workspaceId, {
+        text,
+        authorityKind: dropAuthorityKind,
+        agentAccess: dropAgentAccess,
+      });
+      setDropText("");
+      toast.success("Dropped into knowledge", {
+        description: dropResultDescription(document),
+      });
+      await finishDrop(document);
+    } catch (error) {
+      toast.error("Drop failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setDropping(false);
+    }
+  }
+
+  async function handleDropFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setDropping(true);
+    try {
+      let last: IndexedDocument | null = null;
+      for (const file of Array.from(files)) {
+        const asset = await client.uploadFile(workspaceId, {
+          filename: file.name || "file",
+          contentType: file.type || "application/octet-stream",
+          data: file,
+        });
+        last = await client.createKnowledgeDrop(workspaceId, {
+          fileId: asset.id,
+          authorityKind: dropAuthorityKind,
+          agentAccess: dropAgentAccess,
+        });
+      }
+      toast.success(
+        files.length === 1 ? "Dropped into knowledge" : `${files.length} files dropped`,
+        {
+          description: last ? dropResultDescription(last) : "The files were added to Default.",
+        },
+      );
+      if (last) await finishDrop(last);
+    } catch (error) {
+      toast.error("Drop failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setDropping(false);
+      if (dropFileInputRef.current) dropFileInputRef.current.value = "";
+    }
+  }
+
+  async function handleApplySuggestion(document: IndexedDocument) {
+    setMovingIds((current) => new Set(current).add(document.id));
+    try {
+      const moved = await client.moveDocument(workspaceId, document.id);
+      // The document left the currently selected base.
+      setDocuments((current) => current.filter((item) => item.id !== document.id));
+      toast.success(
+        `Filed “${moved.title}” into ${moved.curation?.suggestedBaseName ?? "the suggested base"}`,
+      );
+    } catch (error) {
+      toast.error("Failed to move document", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setMovingIds((current) => {
+        const next = new Set(current);
+        next.delete(document.id);
+        return next;
+      });
     }
   }
 
@@ -291,63 +438,178 @@ export function DocumentsRoute({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage>
       <section className="flex min-h-0 flex-1 flex-col text-left">
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
-          description="Indexed document bases the agent can search."
+          description="Upload immediately for agent search. Collections are optional organization."
           actions={
-            <div className="flex min-w-0 gap-2">
-              <Input
-                ref={nameInputRef}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="New base name"
-                className="h-8 min-w-0 text-xs"
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void handleCreateBase();
-                }}
-              />
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => void handleCreateBase()}
-                disabled={creatingBase || !name.trim()}
-                className="h-8 shrink-0 pointer-coarse:min-h-10"
-              >
-                {creatingBase ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <PlusIcon className="size-3.5" />
-                )}
-                Create base
-              </Button>
-            </div>
+            <details className="w-full min-w-0 lg:w-auto">
+              <summary className="flex h-8 cursor-pointer list-none items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-fg-muted hover:bg-surface-2 pointer-coarse:min-h-10">
+                <PlusIcon className="size-3.5" />
+                New collection
+                <span className="font-normal text-fg-subtle">optional</span>
+              </summary>
+              <div className="mt-2 grid min-w-0 gap-2 rounded-lg border border-border bg-surface p-2 sm:min-w-80 sm:grid-cols-[minmax(10rem,1fr)_auto]">
+                <Input
+                  ref={nameInputRef}
+                  aria-label="New document collection name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Collection name"
+                  className="h-8 min-w-0 text-xs pointer-coarse:min-h-10"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void handleCreateBase();
+                  }}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void handleCreateBase()}
+                  disabled={creatingBase || !name.trim()}
+                  className="h-8 shrink-0 pointer-coarse:min-h-10"
+                >
+                  {creatingBase ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <PlusIcon className="size-3.5" />
+                  )}
+                  Create
+                </Button>
+              </div>
+            </details>
           }
         />
 
-        <div className="mt-5 grid min-h-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)_360px]">
-          <aside className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4">
+        <div
+          role="region"
+          aria-label="Knowledge drop zone"
+          className="mt-5 rounded-lg border border-dashed border-border bg-surface/25 p-3"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            void handleDropFiles(event.dataTransfer?.files ?? null);
+          }}
+        >
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <SparklesIcon className="size-4 text-brand" />
+            Drop anything
+            <span className="text-2xs font-normal text-fg-subtle">
+              Drops start in Default; enabled curation may name, summarize, and organize them.
+            </span>
+          </div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <textarea
+              aria-label="Knowledge drop text"
+              value={dropText}
+              onChange={(event) => setDropText(event.target.value)}
+              placeholder="Paste notes, a transcript, an email — or drag files here."
+              rows={2}
+              disabled={!fileUploadsEnabled || dropping}
+              className="min-h-16 w-full resize-y rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 py-2 text-xs leading-5 text-[color:var(--color-fg)]"
+            />
+            <div className="flex flex-col gap-2">
+              <label className="grid gap-1 text-2xs font-medium text-fg-subtle">
+                Authority
+                <select
+                  value={dropAuthorityKind}
+                  onChange={(event) =>
+                    setDropAuthorityKind(event.target.value as DocumentAuthorityKind)
+                  }
+                  disabled={dropping}
+                  aria-label="Drop authority"
+                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs font-normal text-[color:var(--color-fg)]"
+                >
+                  {DOCUMENT_AUTHORITY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={dropAgentAccess}
+                  onChange={(event) => setDropAgentAccess(event.target.checked)}
+                  disabled={dropping}
+                />
+                Subject-aware agents can read it
+              </label>
+              <div className="flex gap-2">
+                <input
+                  ref={dropFileInputRef}
+                  type="file"
+                  multiple
+                  aria-label="Add files as a knowledge drop"
+                  className="hidden"
+                  onChange={(event) => void handleDropFiles(event.target.files)}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={!fileUploadsEnabled || dropping}
+                  onClick={() => dropFileInputRef.current?.click()}
+                  className="h-8"
+                >
+                  <FilesIcon className="size-3.5" />
+                  Files
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!fileUploadsEnabled || dropping || !dropText.trim()}
+                  onClick={() => void handleDropText()}
+                  className="h-8"
+                >
+                  {dropping ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <SparklesIcon className="size-3.5" />
+                  )}
+                  Drop
+                </Button>
+              </div>
+            </div>
+          </div>
+          {!fileUploadsEnabled ? (
+            <div className="mt-2 text-2xs text-fg-subtle">
+              Knowledge drops need object storage, which is off for this deployment.
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_20rem]">
+          <aside
+            aria-labelledby="document-bases-heading"
+            className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4"
+          >
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-xs font-medium uppercase text-fg-subtle">Bases</div>
+              <h2
+                id="document-bases-heading"
+                className="text-xs font-medium uppercase text-fg-subtle"
+              >
+                Collections <span className="normal-case font-normal">(optional)</span>
+              </h2>
               <div className="text-2xs text-fg-subtle">{bases.length}</div>
             </div>
-            <div className="space-y-1">
+            <div className="grid auto-cols-[minmax(10rem,80%)] grid-flow-col gap-1 overflow-x-auto overscroll-x-contain pb-1 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
               {basesView === "loading" ? (
                 <div className="flex items-center gap-2 rounded-lg border border-border p-3 text-xs text-fg-muted">
                   <Loader2Icon className="size-3.5 animate-spin" />
-                  Loading bases
+                  Loading collections
                 </div>
               ) : basesView === "error" ? (
                 <LoadErrorState
-                  title="Couldn't load document bases"
+                  title="Couldn't load document collections"
                   error={basesError}
                   onRetry={() => void refreshBases()}
                 />
               ) : basesView === "empty" ? (
                 <div className="rounded-lg border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
-                  No bases yet. Name one above to start indexing documents.
+                  Default is being prepared. Refresh if this message persists.
                 </div>
               ) : (
                 bases.map((base) => (
@@ -356,13 +618,22 @@ export function DocumentsRoute({
                     type="button"
                     onClick={() => setSelectedBaseId(base.id)}
                     className={cn(
-                      "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs",
+                      "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs pointer-coarse:min-h-10",
                       selectedBaseId === base.id
                         ? "border-brand/40 bg-brand/10 text-fg"
                         : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
                     )}
                   >
-                    <span className="truncate">{base.name}</span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="min-w-0 break-words" title={base.name}>
+                        {base.name}
+                      </span>
+                      {isDefaultDocumentCollection(base) ? (
+                        <span className="shrink-0 rounded border border-border px-1 text-[10px] font-normal text-fg-subtle">
+                          automatic
+                        </span>
+                      ) : null}
+                    </span>
                     {selectedBaseId === base.id ? (
                       <CheckIcon className="size-3.5 shrink-0" />
                     ) : null}
@@ -387,6 +658,7 @@ export function DocumentsRoute({
                       ref={fileInputRef}
                       type="file"
                       multiple
+                      aria-label="Upload documents to selected collection"
                       className="hidden"
                       onChange={(event) => void handleFiles(event.target.files)}
                     />
@@ -395,7 +667,7 @@ export function DocumentsRoute({
                       size="sm"
                       disabled={uploading || !fileUploadsEnabled}
                       onClick={() => fileInputRef.current?.click()}
-                      className="h-8"
+                      className="h-8 pointer-coarse:min-h-10"
                     >
                       {uploading ? (
                         <Loader2Icon className="size-3.5 animate-spin" />
@@ -410,7 +682,7 @@ export function DocumentsRoute({
                       size="sm"
                       disabled={retryingAll || failedDocuments.length === 0}
                       onClick={() => void handleRetryFailedDocuments()}
-                      className="h-8"
+                      className="h-8 pointer-coarse:min-h-10"
                     >
                       {retryingAll ? (
                         <Loader2Icon className="size-3.5 animate-spin" />
@@ -422,60 +694,84 @@ export function DocumentsRoute({
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/25 p-3 sm:grid-cols-2 xl:grid-cols-5">
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    Source
-                    <select
+                <FormGrid
+                  columns="three"
+                  className="mt-4 rounded-lg border border-border bg-surface/25 p-3 xl:grid-cols-5"
+                >
+                  <FormField label="Source">
+                    <Select
                       value={uploadSourceKind}
                       onChange={(event) =>
                         setUploadSourceKind(event.target.value as KnowledgeSourceKind)
                       }
-                      className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                     >
                       {sourceKindOptions.map((kind) => (
                         <option key={kind} value={kind}>
                           {formatToken(kind)}
                         </option>
                       ))}
-                    </select>
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    URI
+                    </Select>
+                  </FormField>
+                  <FormField label="URI">
                     <Input
                       value={uploadSourceUri}
                       onChange={(event) => setUploadSourceUri(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="https://..."
                     />
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    Title
+                  </FormField>
+                  <FormField label="Title">
                     <Input
                       value={uploadSourceTitle}
                       onChange={(event) => setUploadSourceTitle(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="Source title"
                     />
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    Author
+                  </FormField>
+                  <FormField label="Author">
                     <Input
                       value={uploadSourceAuthor}
                       onChange={(event) => setUploadSourceAuthor(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="Owner"
                     />
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    ACL tags
+                  </FormField>
+                  <FormField label="ACL tags">
                     <Input
                       value={uploadAclTags}
                       onChange={(event) => setUploadAclTags(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="team, confidential"
                     />
-                  </label>
-                </div>
+                  </FormField>
+                  <FormField label="Authority">
+                    <Select
+                      aria-label="Upload authority"
+                      value={uploadAuthorityKind}
+                      onChange={(event) =>
+                        setUploadAuthorityKind(event.target.value as DocumentAuthorityKind)
+                      }
+                      className="h-8 text-xs pointer-coarse:min-h-10"
+                    >
+                      {DOCUMENT_AUTHORITY_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </FormField>
+                  <FormField label="Agent access">
+                    <Select
+                      value={uploadAgentAccess ? "on" : "off"}
+                      onChange={(event) => setUploadAgentAccess(event.target.value === "on")}
+                      className="h-8 text-xs pointer-coarse:min-h-10"
+                    >
+                      <option value="on">Subject-aware agents can read</option>
+                      <option value="off">Agents blocked</option>
+                    </Select>
+                  </FormField>
+                </FormGrid>
 
                 <div className="mt-4 space-y-2">
                   {pollFailed ? (
@@ -546,13 +842,50 @@ export function DocumentsRoute({
                         className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/35 px-3 py-2.5"
                       >
                         <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">{document.title}</div>
+                          <div className="break-words text-sm font-medium" title={document.title}>
+                            {document.title}
+                          </div>
+                          {document.summary ? (
+                            <p className="mt-1 line-clamp-2 max-w-3xl text-xs leading-5 text-fg-muted">
+                              {document.summary}
+                            </p>
+                          ) : null}
                           <div className="mt-1 text-2xs text-fg-subtle">
                             {document.status} · {document.chunkCount} chunks · {document.parser}
                           </div>
                           <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-[color:var(--color-fg-subtle)]">
                             <span>{formatToken(document.sourceKind)}</span>
                             {document.sourceTitle ? <span>· {document.sourceTitle}</span> : null}
+                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                              {document.authorityKind === "personal" ? (
+                                <LockIcon className="size-3" />
+                              ) : null}
+                              Authority: {documentAuthorityLabel(document.authorityKind)}
+                            </span>
+                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                              {document.agentAccess === false ? (
+                                <BotOffIcon className="size-3" />
+                              ) : null}
+                              {document.agentAccess
+                                ? document.visibility === "private"
+                                  ? "creator's subject-aware agent can read"
+                                  : "subject-aware agents can read"
+                                : "agents blocked"}
+                            </span>
+                            {document.curationStatus === "auto_filed" ? (
+                              <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                                <SparklesIcon className="size-3" />
+                                auto-filed
+                              </span>
+                            ) : null}
+                            {document.topics.slice(0, 4).map((topic) => (
+                              <span
+                                key={topic}
+                                className="rounded border border-[color:var(--color-border)] px-1"
+                              >
+                                {topic}
+                              </span>
+                            ))}
                             {document.aclTags.slice(0, 3).map((tag) => (
                               <span
                                 key={tag}
@@ -562,6 +895,31 @@ export function DocumentsRoute({
                               </span>
                             ))}
                           </div>
+                          {document.curationStatus === "suggested" &&
+                          document.curation?.suggestedBaseId ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+                              <span>
+                                Suggested base: “{document.curation.suggestedBaseName}”
+                                {typeof document.curation.confidence === "number"
+                                  ? ` (${Math.round(document.curation.confidence * 100)}%)`
+                                  : ""}
+                              </span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="xs"
+                                disabled={movingIds.has(document.id)}
+                                onClick={() => void handleApplySuggestion(document)}
+                              >
+                                {movingIds.has(document.id) ? (
+                                  <Loader2Icon className="size-3 animate-spin" />
+                                ) : (
+                                  <FolderInputIcon className="size-3" />
+                                )}
+                                Move it there
+                              </Button>
+                            </div>
+                          ) : null}
                           {document.status === "failed" && document.error ? (
                             <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
                               {document.error}
@@ -600,57 +958,66 @@ export function DocumentsRoute({
             ) : basesView === "empty" ? (
               <EmptyState
                 icon={<FileSearchIcon className="size-4" />}
-                title="Create your first base"
-                description="A document base is an indexed corpus the agent can search. Name one and upload files to it."
+                title="Preparing Default collection"
+                description="OpenGeni creates Default automatically so uploads never require collection setup."
                 action={
-                  <Button type="button" size="sm" onClick={() => nameInputRef.current?.focus()}>
-                    <PlusIcon className="size-3.5" />
-                    Create base
+                  <Button type="button" size="sm" onClick={() => void refreshBases()}>
+                    <RefreshCwIcon className="size-3.5" />
+                    Refresh
                   </Button>
                 }
               />
             ) : (
               <EmptyState
                 icon={<FileSearchIcon className="size-4" />}
-                title="No base selected"
-                description="Pick a base on the left to upload and search its documents."
+                title="No collection selected"
+                description="Pick a collection on the left. Default is selected automatically when needed."
               />
             )}
           </div>
 
-          <aside className="min-w-0 border-t border-border pt-4 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0">
-            <div className="flex items-center gap-2 text-sm font-medium">
+          <aside
+            aria-labelledby="document-search-heading"
+            className="min-w-0 border-t border-border pt-4 lg:col-span-2 xl:col-span-1 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0"
+          >
+            <h2
+              id="document-search-heading"
+              className="flex items-center gap-2 text-sm font-medium"
+            >
               <FileSearchIcon className="size-4 text-brand" />
               Search
-            </div>
+            </h2>
             <div className="mt-3 grid gap-2">
               <Input
+                aria-label="Search indexed documents"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Search indexed documents"
-                className="h-9 text-sm"
+                className="h-9 text-sm pointer-coarse:min-h-10"
                 disabled={!selectedBaseId}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void handleSearch();
                 }}
               />
-              <div className="grid grid-cols-2 gap-2">
-                <select
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-2">
+                <Select
+                  aria-label="Search mode"
                   value={searchMode}
                   onChange={(event) => setSearchMode(event.target.value as DocumentSearchMode)}
-                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
+                  className="h-8 text-xs pointer-coarse:min-h-10"
                   disabled={!selectedBaseId}
                 >
                   <option value="hybrid">Hybrid</option>
                   <option value="vector">Vector</option>
                   <option value="keyword">Keyword</option>
-                </select>
-                <select
+                </Select>
+                <Select
+                  aria-label="Source kind"
                   value={searchSourceKind}
                   onChange={(event) =>
                     setSearchSourceKind(event.target.value as KnowledgeSourceKind | "")
                   }
-                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
+                  className="h-8 text-xs pointer-coarse:min-h-10"
                   disabled={!selectedBaseId}
                 >
                   <option value="">All sources</option>
@@ -659,21 +1026,23 @@ export function DocumentsRoute({
                       {formatToken(kind)}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
-              <Input
-                value={searchAclTags}
-                onChange={(event) => setSearchAclTags(event.target.value)}
-                placeholder="ACL tags"
-                className="h-8 text-xs"
-                disabled={!selectedBaseId}
-              />
+              <FormField label="ACL tags">
+                <Input
+                  value={searchAclTags}
+                  onChange={(event) => setSearchAclTags(event.target.value)}
+                  placeholder="team, confidential"
+                  className="h-8 text-xs pointer-coarse:min-h-10"
+                  disabled={!selectedBaseId}
+                />
+              </FormField>
               <Button
                 type="button"
                 size="sm"
                 onClick={() => void handleSearch()}
                 disabled={searching || !selectedBaseId || !query.trim()}
-                className="h-9"
+                className="h-9 pointer-coarse:min-h-10"
               >
                 {searching ? (
                   <Loader2Icon className="size-3.5 animate-spin" />
@@ -692,7 +1061,9 @@ export function DocumentsRoute({
                     className="rounded-lg border border-border bg-surface/35 p-3"
                   >
                     <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="truncate font-medium text-fg">{result.title}</span>
+                      <span className="min-w-0 break-words font-medium text-fg">
+                        {result.title}
+                      </span>
                       <span className="shrink-0 text-fg-subtle">
                         {result.matchType} · {Math.round(result.score * 100)}%
                       </span>
@@ -716,17 +1087,26 @@ export function DocumentsRoute({
                 </div>
               )}
             </div>
-
-            <MemoryPane
-              workspaceId={workspaceId}
-              memoryEnabled={memoryEnabled}
-              focusMemoryId={focusMemoryId}
-            />
           </aside>
         </div>
       </section>
-    </div>
+    </ContentPage>
   );
+}
+
+function dropResultDescription(document: Pick<IndexedDocument, "curationStatus">): string {
+  switch (document.curationStatus) {
+    case "none":
+      return "Curation is disabled; the document stays in Default with its supplied metadata.";
+    case "pending":
+      return "The document was added to Default; curation is still processing.";
+    case "suggested":
+      return "Curation suggested a destination; review the suggestion below.";
+    case "auto_filed":
+      return "Curation named, summarized, and filed the document automatically.";
+    case "failed":
+      return "Curation failed softly; the document remains searchable with safe fallback metadata.";
+  }
 }
 
 function documentStatusTone(status: IndexedDocument["status"]): StatusTone {

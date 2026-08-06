@@ -7,11 +7,8 @@ import {
   type SlashCommandContext,
   type UseFileAttachmentsResult,
 } from "@opengeni/react";
-import {
-  resolveWorkspaceTranscriptionPolicy,
-  type EffectiveSessionControl,
-  type TranscriptionAdapter,
-} from "@opengeni/sdk";
+import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/core";
+import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { type ReactNode } from "react";
 import { useAppContext } from "@/context";
 
@@ -34,15 +31,18 @@ export function ConsoleComposer(props: {
   autoFocus?: boolean;
   disabled?: boolean;
   fileUploadsEnabled: boolean;
+  /** Rendered before attach (mobile “+” lives here). */
+  controlsLeading?: ReactNode;
   controls?: ReactNode;
+  actions?: ReactNode;
   commandContext?: SlashCommandContext;
   onClearView?: () => void;
-  /** Optional approved host adapter; the web bundle ships no paid provider adapter. */
-  transcriptionAdapter?: TranscriptionAdapter | null;
+  /** Soft-hide dictate while realtime voice is active. */
+  transcriptionSuppressed?: boolean;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
-  const transcriptionPolicy = resolveWorkspaceTranscriptionPolicy(workspace?.settings);
+  const voiceInputEnabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
   return (
     <ChatComposer
       composer={props.composer}
@@ -56,11 +56,22 @@ export function ConsoleComposer(props: {
       {...(props.fileUploadsEnabled ? { attachments: props.attachments } : {})}
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
+      {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
+      // Desktop keeps the paperclip; mobile reaches attach via the “+” menu.
+      attachButtonClassName="max-sm:hidden"
       controlsStart={props.controls}
-      transcription={{
-        adapter: props.transcriptionAdapter ?? null,
-        policy: transcriptionPolicy,
-      }}
+      actionsStart={props.actions}
+      transcriptionSuppressed={props.transcriptionSuppressed === true}
+      {...(context.clientConfig.voiceInput?.available
+        ? {
+            transcription: {
+              client: context.client,
+              workspaceId: props.workspaceId,
+              capability: context.clientConfig.voiceInput,
+              workspaceEnabled: voiceInputEnabled,
+            },
+          }
+        : {})}
     />
   );
 }

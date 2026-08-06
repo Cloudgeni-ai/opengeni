@@ -33,6 +33,17 @@ function assertToolspaceSessionId(sessionId: string): string {
   return sessionId;
 }
 
+function assertToolspaceFilePath(value: string, label: string): string {
+  if (!value || value.includes("\0") || !posixPath.isAbsolute(value)) {
+    throw new ToolspaceTokenPathError(`${label} must be absolute`);
+  }
+  return posixPath.normalize(value);
+}
+
+export function shellToolspacePath(value: string): string {
+  return shellQuote(assertToolspaceFilePath(value, "Toolspace token file"));
+}
+
 /**
  * Derive the per-session token file beside the legacy manifest pointer.
  *
@@ -44,14 +55,10 @@ function assertToolspaceSessionId(sessionId: string): string {
  * authority boundary for Toolspace calls.
  */
 export function toolspaceTokenFileForSession(manifestTokenFile: string, sessionId: string): string {
-  if (
-    !manifestTokenFile ||
-    manifestTokenFile.includes("\0") ||
-    !posixPath.isAbsolute(manifestTokenFile)
-  ) {
-    throw new ToolspaceTokenPathError("Toolspace manifest token file must be absolute");
-  }
-  const normalizedManifestFile = posixPath.normalize(manifestTokenFile);
+  const normalizedManifestFile = assertToolspaceFilePath(
+    manifestTokenFile,
+    "Toolspace manifest token file",
+  );
   const digest = createHash("sha256").update(assertToolspaceSessionId(sessionId)).digest("hex");
   return posixPath.join(posixPath.dirname(normalizedManifestFile), "toolspace-tokens", digest);
 }
@@ -68,10 +75,7 @@ export function toolspaceTokenFileFromEnvironment(
 
 /** Prefix one sandbox command with its session-specific Toolspace pointer. */
 export function withToolspaceTokenEnvironment(cmd: string, tokenFile: string): string {
-  if (!tokenFile || tokenFile.includes("\0") || !posixPath.isAbsolute(tokenFile)) {
-    throw new ToolspaceTokenPathError("Toolspace token file must be absolute");
-  }
-  return [`export OPENGENI_TOOLSPACE_TOKEN_FILE=${shellQuote(tokenFile)}`, cmd].join("\n");
+  return [`export OPENGENI_TOOLSPACE_TOKEN_FILE=${shellToolspacePath(tokenFile)}`, cmd].join("\n");
 }
 
 /** Preserve provider identity/capabilities while decorating command creation. */

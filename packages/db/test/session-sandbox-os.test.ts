@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Session, SessionTurn } from "@opengeni/contracts";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS, Session, SessionTurn } from "@opengeni/contracts";
 
 // Pure (no-postgres) spec for the 0018 read-side shape: the contract Session
 // carries sandboxOs (enum, default linux) + sandboxGroupId (uuid), and
@@ -34,11 +34,21 @@ function baseSession() {
     sandboxBackend: "modal" as const,
     sandboxOs: "linux" as const,
     sandboxGroupId: id,
+    rootSessionId: id,
+    nestedAgentDepth: 0,
+    maxNestedAgentDepthOverride: null,
+    effectiveMaxNestedAgentDepth: 3,
+    nestedAgentDepthPolicySource: "default" as const,
+    nestedAgentDepthPolicySessionId: null,
     // M2 swappable-sandbox pointer (null == use the group sandbox; epoch 0 default).
     activeSandboxId: null,
     activeEpoch: 0,
+    workingDir: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
+    firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+    toolPolicyVersion: 1,
     parentSessionId: null,
     createIdempotencyKey: null,
     temporalWorkflowId: null,
@@ -62,6 +72,7 @@ function baseSession() {
     },
     codexPinnedCredentialId: null,
     codexLastCredentialId: null,
+    codexCompactionMode: "portable",
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
   };

@@ -11,6 +11,7 @@ import {
   getSession,
   getSessionRootId,
   getSessionTurnForAttempt,
+  getSlackInteractionSessionAccessForSession,
   type Database,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
@@ -46,13 +47,32 @@ export type ResolvedSessionAuthorization = {
 };
 
 /**
+ * Prove that a first-party request belongs to the exact currently active
+ * attempt of the named caller session. Unlike the optional embedding-host ACL
+ * port, this database fence is mandatory for high-trust operations.
+ */
+export async function requireLiveAgentAttemptAuthorization(
+  db: Database,
+  grant: AccessGrant,
+  callerSessionId: string,
+): Promise<Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>> {
+  const actor = await resolveSessionAuthorizationActor(db, grant);
+  if (actor.kind !== "agent_attempt" || actor.callerSessionId !== callerSessionId) {
+    throw new SessionAuthorizationDeniedError("caller_stale");
+  }
+  return actor;
+}
+
+/**
  * Resolve and enforce the host ACL for one session. The target and agent actor
  * are reconstructed from workspace-scoped durable state. A request can supply
  * an immediate target id and signed attempt claims, but can never nominate a
  * lineage root or frozen initiator.
  *
- * Returns null when no host port is bound so standalone behavior stays byte-
- * for-byte unchanged and pays no additional lineage lookup.
+ * Slack-owned private sessions are enforced here even when no embedding-host
+ * authorization port is bound. That durable ownership fence covers every
+ * session surface which uses this shared seam, rather than relying on list/UI
+ * filtering or caller-controlled session metadata.
  */
 export async function requireSessionAuthorization(
   deps: SessionAuthorizationDependencies,
@@ -64,12 +84,26 @@ export async function requireSessionAuthorization(
   },
 ): Promise<ResolvedSessionAuthorization | null> {
   const port = deps.sessionAuthorization;
+  const slackAccess = await getSlackInteractionSessionAccessForSession(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: input.sessionId,
+  });
+  if (!port && slackAccess?.visibility !== "private") return null;
+
+  const actor = await resolveSessionAuthorizationActor(deps.db, grant);
+  const target = slackAccess
+    ? { sessionId: input.sessionId, rootSessionId: slackAccess.rootSessionId }
+    : await resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId);
+  if (slackAccess?.visibility === "private") {
+    const allowed =
+      actor.kind === "subject"
+        ? actor.subjectId === slackAccess.owningSubjectId
+        : actor.callerRootSessionId === target.rootSessionId;
+    if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
+  }
   if (!port) return null;
 
-  const [actor, target] = await Promise.all([
-    resolveSessionAuthorizationActor(deps.db, grant),
-    resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId),
-  ]);
   let rawDecision: unknown;
   try {
     rawDecision = await port.authorizeSession({

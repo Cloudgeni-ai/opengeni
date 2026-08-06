@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "0.17.2",
+  "version": "0.39.2",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -21,6 +21,18 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./slack-bot-scopes": {
+      "types": "./src/slack-bot-scopes.ts",
+      "default": "./src/slack-bot-scopes.ts"
+    },
+    "./google-drive": {
+      "types": "./src/google-drive.ts",
+      "default": "./src/google-drive.ts"
+    },
+    "./connector-destinations": {
+      "types": "./src/connector-destinations.ts",
+      "default": "./src/connector-destinations.ts"
     }
   },
   "publishConfig": {
@@ -28,16 +40,17 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "zod": "^4.2.1"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=18"

@@ -88,10 +88,7 @@ export function classifyCodexPin(args: {
 export type RotationDecision =
   // The chosen account. `moved` ⇒ it differs from the current active pointer, so
   // the caller must persist the pointer move (and the switch is a "rotation").
-  // `droppedConnectors` (P4 Part B): the leaving session's used connectors that the
-  // chosen account does NOT cover — populated ONLY on a Tier-2/unknown pick that
-  // can't cover (prefer-not-require: failover still happens, but the pill warns).
-  | { kind: "active"; credentialId: string; moved: boolean; droppedConnectors?: string[] }
+  | { kind: "active"; credentialId: string; moved: boolean }
   // Every eligible account is capped/cooling: idle until the soonest instant ANY
   // account clears every blocking condition (the multi-account generalization of
   // the single-account idle-until-reset).
@@ -157,46 +154,10 @@ function cooling(acct: CodexRotationAccount, now: Date): boolean {
 }
 
 /**
- * P4 connector coverage (prefer-not-require). `acct` COVERS `usedConnectors` iff its
- * cached connector set is a SUPERSET of the session's used set. An empty used set is
- * trivially covered by everyone (→ Tier 1 == all eligibles == byte-identical to P3).
- * A null (never-probed) set is UNKNOWN: never credited as covering (Tier 2 only),
- * but — critically — never excluded, so failover is fully preserved.
- */
-function covers(acct: CodexRotationAccount, usedConnectors: string[]): boolean {
-  if (usedConnectors.length === 0) {
-    return true;
-  }
-  const owned = acct.connectorNamespaces;
-  if (owned === null) {
-    return false; // unprobed ⇒ unknown ⇒ never Tier 1 (but still a Tier-2 candidate)
-  }
-  const ownedSet = new Set(owned);
-  return usedConnectors.every((connector) => ownedSet.has(connector));
-}
-
-/**
- * The used connectors the chosen account does NOT cover (the "switch dropped a
- * connector" note). Empty when the account covers (superset) or nothing was used.
- * A null (unknown) set surfaces ALL used connectors — we can't prove it covers them.
- */
-function droppedConnectorsFor(acct: CodexRotationAccount, usedConnectors: string[]): string[] {
-  if (usedConnectors.length === 0) {
-    return [];
-  }
-  const owned = acct.connectorNamespaces;
-  if (owned === null) {
-    return [...usedConnectors];
-  }
-  const ownedSet = new Set(owned);
-  return usedConnectors.filter((connector) => !ownedSet.has(connector));
-}
-
-/**
- * Healthy for an already-frozen/in-flight turn = connected/usable (status
+ * Healthy for an already-leased/in-flight turn = connected/usable (status
  * "active", excludes needs_relogin/error), not cooling, and not exhausted in
  * either provider window. Allocator eligibility is
- * deliberately separate so disabling NEW work cannot break refresh/resume.
+ * deliberately separate so disabling NEW work cannot break an existing live lease.
  */
 export function isCodexCredentialHealthy(acct: CodexRotationAccount, now: Date): boolean {
   return (
@@ -433,8 +394,8 @@ export const REACTIVE_PERSISTENCE_FAULT_FLOOR_MS = 5_000; // 5s
  * Circuit-breaker slack (Finding 1b) added to the connected-account count to bound
  * consecutive reactive failovers. Each legitimate failover cools one account, so
  * after at most N failovers every account is capped and the reactive path takes the
- * all-capped idle instead; the +margin absorbs benign re-ranks (a connector-covering
- * pick order) without tripping the breaker in normal use.
+ * all-capped idle instead; the +margin absorbs benign capacity re-ranks without
+ * tripping the breaker in normal use.
  */
 export const REACTIVE_ROTATION_MARGIN = 2;
 /**
@@ -491,11 +452,6 @@ export function chooseRotationActive(args: {
   priorCredentialId: string | null;
   accounts: CodexRotationAccount[];
   now: Date;
-  // P4 (Part B): the connectors the leaving session has access to (the leaving
-  // account's cached connector set, used as the "session needs these" proxy).
-  // Optional + defaults to [] ⇒ when absent/empty the ranker is BYTE-IDENTICAL to
-  // P3 (every account trivially covers → Tier 1 == all eligibles). Self-gating.
-  usedConnectors?: string[];
 }): RotationDecision {
   const { activeCredentialId, priorCredentialId, accounts, now } = args;
   // Normalize at the entry point: rotation-enabled ALWAYS behaves as sharded
@@ -503,7 +459,6 @@ export function chooseRotationActive(args: {
   // tests can still express stored legacy values.
   const rotationStrategy = effectiveRotationStrategy(args.rotationStrategy);
   const allocatableAccounts = accounts.filter((account) => account.allocatorEnabled);
-  const usedConnectors = args.usedConnectors ?? [];
 
   if (allocatableAccounts.length === 0) {
     return { kind: "none" };
@@ -523,14 +478,10 @@ export function chooseRotationActive(args: {
         earliestResetAt: earliestReset(allocatableAccounts, now),
       };
     }
-    // P4: surface the dropped-connector note when the chosen account doesn't cover
-    // the session's used connectors (a Tier-2/unknown failover pick). Empty ⇒ omit.
-    const dropped = droppedConnectorsFor(chosen, usedConnectors);
     return {
       kind: "active",
       credentialId: chosen.id,
       moved: chosen.id !== activeCredentialId,
-      ...(dropped.length > 0 ? { droppedConnectors: dropped } : {}),
     };
   };
 
@@ -568,26 +519,20 @@ export function chooseRotationActive(args: {
     return decide(eligibles[0]);
   }
 
-  // most_remaining (default + the correctness path). Two-tier coverage pick over
-  // the SAME eligible set (prefer-not-require):
-  //   Tier 1 — eligibles whose connector set COVERS the session's used set.
-  //   Tier 2 — ALL eligibles, only if Tier 1 is empty (failover fully preserved).
-  // Within the chosen tier:
+  // most_remaining (default + the correctness path). Across the eligible set:
   //   1. least active leases (concurrent turns spread before quota metadata moves),
   //   2. most remaining binding quota,
   //   3. fewest historical selections,
   //   4. least-recently selected, then stable created_at/id input order.
   // Base CodexAccountStatus values (pure legacy tests/reactive rank) default the
   // lease/cursor metadata to zero/null, preserving deterministic stable ties.
-  const covering = eligibles.filter((acct) => covers(acct, usedConnectors));
-  const pool = covering.length > 0 ? covering : eligibles;
   const activeLeases = (acct: CodexRotationAccount): number =>
     "activeLeaseCount" in acct ? acct.activeLeaseCount : 0;
   const selections = (acct: CodexRotationAccount): number =>
     "selectionCount" in acct ? acct.selectionCount : 0;
   const lastSelected = (acct: CodexRotationAccount): number =>
     "lastSelectedAt" in acct && acct.lastSelectedAt ? acct.lastSelectedAt.getTime() : 0;
-  const chosen = pool.reduce<CodexRotationAccount | undefined>((best, acct) => {
+  const chosen = eligibles.reduce<CodexRotationAccount | undefined>((best, acct) => {
     if (!best) {
       return acct;
     }
@@ -613,7 +558,7 @@ export function chooseRotationActive(args: {
  * the same until BOTH the deployment flag and workspace cutover are enabled;
  * otherwise a rolling fleet would run two allocators at once. When the active
  * pointer is no longer eligible, zeroing the additive metadata delegates to the
- * same capacity/connector ranking that the old selector used.
+ * same capacity ranking that the old selector used.
  */
 export function chooseLegacyRotationActive(
   args: Parameters<typeof chooseRotationActive>[0],
@@ -650,8 +595,6 @@ export function selectCodexCredentialLeaseForTurn(args: {
   sessionPinnedCredentialId: string | null;
   sessionPinSource: CodexPinSource | null;
   sessionLastCredentialId: string | null;
-  /** Same-turn checkpoint/frozen account; temporary disable cannot move it. */
-  continuationCredentialId?: string | null;
   now: Date;
 }): CodexTurnLeaseSelection {
   const {
@@ -681,21 +624,6 @@ export function selectCodexCredentialLeaseForTurn(args: {
     };
   }
 
-  const continuation = args.continuationCredentialId
-    ? accounts.find((account) => account.id === args.continuationCredentialId)
-    : undefined;
-  if (continuation && isCodexCredentialHealthy(continuation, args.now)) {
-    return {
-      credentialId: continuation.id,
-      advanceActivePointer: false,
-      decision: {
-        kind: "active",
-        credentialId: continuation.id,
-        moved: continuation.id !== activeCredentialId,
-      },
-    };
-  }
-
   const connectedIds = new Set(
     accounts.filter((account) => account.allocatorEnabled).map((account) => account.id),
   );
@@ -708,8 +636,8 @@ export function selectCodexCredentialLeaseForTurn(args: {
   });
 
   // A manual pin is user intent, not a policy hint. Never silently fail it over.
-  // We still reject allocator-disabled rows for a NEW turn; healthy live/frozen
-  // same-turn continuity already returned above before this admission filter.
+  // We still reject allocator-disabled rows for a NEW turn; a healthy live
+  // same-turn lease already returned above before this admission filter.
   if (pinDisposition === "manual" && args.sessionPinnedCredentialId) {
     const pinned = accounts.find((account) => account.id === args.sessionPinnedCredentialId);
     if (!pinned?.allocatorEnabled) {
@@ -766,13 +694,27 @@ export function selectCodexCredentialLeaseForTurn(args: {
 
   // A stale policy pin is intentionally ignored here and cleared by the caller
   // after the atomic selection. Rotation-off/unpinned behavior otherwise keeps
-  // the pre-lease pin > active-pointer contract.
+  // the pre-lease pin > active-pointer contract. The pointer is preference, not
+  // proof of capacity: rotation-off must wait on a capped pointer rather than
+  // falsely admitting it or silently failing over to another subscription.
   if (!rotationEnabled) {
-    const credentialId =
-      activeCredentialId && connectedIds.has(activeCredentialId) ? activeCredentialId : null;
+    const active = activeCredentialId
+      ? accounts.find((account) => account.id === activeCredentialId)
+      : undefined;
+    if (!active?.allocatorEnabled) {
+      return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
+    if (!isCodexCredentialHealthy(active, args.now)) {
+      return {
+        credentialId: null,
+        decision: { kind: "allCapped", earliestResetAt: availableAt(active, args.now) },
+        advanceActivePointer: false,
+      };
+    }
     return {
-      credentialId,
-      decision: credentialId ? { kind: "active", credentialId, moved: false } : { kind: "none" },
+      credentialId: active.id,
+      decision: { kind: "active", credentialId: active.id, moved: false },
+      advanceActivePointer: false,
     };
   }
 
@@ -802,7 +744,6 @@ export function selectCodexCredentialLeaseForTurn(args: {
     priorCredentialId: priorId,
     accounts,
     now: args.now,
-    usedConnectors: accounts.find((account) => account.id === priorId)?.connectorNamespaces ?? [],
   });
   return {
     credentialId: decision.kind === "active" ? decision.credentialId : null,

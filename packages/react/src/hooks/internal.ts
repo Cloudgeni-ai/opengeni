@@ -1,6 +1,51 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { EmbeddedSessionClientLike } from "../client";
+import type { EmbeddedSessionEventClientLike } from "../client";
+
+const HIDDEN_STREAM_GRACE_MS = 2_000;
+
+/**
+ * Keep live browser work active while the page is visible, then suspend it
+ * after a short hidden-tab grace period. Returning to the page re-enables the
+ * caller, which must reconcile durable state before resuming live delivery.
+ */
+export function usePageLiveActivity(hiddenGraceMs = HIDDEN_STREAM_GRACE_MS): boolean {
+  // Keep the server and initial browser render identical; the effect applies
+  // visibility after mount and preserves the intentional hidden-tab grace.
+  const [active, setActive] = useState(true);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelHiddenTimer = () => {
+      if (hiddenTimer !== null) {
+        clearTimeout(hiddenTimer);
+        hiddenTimer = null;
+      }
+    };
+    const sync = () => {
+      cancelHiddenTimer();
+      if (document.visibilityState !== "hidden") {
+        setActive(true);
+        return;
+      }
+      hiddenTimer = setTimeout(() => {
+        hiddenTimer = null;
+        if (document.visibilityState === "hidden") setActive(false);
+      }, hiddenGraceMs);
+    };
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("pageshow", sync);
+    sync();
+    return () => {
+      cancelHiddenTimer();
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("pageshow", sync);
+    };
+  }, [hiddenGraceMs]);
+
+  return active;
+}
 
 export type AsyncListState<T> = {
   data: T | null;
@@ -19,6 +64,7 @@ export function usePolledValue<T>(
 ): AsyncListState<T> {
   const enabled = options.enabled ?? true;
   const pollIntervalMs = options.pollIntervalMs;
+  const pageLive = usePageLiveActivity();
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
@@ -28,6 +74,8 @@ export function usePolledValue<T>(
     activeLoadRef.current = load;
   }, [load]);
   const requestAbortRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef<{ load: typeof load; promise: Promise<void> } | null>(null);
+  const trailingRefreshRef = useRef<{ load: typeof load; promise: Promise<void> } | null>(null);
   const [stateIdentity, setStateIdentity] = useState<{ load: typeof load }>(() => ({ load }));
 
   // A new loader identity means a new query (different session/workspace/...):
@@ -40,68 +88,107 @@ export function usePolledValue<T>(
     }
   }, [load, stateIdentity.load]);
 
-  const run = useCallback(async () => {
+  const run = useCallback((): Promise<void> => {
     // A callback retained by a completed mutation from the previous query must
     // not supersede or settle the current query's request.
-    if (activeLoadRef.current !== load) return;
+    if (activeLoadRef.current !== load) return Promise.resolve();
+    const existing = inFlightRef.current;
+    if (existing?.load === load) return existing.promise;
     const ticket = ++generation.current;
-    requestAbortRef.current?.abort();
     const requestAbort = new AbortController();
     requestAbortRef.current = requestAbort;
-    try {
-      const result = await load(requestAbort.signal);
-      if (
-        ticket === generation.current &&
-        activeLoadRef.current === load &&
-        !requestAbort.signal.aborted
-      ) {
-        setData(result);
-        setError(null);
-        setLoading(false);
+    let promise!: Promise<void>;
+    promise = (async () => {
+      try {
+        const result = await load(requestAbort.signal);
+        if (
+          ticket === generation.current &&
+          activeLoadRef.current === load &&
+          !requestAbort.signal.aborted
+        ) {
+          setData(result);
+          setError(null);
+          setLoading(false);
+        }
+      } catch (cause) {
+        if (
+          ticket === generation.current &&
+          activeLoadRef.current === load &&
+          !requestAbort.signal.aborted
+        ) {
+          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setLoading(false);
+        }
+      } finally {
+        if (requestAbortRef.current === requestAbort) requestAbortRef.current = null;
+        if (inFlightRef.current?.promise === promise) inFlightRef.current = null;
       }
-    } catch (cause) {
-      if (
-        ticket === generation.current &&
-        activeLoadRef.current === load &&
-        !requestAbort.signal.aborted
-      ) {
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
-        setLoading(false);
-      }
-    } finally {
-      if (requestAbortRef.current === requestAbort) {
-        requestAbortRef.current = null;
-      }
-    }
+    })();
+    inFlightRef.current = { load, promise };
+    return promise;
   }, [load]);
 
+  const refresh = useCallback((): Promise<void> => {
+    const existing = inFlightRef.current;
+    if (existing?.load !== load) return run();
+    const trailing = trailingRefreshRef.current;
+    if (trailing?.load === load) return trailing.promise;
+    let promise!: Promise<void>;
+    promise = existing.promise.then(async () => {
+      if (trailingRefreshRef.current?.promise === promise) {
+        trailingRefreshRef.current = null;
+      }
+      if (activeLoadRef.current === load) await run();
+    });
+    trailingRefreshRef.current = { load, promise };
+    return promise;
+  }, [load, run]);
+
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || !pageLive) {
       setLoading(false);
+      generation.current += 1;
+      requestAbortRef.current?.abort();
+      inFlightRef.current = null;
+      trailingRefreshRef.current = null;
       return;
     }
     setLoading(true);
-    void run();
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (cancelled || pollIntervalMs === undefined || pollIntervalMs <= 0) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void run().finally(schedule);
+      }, pollIntervalMs);
+    };
+    void run().finally(schedule);
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
       return () => {
+        cancelled = true;
         generation.current += 1;
         requestAbortRef.current?.abort();
+        inFlightRef.current = null;
+        trailingRefreshRef.current = null;
       };
     }
-    const timer = setInterval(() => void run(), pollIntervalMs);
     return () => {
-      clearInterval(timer);
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
       generation.current += 1;
       requestAbortRef.current?.abort();
+      inFlightRef.current = null;
+      trailingRefreshRef.current = null;
     };
-  }, [run, enabled, pollIntervalMs]);
+  }, [run, enabled, pageLive, pollIntervalMs]);
 
   const identityMatches = stateIdentity.load === load;
   return {
     data: identityMatches ? data : null,
     loading: identityMatches ? loading : enabled,
     error: identityMatches ? error : null,
-    refresh: run,
+    refresh,
   };
 }
 
@@ -215,7 +302,7 @@ export type SessionEventFeedOptions = {
  * `events` log or tails the stream directly (reconnect handled by the SDK).
  */
 export function useSessionEventTrigger(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionEventClientLike,
   workspaceId: string,
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,
@@ -224,6 +311,8 @@ export function useSessionEventTrigger(
   reconcileBeforeLive?: (() => void | Promise<void>) | undefined,
 ): void {
   const enabled = options.enabled ?? true;
+  const pageLive = usePageLiveActivity();
+  const liveEnabled = enabled && pageLive;
   const events = options.events;
   const sharedFeed = events !== undefined;
   const matchRef = useRef(match);
@@ -236,20 +325,46 @@ export function useSessionEventTrigger(
   }, [match, onEvent, reconcileBeforeLive]);
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
+  const sharedFeedHasEventsRef = useRef(false);
 
   // Shared-log mode: scan only the unseen tail on every append.
   useEffect(() => {
-    if (!sharedFeed || !enabled || !sessionId) {
+    if (!sharedFeed || !liveEnabled || !sessionId) {
       return;
     }
     const feedKey = `${workspaceId}\u0000${sessionId}`;
     const firstSequence = events[0]?.sequence ?? 0;
-    // A new session target or a log reset (sequence restarted below the
-    // cursor) restarts consumption from the top of the shared log.
-    if (feedKeyRef.current !== feedKey || firstSequence > consumedRef.current + 1) {
+    if (feedKeyRef.current !== feedKey) {
       feedKeyRef.current = feedKey;
-      consumedRef.current = 0;
+      sharedFeedHasEventsRef.current = events.length > 0;
+      // The caller has already loaded its authoritative initial projection.
+      // Seed from the shared log's current tail so mounting a large historical
+      // session cannot replay every old event as a new live trigger.
+      consumedRef.current = events.at(-1)?.sequence ?? 0;
+      return;
     }
+    const firstNonEmptyBatch = !sharedFeedHasEventsRef.current && events.length > 0;
+    if (firstNonEmptyBatch || firstSequence > consumedRef.current + 1) {
+      // The usual shared feed mounts empty, then receives a historical tail.
+      // A later discontinuity can likewise replace the retained browser
+      // window. In either case, reconcile once from the latest relevant event
+      // instead of replaying the whole retained window as live traffic.
+      sharedFeedHasEventsRef.current = events.length > 0;
+      consumedRef.current = events.at(-1)?.sequence ?? consumedRef.current;
+      let latestMatch: SessionEvent | undefined;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (event && matchRef.current(event)) {
+          latestMatch = event;
+          break;
+        }
+      }
+      if (latestMatch) {
+        onEventRef.current(latestMatch);
+      }
+      return;
+    }
+    sharedFeedHasEventsRef.current ||= events.length > 0;
     for (const event of events) {
       if (event.sequence <= consumedRef.current) {
         continue;
@@ -259,11 +374,11 @@ export function useSessionEventTrigger(
         onEventRef.current(event);
       }
     }
-  }, [sharedFeed, enabled, events, workspaceId, sessionId]);
+  }, [sharedFeed, liveEnabled, events, workspaceId, sessionId]);
 
   // Self-stream mode: tail from the session's current lastSequence.
   useEffect(() => {
-    if (sharedFeed || !enabled || !sessionId) {
+    if (sharedFeed || !liveEnabled || !sessionId) {
       return;
     }
     const controller = new AbortController();
@@ -291,7 +406,7 @@ export function useSessionEventTrigger(
     return () => {
       controller.abort();
     };
-  }, [sharedFeed, enabled, client, workspaceId, sessionId]);
+  }, [sharedFeed, liveEnabled, client, workspaceId, sessionId]);
 }
 
 /** Debounce rapid event bursts into one trailing call (default 150ms). */

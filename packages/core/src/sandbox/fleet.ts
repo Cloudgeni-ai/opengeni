@@ -17,6 +17,7 @@ import {
   getSandbox,
   listSandboxes,
   readActiveSandbox,
+  readLease,
   requireSession,
   setActiveSandbox,
   type Database,
@@ -32,6 +33,7 @@ import {
   type BackendUnresolvableCode,
   type ControlRpc,
   type NatsRequestConnection,
+  type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
@@ -40,6 +42,15 @@ export type FleetServices = {
   db: Database;
   settings: Settings;
   bus?: EventBus;
+  /** API-direct readiness owner for the session's home group. Production wires
+   * this to the same viewer/provider verification + rematerialization path; core
+   * tests may omit it when exercising pointer mechanics only. */
+  ensureSessionGroupReady?: (ctx: FleetContext) => Promise<FleetReadinessHold>;
+};
+
+export type FleetReadinessHold = {
+  /** Release target liveness only after route publication settles. */
+  release: () => Promise<void>;
 };
 
 export type FleetContext = {
@@ -84,6 +95,7 @@ export async function buildFleetContextForSession(
 
 /** The dominant liveness of a fleet member, surfaced to the dock + the agent. */
 export type FleetLiveness = "online" | "reconnecting" | "offline";
+export type FleetOperationAvailability = "ready" | "wakeable" | "recovering" | "unavailable";
 
 /**
  * A fleet member as the agent + the dock see it (the M8b/M9 UI seam — the
@@ -106,11 +118,38 @@ export type FleetSandboxEntry = {
   enrollmentId: string | null;
   /** Whether this target can be attached/swapped to right now (live + addressable). */
   attachable: boolean;
+  /** Whether an ordinary shell/files operation can use this target. This is
+   * deliberately separate from `attachable`: an idle managed home sandbox can
+   * be wakeable even while its holderless lease is cold/draining and therefore
+   * not an already-live swap target. */
+  operationAvailability: FleetOperationAvailability;
   /** Selfhosted only: whether whole-machine + screen-control consent is acked. */
   consented?: boolean;
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
   hasDisplay?: boolean;
   lastSeenAt?: string | null;
+  /** Orthogonal truth dimensions. `liveness` is only their conservative UI
+   * projection and is never evidence for a specific dimension. */
+  providerStatus: "not_created" | "creating" | "exists" | "missing" | "unknown";
+  leaseLiveness: "cold" | "warming" | "warm" | "draining" | null;
+  routeStatus: "attached" | "detached";
+  archiveStatus: "none" | "available" | "unverified" | "invalid";
+  restoreStatus:
+    | "not_required"
+    | "pending"
+    | "restoring"
+    | "verifying"
+    | "ready"
+    | "degraded"
+    | "unrecoverable";
+  workspaceStatus: "unknown" | "not_ready" | "ready" | "degraded" | "unrecoverable";
+  leaseEpoch: number | null;
+  routeEpoch: number;
+  /** Numeric/boolean persistence truth only. Archive locations, content hashes,
+   * provider identities, and storage handles are intentionally not projected. */
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
 };
 
 export type FleetListResult = {
@@ -127,7 +166,12 @@ export type FleetSwapResult = {
   activeSandboxId: string | null;
   activeEpoch: number;
   reason?: string;
-  code?: BackendUnresolvableCode | "concurrent_swap";
+  code?:
+    | BackendUnresolvableCode
+    | "concurrent_swap"
+    | "recovery_in_progress"
+    | "recovery_degraded"
+    | "recovery_unrecoverable";
 };
 
 const PROBE_TIMEOUT_MS = 5_000;
@@ -200,17 +244,59 @@ export async function listFleet(
   const entries: FleetSandboxEntry[] = [];
 
   // The session's own group box (the default/home sandbox; null active pointer ==
-  // this box). It is live by virtue of being the session's resumable group.
+  // this box). A session/group row is not provider existence. Online requires a
+  // warm lease, observed provider existence, and verified workspace readiness.
   const groupActive = pointer.activeSandboxId === null;
+  const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
+  const groupOnline = Boolean(
+    groupLease?.liveness === "warm" &&
+    groupLease.recovery.provider.status === "exists" &&
+    groupLease.recovery.workspace.status === "ready",
+  );
+  const groupRecovering = Boolean(
+    groupLease &&
+    (groupLease.liveness === "warming" ||
+      groupLease.recovery.restore.status === "pending" ||
+      groupLease.recovery.restore.status === "restoring" ||
+      groupLease.recovery.restore.status === "verifying"),
+  );
+  const groupRecoveryUnavailable = Boolean(
+    groupLease &&
+    (groupLease.recovery.restore.status === "degraded" ||
+      groupLease.recovery.restore.status === "unrecoverable" ||
+      groupLease.recovery.workspace.status === "degraded" ||
+      groupLease.recovery.workspace.status === "unrecoverable"),
+  );
+  const groupOperationAvailability: FleetOperationAvailability = groupOnline
+    ? "ready"
+    : groupRecoveryUnavailable
+      ? "unavailable"
+      : groupRecovering
+        ? "recovering"
+        : ctx.sessionBackend === "selfhosted"
+          ? "unavailable"
+          : "wakeable";
   entries.push({
     id: ctx.sessionGroupId,
     kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
     name: "session sandbox",
-    liveness: "online",
+    liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
     active: groupActive,
     isSessionGroup: true,
     enrollmentId: null,
-    attachable: true,
+    attachable: groupOnline,
+    operationAvailability: groupOperationAvailability,
+    providerStatus: groupLease?.recovery.provider.status ?? "not_created",
+    leaseLiveness: groupLease?.liveness ?? null,
+    routeStatus: groupActive ? "attached" : "detached",
+    archiveStatus: groupLease?.recovery.archive.status ?? "none",
+    restoreStatus: groupLease?.recovery.restore.status ?? "not_required",
+    workspaceStatus: groupLease?.recovery.workspace.status ?? "unknown",
+    leaseEpoch: groupLease?.leaseEpoch ?? null,
+    routeEpoch: pointer.activeEpoch,
+    workspaceGeneration: groupLease?.workspaceGeneration ?? null,
+    archiveGeneration: groupLease?.archiveGeneration ?? null,
+    archiveComplete: groupLease?.archiveComplete ?? false,
   });
 
   // The workspace's first-class selfhosted sandboxes (enrolled machines). Probe
@@ -233,9 +319,31 @@ export async function listFleet(
       isSessionGroup: false,
       enrollmentId: sandbox.enrollmentId,
       attachable: probe.liveness === "online",
+      operationAvailability:
+        probe.liveness === "online"
+          ? "ready"
+          : probe.liveness === "reconnecting"
+            ? "recovering"
+            : "unavailable",
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
       lastSeenAt: enrollment?.lastSeenAt ?? null,
+      providerStatus:
+        probe.liveness === "online"
+          ? "exists"
+          : probe.liveness === "reconnecting"
+            ? "unknown"
+            : "missing",
+      leaseLiveness: null,
+      routeStatus: pointer.activeSandboxId === sandbox.id ? "attached" : "detached",
+      archiveStatus: "none",
+      restoreStatus: "not_required",
+      workspaceStatus: probe.liveness === "online" ? "ready" : "not_ready",
+      leaseEpoch: null,
+      routeEpoch: pointer.activeEpoch,
+      workspaceGeneration: null,
+      archiveGeneration: null,
+      archiveComplete: false,
     });
   }
 
@@ -345,49 +453,81 @@ export async function swapActiveSandbox(
     };
   }
 
-  // Read the current epoch, then CAS on it (the fence). One retry on a lost race
-  // (a concurrent swap bumped the epoch between read and write).
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let readinessHold: FleetReadinessHold | undefined;
+  if (resolved.targetSandboxId === null && services.ensureSessionGroupReady) {
+    try {
+      readinessHold = await services.ensureSessionGroupReady(ctx);
+    } catch (error) {
+      const lease = await readLease(services.db, ctx.workspaceId, ctx.sessionGroupId);
+      const restore = lease?.recovery.restore.status;
+      const code =
+        restore === "degraded"
+          ? ("recovery_degraded" as const)
+          : restore === "unrecoverable"
+            ? ("recovery_unrecoverable" as const)
+            : ("recovery_in_progress" as const);
+      const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
+        activeSandboxId: null,
+        activeEpoch: 0,
+      };
+      return {
+        swapped: false,
+        activeSandboxId: pointer.activeSandboxId,
+        activeEpoch: pointer.activeEpoch,
+        reason:
+          error instanceof Error
+            ? error.message
+            : "session sandbox did not reach verified readiness",
+        code,
+      };
+    }
+  }
+
+  try {
+    // Read the current epoch, then CAS on it (the fence). One retry on a lost race
+    // (a concurrent swap bumped the epoch between read and write).
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
+        activeSandboxId: null,
+        activeEpoch: 0,
+      };
+      // Even a same-target attach advances active_epoch. It is a repair/fence
+      // request, not a no-op acknowledgment: any cached stale route is invalidated
+      // only after target readiness has been proved above.
+      const result = await setActiveSandbox(services.db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.sessionId,
+        targetSandboxId: resolved.targetSandboxId,
+        expectedEpoch: pointer.activeEpoch,
+        ...(workingDir !== undefined ? { workingDir } : {}),
+      });
+      if (result.swapped && result.pointer) {
+        return {
+          swapped: true,
+          activeSandboxId: result.pointer.activeSandboxId,
+          activeEpoch: result.pointer.activeEpoch,
+        };
+      }
+      // CAS lost (a concurrent swap won) — re-read + retry once.
+    }
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
       activeSandboxId: null,
       activeEpoch: 0,
     };
-    // No-op swap (already pointed there) is a success without an epoch bump churn.
-    if (pointer.activeSandboxId === resolved.targetSandboxId) {
-      return {
-        swapped: true,
-        activeSandboxId: pointer.activeSandboxId,
-        activeEpoch: pointer.activeEpoch,
-      };
-    }
-    const result = await setActiveSandbox(services.db, {
-      accountId: ctx.accountId,
-      workspaceId: ctx.workspaceId,
-      sessionId: ctx.sessionId,
-      targetSandboxId: resolved.targetSandboxId,
-      expectedEpoch: pointer.activeEpoch,
-      ...(workingDir !== undefined ? { workingDir } : {}),
-    });
-    if (result.swapped && result.pointer) {
-      return {
-        swapped: true,
-        activeSandboxId: result.pointer.activeSandboxId,
-        activeEpoch: result.pointer.activeEpoch,
-      };
-    }
-    // CAS lost (a concurrent swap won) — re-read + retry once.
+    return {
+      swapped: false,
+      activeSandboxId: pointer.activeSandboxId,
+      activeEpoch: pointer.activeEpoch,
+      reason: "a concurrent swap won the epoch fence; re-read and retry",
+      code: "concurrent_swap",
+    };
+  } finally {
+    // Do not let a cleanup failure turn an already-committed route CAS into a
+    // false failure. Viewer holders are TTL-bounded and will be reaped if this
+    // best-effort explicit release cannot complete.
+    await readinessHold?.release().catch(() => undefined);
   }
-  const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
-    activeSandboxId: null,
-    activeEpoch: 0,
-  };
-  return {
-    swapped: false,
-    activeSandboxId: pointer.activeSandboxId,
-    activeEpoch: pointer.activeEpoch,
-    reason: "a concurrent swap won the epoch fence; re-read and retry",
-    code: "concurrent_swap",
-  };
 }
 
 export type RunOnOp =
@@ -399,13 +539,98 @@ export type RunOnResult = {
   target: string;
   kind: string;
   ok: boolean;
+  /** Display name of the target sandbox when known (from the sandboxes row). */
+  targetName?: string;
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
+  /** Exec only: whether the machine killed the child at its process deadline. */
+  timedOut?: boolean;
+  /** Exec only: the effective clamped process deadline enforced by the machine. */
+  deadlineMs?: number;
   content?: string;
   bytesWritten?: number;
   reason?: string;
 };
+
+export type RunOnSelfhostedMachine = {
+  workspaceId: string;
+  agentId: string;
+  controlRpc: ControlRpc;
+  relay: SelfhostedRelayConfig;
+  /** Short request/reply deadline for read/write and other control operations. */
+  controlTimeoutMs: number;
+  /** Longer agent-side process deadline for exec. */
+  execTimeoutMs: number;
+};
+
+/**
+ * Execute the one-off machine operation once the workspace/enrollment lookup has
+ * succeeded. Kept separate from {@link runOnSandbox} so the command/deadline
+ * contract is deterministic against an in-memory ControlRpc without weakening
+ * the production ownership lookup or requiring a real machine.
+ */
+export async function executeRunOnSelfhostedMachine(
+  machine: RunOnSelfhostedMachine,
+  target: string,
+  op: RunOnOp,
+): Promise<RunOnResult> {
+  const session = new SelfhostedSession({
+    workspaceId: machine.workspaceId,
+    agentId: machine.agentId,
+    controlRpc: machine.controlRpc,
+    relay: machine.relay,
+    timeoutMs: machine.controlTimeoutMs,
+    execTimeoutMs: machine.execTimeoutMs,
+  });
+
+  try {
+    if (op.kind === "exec") {
+      const deadlineMs = session.effectiveExecDeadlineMs;
+      const res = await session.exec({
+        cmd: op.cmd,
+        ...(op.workdir ? { workdir: op.workdir } : {}),
+      });
+      const timedOut = res.timedOut === true;
+      const hasTerminalExit = res.exitCode !== null;
+      return {
+        target,
+        kind: "exec",
+        // `ok` means the one-off operation reached a terminal response. Preserve
+        // the established non-zero-exit behavior, but never claim success when
+        // the machine killed the child or returned no terminal exit proof.
+        ok: !timedOut && hasTerminalExit,
+        stdout: res.stdout,
+        stderr: res.stderr,
+        exitCode: res.exitCode,
+        timedOut,
+        deadlineMs,
+        ...(timedOut
+          ? { reason: `command exceeded the ${deadlineMs} ms execution deadline` }
+          : !hasTerminalExit
+            ? { reason: "machine returned no terminal exit code" }
+            : {}),
+      };
+    }
+    if (op.kind === "read") {
+      const bytes = await session.readFile({ path: op.path });
+      return { target, kind: "read", ok: true, content: new TextDecoder().decode(bytes) };
+    }
+    const bytesWritten = await session.writeFile({ path: op.path, content: op.content });
+    return { target, kind: "write", ok: true, bytesWritten };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      target,
+      kind: op.kind,
+      ok: false,
+      reason,
+      // A transport failure is not evidence that the process itself timed out,
+      // so leave `timedOut` absent while still reporting the enforced deadline.
+      ...(op.kind === "exec" ? { deadlineMs: session.effectiveExecDeadlineMs } : {}),
+    };
+  }
+}
 
 /**
  * Run a ONE-OFF op against a SPECIFIC target WITHOUT changing the active pointer
@@ -434,6 +659,7 @@ export async function runOnSandbox(
   if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
     return {
       target,
+      targetName: sandbox.name,
       kind: op.kind,
       ok: false,
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
@@ -441,42 +667,28 @@ export async function runOnSandbox(
   }
   const enrollment = await getEnrollment(services.db, ctx.workspaceId, sandbox.enrollmentId);
   if (!enrollment || enrollment.status !== "active") {
-    return { target, kind: op.kind, ok: false, reason: `sandbox ${target} is not enrolled/active` };
+    return {
+      target,
+      targetName: sandbox.name,
+      kind: op.kind,
+      ok: false,
+      reason: `sandbox ${target} is not enrolled/active`,
+    };
   }
 
-  const session = new SelfhostedSession({
-    workspaceId: ctx.workspaceId,
-    agentId: sandbox.enrollmentId,
-    controlRpc: controlRpc(services.bus),
-    relay: relayConfigFromSettings(services.settings),
-  });
-
-  try {
-    if (op.kind === "exec") {
-      const res = await session.exec({
-        cmd: op.cmd,
-        ...(op.workdir ? { workdir: op.workdir } : {}),
-      });
-      return {
-        target,
-        kind: "exec",
-        ok: true,
-        stdout: res.stdout,
-        stderr: res.stderr,
-        exitCode: res.exitCode,
-      };
-    }
-    if (op.kind === "read") {
-      const bytes = await session.readFile({ path: op.path });
-      return { target, kind: "read", ok: true, content: new TextDecoder().decode(bytes) };
-    }
-    // write
-    const bytesWritten = await session.writeFile({ path: op.path, content: op.content });
-    return { target, kind: "write", ok: true, bytesWritten };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    return { target, kind: op.kind, ok: false, reason };
-  }
+  const result = await executeRunOnSelfhostedMachine(
+    {
+      workspaceId: ctx.workspaceId,
+      agentId: sandbox.enrollmentId,
+      controlRpc: controlRpc(services.bus),
+      relay: relayConfigFromSettings(services.settings),
+      controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
+      execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+    },
+    target,
+    op,
+  );
+  return { ...result, targetName: sandbox.name };
 }
 
 export type ProvisionResult =

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  apiKeyConnectionRef,
   capabilityAuthHint,
   capabilityConnectPlan,
   capabilityFilterLabel,
@@ -17,12 +18,21 @@ import {
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
   normalizeProviderDomain,
+  oauthConnectionOwnership,
+  oauthConnectionRef,
   oauthResumeAction,
+  preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
+  subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
-import type { CapabilityCatalogItem, CapabilityKind, ConnectionMetadata } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  CapabilityKind,
+  ConnectionMetadata,
+  SocialConnection,
+} from "@/types";
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   return {
@@ -79,6 +89,27 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     enabledReason: null,
     connectionRef: null,
     metadata: {},
+    ...overrides,
+  };
+}
+
+function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConnection {
+  return {
+    id: "11111111-1111-4111-8111-111111111111",
+    accountId: "22222222-2222-4222-8222-222222222222",
+    workspaceId: "33333333-3333-4333-8333-333333333333",
+    ownership: "workspace",
+    provider: "x",
+    accountHandle: "opengeni",
+    accountName: "OpenGeni",
+    externalAccountId: "x-account-1",
+    status: "connected",
+    scopes: ["tweet.read"],
+    credentialRef: null,
+    tokenMetadata: {},
+    metadata: {},
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
     ...overrides,
   };
 }
@@ -178,6 +209,17 @@ describe("curated skill provenance", () => {
 });
 
 describe("capabilityConnectPlan", () => {
+  test("first-party social APIs use their dedicated OAuth connector", () => {
+    const x = item({
+      id: "api:x",
+      kind: "api",
+      surfaceType: "first_party_social",
+      metadata: { provider: "x" },
+    });
+    expect(capabilityConnectPlan(x)).toEqual({ mode: "social_oauth", provider: "x" });
+    expect(capabilityAuthHint(x)).toBe("OAuth");
+  });
+
   test("non-MCP kinds just enable", () => {
     expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({ mode: "enable" });
     expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({
@@ -271,6 +313,18 @@ describe("capabilityConnectPlan", () => {
     );
     if (plan.mode !== "oauth") throw new Error("expected oauth");
     expect(plan.providerDomain).toBe("mcp.notion.com");
+  });
+});
+
+describe("first-party social capability state", () => {
+  test("prefers a usable connection", () => {
+    const disabled = socialConnection({
+      id: "11111111-1111-4111-8111-111111111112",
+      status: "disabled",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+    });
+    const connected = socialConnection({ updatedAt: "2026-08-02T00:00:00.000Z" });
+    expect(preferredSocialConnection([disabled, connected], "x")?.status).toBe("connected");
   });
 });
 
@@ -373,6 +427,18 @@ describe("oauthResumeAction", () => {
     expect(oauthResumeAction(enabled, "conn-2")).toBe("enable");
   });
 
+  test("an enabled generic subject binding remains a reconnect without persisting the returned UUID", () => {
+    const enabled = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(oauthResumeAction(enabled, "private-personal-row")).toBe("reconnect");
+  });
+
   test("a fresh connect of a disabled item enables it", () => {
     expect(oauthResumeAction(item({ enabled: false }), "conn-1")).toBe("enable");
   });
@@ -428,7 +494,47 @@ describe("connectionHealth", () => {
     expect(health.connection?.id).toBe("conn-1");
   });
 
-  test("matches by id, not domain — a same-domain row with a different id is not a match", () => {
+  test("matches a generic subject binding to the caller's personal provider/kind row without a UUID", () => {
+    const subjectRef = {
+      providerDomain: "slack.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const personal = connection({
+      id: "private-personal-row",
+      subjectId: "current-user",
+      providerDomain: "WWW.Slack.com",
+      kind: "oauth2",
+      status: "active",
+    });
+    const health = connectionHealth(
+      item({ enabled: true, connectionRef: subjectRef }),
+      [personal],
+      true,
+    );
+    expect(health).toEqual({ state: "connected", connection: personal });
+    expect(subjectRef).not.toHaveProperty("connectionId");
+  });
+
+  test("a workspace-shared row never satisfies a generic subject binding", () => {
+    const subjectRef = {
+      providerDomain: "slack.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const shared = connection({
+      id: "shared-bot-row",
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      status: "active",
+    });
+    expect(
+      connectionHealth(item({ enabled: true, connectionRef: subjectRef }), [shared], true),
+    ).toEqual({ state: "attention", connection: null });
+  });
+
+  test("workspace bindings continue to match only their exact UUID", () => {
     const conns = [connection({ id: "other", providerDomain: "linear.app", status: "active" })];
     expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({
       state: "attention",
@@ -461,6 +567,7 @@ describe("capabilityReconnectPlan", () => {
     expect(capabilityReconnectPlan(drifted, inactive)).toEqual({
       kind: "api_key",
       connectionId: "conn-1",
+      ownership: "workspace",
     });
   });
 
@@ -472,7 +579,25 @@ describe("capabilityReconnectPlan", () => {
     expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({
       kind: "oauth",
       connectionId: null,
+      ownership: "workspace",
     });
+  });
+
+  test("a generic subject binding reconnects through OAuth without an installation UUID", () => {
+    const oauthItem = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({
+      kind: "oauth",
+      connectionId: null,
+      ownership: "personal",
+    });
+    expect(oauthItem.connectionRef).not.toHaveProperty("connectionId");
   });
 
   test("nothing to repair when healthy, unverified, or without a ref", () => {
@@ -564,6 +689,61 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
   });
 });
 
+describe("subjectOAuthConnectionRef", () => {
+  test("builds a generic subject-owned OAuth ref with no private connection UUID", () => {
+    const ref = subjectOAuthConnectionRef("slack.com");
+    expect(ref).toEqual({
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(ref).not.toHaveProperty("connectionId");
+  });
+});
+
+describe("OAuth ownership helpers", () => {
+  test("workspace refs pin the exact shared row while personal refs hide the private UUID", () => {
+    expect(oauthConnectionRef("workspace", "workspace-conn", "linear.app")).toEqual({
+      connectionId: "workspace-conn",
+      providerDomain: "linear.app",
+      kind: "oauth2",
+      subjectScope: "workspace",
+    });
+    const personal = oauthConnectionRef("personal", "private-conn", "linear.app");
+    expect(personal).toEqual({
+      providerDomain: "linear.app",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(personal).not.toHaveProperty("connectionId");
+  });
+
+  test("accepts only explicit callback ownership values", () => {
+    expect(oauthConnectionOwnership("workspace")).toBe("workspace");
+    expect(oauthConnectionOwnership("personal")).toBe("personal");
+    expect(oauthConnectionOwnership("subject")).toBeNull();
+    expect(oauthConnectionOwnership(null)).toBeNull();
+  });
+});
+
+describe("API-key ownership helpers", () => {
+  test("workspace refs pin the shared row while personal refs hide the private UUID", () => {
+    expect(apiKeyConnectionRef("workspace", "workspace-conn", "api.example.com")).toEqual({
+      connectionId: "workspace-conn",
+      providerDomain: "api.example.com",
+      kind: "api_key",
+      subjectScope: "workspace",
+    });
+    const personal = apiKeyConnectionRef("personal", "private-conn", "api.example.com");
+    expect(personal).toEqual({
+      providerDomain: "api.example.com",
+      kind: "api_key",
+      subjectScope: "subject",
+    });
+    expect(personal).not.toHaveProperty("connectionId");
+  });
+});
+
 describe("workspaceConnectionForDomain", () => {
   test("matches a workspace-shared row across case and www differences", () => {
     const conns = [connection({ id: "c1", providerDomain: "linear.app", subjectId: null })];
@@ -602,9 +782,45 @@ describe("connectionToReuseForApiKey", () => {
     // connection created on the first attempt is still on the workspace.
     const cap = item({ enabled: false, connectionRef: null });
     const conns = [
-      connection({ id: "existing", providerDomain: "api.supabase.com", subjectId: null }),
+      connection({
+        id: "existing",
+        providerDomain: "api.supabase.com",
+        subjectId: null,
+        kind: "api_key",
+      }),
     ];
     expect(connectionToReuseForApiKey(cap, conns, "API.Supabase.com")).toBe("existing");
+  });
+
+  test("personal connect reuses only the current subject's visible personal row", () => {
+    const cap = item({ enabled: false, connectionRef: null });
+    const conns = [
+      connection({
+        id: "workspace",
+        providerDomain: "api.supabase.com",
+        subjectId: null,
+        kind: "api_key",
+      }),
+      connection({
+        id: "personal",
+        providerDomain: "api.supabase.com",
+        subjectId: "user-1",
+        kind: "api_key",
+      }),
+    ];
+    expect(connectionToReuseForApiKey(cap, conns, "api.supabase.com", "personal")).toBe("personal");
+  });
+
+  test("personal connect never reuses an exact workspace installation ref", () => {
+    const cap = item({
+      enabled: true,
+      connectionRef: {
+        connectionId: "workspace-ref",
+        providerDomain: "api.supabase.com",
+        kind: "api_key",
+      },
+    });
+    expect(connectionToReuseForApiKey(cap, [], "api.supabase.com", "personal")).toBeNull();
   });
 
   test("returns null when nothing exists to reuse (a fresh connection is minted)", () => {

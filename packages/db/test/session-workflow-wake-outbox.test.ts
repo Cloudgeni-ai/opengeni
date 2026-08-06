@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
+import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   bootstrapWorkspace,
@@ -8,13 +9,17 @@ import {
   createDb,
   createSession,
   enqueueSessionWorkflowWake,
+  getSessionTurn,
   initializeSessionStartAtomically,
   listSessionEvents,
   listSessionTurns,
   markSessionWorkflowWakeDelivered,
   markSessionWorkflowWakeFailed,
+  markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
+  requestSessionTurnRecovery,
+  settleSessionAttemptInterruptions,
   setSessionGoalStatus,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
@@ -63,7 +68,12 @@ async function fixture() {
 
 type WakeFixture = Awaited<ReturnType<typeof fixture>>;
 
-async function send(wakeFixture: WakeFixture, text: string, clientEventId = crypto.randomUUID()) {
+async function send(
+  wakeFixture: WakeFixture,
+  text: string,
+  delivery: "send" | "steer" = "send",
+  clientEventId = crypto.randomUUID(),
+) {
   return await withWorkspaceSubjectRls(
     client.db,
     wakeFixture.grant.workspaceId!,
@@ -77,10 +87,9 @@ async function send(wakeFixture: WakeFixture, text: string, clientEventId = cryp
           subjectId: wakeFixture.grant.subjectId,
           actor: { type: "human", subjectId: wakeFixture.grant.subjectId },
           operationKey: clientEventId,
-          delivery: "send",
+          delivery,
           text,
           resources: [],
-          tools: [],
           reasoningEffortFallback: "low",
           source: "user",
         }),
@@ -122,6 +131,20 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 describe("transactional session workflow wake outbox", () => {
   test("initial session state, first turn, and wake commit once under concurrent retries", async () => {
     const ctx = await fixture();
+    const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+      schemaVersion: 1,
+      productModelId: "scripted-model",
+      requestedModelId: null,
+      modelSource: "deployment",
+      reasoningEffort: "low",
+      reasoningSource: "deployment",
+      providerId: "scripted-provider",
+      upstreamModelId: "scripted-upstream",
+      wireApi: "responses",
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
     const initialize = () =>
       initializeSessionStartAtomically(client.db, {
         accountId: ctx.grant.accountId,
@@ -129,6 +152,7 @@ describe("transactional session workflow wake outbox", () => {
         sessionId: ctx.session.id,
         clientEventId: `initial:${ctx.session.id}`,
         reasoningEffortFallback: "low",
+        turnExecutionPolicy,
         createdEventPayload: {},
         goal: { text: "Finish exactly once" },
       });
@@ -139,6 +163,9 @@ describe("transactional session workflow wake outbox", () => {
     ]);
     expect(results.flatMap((result) => result.events)).toHaveLength(5);
     expect(results.map((result) => result.workflowWakeRevision).sort()).toEqual([1, 2]);
+    // Both concurrent callers own a committed wake revision, so neither may
+    // describe itself as a mutation-free replay.
+    expect(results.map((result) => result.changed).sort()).toEqual([true, true]);
 
     const events = await listSessionEvents(
       client.db,
@@ -157,6 +184,14 @@ describe("transactional session workflow wake outbox", () => {
     expect(await listSessionTurns(client.db, ctx.grant.workspaceId!, ctx.session.id)).toHaveLength(
       1,
     );
+    expect(readTurnExecutionPolicyV1(results[0]!.turn!.metadata)).toEqual({
+      kind: "valid",
+      policy: turnExecutionPolicy,
+    });
+    expect(readTurnExecutionPolicyV1(results[1]!.turn!.metadata)).toEqual({
+      kind: "valid",
+      policy: turnExecutionPolicy,
+    });
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
       wakeRevision: 2,
       deliveredRevision: 0,
@@ -381,6 +416,26 @@ describe("transactional session workflow wake outbox", () => {
     });
   });
 
+  test("a late duplicate failure cannot poison an already-delivered revision", async () => {
+    const ctx = await fixture();
+    const queued = await send(ctx, "deliver once");
+    const claimed = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(claimed?.wakeRevision).toBe(queued.wakeRevision);
+
+    await markSessionWorkflowWakeDelivered(client.db, claimed!);
+    expect(await markSessionWorkflowWakeFailed(client.db, claimed!, "late duplicate failure")).toBe(
+      false,
+    );
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: queued.wakeRevision,
+      deliveredRevision: queued.wakeRevision,
+      attempts: 0,
+      lastError: null,
+    });
+  });
+
   test("concurrent producers serialize into distinct monotonically increasing revisions", async () => {
     const ctx = await fixture();
     const results = await Promise.all(
@@ -457,5 +512,218 @@ describe("transactional session workflow wake outbox", () => {
     expect(claimed).toMatchObject({
       interruptionRequested: true,
     });
+  });
+
+  test("fully quiesced historical interruptions do not upgrade ordinary wakes to control", async () => {
+    const ctx = await fixture();
+    const queued = await send(ctx, "run");
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: queued.wakeRevision,
+    });
+    const attemptId = crypto.randomUUID();
+    const workflowRunId = crypto.randomUUID();
+    const activityId = crypto.randomUUID();
+    await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId,
+      attemptId,
+      dispatchId: activityId,
+      trigger: { kind: "next" },
+    });
+    const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(paused.interruptionCount).toBe(1);
+    const pauseWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(pauseWake).toMatchObject({ interruptionRequested: true });
+    await markSessionWorkflowWakeDelivered(client.db, pauseWake!);
+    expect(
+      await settleSessionAttemptInterruptions(
+        client.db,
+        ctx.grant.workspaceId!,
+        ctx.session.id,
+        attemptId,
+      ),
+    ).toMatchObject({ action: "paused" });
+    const settlementWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(settlementWake).toMatchObject({ interruptionRequested: true });
+    await markSessionWorkflowWakeDelivered(client.db, settlementWake!);
+    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      attemptId,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: activityId,
+    });
+    expect(quiescenceEvents).toEqual([
+      expect.objectContaining({
+        type: "session.queue.changed",
+        clientEventId: `opengeni:attempt-quiesced:${attemptId}`,
+        payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+      }),
+      expect.objectContaining({
+        type: "session.status.changed",
+        clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
+        payload: expect.objectContaining({ status: "idle", reason: "paused_recovery_settled" }),
+      }),
+    ]);
+    await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "resume",
+        }),
+      ),
+    );
+
+    const [attempt] = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+      db
+        .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
+        .from(schema.sessionTurnAttempts)
+        .where(eq(schema.sessionTurnAttempts.id, attemptId)),
+    );
+    expect(attempt?.quiescedAt).not.toBeNull();
+    const resumeWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(resumeWake).toMatchObject({ interruptionRequested: true });
+    await markSessionWorkflowWakeDelivered(client.db, resumeWake!);
+    const ordinary = await send(ctx, "ordinary follow-up");
+
+    expect(
+      (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+        (entry) => entry.sessionId === ctx.session.id,
+      ),
+    ).toMatchObject({
+      wakeRevision: ordinary.wakeRevision,
+      interruptionRequested: false,
+    });
+  });
+
+  test("an ownerless Steer keeps control priority when a later Send coalesces", async () => {
+    const ctx = await fixture();
+    const queued = await send(ctx, "run");
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: queued.wakeRevision,
+    });
+    const attemptId = crypto.randomUUID();
+    const predecessor = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(predecessor.action).toBe("claimed");
+    if (predecessor.action !== "claimed") throw new Error("predecessor was not claimed");
+    expect(
+      await requestSessionTurnRecovery(client.db, ctx.grant.workspaceId!, {
+        sessionId: ctx.session.id,
+        turnId: predecessor.turn.id,
+        triggerEventId: predecessor.turn.triggerEventId,
+        attemptId,
+        reason: "provider_unavailable",
+        providerRecoveryCount: 1,
+        detail: { continueDelayMs: 2_000 },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    expect(
+      (await getSessionTurn(client.db, ctx.grant.workspaceId!, predecessor.turn.id))?.metadata,
+    ).toMatchObject({ providerRecoveryCount: 1 });
+
+    const steered = await send(ctx, "change direction", "steer");
+    expect(steered.interruptionCount).toBe(0);
+    const laterSend = await send(ctx, "also remember this");
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: laterSend.wakeRevision,
+      controlRevision: steered.wakeRevision,
+    });
+    const claimed = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(claimed).toMatchObject({
+      wakeRevision: laterSend.wakeRevision,
+      interruptionRequested: true,
+    });
+
+    await markSessionWorkflowWakeDelivered(client.db, claimed!);
+    const ordinary = await send(ctx, "ordinary follow-up");
+    const ordinaryClaim = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(ordinaryClaim).toMatchObject({
+      wakeRevision: ordinary.wakeRevision,
+      interruptionRequested: false,
+    });
+  });
+
+  test("the rolling trigger preserves control priority for old writers", async () => {
+    const ctx = await fixture();
+    await withWorkspaceRls(client.db, ctx.grant.workspaceId!, async (db) => {
+      await db.execute(sql`
+        insert into ${schema.sessionWorkflowWakeOutbox} (
+          session_id, account_id, workspace_id, temporal_workflow_id, reason
+        ) values (
+          ${ctx.session.id}, ${ctx.grant.accountId}, ${ctx.grant.workspaceId!},
+          ${`session-${ctx.session.id}`}, 'prompt_steer'
+        )
+        on conflict (session_id) do update set
+          wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+          reason = excluded.reason,
+          updated_at = now()
+      `);
+      await db.execute(sql`
+        insert into ${schema.sessionWorkflowWakeOutbox} (
+          session_id, account_id, workspace_id, temporal_workflow_id, reason
+        ) values (
+          ${ctx.session.id}, ${ctx.grant.accountId}, ${ctx.grant.workspaceId!},
+          ${`session-${ctx.session.id}`}, 'prompt_send'
+        )
+        on conflict (session_id) do update set
+          wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
+          reason = excluded.reason,
+          updated_at = now()
+      `);
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: 2,
+      deliveredRevision: 0,
+      controlRevision: 1,
+      reason: "prompt_send",
+    });
+    expect(
+      (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+        (entry) => entry.sessionId === ctx.session.id,
+      ),
+    ).toMatchObject({ interruptionRequested: true });
   });
 });

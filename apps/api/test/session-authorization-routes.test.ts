@@ -168,12 +168,58 @@ async function fixture() {
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
     permissions: ["sessions:read", "sessions:control"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
   return { grant, root, child, hidden, authorization };
 }
 
 describe("embedding host session authorization routes", () => {
+  test("GET goal ignores a malformed legacy continuation instead of returning 500", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    await shared.admin`
+      update sessions
+      set status = 'idle'
+      where id = ${value.child.id} and workspace_id = ${value.grant.workspaceId}`;
+    const [goal] = await shared.admin<{ id: string }[]>`
+      insert into session_goals (account_id, workspace_id, session_id, text)
+      values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.child.id},
+        'API malformed continuation goal'
+      )
+      returning id`;
+    if (!goal) throw new Error("goal fixture was not created");
+    await shared.admin`
+      insert into session_system_updates (
+        account_id, workspace_id, session_id, kind, source_id,
+        dedupe_key, summary, payload
+      ) values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.child.id},
+        'goal_continuation', ${goal.id}, ${`api-malformed-${crypto.randomUUID()}`},
+        'malformed API continuation',
+        ${shared.admin.json({
+          type: "goal_continuation",
+          goalId: goal.id,
+          goalVersion: "not-an-integer",
+          prompt: "continue safely",
+        })}
+      )`;
+
+    const response = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      continuation?: { state?: string; reason?: string };
+    };
+    expect(body.continuation).toMatchObject({
+      state: "invariant_broken",
+      reason: "missing_obligation",
+    });
+  });
+
   test("updates MCP approval policy with session-control authority and one durable event", async () => {
     if (!available) return;
     const value = await fixture();
@@ -235,6 +281,62 @@ describe("embedding host session authorization routes", () => {
       serverId: "external_tools",
       effectiveFrom: "next_attempt",
     });
+  });
+
+  test("updates the durable session tool policy and returns a version conflict", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const decisions: Array<{ operation: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, surface }) => {
+        decisions.push({ operation, surface });
+        return { allowed: true, relatedSessionAccess: "root" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/tool-policy`;
+    const request = (expectedVersion: number) =>
+      app.request(path, {
+        method: "PUT",
+        headers: {
+          authorization: value.authorization,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: "explicit",
+          tools: [],
+          firstPartyMcpTools: [],
+          expectedVersion,
+        }),
+      });
+
+    const response = await request(1);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: value.child.id,
+      tools: [],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: value.root.id },
+      toolPolicyVersion: 2,
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.tool_policy.write",
+      surface: "http",
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.tool_policy.write",
+      surface: "core",
+    });
+
+    const conflict = await request(1);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({
+      code: "SESSION_TOOL_POLICY_CONFLICT",
+      currentVersion: 2,
+    });
+    const policyEvents = (
+      await listSessionEvents(client.db, value.grant.workspaceId, value.child.id)
+    ).filter((event) => event.type === "session.tool_policy.updated");
+    expect(policyEvents).toHaveLength(1);
   });
 
   test("classifies approval-policy requests before returning precise 400 and 404 responses", async () => {
@@ -301,6 +403,37 @@ describe("embedding host session authorization routes", () => {
     ).toBe(404);
     expect(decisions).toHaveLength(5);
     expect(new Set(decisions)).toEqual(new Set(["session.mcp.approval_policy.write"]));
+  });
+
+  test("authorizes browser activation as realtime control before validating its body", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const decisions: Array<{ operation: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, surface }) => {
+        decisions.push({ operation, surface });
+        return { allowed: true, relatedSessionAccess: "target" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const response = await app.request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}` +
+        `/realtime/${crypto.randomUUID()}/connections/${crypto.randomUUID()}/activate`,
+      {
+        method: "POST",
+        headers: {
+          authorization: value.authorization,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+
+    expect(response.status).toBe(422);
+    expect(decisions).toContainEqual({
+      operation: "session.realtime.control",
+      surface: "http",
+    });
   });
 
   test("public turn and queue reads omit host instructions while the worker claim retains them", async () => {
@@ -515,7 +648,7 @@ describe("embedding host session authorization routes", () => {
     expect(sharedSibling.id).not.toBe(value.child.id);
   });
 
-  test("authorizes every session-bound first-party MCP request at the transport seam", async () => {
+  test("authorizes narrowly delegated session-bound MCP requests without workspace read", async () => {
     if (!available) return;
     const value = await fixture();
     const calls: Array<{ operation: string; surface: string; sessionId: string }> = [];
@@ -530,8 +663,9 @@ describe("embedding host session authorization routes", () => {
       accountId: value.grant.accountId,
       workspaceId: value.grant.workspaceId,
       subjectId: value.grant.subjectId,
-      permissions: ["workspace:read", "sessions:read"],
+      permissions: ["sessions:control"],
       sessionId: value.child.id,
+      principalKind: "service",
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
     const response = await fullAppWith(port).request(
@@ -575,6 +709,37 @@ describe("embedding host session authorization routes", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
     });
     expect(denied.status).toBe(404);
+
+    const unboundToken = await signDelegatedAccessToken(SECRET, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      subjectId: value.grant.subjectId,
+      principalKind: "service",
+      permissions: ["sessions:control"],
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    });
+    const unbound = await fullAppWith(port).request(
+      `/v1/workspaces/${value.grant.workspaceId}/mcp`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${unboundToken}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "session-authorization-test", version: "1" },
+          },
+        }),
+      },
+    );
+    expect(unbound.status).toBe(403);
   });
 
   test("applies exact host scope to first-party MCP target reads and discovery", async () => {
@@ -635,6 +800,139 @@ describe("embedding host session authorization routes", () => {
     ]);
   });
 
+  test("authorizes first-party MCP Pause, Resume, and Agent Steer exactly once", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const started = await initializeSessionStartAtomically(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.child.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: null,
+    });
+    if (!started.turn) throw new Error("test caller did not create an initial turn");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+      sessionId: value.child.id,
+      workflowId: `session-${value.child.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`test caller was not claimed`);
+    const target = await createSession(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      parentSessionId: value.root.id,
+      initialMessage: "control target",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      sandboxBackend: "modal",
+      createdBy: { kind: "subject", subjectId: value.grant.subjectId, label: "Test owner" },
+      createdByContext: {},
+    });
+    const decisions: Array<{ operation: string; surface: string; sessionId: string }> = [];
+    const port = {
+      authorizeSession: async ({ operation, surface, target: authorizationTarget }) => {
+        decisions.push({
+          operation,
+          surface,
+          sessionId: authorizationTarget.sessionId,
+        });
+        if (surface === "core") {
+          throw new Error("duplicate core authorization");
+        }
+        return { allowed: true, relatedSessionAccess: "root" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    } satisfies SessionAuthorizationPort;
+    const noop = async () => undefined;
+    const mcpDeps = {
+      settings: testSettings(),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        wakeSessionWorkflow: noop,
+        requestSessionWorkflowWakeDispatch: noop,
+      } as unknown as SessionWorkflowClient,
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: noop },
+      getDocumentServices: () => ({}) as never,
+      sessionAuthorization: port,
+    } as unknown as ApiRouteDeps;
+    const server = buildOpenGeniMcpServer(mcpDeps, {
+      ...value.grant,
+      permissions: ["workspace:read", "sessions:read", "sessions:control"],
+      metadata: {
+        sessionId: value.child.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: ["session_pause", "session_resume", "session_steer"],
+      },
+    });
+
+    const paused = await callMcpTool<{ effectiveControl: { state: string } }>(
+      server,
+      "session_pause",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(paused.effectiveControl.state).toBe("paused");
+    const resumed = await callMcpTool<{ effectiveControl: { state: string } }>(
+      server,
+      "session_resume",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(resumed.effectiveControl.state).toBe("active");
+    const steered = await callMcpTool<{ updateId: string }>(server, "session_steer", {
+      sessionId: target.id,
+      instruction: "Take the newest direction exactly once",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(steered.updateId).toEqual(expect.any(String));
+
+    const operatorServer = buildOpenGeniMcpServer(mcpDeps, {
+      ...value.grant,
+      permissions: ["workspace:read", "sessions:read", "sessions:control"],
+    });
+    const operatorPaused = await callMcpTool<{ effectiveControl: { state: string } }>(
+      operatorServer,
+      "session_pause",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorPaused.effectiveControl.state).toBe("paused");
+    const operatorResumed = await callMcpTool<{ effectiveControl: { state: string } }>(
+      operatorServer,
+      "session_resume",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorResumed.effectiveControl.state).toBe("active");
+
+    expect(decisions).toEqual([
+      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
+      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
+      { operation: "session.steer", surface: "first_party_mcp", sessionId: target.id },
+      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
+      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
+    ]);
+  });
+
   test("reconstructs live agent-attempt authority and rejects the same token after settlement", async () => {
     if (!available || !shared) return;
     const value = await fixture();
@@ -674,6 +972,7 @@ describe("embedding host session authorization routes", () => {
       turnId: claimed.turn.id,
       attemptId,
       executionGeneration: claimed.turn.executionGeneration,
+      principalKind: "agent_attempt",
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
     const headers = { authorization: `Bearer ${token}` };

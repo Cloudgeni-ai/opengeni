@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -33,6 +34,36 @@ function ghApiCommands(source: string): string[] {
 }
 
 describe("release image workflow contract", () => {
+  test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
+    const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
+    const versionProjection = release.slice(
+      release.indexOf("\n  version:\n"),
+      release.indexOf("\n  publish:\n"),
+    );
+
+    expect(release).toContain(
+      "github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha)",
+    );
+    expect(release).toContain("cancel-in-progress: ${{ github.event_name == 'push' }}");
+    expect(ci).toContain(
+      "github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number)",
+    );
+    expect(ci).toContain("cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}");
+    expect(ci).not.toContain(
+      "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
+    );
+    for (const duplicatedGate of [
+      "bun run typecheck",
+      "bun run build:packages",
+      "bun scripts/publish-closure-guard.ts",
+      "bun run test:runtime-embedding-consumer",
+      "bun run test:ogtool-package",
+    ]) {
+      expect(versionProjection).not.toContain(duplicatedGate);
+      expect(ci).toContain(duplicatedGate);
+    }
+  });
+
   test("downloads artifact ZIPs through portable gh api stdout redirection", async () => {
     const workflows = await Promise.all(
       ["release-acceptance.yml", "release.yml", "release-embedded.yml"].map(workflow),
@@ -52,6 +83,9 @@ describe("release image workflow contract", () => {
   test("candidate builds every physical image and freezes a full-SHA receipt", async () => {
     const candidate = await workflow("release-candidate.yml");
 
+    expect(candidate).not.toContain("expected_packages:");
+    expect(candidate).not.toContain("OPENGENI_EXPECTED_PACKAGES");
+    expect(candidate).toContain('OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED: "true"');
     for (const identity of [
       "target: api",
       "target: worker",
@@ -61,6 +95,8 @@ describe("release image workflow contract", () => {
     ]) {
       expect(candidate).toContain(identity);
     }
+    expect(candidate).toContain("docker/setup-qemu-action@");
+    expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
     expect(candidate).toContain("candidate-$SOURCE_SHA");
     expect(candidate).toContain("opengeni-candidate-${SOURCE_SHA}");
     expect(candidate).toContain("evidence/release-candidate.json");
@@ -85,14 +121,111 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
     expect(candidate).toContain("use its original successful producer run ID");
     expect(candidate).toContain("bun scripts/resolve-github-release-state.ts");
+    expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
+    expect(candidate).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
     expect(candidate).not.toContain('gh release view "$tag"');
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
+  });
+
+  test("main CI publishes exact-SHA dogfood images without granting PR publication", async () => {
+    const ci = await workflow("ci.yml");
+    const images = ci.slice(
+      ci.indexOf("\n  service-images:\n"),
+      ci.indexOf("\n  automation-report:\n"),
+    );
+    const parsed = Bun.YAML.parse(ci) as {
+      jobs: Record<
+        string,
+        {
+          name?: string;
+          needs?: string | string[];
+          if?: string;
+          steps?: Array<{
+            name?: string;
+            env?: Record<string, string>;
+            run?: string;
+            with?: Record<string, unknown>;
+          }>;
+        }
+      >;
+    };
+
+    expect(parsed.jobs["service-images"]?.needs).toBe("automation-admission");
+    expect(parsed.jobs["relay-image"]?.needs).toBe("automation-admission");
+    expect(parsed.jobs["sandbox-image"]?.needs).toBe("automation-admission");
+    expect(parsed.jobs.images?.name).toBe("Workload image builds");
+    expect(parsed.jobs.images?.needs).toEqual([
+      "automation-admission",
+      "service-images",
+      "relay-image",
+      "sandbox-image",
+    ]);
+    expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["relay-image"]?.if);
+    expect(parsed.jobs["relay-image"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
+    expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
+    expect(parsed.jobs.images?.if).toBe(parsed.jobs["service-images"]?.if);
+    expect(images.match(/packages: write/g)).toHaveLength(3);
+    for (const jobName of ["service-images", "relay-image", "sandbox-image"]) {
+      const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
+      expect(login?.with).toEqual({
+        registry: "ghcr.io",
+        username: "${{ github.actor }}",
+        password: "${{ secrets.GITHUB_TOKEN }}",
+      });
+    }
+    expect(images).toContain("Require every workload image build");
+    expect(images).toContain("SERVICE_IMAGES_RESULT: ${{ needs.service-images.result }}");
+    expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
+    expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
+    const aggregate = parsed.jobs.images?.steps?.find(
+      (step) => step.name === "Require every workload image build",
+    );
+    expect(aggregate?.env).toEqual({
+      SERVICE_IMAGES_RESULT: "${{ needs.service-images.result }}",
+      RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
+      SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
+    });
+    const aggregateResult = (serviceResult: string, relayResult: string, sandboxResult: string) =>
+      Bun.spawnSync(["bash", "-c", aggregate?.run ?? "exit 1"], {
+        env: {
+          ...process.env,
+          SERVICE_IMAGES_RESULT: serviceResult,
+          RELAY_IMAGE_RESULT: relayResult,
+          SANDBOX_IMAGE_RESULT: sandboxResult,
+        },
+      }).exitCode;
+    expect(aggregateResult("success", "success", "success")).toBe(0);
+    for (const result of ["failure", "skipped", "cancelled", ""]) {
+      expect(aggregateResult(result, "success", "success")).not.toBe(0);
+      expect(aggregateResult("success", result, "success")).not.toBe(0);
+      expect(aggregateResult("success", "success", result)).not.toBe(0);
+    }
+    expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
+    expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
+    expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
+    expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.sha \}\}/g)).toHaveLength(3);
+    expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}");
+    expect(images).toContain("Write exact-main-SHA dogfood receipt");
+    expect(images).toContain("Upload exact-main-SHA dogfood receipt");
+    expect(images).toContain("API_DIGEST: ${{ needs.service-images.outputs.api_digest }}");
+    expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
+    expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
+    expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
+    expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
+    expect(images).toContain("dogfood-images-${{ github.sha }}");
+    expect(images).toContain("dogfood-images.sha256");
+    expect(images).toContain("'^sha256:[0-9a-f]{64}$'");
+    expect(images).not.toMatch(/:latest(?:['"}\s]|$)/);
   });
 
   test("final release promotes accepted manifests and has no image build boundary", async () => {
     const release = await workflow("release.yml");
     const finalJob = release.slice(release.indexOf("\n  images:\n"));
 
+    expect(release).not.toContain("inputs.expected_packages");
+    expect(release).toContain("steps.acceptance-bundle.outputs.expected_packages");
+    expect(release).toContain('map(.name + "@" + .version)');
+    expect(release).toContain("map({name, version})");
     expect(finalJob).toContain("Promote exact accepted manifests");
     expect(finalJob).toContain("docker buildx imagetools create");
     expect(finalJob).toContain("--prefer-index=false");
@@ -119,6 +252,20 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain("helm package");
     expect(finalJob).toContain("Publish or reconcile the exact accepted Helm chart");
     expect(finalJob).toContain("helm push");
+    expect(finalJob).toContain(
+      'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
+    );
+    expect(finalJob).toContain('chart_pull_oci="${chart_oci}/opengeni"');
+    expect(finalJob).toContain('helm pull "$chart_pull_oci"');
+    expect(finalJob).toContain(
+      'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
+    );
+    expect(finalJob).toContain('helm push "$chart_path" "$chart_oci"');
+    expect(finalJob).toContain('--arg reference "$chart_pull_oci"');
+    expect(finalJob).toContain("for attempt in $(seq 1 10)");
+    expect(finalJob).toContain(
+      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+    );
     expect(finalJob).toContain("name: production-release");
     expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
       finalJob.indexOf("Promote exact accepted manifests"),
@@ -151,6 +298,8 @@ describe("release image workflow contract", () => {
     expect(acceptance).toContain("verify-operator-acceptance-provenance.ts");
     expect(acceptance).toContain("assemble-release-acceptance.ts");
     expect(acceptance).toContain("OPERATOR_ARTIFACT_DIGEST#sha256:");
+    expect(acceptance).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
+    expect(acceptance).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
     expect(acceptance).not.toContain("operator_artifact_url:");
     expect(acceptance).not.toContain("operator_artifact_sha256:");
     expect(acceptance).toContain("release-acceptance-${{ inputs.source_sha }}");
@@ -183,7 +332,24 @@ describe("release image workflow contract", () => {
     expect(release).toContain("bun run test:publish-consumer");
     expect(release).toContain("uses: changesets/action@");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
+    expect(release).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(release).toContain("Publish or reconcile the exact candidate chart");
+    expect(release).toContain('[ "$GITHUB_REF" = "refs/heads/main" ]');
+    expect(release).not.toContain('[ "$GITHUB_SHA" = "$SOURCE_SHA" ]');
+    expect(release).toContain(
+      'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
+    );
+    expect(release).toContain('chart_pull_oci="${chart_oci}/opengeni"');
+    expect(release).toContain('helm pull "$chart_pull_oci"');
+    expect(release).toContain(
+      'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
+    );
+    expect(release).toContain('helm push "$chart_path" "$chart_oci"');
+    expect(release).toContain('--arg reference "$chart_pull_oci"');
+    expect(release).toContain("for attempt in $(seq 1 10)");
+    expect(release).toContain(
+      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+    );
     expect(release).toContain('OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"');
     expect(release).toContain("bun scripts/resolve-github-release-state.ts");
     expect(release).not.toContain('gh release view "$tag"');
@@ -210,6 +376,46 @@ describe("release image workflow contract", () => {
     expect(release).not.toContain("docker/build-push-action");
     expect(release).not.toContain("docker build ");
     expect(release).not.toContain('--tag "${name}:latest"');
+  });
+
+  test("package-only publication is exact-source, CI-gated, and evidence-bound", async () => {
+    const publish = await workflow("publish-packages.yml");
+    const sourceGate = publish.indexOf("Require successful protected source CI");
+    const plan = publish.indexOf("Plan exact package publication");
+    const retainedPlan = publish.indexOf("Retain pre-publication package plan");
+    const mutation = publish.indexOf("Publish unpublished package versions");
+    const reconciliation = publish.indexOf("Reconcile exact registry package identity");
+
+    expect(publish).toContain("expected_packages:");
+    expect(publish).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
+    expect(publish).toContain("checks: read");
+    expect(publish).toContain("filter=latest&per_page=100");
+    expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');
+    expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
+    expect(publish).not.toContain('test "$(git rev-parse origin/main)" = "$SOURCE_SHA"');
+    expect(publish).toContain("else max_by(.id)");
+    expect(publish).toContain('.status == "completed" and .conclusion == "success"');
+    expect(publish).not.toContain("| length == 1");
+    for (const required of [
+      "Typecheck and unit tests",
+      "Deployment artifacts",
+      "Workload image builds",
+    ]) {
+      expect(publish).toContain(required);
+    }
+    expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: plan");
+    expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
+    expect(publish).toContain("bun scripts/verify-release-packages.ts");
+    expect(publish).toContain("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10");
+    expect(publish).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
+    expect(publish).toContain("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+    expect(publish).not.toMatch(/actions\/(?:checkout|setup-node)@v[0-9]/);
+    expect(publish).not.toMatch(/oven-sh\/setup-bun@v[0-9]/);
+    expect(sourceGate).toBeGreaterThan(-1);
+    expect(plan).toBeGreaterThan(sourceGate);
+    expect(retainedPlan).toBeGreaterThan(plan);
+    expect(mutation).toBeGreaterThan(retainedPlan);
+    expect(reconciliation).toBeGreaterThan(mutation);
   });
 
   test("public registry authentication is portable, short-lived, and version-bound", async () => {
@@ -240,6 +446,20 @@ describe("release image workflow contract", () => {
     expect(login).toContain("--expose-token");
     expect(login).not.toContain("client-secret");
     expect(login).not.toContain("admin-password");
+  });
+
+  test("agent publication creates only immutable-compatible versioned releases", async () => {
+    const agentRelease = await workflow("agent-release.yml");
+
+    expect(agentRelease).toContain(
+      "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+    );
+    expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
+    expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
+    expect(agentRelease).toContain("OPENGENI_AGENT_STABLE_VERSION");
+    expect(agentRelease).not.toContain("gh release delete");
+    expect(agentRelease).not.toContain("gh release create agent-latest");
+    expect(agentRelease).not.toContain("releases/download/agent-latest");
   });
 
   test("release-state parsing accepts a valid absent release without weakening type checks", async () => {
@@ -286,7 +506,17 @@ ${parser}`,
 
   test("ordinary CI builds the same five physical image roles", async () => {
     const ci = await workflow("ci.yml");
-    const imagesJob = ci.slice(ci.indexOf("\n  images:\n"));
+    const parsed = Bun.YAML.parse(ci) as { jobs: Record<string, { steps: Array<unknown> }> };
+    const imagesJob = ci.slice(ci.indexOf("\n  service-images:\n"));
+    const serviceImages = ci.slice(
+      ci.indexOf("\n  service-images:\n"),
+      ci.indexOf("\n  relay-image:\n"),
+    );
+    const relayImage = ci.slice(
+      ci.indexOf("\n  relay-image:\n"),
+      ci.indexOf("\n  sandbox-image:\n"),
+    );
+    const sandboxImage = ci.slice(ci.indexOf("\n  sandbox-image:\n"), ci.indexOf("\n  images:\n"));
 
     for (const identity of [
       "target: api",
@@ -297,5 +527,55 @@ ${parser}`,
     ]) {
       expect(imagesJob).toContain(identity);
     }
+    expect(imagesJob).toContain("docker/setup-qemu-action@");
+    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
+    expect(serviceImages).not.toContain("docker/sandbox.Dockerfile");
+    expect(serviceImages).not.toContain("agent/crates/opengeni-relay/Dockerfile");
+    expect(relayImage).toContain("agent/crates/opengeni-relay/Dockerfile");
+    expect(relayImage).not.toMatch(/target: (?:api|worker|web)/);
+    expect(relayImage).not.toContain("docker/sandbox.Dockerfile");
+    expect(sandboxImage).toContain("docker/sandbox.Dockerfile");
+    expect(sandboxImage).not.toMatch(/target: (?:api|worker|web)/);
+
+    const imageSteps = ["service-images", "relay-image", "sandbox-image"].flatMap((jobName) =>
+      parsed.jobs[jobName]!.steps.filter(
+        (step): step is { name: string; uses: string } =>
+          typeof step === "object" &&
+          step !== null &&
+          "uses" in step &&
+          step.uses === "docker/build-push-action@v7.3.0",
+      ).map((step) => ({
+        jobName,
+        name: step.name,
+        fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
+      })),
+    );
+    expect(imageSteps).toEqual([
+      {
+        jobName: "service-images",
+        name: "Build API image",
+        fingerprint: "4f1bf9e5979e86bc78b8813e4c2ed834bd9e24781d8906a493be33d235113231",
+      },
+      {
+        jobName: "service-images",
+        name: "Build worker image",
+        fingerprint: "df6c0eea3a346c6ad9f71bb5545044a062179ffd9447553a1e21f467d85c65f4",
+      },
+      {
+        jobName: "service-images",
+        name: "Build web image",
+        fingerprint: "a535f3fae1f58cdd9d47273d2340c26d4e3c143c4e69c59f2de984fcfec37714",
+      },
+      {
+        jobName: "relay-image",
+        name: "Build relay image",
+        fingerprint: "1e26cd74190f9b806413e6943324c20a9da0e8f84dd42406555fca5b5c11c4f9",
+      },
+      {
+        jobName: "sandbox-image",
+        name: "Build headless sandbox image",
+        fingerprint: "6d1ce559070b6825ff5684da724e4c69baad72f6346ab3db04acb46f3cdccbff",
+      },
+    ]);
   });
 });

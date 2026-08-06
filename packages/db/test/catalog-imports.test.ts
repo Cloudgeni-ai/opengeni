@@ -1,11 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
-import { importIntegrationsCatalog } from "../../../scripts/import-integrations-catalog";
+import {
+  catalogRowToDbInput,
+  importIntegrationsCatalog,
+  normalizeCatalogSnapshot,
+} from "../../../scripts/import-integrations-catalog";
 import {
   createDb,
   createImportBatch,
   enableCapabilityInstallation,
+  findCompletedImportBatch,
   getCapabilityCatalogItem,
   listCapabilityCatalogItems,
   listEnabledMcpCapabilityServers,
@@ -46,6 +51,104 @@ afterAll(async () => {
 }, 180_000);
 
 describe("catalog import persistence", () => {
+  test("recognizes only a completed batch for an exact snapshot fingerprint", async () => {
+    if (!available) return;
+    const snapshotRef = `fixture@sha256:${"a".repeat(64)}`;
+    await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-28T00:00:00.000Z"),
+      snapshotRef,
+      attributionNote: "MIT attribution",
+    });
+    expect(
+      await findCompletedImportBatch(db, {
+        source: "integrations.sh",
+        snapshotRef,
+        importedCount: 6,
+      }),
+    ).toBeNull();
+
+    const completed = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-28T00:00:00.000Z"),
+      snapshotRef,
+      attributionNote: "MIT attribution",
+      importedCount: 6,
+    });
+    expect(
+      await findCompletedImportBatch(db, {
+        source: "integrations.sh",
+        snapshotRef,
+        importedCount: 6,
+      }),
+    ).toMatchObject({ id: completed.id, importedCount: 6 });
+  }, 180_000);
+
+  test("persists Mobbin's reviewed OAuth and official Registry contract", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const batch = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-28T00:00:00.000Z"),
+      snapshotRef: "mobbin-official-registry-fixture",
+      attributionNote: "MIT attribution",
+    });
+    const [mobbin] = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-28T00:00:00.000Z",
+      importRows: [
+        {
+          domain: "mobbin.com",
+          name: "Mobbin",
+          mcpUrl: "https://api.mobbin.com/mcp",
+          transport: "streamable-http",
+          authKind: "oauth2",
+          scopesHint: ["openid"],
+          credentialFacts: [],
+          tier: "verified",
+          provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
+          logoSourceUrl: null,
+          probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+        },
+      ],
+    }).rows;
+    expect(mobbin).toBeDefined();
+
+    const dbInput = catalogRowToDbInput(mobbin!, { importBatchId: batch.id });
+    await upsertRegistryCapabilityCatalogItem(db, dbInput);
+
+    const catalogItem = await getCapabilityCatalogItem(db, ws.workspaceId, dbInput.id);
+    expect(catalogItem).toMatchObject({
+      name: "Mobbin",
+      description:
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      homepageUrl: "https://mobbin.com/mcp",
+      endpointUrl: "https://api.mobbin.com/mcp",
+      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
+      authModel: "credential_ref",
+      providerDomain: "mobbin.com",
+      authKind: "oauth2",
+      tier: "verified",
+      logoAssetPath: null,
+      runtime: {
+        available: true,
+        catalogTrust: { state: "trusted", reason: "verified_probe" },
+      },
+      metadata: {
+        scopesHint: ["openid"],
+        logoSource: "generic_monogram",
+        documentationUrl: "https://docs.mobbin.com/mcp/introduction",
+        officialMcpRegistry: {
+          name: "com.mobbin/mobbin",
+          version: "1.0.1",
+          status: "active",
+          isLatest: true,
+        },
+        sourceCommit: "bbee2a6be34d251c580ba80bb8b407c87587aba7",
+        mcpProbe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+      },
+    });
+  }, 180_000);
+
   test("upserts registry rows by domain and MCP URL and keeps fresh registry rows visible", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -459,5 +562,14 @@ function registryRow(overrides: {
     tier: overrides.tier,
     provenance: overrides.provenance,
     logoAssetPath: overrides.logoAssetPath ?? null,
+    metadata: {
+      mcpProbe: {
+        status: "real" as const,
+        checkedAt: "2026-07-04T00:00:00.000Z",
+        transport: "streamable-http" as const,
+        protocolVersion: "2025-06-18",
+        toolCount: 1,
+      },
+    },
   };
 }

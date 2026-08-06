@@ -40,12 +40,13 @@ import {
   type DesktopInputRequest,
 } from "@opengeni/agent-proto";
 
-import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunning } from "./index";
-// `stripExecBanner` is the SAME pure helper recording.ts uses to recover the raw
-// command body from Modal's execCommand banner ("…Output:\n<body>"). Imported from
-// the agent-loop-free leaf (importing a pure parser FROM the leaf is allowed — the
-// leaf boundary only forbids the leaf importing the agent loop, not the reverse).
-import { ensureDisplayStack, stripExecBanner } from "./sandbox";
+import {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStillRunning,
+  sandboxCommandStdout,
+} from "./index";
+import { ensureDisplayStack } from "./sandbox";
 
 // `requireBoundSession` lives in @openai/agents-core/sandbox/capabilities/base
 // but is NOT re-exported from the public @openai/agents/sandbox barrel, so we
@@ -97,7 +98,20 @@ const SCREENSHOT_RETRY_DELAY_MS = 750;
 // reconstructed byte count against the on-box file size. 98304 = 96 KiB, divisible by 3
 // so each chunk's base64 is self-contained (no cross-chunk padding) and concatenating the
 // decoded chunks reconstructs the PNG byte-exactly.
-const SCREENSHOT_READ_CHUNK_BYTES = 98_304;
+export const SCREENSHOT_READ_CHUNK_BYTES = 98_304;
+// A 1280x800 RGB framebuffer is ~3 MiB before PNG compression. Eight MiB leaves
+// substantial headroom for an unusually noisy frame while keeping a forged `wc -c`
+// response from admitting hundreds or millions of provider calls. Parse the on-box
+// size as bigint first, then convert only after this bound is proven.
+export const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
+export const MAX_SCREENSHOT_READ_CHUNKS =
+  Math.floor((MAX_SCREENSHOT_BYTES - 1) / SCREENSHOT_READ_CHUNK_BYTES) + 1;
+// One absolute budget covers size lookup, every chunk, and remote temp-file cleanup.
+// Data reads stop early enough to reserve a final cleanup window.
+const SCREENSHOT_READBACK_TIMEOUT_MS = 15_000;
+const SCREENSHOT_CLEANUP_MAX_RESERVE_MS = 1_000;
+const SCREENSHOT_CLEANUP_TIMEOUT_MS = 1_000;
+const SCREENSHOT_SIZE_MAX_DIGITS = 32;
 
 export type SandboxComputerOptions = {
   display?: string; // ":0"
@@ -111,6 +125,10 @@ export type SandboxComputerOptions = {
   // exposed mainly so tests can shrink it (a real caller wants the full budget).
   screenshotWarmupBudgetMs?: number;
   screenshotRetryDelayMs?: number;
+  /** Absolute wall-clock budget for one size+chunk+cleanup readback transaction. */
+  screenshotReadbackTimeoutMs?: number;
+  /** Turn cancellation fence; aborting it stops all new screenshot read admissions. */
+  abortSignal?: AbortSignal;
   /**
    * One turn-scoped preparation hook, invoked by the first real computer action.
    * The agent may advertise computer-use on every turn, but merely advertising the
@@ -183,12 +201,14 @@ type ComputerSession = {
     runAs?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }) => Promise<ExecResultLike | string>;
   execCommand?: (args: {
     cmd: string;
     runAs?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
 };
 
@@ -199,12 +219,28 @@ export class ComputerUnavailableError extends Error {
     this.name = "ComputerUnavailableError";
   }
 }
-/** The screenshot file read back SHORT of its on-box byte size — a chunk was truncated
- *  by the provider's exec-output cap. This is deterministic, NOT a warm-up transient, so
- *  it fails LOUD immediately with the byte counts (never a silent blank the model would
- *  read as a real empty screen) and is not retried. */
+/** Typed, fail-fast screenshot capture/readback failure. None of these failures are
+ * display warm-up transients, so they are never retried as a fresh capture. */
+export type ScreenshotReadErrorCode =
+  | "aborted"
+  | "capture_outcome_unknown"
+  | "chunk_limit_exceeded"
+  | "cleanup_failed"
+  | "command_failed"
+  | "command_outcome_unknown"
+  | "invalid_chunk_output"
+  | "invalid_size_output"
+  | "read_timeout"
+  | "size_limit_exceeded"
+  | "truncated_read";
+
 export class ScreenshotReadError extends Error {
-  constructor(message: string) {
+  cleanupFailed = false;
+
+  constructor(
+    public readonly code: ScreenshotReadErrorCode,
+    message: string,
+  ) {
     super(message);
     this.name = "ScreenshotReadError";
   }
@@ -229,6 +265,59 @@ export class ComputerActionError extends Error {
   }
 }
 
+type ComputerPublicErrorClass = "ComputerActionTimeoutError" | "ComputerUnavailableError";
+type ComputerPublicErrorCode = "command_yield_timeout" | "screenshot_capture_failed";
+
+function computerPublicErrorFields<
+  ErrorClass extends ComputerPublicErrorClass,
+  ErrorCode extends ComputerPublicErrorCode,
+>(
+  error: unknown,
+  fallbackClass: ErrorClass,
+  fallbackCode: ErrorCode,
+): {
+  errorClass: ErrorClass;
+  errorCode: ErrorCode;
+  status?: number;
+  origin: "sandbox-computer";
+} {
+  const fields: {
+    errorClass: ErrorClass;
+    errorCode: ErrorCode;
+    status?: number;
+    origin: "sandbox-computer";
+  } = { errorClass: fallbackClass, errorCode: fallbackCode, origin: "sandbox-computer" };
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public diagnostics are best-effort. Hostile getters/proxies must never
+    // replace the exact internal failure with a logging projection failure.
+  }
+  return fields;
+}
+
+type ScreenshotReadbackFence = {
+  overallDeadline: number;
+  dataDeadline: number;
+  controller: AbortController;
+  timer: ReturnType<typeof setTimeout>;
+  detachAbortSignal: () => void;
+};
+
+function screenshotNow(): number {
+  return performance.now();
+}
+
+function validBase64(value: string): boolean {
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value);
+}
+
 /**
  * The Computer the agent drives. Every action issues ONE shell line through the
  * externally-owned session (exec ?? execCommand, F1), prefixed with the display.
@@ -249,6 +338,8 @@ export class SandboxComputer implements Computer {
   private readonly tmp: string;
   private readonly screenshotWarmupBudgetMs: number;
   private readonly screenshotRetryDelayMs: number;
+  private readonly screenshotReadbackTimeoutMs: number;
+  private readonly abortSignal: AbortSignal | undefined;
   private readonly prepare: ((session: SandboxSessionLike) => Promise<void>) | undefined;
   private prepared = false;
   private preparation: Promise<void> | null = null;
@@ -265,6 +356,15 @@ export class SandboxComputer implements Computer {
     this.tmp = opts.screenshotTmpDir ?? "/tmp";
     this.screenshotWarmupBudgetMs = opts.screenshotWarmupBudgetMs ?? SCREENSHOT_WARMUP_BUDGET_MS;
     this.screenshotRetryDelayMs = opts.screenshotRetryDelayMs ?? SCREENSHOT_RETRY_DELAY_MS;
+    this.screenshotReadbackTimeoutMs =
+      opts.screenshotReadbackTimeoutMs ?? SCREENSHOT_READBACK_TIMEOUT_MS;
+    if (
+      !Number.isFinite(this.screenshotReadbackTimeoutMs) ||
+      this.screenshotReadbackTimeoutMs <= 0
+    ) {
+      throw new RangeError("screenshotReadbackTimeoutMs must be a positive finite number");
+    }
+    this.abortSignal = opts.abortSignal;
     this.prepare = opts.prepare;
   }
 
@@ -299,24 +399,41 @@ export class SandboxComputer implements Computer {
   // The single command primitive. Dual-paths exec/execCommand (F1), then uses the
   // established string-aware parsers (F2/F3): exitCode from the preamble, and
   // "still running" → a retriable failure. Returns the command OUTPUT body.
-  private async x(cmd: string): Promise<string> {
+  private async x(cmd: string, options: { requireSettled?: boolean } = {}): Promise<string> {
     await this.prepareOnce();
     const args = {
       cmd: `DISPLAY=${this.display} ${cmd}`,
       ...(this.runAs ? { runAs: this.runAs } : {}),
       yieldTimeMs: ACTION_YIELD_MS,
       maxOutputTokens: 4_000,
+      ...(this.abortSignal ? { signal: this.abortSignal } : {}),
     };
     let result: ExecResultLike | string;
-    if (typeof this.session.exec === "function") {
-      result = await this.session.exec(args);
-    } else if (typeof this.session.execCommand === "function") {
-      result = await this.session.execCommand(args);
-    } else {
+    if (typeof this.session.exec !== "function" && typeof this.session.execCommand !== "function") {
       throw new ComputerUnavailableError("session cannot run commands (no exec/execCommand)");
+    }
+    try {
+      result =
+        typeof this.session.exec === "function"
+          ? await this.session.exec(args)
+          : await this.session.execCommand!(args);
+    } catch (error) {
+      if (options.requireSettled) {
+        throw new ScreenshotReadError(
+          "capture_outcome_unknown",
+          "screenshot capture provider call failed without an authoritative terminal result; refusing to retry",
+        );
+      }
+      throw error;
     }
     const output = sandboxCommandOutput(result);
     if (sandboxCommandStillRunning(result)) {
+      if (options.requireSettled) {
+        throw new ScreenshotReadError(
+          "capture_outcome_unknown",
+          "screenshot capture did not settle before the provider yield window; refusing to read or retry an operation with an unknown outcome",
+        );
+      }
       // F3: the command exceeded the yield window. WARN AND RETURN rather than
       // throw. Throwing here causes the SDK's catch in `_runComputerActionAndScreenshot`
       // to set output='' and build `{image_url:""}` → Azure 400. By returning
@@ -328,11 +445,18 @@ export class SandboxComputer implements Computer {
       // produces empty bytes, and the retry loop eventually throws. The wire-level
       // backstop in computerCallNormalizingFetch is also in place as a second net.
       console.warn(
-        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${cmd}`,
+        "[SandboxComputer] action command did not finish before the yield window; proceeding to screenshot",
+        computerPublicErrorFields(undefined, "ComputerActionTimeoutError", "command_yield_timeout"),
       );
       return output;
     }
     const exitCode = sandboxCommandExitCode(result);
+    if (options.requireSettled && exitCode === null) {
+      throw new ScreenshotReadError(
+        "capture_outcome_unknown",
+        "screenshot capture returned no authoritative exit status; refusing to retry",
+      );
+    }
     if (exitCode !== null && exitCode !== 0) {
       throw new ComputerActionError(cmd, exitCode, output);
     }
@@ -344,6 +468,104 @@ export class SandboxComputer implements Computer {
   }
   private shq(s: string): string {
     return `'${s.replace(/'/g, `'\\''`)}'`;
+  }
+
+  private startScreenshotReadback(): ScreenshotReadbackFence {
+    const started = screenshotNow();
+    const overallDeadline = started + this.screenshotReadbackTimeoutMs;
+    const cleanupReserveMs = Math.min(
+      SCREENSHOT_CLEANUP_MAX_RESERVE_MS,
+      Math.max(5, Math.floor(this.screenshotReadbackTimeoutMs / 4)),
+    );
+    const dataDeadline = Math.max(started + 1, overallDeadline - cleanupReserveMs);
+    const controller = new AbortController();
+    const timeoutError = new ScreenshotReadError(
+      "read_timeout",
+      `screenshot readback exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+    );
+    const timer = setTimeout(
+      () => controller.abort(timeoutError),
+      Math.max(1, dataDeadline - screenshotNow()),
+    );
+
+    const onAbort = () =>
+      controller.abort(
+        new ScreenshotReadError("aborted", "screenshot readback was aborted before completion"),
+      );
+    if (this.abortSignal?.aborted) onAbort();
+    else this.abortSignal?.addEventListener("abort", onAbort, { once: true });
+
+    return {
+      overallDeadline,
+      dataDeadline,
+      controller,
+      timer,
+      detachAbortSignal: () => this.abortSignal?.removeEventListener("abort", onAbort),
+    };
+  }
+
+  private finishScreenshotReadback(fence: ScreenshotReadbackFence): void {
+    clearTimeout(fence.timer);
+    fence.detachAbortSignal();
+  }
+
+  private screenshotReadFenceError(fence: ScreenshotReadbackFence): ScreenshotReadError {
+    const reason = fence.controller.signal.reason;
+    if (reason instanceof ScreenshotReadError) return reason;
+    return new ScreenshotReadError(
+      this.abortSignal?.aborted ? "aborted" : "read_timeout",
+      this.abortSignal?.aborted
+        ? "screenshot readback was aborted before completion"
+        : `screenshot readback exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+    );
+  }
+
+  private assertScreenshotReadAdmission(fence: ScreenshotReadbackFence): number {
+    if (fence.controller.signal.aborted) throw this.screenshotReadFenceError(fence);
+    const remainingMs = fence.dataDeadline - screenshotNow();
+    if (remainingMs <= 0) {
+      const error = new ScreenshotReadError(
+        "read_timeout",
+        `screenshot readback exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+      );
+      fence.controller.abort(error);
+      throw error;
+    }
+    return remainingMs;
+  }
+
+  private boundedScreenshotCommand(command: string, budgetMs: number): string {
+    const graceMs = Math.min(250, Math.max(5, Math.floor(budgetMs / 4)));
+    const commandMs = Math.max(1, budgetMs - graceMs);
+    const killAfterMs = Math.max(1, Math.floor(graceMs / 2));
+    return (
+      `timeout --signal=TERM --kill-after=${(killAfterMs / 1_000).toFixed(3)}s ` +
+      `${(commandMs / 1_000).toFixed(3)}s bash -c ${this.shq(command)}`
+    );
+  }
+
+  private async beforeScreenshotReadDeadline<T>(
+    promise: Promise<T>,
+    fence: ScreenshotReadbackFence,
+  ): Promise<T> {
+    this.assertScreenshotReadAdmission(fence);
+    const signal = fence.controller.signal;
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const settle = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => settle(() => reject(this.screenshotReadFenceError(fence)));
+      signal.addEventListener("abort", onAbort, { once: true });
+      void promise.then(
+        (value) => settle(() => resolve(value)),
+        (error) => settle(() => reject(error)),
+      );
+      if (signal.aborted) onAbort();
+    });
   }
 
   async screenshot(): Promise<string> {
@@ -379,9 +601,19 @@ export class SandboxComputer implements Computer {
       }
       attempt++;
       const f = `${this.tmp}/og-shot-${Date.now()}-${Math.random().toString(36).slice(2)}.png`;
+      let readbackFence: ScreenshotReadbackFence | null = null;
+      let attemptFailure: unknown;
+      let attemptResult: string | undefined;
       try {
-        await this.x(`scrot --pointer --overwrite ${f}`);
-        const bytes = await this.readScreenshotBytes(f);
+        if (this.abortSignal?.aborted) {
+          throw new ScreenshotReadError(
+            "aborted",
+            "screenshot capture was aborted before admission",
+          );
+        }
+        await this.x(`scrot --pointer --overwrite ${this.shq(f)}`, { requireSettled: true });
+        readbackFence = this.startScreenshotReadback();
+        const bytes = await this.readScreenshotBytes(f, readbackFence);
         if (bytes.length === 0) {
           // A cold/not-yet-painting :0 yields a zero-byte frame. Retry rather than
           // hand the model an empty image_url; throw once the budget is spent.
@@ -389,24 +621,48 @@ export class SandboxComputer implements Computer {
             "scrot produced an empty screenshot (display not up?)",
           );
         }
-        return Buffer.from(bytes).toString("base64");
+        attemptResult = Buffer.from(bytes).toString("base64");
       } catch (error) {
-        lastError = error;
-        // A short/truncated read is deterministic (the exec-output cap), not a warm-up
-        // transient — retrying only burns the budget and delays a legible failure. Fail
-        // loud NOW (the `finally` still cleans up the temp file).
-        if (error instanceof ScreenshotReadError) {
-          throw error;
-        }
-      } finally {
-        // Best-effort cleanup on every attempt (success OR failure); never mask the
-        // screenshot result.
-        // If preparation itself failed, scrot never ran and no file exists. Do
-        // not route cleanup through x(), because that would retry the expensive
-        // display preparation merely to delete a nonexistent path.
+        attemptFailure =
+          this.abortSignal?.aborted && !(error instanceof ScreenshotReadError)
+            ? new ScreenshotReadError("aborted", "screenshot capture was aborted")
+            : error;
+        lastError = attemptFailure;
+      }
+
+      let cleanupFailure: unknown;
+      try {
+        // Cleanup has its own in-box process timeout and provider abort. A readback
+        // reserves part of its one aggregate deadline for this exact operation.
         if (this.prepared) {
-          await this.x(`rm -f ${f}`).catch(() => undefined);
+          const cleanupDeadline =
+            readbackFence?.overallDeadline ?? screenshotNow() + SCREENSHOT_CLEANUP_TIMEOUT_MS;
+          await this.cleanupScreenshotFile(f, cleanupDeadline);
         }
+      } catch (error) {
+        cleanupFailure = error;
+      } finally {
+        if (readbackFence) this.finishScreenshotReadback(readbackFence);
+      }
+
+      if (cleanupFailure !== undefined) {
+        if (attemptFailure instanceof ScreenshotReadError) {
+          attemptFailure.cleanupFailed = true;
+          console.warn("[SandboxComputer] screenshot cleanup failed after readback failure");
+        } else if (attemptFailure !== undefined) {
+          console.warn("[SandboxComputer] screenshot cleanup failed after capture failure");
+        } else {
+          throw cleanupFailure;
+        }
+      }
+
+      // A readback or unknown-outcome failure is deterministic, not a display warm-up
+      // transient. Cleanup has settled, so now fail loud without replaying the operation.
+      if (attemptFailure instanceof ScreenshotReadError) {
+        throw attemptFailure;
+      }
+      if (attemptResult !== undefined) {
+        return attemptResult;
       }
       // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
       if (Date.now() + this.screenshotRetryDelayMs >= deadline) {
@@ -439,28 +695,114 @@ export class SandboxComputer implements Computer {
   // computer-use turn once routing was enabled. So a STRING exec result is banner-stripped
   // exactly like the direct execCommand path; only a structured object goes to
   // sandboxCommandOutput.
-  private async readCmdRaw(cmd: string): Promise<string> {
+  private async readCmdRaw(cmd: string, fence: ScreenshotReadbackFence): Promise<string> {
+    const remainingMs = this.assertScreenshotReadAdmission(fence);
     const args = {
-      cmd,
+      // GNU timeout owns the remote process-group deadline even when a provider ignores
+      // AbortSignal or leaves its transport promise unresolved.
+      cmd: this.boundedScreenshotCommand(cmd, remainingMs),
       ...(this.runAs ? { runAs: this.runAs } : {}),
-      yieldTimeMs: ACTION_YIELD_MS,
+      yieldTimeMs: Math.max(1, Math.ceil(remainingMs)),
       // null disables the provider's TOKEN truncation; the byte cap this method chunks
       // around is a separate, lower-level exec-stdout buffer limit.
       maxOutputTokens: null as unknown as number,
+      signal: fence.controller.signal,
     };
-    if (typeof this.session.exec === "function") {
-      const result = await this.session.exec(args);
-      // A routing proxy fronting a Modal box returns the execCommand banner STRING;
-      // a native structured exec returns an object. Handle both so neither silently
-      // yields an empty body.
-      return typeof result === "string" ? stripExecBanner(result) : sandboxCommandOutput(result);
+    let providerCall: Promise<ExecResultLike | string>;
+    try {
+      if (typeof this.session.exec === "function") {
+        providerCall = this.session.exec(args);
+      } else if (typeof this.session.execCommand === "function") {
+        providerCall = this.session.execCommand(args);
+      } else {
+        throw new ScreenshotReadError(
+          "command_failed",
+          "session cannot run commands (no exec/execCommand) — screenshots unavailable",
+        );
+      }
+    } catch (error) {
+      if (error instanceof ScreenshotReadError) throw error;
+      throw new ScreenshotReadError(
+        "command_failed",
+        "screenshot readback provider command failed before admission",
+      );
     }
-    if (typeof this.session.execCommand === "function") {
-      return stripExecBanner(await this.session.execCommand(args));
+
+    let result: ExecResultLike | string;
+    try {
+      result = await this.beforeScreenshotReadDeadline(providerCall, fence);
+    } catch (error) {
+      if (error instanceof ScreenshotReadError) throw error;
+      if (fence.controller.signal.aborted) throw this.screenshotReadFenceError(fence);
+      throw new ScreenshotReadError(
+        "command_failed",
+        "screenshot readback provider command failed",
+      );
     }
-    throw new ComputerUnavailableError(
-      "session cannot run commands (no exec/execCommand) — screenshots unavailable",
-    );
+
+    if (sandboxCommandStillRunning(result)) {
+      const error = new ScreenshotReadError(
+        "command_outcome_unknown",
+        "screenshot readback command did not settle before the provider yield window; refusing to admit another chunk",
+      );
+      fence.controller.abort(error);
+      throw error;
+    }
+    const exitCode = sandboxCommandExitCode(result);
+    if (exitCode === 124) {
+      const error = new ScreenshotReadError(
+        "read_timeout",
+        `screenshot readback exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+      );
+      fence.controller.abort(error);
+      throw error;
+    }
+    if (exitCode === null) {
+      const error = new ScreenshotReadError(
+        "command_outcome_unknown",
+        "screenshot readback command returned no authoritative exit status; refusing to admit another chunk",
+      );
+      fence.controller.abort(error);
+      throw error;
+    }
+    if (exitCode !== 0) {
+      throw new ScreenshotReadError(
+        "command_failed",
+        `screenshot readback command failed with exit code ${exitCode}`,
+      );
+    }
+
+    // A routing proxy fronting a Modal box can return the execCommand banner STRING;
+    // a native structured exec returns an object. Handle both so neither silently
+    // yields an empty body.
+    return sandboxCommandStdout(result);
+  }
+
+  private parseScreenshotByteSize(raw: string): number {
+    // `wc -c < file` emits one decimal integer plus optional horizontal framing and
+    // one optional line ending. Anything else is wrapper contamination or ambiguity.
+    const match = /^[ \t]*([0-9]+)[ \t]*(?:\r?\n)?$/u.exec(raw);
+    if (!match) {
+      throw new ScreenshotReadError(
+        "invalid_size_output",
+        "screenshot byte-size command returned malformed or multiple values",
+      );
+    }
+    const digits = match[1]!;
+    if (digits.length > SCREENSHOT_SIZE_MAX_DIGITS) {
+      throw new ScreenshotReadError(
+        "size_limit_exceeded",
+        `screenshot byte size exceeds the ${MAX_SCREENSHOT_BYTES}B safety limit`,
+      );
+    }
+    const size = BigInt(digits);
+    if (size > BigInt(MAX_SCREENSHOT_BYTES)) {
+      throw new ScreenshotReadError(
+        "size_limit_exceeded",
+        `screenshot byte size exceeds the ${MAX_SCREENSHOT_BYTES}B safety limit`,
+      );
+    }
+    return Number(size);
   }
 
   // Read the screenshot PNG bytes off the box. A SINGLE `base64 <file>` over Modal's
@@ -470,30 +812,125 @@ export class SandboxComputer implements Computer {
   // (each read's base64 stays well under the cap) and reconstruct — validating the total
   // against the on-box size and failing LOUD on any short read rather than handing back a
   // truncated/blank frame. Binary-safe: base64 is plain ASCII over stdout.
-  private async readScreenshotBytes(path: string): Promise<Uint8Array> {
+  private async readScreenshotBytes(
+    path: string,
+    fence: ScreenshotReadbackFence,
+  ): Promise<Uint8Array> {
+    const quotedPath = this.shq(path);
     // On-box byte size (tiny output — always safe). A still-warming :0 can yield a
     // zero-byte scrot file; report empty so the caller retries within its warm-up budget.
-    const sizeRaw = (await this.readCmdRaw(`wc -c < ${path} 2>/dev/null`)).replace(/[^0-9]/g, "");
-    const fileSize = Number.parseInt(sizeRaw, 10);
-    if (!Number.isFinite(fileSize) || fileSize <= 0) return new Uint8Array();
+    const sizeRaw = await this.readCmdRaw(`wc -c < ${quotedPath} 2>/dev/null`, fence);
+    const fileSize = this.parseScreenshotByteSize(sizeRaw);
+    if (fileSize === 0) return new Uint8Array();
 
     const chunks: Buffer[] = [];
-    const nChunks = Math.ceil(fileSize / SCREENSHOT_READ_CHUNK_BYTES);
+    const nChunks = Math.floor((fileSize - 1) / SCREENSHOT_READ_CHUNK_BYTES) + 1;
+    if (nChunks > MAX_SCREENSHOT_READ_CHUNKS) {
+      throw new ScreenshotReadError(
+        "chunk_limit_exceeded",
+        `screenshot read requires more than ${MAX_SCREENSHOT_READ_CHUNKS} chunks`,
+      );
+    }
     for (let i = 0; i < nChunks; i++) {
+      this.assertScreenshotReadAdmission(fence);
       // `dd bs=CHUNK skip=i count=1` reads bytes [i*CHUNK, (i+1)*CHUNK); CHUNK % 3 == 0
       // so each chunk's base64 is self-contained and decoded chunks concatenate exactly.
       const raw = await this.readCmdRaw(
-        `dd if=${path} bs=${SCREENSHOT_READ_CHUNK_BYTES} skip=${i} count=1 2>/dev/null | base64`,
+        `dd if=${quotedPath} bs=${SCREENSHOT_READ_CHUNK_BYTES} skip=${i} count=1 2>/dev/null | base64`,
+        fence,
       );
-      chunks.push(Buffer.from(raw.replace(/\s+/g, ""), "base64"));
+      const encoded = raw.replace(/[ \t\r\n]/g, "");
+      if (!validBase64(encoded)) {
+        throw new ScreenshotReadError(
+          "invalid_chunk_output",
+          `screenshot chunk ${i + 1} of ${nChunks} returned malformed base64`,
+        );
+      }
+      const chunk = Buffer.from(encoded, "base64");
+      const expectedBytes = Math.min(
+        SCREENSHOT_READ_CHUNK_BYTES,
+        fileSize - i * SCREENSHOT_READ_CHUNK_BYTES,
+      );
+      if (chunk.length !== expectedBytes) {
+        throw new ScreenshotReadError(
+          "truncated_read",
+          `screenshot chunk ${i + 1} of ${nChunks} reconstructed ${chunk.length}B of ${expectedBytes}B; frame incomplete`,
+        );
+      }
+      chunks.push(chunk);
     }
     const bytes = Buffer.concat(chunks);
     if (bytes.length !== fileSize) {
       throw new ScreenshotReadError(
+        "truncated_read",
         `screenshot read reconstructed ${bytes.length}B of ${fileSize}B (${nChunks} chunk(s), path=${path}) — a chunk was truncated by the exec-output cap; frame incomplete`,
       );
     }
     return new Uint8Array(bytes);
+  }
+
+  private async cleanupScreenshotFile(path: string, deadline: number): Promise<void> {
+    const remainingMs = deadline - screenshotNow();
+    if (remainingMs <= 0) {
+      throw new ScreenshotReadError(
+        "cleanup_failed",
+        "screenshot temp-file cleanup deadline expired before admission",
+      );
+    }
+    const controller = new AbortController();
+    const timeoutError = new ScreenshotReadError(
+      "cleanup_failed",
+      "screenshot temp-file cleanup exceeded its deadline",
+    );
+    const timer = setTimeout(() => controller.abort(timeoutError), Math.max(1, remainingMs));
+    const args = {
+      cmd: this.boundedScreenshotCommand(`rm -f -- ${this.shq(path)}`, remainingMs),
+      ...(this.runAs ? { runAs: this.runAs } : {}),
+      yieldTimeMs: Math.max(1, Math.ceil(remainingMs)),
+      maxOutputTokens: 1_000,
+      signal: controller.signal,
+    };
+
+    try {
+      let providerCall: Promise<ExecResultLike | string>;
+      if (typeof this.session.exec === "function") providerCall = this.session.exec(args);
+      else if (typeof this.session.execCommand === "function") {
+        providerCall = this.session.execCommand(args);
+      } else {
+        throw timeoutError;
+      }
+      const result = await new Promise<ExecResultLike | string>((resolve, reject) => {
+        let settled = false;
+        const settle = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          controller.signal.removeEventListener("abort", onAbort);
+          callback();
+        };
+        const onAbort = () => settle(() => reject(timeoutError));
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+        void providerCall.then(
+          (value) => settle(() => resolve(value)),
+          () => settle(() => reject(timeoutError)),
+        );
+        if (controller.signal.aborted) onAbort();
+      });
+      const exitCode = sandboxCommandExitCode(result);
+      if (sandboxCommandStillRunning(result) || exitCode === null || exitCode !== 0) {
+        throw new ScreenshotReadError(
+          "cleanup_failed",
+          "screenshot temp-file cleanup did not settle successfully",
+        );
+      }
+    } catch (error) {
+      if (error instanceof ScreenshotReadError) throw error;
+      throw new ScreenshotReadError(
+        "cleanup_failed",
+        "screenshot temp-file cleanup provider call failed",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async click(xp: number, yp: number, button: ComputerButton) {
@@ -601,7 +1038,19 @@ export type NativeDesktopComputerOptions = {
   readOnly?: boolean; // when true, every WRITE action throws ComputerReadOnlyError
   screenshotWarmupBudgetMs?: number; // wall-clock budget to retry a warming/empty first frame
   screenshotRetryDelayMs?: number; // delay between warm-up retries
+  /** Aggregate wall-clock budget for provider capture and pre-serialization admission. */
+  screenshotReadbackTimeoutMs?: number;
+  /** Turn cancellation fence; aborting it stops all new native capture admissions. */
+  abortSignal?: AbortSignal;
 };
+
+type NativeScreenshotFence = {
+  controller: AbortController;
+  timer: ReturnType<typeof setTimeout>;
+  detachAbortSignal: () => void;
+};
+
+type NativeScreenshotResult = Awaited<ReturnType<NativeDesktopSession["screenshot"]>>;
 
 /** A capture failure that RETRYING cannot cure — Screen Recording (TCC) has not been
  *  granted to the agent, so every capture will deny until the user grants it. We fail
@@ -639,6 +1088,9 @@ export class NativeDesktopComputer implements Computer {
   private readonly readOnly: boolean;
   private readonly screenshotWarmupBudgetMs: number;
   private readonly screenshotRetryDelayMs: number;
+  private readonly screenshotReadbackTimeoutMs: number;
+  private readonly abortSignal: AbortSignal | undefined;
+  private inFlightScreenshot: Promise<NativeScreenshotResult> | null = null;
   // The ENCODED vs NATIVE geometry of the MOST RECENT screenshot the model saw. The
   // model computes click coordinates in the encoded-pixel space of that screenshot;
   // when the agent downscaled the PNG to fit the transport budget, encoded < native,
@@ -659,6 +1111,15 @@ export class NativeDesktopComputer implements Computer {
     this.screenshotWarmupBudgetMs =
       opts.screenshotWarmupBudgetMs ?? NATIVE_SCREENSHOT_WARMUP_BUDGET_MS;
     this.screenshotRetryDelayMs = opts.screenshotRetryDelayMs ?? NATIVE_SCREENSHOT_RETRY_DELAY_MS;
+    this.screenshotReadbackTimeoutMs =
+      opts.screenshotReadbackTimeoutMs ?? SCREENSHOT_READBACK_TIMEOUT_MS;
+    if (
+      !Number.isFinite(this.screenshotReadbackTimeoutMs) ||
+      this.screenshotReadbackTimeoutMs <= 0
+    ) {
+      throw new RangeError("screenshotReadbackTimeoutMs must be a positive finite number");
+    }
+    this.abortSignal = opts.abortSignal;
   }
 
   /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
@@ -668,6 +1129,115 @@ export class NativeDesktopComputer implements Computer {
 
   private guardWrite() {
     if (this.readOnly) throw new ComputerReadOnlyError();
+  }
+
+  private startScreenshotFence(): NativeScreenshotFence {
+    const controller = new AbortController();
+    const timeoutError = new ScreenshotReadError(
+      "read_timeout",
+      `native screenshot capture exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+    );
+    const timer = setTimeout(
+      () => controller.abort(timeoutError),
+      this.screenshotReadbackTimeoutMs,
+    );
+    const onAbort = () =>
+      controller.abort(
+        new ScreenshotReadError(
+          "aborted",
+          "native screenshot capture was aborted before completion",
+        ),
+      );
+    if (this.abortSignal?.aborted) onAbort();
+    else this.abortSignal?.addEventListener("abort", onAbort, { once: true });
+    return {
+      controller,
+      timer,
+      detachAbortSignal: () => this.abortSignal?.removeEventListener("abort", onAbort),
+    };
+  }
+
+  private finishScreenshotFence(fence: NativeScreenshotFence): void {
+    clearTimeout(fence.timer);
+    fence.detachAbortSignal();
+  }
+
+  private screenshotFenceError(fence: NativeScreenshotFence): ScreenshotReadError {
+    const reason = fence.controller.signal.reason;
+    if (reason instanceof ScreenshotReadError) return reason;
+    return new ScreenshotReadError(
+      this.abortSignal?.aborted ? "aborted" : "read_timeout",
+      this.abortSignal?.aborted
+        ? "native screenshot capture was aborted before completion"
+        : `native screenshot capture exceeded its ${this.screenshotReadbackTimeoutMs}ms aggregate deadline`,
+    );
+  }
+
+  private assertScreenshotAdmission(fence: NativeScreenshotFence): void {
+    if (fence.controller.signal.aborted) throw this.screenshotFenceError(fence);
+  }
+
+  private startProviderScreenshot(): Promise<NativeScreenshotResult> {
+    if (this.inFlightScreenshot) {
+      throw new ScreenshotReadError(
+        "capture_outcome_unknown",
+        "a previous native screenshot capture remains unresolved; refusing to start another provider capture",
+      );
+    }
+    const providerCall = this.session.screenshot();
+    this.inFlightScreenshot = providerCall;
+    const clearIfCurrent = () => {
+      if (this.inFlightScreenshot === providerCall) this.inFlightScreenshot = null;
+    };
+    // The provider API is not cancellable. Keep the exact promise as the
+    // instance-level admission identity until that operation itself settles;
+    // caller timeout/abort must not clear it and admit accumulating captures.
+    void providerCall.then(clearIfCurrent, clearIfCurrent);
+    return providerCall;
+  }
+
+  private async beforeScreenshotDeadline<T>(
+    startProviderCall: () => Promise<T>,
+    fence: NativeScreenshotFence,
+  ): Promise<T> {
+    this.assertScreenshotAdmission(fence);
+    const providerCall = startProviderCall();
+    const signal = fence.controller.signal;
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const settle = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => settle(() => reject(this.screenshotFenceError(fence)));
+      signal.addEventListener("abort", onAbort, { once: true });
+      void providerCall.then(
+        (value) => settle(() => resolve(value)),
+        (error) => settle(() => reject(error)),
+      );
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private async waitForScreenshotRetry(fence: NativeScreenshotFence): Promise<void> {
+    this.assertScreenshotAdmission(fence);
+    const signal = fence.controller.signal;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settle = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const timer = setTimeout(() => settle(resolve), this.screenshotRetryDelayMs);
+      const onAbort = () => settle(() => reject(this.screenshotFenceError(fence)));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
   }
 
   /** Scale a coordinate the model expressed in the MOST RECENT screenshot's
@@ -723,51 +1293,68 @@ export class NativeDesktopComputer implements Computer {
     // bounded budget and, on a terminal failure, FAIL LOUD with the agent's actual
     // reason (logged) — never a silent blank. A permission (TCC) denial is terminal:
     // retrying cannot grant Screen Recording, so we break immediately.
-    let lastError: unknown;
-    const deadline = Date.now() + this.screenshotWarmupBudgetMs;
-    let attempt = 0;
-    while (true) {
-      if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, this.screenshotRetryDelayMs));
-      }
-      attempt++;
-      try {
-        const { png, width, height, nativeWidth, nativeHeight } = await this.session.screenshot();
-        if (png.length === 0) {
-          // A warming capture yields an empty frame — retry rather than hand the model
-          // a blank; throw once the budget is spent.
-          throw new ComputerUnavailableError(
-            "native desktop screenshot returned an empty frame (display not up?)",
-          );
+    const fence = this.startScreenshotFence();
+    try {
+      let lastError: unknown;
+      const warmupDeadline = Date.now() + this.screenshotWarmupBudgetMs;
+      let attempt = 0;
+      while (true) {
+        if (attempt > 0) await this.waitForScreenshotRetry(fence);
+        this.assertScreenshotAdmission(fence);
+        attempt++;
+        try {
+          // Native provider capture has no cancellable structural API today. Race it
+          // against the turn/deadline fence so a late result is ignored and can never
+          // reach geometry, base64, or model/tool serialization.
+          const { png, width, height, nativeWidth, nativeHeight } =
+            await this.beforeScreenshotDeadline(() => this.startProviderScreenshot(), fence);
+          this.assertScreenshotAdmission(fence);
+          if (png.byteLength > MAX_SCREENSHOT_BYTES) {
+            throw new ScreenshotReadError(
+              "size_limit_exceeded",
+              `native screenshot byte size exceeds the ${MAX_SCREENSHOT_BYTES}B safety limit`,
+            );
+          }
+          if (png.length === 0) {
+            // A warming capture yields an empty frame — retry rather than hand the model
+            // a blank; throw once the budget is spent.
+            throw new ComputerUnavailableError(
+              "native desktop screenshot returned an empty frame (display not up?)",
+            );
+          }
+          // Record the encoded (what the model sees) vs native geometry of THIS frame so
+          // the next click/move/scroll/drag scales its coordinates back to native pixels.
+          this.lastEncoded = [width, height];
+          this.lastNative = [nativeWidth || width, nativeHeight || height];
+          return Buffer.from(png).toString("base64");
+        } catch (error) {
+          // Bounds, cancellation, and deadline failures are admission fences, not
+          // warm-up transients. Retrying could duplicate an ambiguous provider call.
+          if (error instanceof ScreenshotReadError) throw error;
+          lastError = error;
+          // A permission denial will deny on every retry — fail fast with the reason.
+          if (isTerminalCaptureDenial(error)) break;
         }
-        // Record the encoded (what the model sees) vs native geometry of THIS frame so
-        // the next click/move/scroll/drag scales its coordinates back to native pixels.
-        this.lastEncoded = [width, height];
-        this.lastNative = [nativeWidth || width, nativeHeight || height];
-        return Buffer.from(png).toString("base64");
-      } catch (error) {
-        lastError = error;
-        // A permission denial will deny on every retry — fail fast with the reason.
-        if (isTerminalCaptureDenial(error)) break;
+        // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
+        if (Date.now() + this.screenshotRetryDelayMs >= warmupDeadline) break;
       }
-      // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
-      if (Date.now() + this.screenshotRetryDelayMs >= deadline) {
-        break;
-      }
+      // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Public logs
+      // receive only structural metadata; the exact error is rethrown internally.
+      console.warn(
+        "[NativeDesktopComputer] screenshot failed after the capture retry budget",
+        computerPublicErrorFields(
+          lastError,
+          "ComputerUnavailableError",
+          "screenshot_capture_failed",
+        ),
+      );
+      if (lastError instanceof Error) throw lastError;
+      throw new ComputerUnavailableError(
+        "native desktop screenshot returned an empty frame (display not up?)",
+      );
+    } finally {
+      this.finishScreenshotFence(fence);
     }
-    // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
-    // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
-    // then rethrow — never return "".
-    const reason = lastError instanceof Error ? lastError.message : String(lastError);
-    console.warn(
-      `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
-    );
-    if (lastError instanceof Error) {
-      throw lastError;
-    }
-    throw new ComputerUnavailableError(
-      "native desktop screenshot returned an empty frame (display not up?)",
-    );
   }
 
   async click(x: number, y: number, button: ComputerButton) {
@@ -937,23 +1524,6 @@ function renderImageForTextTransport(output: ToolOutputImage | string): string {
   return `data:${mediaType};base64,${Buffer.from(image.data).toString("base64")}`;
 }
 
-/** Whether the bound model supports the structured tool-output transport, in
- *  lockstep with the SDK's private `supportsStructuredToolOutputTransport`
- *  (capabilities/transport): a ChatCompletions-family model — and an UNBOUND model
- *  (undefined) — does NOT, so it gets the function tools; every other model keeps
- *  the hosted `computer_use_preview` tool. The codex neutralize trick in index.ts
- *  drops `_modelInstance`, so this returns false there and the function tools win. */
-function supportsStructuredToolOutputTransport(modelInstance: unknown): boolean {
-  if (!modelInstance) return false;
-  const constructorName =
-    typeof modelInstance === "object" &&
-    modelInstance &&
-    typeof (modelInstance as { constructor?: unknown }).constructor === "function"
-      ? ((modelInstance as { constructor: { name?: string } }).constructor.name ?? "")
-      : "";
-  return !constructorName.includes("ChatCompletions");
-}
-
 const COMPUTER_READ_ONLY_MESSAGE =
   "computer-use is read-only for this session — click, double_click, move, scroll, type, keypress, and drag are disabled. Call computer_screenshot to observe the desktop.";
 
@@ -1027,6 +1597,10 @@ export function computerFunctionTools(
         "Capture the current desktop and return it as an image. Call this FIRST and again after each action — all coordinates for click/move/scroll/drag are pixels of the most recent screenshot.",
       parameters: objectSchema({}, []) as never,
       strict: false,
+      errorFunction: (_context, error) =>
+        error instanceof ScreenshotReadError
+          ? `computer screenshot failed [${error.code}]: ${error.message}${error.cleanupFailed ? " (temp-file cleanup also failed)" : ""}`
+          : `computer screenshot failed: ${error instanceof Error ? error.message : String(error)}`,
       execute: async () => {
         // screenshot() returns raw base64 PNG and NEVER an empty string (it throws
         // instead), so the model can't receive an empty image_url.
@@ -1190,39 +1764,30 @@ export function computerFunctionTools(
 /**
  * EXPLICIT tool-transport selection, decided by the caller that knows the
  * provider's true wire identity (the worker's model resolution — see agent-turn.ts),
- * NOT inferred from the bound model instance's constructor name. This is the
- * HARDENING seam: `supportsStructuredToolOutputTransport` string-sniffs the
- * constructor for "ChatCompletions", which a wrapped / proxied / minified model
- * instance would defeat — silently handing a chat-completions provider the HOSTED
- * `computer_use_preview` tool it 400s on every turn. When `toolMode` is set, tools()
- * OBEYS it and never consults the sniff:
+ * never inferred from the bound model instance's constructor name:
  *   • "hosted"         → the single hosted `computer_use_preview` tool (Responses backends).
  *   • "function-image" → the FUNCTION `computer_*` tools with screenshots delivered as a
  *                        structured `{type:'image'}` output (the codex/ChatGPT backend,
  *                        which rejects hosted tool types but SEES structured image results).
- *   • "function-text"  → the FUNCTION tools with screenshots rendered as a text
- *                        `data:…;base64` URL (chat-completions providers, which can't read
- *                        structured image tool results).
+ *   • "disabled"       → no computer tools. Providers without a proven visual image
+ *                        transport fail closed instead of receiving base64 as text.
+ *   • "function-text"  → deprecated fail-closed alias retained for source compatibility.
+ *   • omitted           → fail closed exactly like "disabled"; public runtime callers must
+ *                        prove the transport explicitly before computer tools are exposed.
  */
-export type ComputerToolMode = "hosted" | "function-image" | "function-text";
+export type ComputerToolMode = "hosted" | "function-image" | "disabled" | "function-text";
 
 export type ComputerUseArgs = {
   dimensions?: [number, number];
   readOnly?: boolean;
   display?: string;
+  /** Turn-scoped cancellation fence threaded into capture/readback provider calls. */
+  abortSignal?: AbortSignal;
   needsApproval?: boolean | ((ctx: unknown, action: unknown) => boolean | Promise<boolean>);
-  // Deliver screenshots from the FUNCTION tools as a REAL image the model can see
-  // (a structured `{type:'image'}` tool output → agents-core normalizes it to an
-  // `input_image` content item inside the function_call_output) instead of the text
-  // data-URL string. Only the codex/ChatGPT backend can read structured image tool
-  // results; chat-completions providers cannot, so this stays OFF (text rendering)
-  // by default and is turned on only on the codex path (see index.ts). Ignored when
-  // `toolMode` is set (the mode carries its own image-delivery choice).
+  /** @deprecated Use `toolMode: "function-image"`. Omitted transport now fails closed. */
   imageFunctionResults?: boolean;
-  // EXPLICIT transport selection (see {@link ComputerToolMode}). When present, tools()
-  // obeys it directly — the constructor-name sniff is NOT consulted. When ABSENT, the
-  // legacy sniff behaviour is preserved byte-for-byte (back-compat for any embedder
-  // that constructs the capability without threading a mode).
+  // EXPLICIT transport selection (see {@link ComputerToolMode}). When absent, tools()
+  // returns no computer tools; constructor-name sniffing is never a transport proof.
   toolMode?: ComputerToolMode;
   /** Called after the display is ready on the first actual computer action. */
   onReady?: (session: SandboxSessionLike) => Promise<void>;
@@ -1238,17 +1803,9 @@ export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
  * the LIVE externally-owned session, so the agent's actions and the viewers'
  * pixels are one display.
  *
- * `tools()` is TRANSPORT-AWARE, mirroring the SDK's `filesystem()` capability
- * (which branches its `view_image` / `apply_patch` on
- * `supportsStructuredToolOutputTransport(this._modelInstance)`):
- *   • structured transport (the Responses/OpenAI backend) → the single HOSTED
- *     `computer_use_preview` tool over a Computer bound to the session (unchanged).
- *   • text transport (codex / ChatGPT backend — or an unbound model) → a set of
- *     FUNCTION tools ({@link computerFunctionTools}) that route to the SAME Computer,
- *     because the codex backend rejects the hosted computer tool type.
- * The bound model instance is captured by the SDK's `bind().bindRunAs().bindModel()`
- * chain (base `Capability._modelInstance`); the codex path in index.ts neutralizes
- * `bindModel` so `_modelInstance` stays undefined here → the function tools win.
+ * `tools()` is transport-aware only through `ComputerUseArgs.toolMode`. The bound
+ * model instance is intentionally ignored: a constructor name cannot prove whether
+ * screenshots travel as hosted computer output or structured function images.
  */
 export class ComputerUseCapability extends Capability {
   readonly type = "computer-use";
@@ -1267,11 +1824,13 @@ export class ComputerUseCapability extends Capability {
       ? new NativeDesktopComputer(session, {
           ...(this.args.dimensions ? { dimensions: this.args.dimensions } : {}),
           ...(this.args.readOnly !== undefined ? { readOnly: this.args.readOnly } : {}),
+          ...(this.args.abortSignal ? { abortSignal: this.args.abortSignal } : {}),
         })
       : new SandboxComputer(session, {
           ...(this.args.dimensions ? { dimensions: this.args.dimensions } : {}),
           ...(this.args.readOnly !== undefined ? { readOnly: this.args.readOnly } : {}),
           ...(this.args.display ? { display: this.args.display } : {}),
+          ...(this.args.abortSignal ? { abortSignal: this.args.abortSignal } : {}),
           // The SDK base exposes the bound runAs as a protected field.
           ...(typeof this._runAs === "string" ? { runAs: this._runAs } : {}),
           // Crucially lazy: tool registration does no provider work. The first
@@ -1285,12 +1844,8 @@ export class ComputerUseCapability extends Capability {
             await this.args.onReady?.(preparedSession);
           },
         });
-    // HARDENING: when the caller declares an EXPLICIT toolMode, obey it and NEVER
-    // consult `supportsStructuredToolOutputTransport` — tool selection must not
-    // depend on the model instance's constructor name (a wrapped/proxied/minified
-    // instance would defeat the "ChatCompletions" string-sniff and silently hand a
-    // chat-completions provider the hosted tool it 400s on). The mode is decided by
-    // the worker, where provider identity is authoritative (see agent-turn.ts).
+    // Tool selection must not depend on the model instance's constructor name. The
+    // worker supplies a proven explicit mode; public callers that omit it fail closed.
     switch (this.args.toolMode) {
       case "hosted":
         return [this.hostedComputerTool(computer)];
@@ -1301,31 +1856,21 @@ export class ComputerUseCapability extends Capability {
           this.args.needsApproval,
           true,
         );
+      case "disabled":
       case "function-text":
-        return computerFunctionTools(
-          computer,
-          this.args.readOnly ?? false,
-          this.args.needsApproval,
-          false,
-        );
       case undefined:
-        break; // fall through to the legacy sniff (back-compat), preserved byte-for-byte
+        // A text data URL is not a visual observation for the provider and can
+        // consume hundreds of thousands of apparent text tokens. Disable the
+        // entire coordinate-dependent capability: action tools without a usable
+        // screenshot would be blind and unsafe.
+        return [];
     }
-    // Legacy (no toolMode): structured transport keeps the HOSTED computer tool
-    // (unchanged); the codex / text backend gets the FUNCTION tools it can call.
-    if (supportsStructuredToolOutputTransport(this._modelInstance)) {
-      return [this.hostedComputerTool(computer)];
-    }
-    return computerFunctionTools(
-      computer,
-      this.args.readOnly ?? false,
-      this.args.needsApproval,
-      this.args.imageFunctionResults ?? false,
-    );
+    // Runtime callers may bypass TypeScript or pass a value from a newer client.
+    // Unknown transport modes must remain fail-closed.
+    return [];
   }
 
-  /** The single HOSTED `computer_use_preview` tool bound to `computer` — identical
-   *  construction for the explicit "hosted" mode and the legacy structured-sniff path. */
+  /** The single HOSTED `computer_use_preview` tool bound to `computer`. */
   private hostedComputerTool(computer: Computer): Tool<unknown> {
     return computerTool({
       computer,

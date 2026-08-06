@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "0.12.5",
+  "version": "0.18.19",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -28,6 +28,10 @@
     "./skill-library": {
       "types": "./src/skill-library.ts",
       "default": "./src/skill-library.ts"
+    },
+    "./mcp-network": {
+      "types": "./src/mcp-network.ts",
+      "default": "./src/mcp-network.ts"
     }
   },
   "publishConfig": {
@@ -35,8 +39,8 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsup",
-    "typecheck": "tsgo --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
@@ -48,15 +52,16 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/network": "workspace:*",
     "debug": "4.4.3",
-    "modal": "0.7.6",
+    "modal": "0.9.0",
     "openai": "6.47.0",
     "ws": "8.21.1"
   },
   "devDependencies": {
     "@openai/agents-core": "0.13.3",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3",
+    "typescript": "7.0.2",
     "zod": "4.4.3"
   }
 }

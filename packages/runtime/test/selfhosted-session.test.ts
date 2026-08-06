@@ -81,6 +81,69 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(seen[0]?.timeoutMs).toBe(17_000);
   });
 
+  test("exec preserves the ambient machine shell only when no shell is requested", async () => {
+    const mock = new MockAgentResponder();
+    await sessionWith(mock).exec({ cmd: "printf ambient" });
+
+    const op = mock.requests[0]?.req.op;
+    if (op?.$case !== "exec") throw new Error("expected exec request");
+    expect(op.exec.command).toEqual(["printf ambient"]);
+    expect(op.exec.shell).toBe(true);
+  });
+
+  test("exec honors explicit POSIX shell and login choices through direct argv", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+
+    await session.exec({ cmd: "printf non-login", shell: "/bin/bash", login: false });
+    await session.execCommand({ cmd: "printf login", shell: "/bin/zsh", login: true });
+
+    const first = mock.requests[0]?.req.op;
+    const second = mock.requests[1]?.req.op;
+    if (first?.$case !== "exec" || second?.$case !== "exec") {
+      throw new Error("expected exec requests");
+    }
+    expect(first.exec).toMatchObject({
+      command: ["/bin/bash", "-c", "printf non-login"],
+      shell: false,
+    });
+    expect(second.exec).toMatchObject({
+      command: ["/bin/zsh", "-l", "-c", "printf login"],
+      shell: false,
+    });
+  });
+
+  test("exec maps explicit Windows shell families without POSIX flags", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+
+    await session.exec({ cmd: "echo cmd", shell: String.raw`C:\Windows\System32\cmd.exe` });
+    await session.exec({ cmd: "Write-Output profile", shell: "pwsh.exe", login: true });
+    await session.exec({ cmd: "Write-Output clean", shell: "powershell.exe", login: false });
+
+    const requests = mock.requests.map((request) => request.req.op);
+    if (requests.some((op) => op?.$case !== "exec")) throw new Error("expected exec requests");
+    expect(requests[0]?.exec).toMatchObject({
+      command: [String.raw`C:\Windows\System32\cmd.exe`, "/D", "/S", "/C", "echo cmd"],
+      shell: false,
+    });
+    expect(requests[1]?.exec).toMatchObject({
+      command: ["pwsh.exe", "-NoLogo", "-NonInteractive", "-Command", "Write-Output profile"],
+      shell: false,
+    });
+    expect(requests[2]?.exec).toMatchObject({
+      command: [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Write-Output clean",
+      ],
+      shell: false,
+    });
+  });
+
   test("exec surfaces $HOSTNAME from the machine", async () => {
     const mock = new MockAgentResponder({ hostname: "the-vm" });
     const res = await sessionWith(mock).exec({ cmd: "echo $HOSTNAME" });
@@ -493,9 +556,15 @@ describe("isProviderSandboxNotFoundError — selfhosted ALWAYS false (no rival c
     }
   });
 
-  test("Modal's discriminator is unaffected (404 still true for modal)", () => {
+  test("Modal requires typed or exact terminal evidence before declaring NotFound", () => {
     expect(isProviderSandboxNotFoundError("modal", { status: 404 })).toBe(true);
-    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox not found"))).toBe(true);
+    expect(
+      isProviderSandboxNotFoundError(
+        "modal",
+        new Error("Modal sandbox sb-selfhosted-test not found (has been terminated)"),
+      ),
+    ).toBe(true);
+    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox not found"))).toBe(false);
   });
 });
 

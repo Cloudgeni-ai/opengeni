@@ -1,5 +1,41 @@
 # @opengeni/codex
 
+## 0.2.12
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+
+## 0.2.11
+
+### Patch Changes
+
+- 69bc207: Keep Codex history canonical across subscriptions and providers, separate optional owner-designated Codex Apps authority from inference allocation, and fence Apps authorization through each remote request.
+
+## 0.2.10
+
+### Patch Changes
+
+- 4f15920: Add an authorized, server-mediated connected-Codex GPT-Live V3 WebRTC SDP path with credential-safe negotiation and browser lifecycle helpers.
+
+## 0.2.9
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+
+## 0.2.8
+
+### Patch Changes
+
+- 6d167f4: Recover exact Codex encrypted-artifact rejections without deleting durable conversation truth, and make maintenance migration protocol activation part of the canonical migration transaction.
+
+## 0.2.7
+
+### Patch Changes
+
+- bdd531c: Make Codex subscription response timeouts recoverable without blindly replaying partially observed model work. The transport now assigns a durable request identity, records attempt-fenced start/headers/first-byte/terminal metadata, enforces explicit headers, stream-idle, and whole-request deadlines, and retries once only before any response is observed. Exhausted or partial-stream timeouts retain a typed failure class and return the durable session to its existing retryable recovery path instead of hard-failing it with the opaque OpenAI SDK `Request timed out.` error. External cancellation remains authoritative, the SDK retry budget remains disabled, and Codex subscription turns keep their existing zero-credit billing path.
+
 ## 0.2.6
 
 ### Patch Changes

@@ -1,11 +1,38 @@
 import { describe, expect, test } from "bun:test";
 import {
   ApproveOrganizationRecoveryRequest,
+  OrganizationGovernance,
+  OrganizationRecoveryCustodian,
   OrganizationRecoveryOperation,
   SetOrganizationRecoveryPolicyRequest,
 } from "../src/index";
 
 describe("organization governance contracts", () => {
+  test("public governance projections hide canonical custodian and authority identity", () => {
+    expect(
+      OrganizationRecoveryCustodian.safeParse({
+        enrollmentState: "accepted",
+        acceptedAt: new Date().toISOString(),
+        subjectId: "user:should-not-be-public",
+      }).success,
+    ).toBe(false);
+    expect(
+      OrganizationGovernance.safeParse({
+        accountId: "00000000-0000-4000-8000-000000000001",
+        kind: "team",
+        state: "active",
+        governanceRevision: 1,
+        recoveryPolicy: {
+          revision: 1,
+          quorum: 2,
+          custodians: [{ enrollmentState: "pending", acceptedAt: null }],
+        },
+        authorizationInvalidatedAt: null,
+        authoritySubjectId: "user:hidden",
+      }).success,
+    ).toBe(false);
+  });
+
   test("requires distinct custodians and a satisfiable quorum", () => {
     expect(
       SetOrganizationRecoveryPolicyRequest.safeParse({

@@ -1,10 +1,10 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
+import { useMachines } from "@opengeni/react/machines";
+import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
-  HumanInputForm,
-  MessageTimeline,
   projectPendingApprovals,
   useComposer,
   useFileAttachments,
@@ -13,65 +13,101 @@ import {
   useSession,
   useSessionEvents,
   useSessionLineage,
-  QueueSurface,
   useTurnQueue,
   type AgentMessageItem,
   type AuthNeededItem,
   type PendingApproval,
   type TimelineItem,
   type UserMessageItem,
-} from "@opengeni/react";
+} from "@opengeni/react/session";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
+import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
-import { EnabledMcpToolPicker, ModelPicker } from "@/components/pickers";
+import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   FailedSessionBanner,
   TerminalSessionArchive,
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
-import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
-import { GoalSurface } from "@/components/session/goal-surface";
-import { SessionInspector } from "@/components/session/inspector";
+import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
+import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { useCodexModels } from "@/lib/use-codex-models";
 import { normalizeProviderDomain } from "@/lib/capabilities";
 import {
   isTerminalSessionStatus,
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
-import { buildTools } from "@/lib/session-tools";
-import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
+import {
+  EMPTY_COMPOSER_LAUNCH,
+  composerLaunchSearchAfterPolicyApply,
+  composerLaunchSearchKey,
+  type ComposerLaunchSearch,
+} from "@/lib/composer-launch";
+import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
+import { resolveSessionComposerModel } from "@/lib/session-model";
+import { mergeSessionContextProjection } from "@/lib/session-pins";
+import {
+  firstPartySessionToolOptions,
+  isIntelligenceEffort,
+  sessionPolicyPickerIds,
+  toolsForPolicySelection,
+} from "@/lib/session-tools";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import type { ComposerDraft, LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const LazySessionInspector = lazy(() =>
+  import("@/components/session/inspector").then(({ SessionInspector }) => ({
+    default: SessionInspector,
+  })),
+);
+
+const LazyCodexRealtimeControl = lazy(() =>
+  import("@opengeni/react/realtime").then(({ SessionRealtimeControl }) => ({
+    default: SessionRealtimeControl,
+  })),
+);
 
 export function SessionRoute({
   workspaceId,
   sessionId,
+  launch = EMPTY_COMPOSER_LAUNCH,
+  realtimeAutostartModel,
 }: {
   workspaceId: string;
   sessionId: string;
+  launch?: ComposerLaunchSearch;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
 }) {
   const context = useAppContext();
   const rail = useRail();
   const navigate = useNavigate();
+  const consumeRealtimeAutostart = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId },
+      search: {},
+      replace: true,
+    });
+  }, [navigate, sessionId, workspaceId]);
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
-  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId);
   const {
     events,
     sessionStatus,
@@ -80,8 +116,15 @@ export function SessionRoute({
     hasOlder,
     loadingOlder,
     loadOlder,
+    hasNewer,
+    loadingNewer,
+    loadNewer,
+    loadingOldest,
+    loadOldest,
+    jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
+  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId, { events });
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -155,19 +198,29 @@ export function SessionRoute({
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
-  const { setSession: setContextSession, setConnectionState: setContextConnectionState } = context;
+  const {
+    setSession: setContextSession,
+    setConnectionState: setContextConnectionState,
+    sessionEventFeedStore,
+  } = context;
   useEffect(() => {
-    setContextSession(session);
+    setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
+  useEffect(() => {
+    sessionEventFeedStore.set({ sessionId, events });
+  }, [events, sessionId, sessionEventFeedStore]);
   useEffect(
     () => () => {
       setContextSession(null);
       setContextConnectionState("idle");
+      if (sessionEventFeedStore.getSnapshot()?.sessionId === sessionId) {
+        sessionEventFeedStore.set(null);
+      }
     },
-    [setContextConnectionState, setContextSession],
+    [sessionId, sessionEventFeedStore, setContextConnectionState, setContextSession],
   );
   useEffect(() => {
     if (streamError && !isApiErrorStatus(streamError, 404)) {
@@ -183,8 +236,9 @@ export function SessionRoute({
   }, [loadError]);
 
   // A reconnect OAuth round-trip lands back here (the reconnect card set
-  // returnPath to this session). The connection is refreshed server-side, so we
-  // just acknowledge it and strip the params — the user retries their message.
+  // returnPath to this session). The connection is refreshed server-side, but
+  // the original tool call was settled as an error and is never replayed. Strip
+  // the params and tell the user to start a new turn.
   const oauthReturnHandled = useRef(false);
   useEffect(() => {
     if (oauthReturnHandled.current) {
@@ -198,8 +252,8 @@ export function SessionRoute({
     oauthReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
     if (outcome === "success") {
-      toast.success("Reconnected", {
-        description: "Send your message again to continue.",
+      toast.success("Connection restored", {
+        description: "The earlier tool call wasn't replayed. Send a new message to try again.",
       });
     } else {
       toast.error("Reconnect failed", {
@@ -242,77 +296,24 @@ export function SessionRoute({
     [context.client, workspaceId],
   );
 
-  // One lazy catalog fetch feeds two timeline resolvers: provider logos for any
-  // inline reconnect card, and real capability names for the tool chips on user
-  // messages. Both resolve only through the workspace catalog, so fetch it once —
-  // when EITHER an auth-needed card OR a message carrying tool chips is in view —
-  // and reuse the single response. Logos serve from our own catalog-assets route
-  // via `catalogAssetUrl`, never an off-origin favicon (the CSP forbids it and it
-  // would leak which providers are connected).
-  const hasAuthNeeded = useMemo(
-    () => timeline.some((item) => item.kind === "auth-needed"),
-    [timeline],
-  );
-  const hasToolChips = useMemo(
-    () => timeline.some((item) => item.kind === "user-message" && item.tools.length > 0),
-    [timeline],
-  );
-  const [providerLogos, setProviderLogos] = useState<Map<string, string>>(() => new Map());
-  // mcpServerId -> human capability name, so a chip reads "Linear" instead of a
-  // best-effort parse of the raw server id.
-  const [capabilityNames, setCapabilityNames] = useState<Map<string, string>>(() => new Map());
-  const catalogRequestedRef = useRef(false);
-  useEffect(() => {
-    if ((!hasAuthNeeded && !hasToolChips) || catalogRequestedRef.current) {
-      return;
+  // The workspace shell already needs the capability catalog for session tool
+  // policy. Reuse that authoritative read for timeline logos instead of
+  // downloading the same large catalog again from the session route.
+  const providerLogos = useMemo(() => {
+    const logos = new Map<string, string>();
+    for (const capability of context.workspaceCapabilityCatalog) {
+      const domain = capability.providerDomain ?? capability.connectionRef?.providerDomain ?? null;
+      const url = context.client.catalogAssetUrl(capability.logoAssetPath);
+      if (domain && url) {
+        const key = normalizeProviderDomain(domain);
+        if (!logos.has(key)) logos.set(key, url);
+      }
     }
-    catalogRequestedRef.current = true;
-    let cancelled = false;
-    void context.client
-      .listCapabilities(workspaceId)
-      .then((catalog) => {
-        if (cancelled) {
-          return;
-        }
-        const logos = new Map<string, string>();
-        const names = new Map<string, string>();
-        for (const cap of catalog.items) {
-          const domain = cap.providerDomain ?? cap.connectionRef?.providerDomain ?? null;
-          const url = context.client.catalogAssetUrl(cap.logoAssetPath);
-          if (domain && url) {
-            const key = normalizeProviderDomain(domain);
-            if (!logos.has(key)) {
-              logos.set(key, url);
-            }
-          }
-          // A chip's tool.id IS the capability's runtime mcpServerId — map it to
-          // the item's human name so the chip resolves to the real label.
-          const mcpServerId = cap.runtime.mcpServerId;
-          if (mcpServerId && cap.name && !names.has(mcpServerId)) {
-            names.set(mcpServerId, cap.name);
-          }
-        }
-        setProviderLogos(logos);
-        setCapabilityNames(names);
-      })
-      .catch(() => {
-        // Leave the card on its monogram fallback and the chips on their
-        // best-effort labels, and allow a later retry.
-        if (!cancelled) {
-          catalogRequestedRef.current = false;
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [hasAuthNeeded, hasToolChips, context.client, workspaceId]);
+    return logos;
+  }, [context.client, context.workspaceCapabilityCatalog]);
   const resolveProviderLogo = useCallback(
     (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
     [providerLogos],
-  );
-  const resolveCapabilityName = useCallback(
-    (mcpServerId: string) => capabilityNames.get(mcpServerId) ?? null,
-    [capabilityNames],
   );
   // One lineage read feeds the single composer-anchored agents surface. Events
   // refresh it instantly on spawn/worker-completion, and a 30s poll ensures the pill's
@@ -325,7 +326,7 @@ export function SessionRoute({
   });
   const agentNodes = lineage.lineage?.children ?? [];
 
-  if (loading || !session) {
+  if (!session) {
     if (loadError) {
       return isApiErrorStatus(loadError, 404) ? (
         <ProblemPanel
@@ -353,15 +354,36 @@ export function SessionRoute({
         />
       );
     }
-    return <LoadingPanel label="Opening session" />;
+    return (
+      <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+        <SessionDock
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          session={null}
+          events={events}
+          connectionState={connectionState}
+          primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
+          dockCollapsed={!context.inspectorOpen}
+          onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+          onOpenNavigation={() => {
+            context.setInspectorOpen(false);
+            rail.setDrawerOpen(true);
+          }}
+        />
+      </div>
+    );
   }
 
   const chatPane = (
     <SessionChatPane
+      key={session.id}
       session={session}
       events={events}
       timeline={timeline}
       initialLoading={initialLoading}
+      launch={launch}
+      realtimeAutostartModel={realtimeAutostartModel}
+      onRealtimeAutostartConsumed={consumeRealtimeAutostart}
       approvals={approvals}
       humanInput={humanInput}
       failure={failure}
@@ -372,6 +394,12 @@ export function SessionRoute({
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
+      hasNewer={hasNewer}
+      loadingNewer={loadingNewer}
+      onLoadNewer={loadNewer}
+      loadingOldest={loadingOldest}
+      onJumpToStart={loadOldest}
+      onJumpToLatest={jumpToLatest}
       onClearView={clearView}
       onOpenSession={(nextSessionId) =>
         void navigate({
@@ -381,7 +409,7 @@ export function SessionRoute({
       }
       onMemoryClick={(memoryId) =>
         void navigate({
-          to: "/workspaces/$workspaceId/documents",
+          to: "/workspaces/$workspaceId/memory",
           params: { workspaceId },
           search: { memory: memoryId },
         })
@@ -396,7 +424,6 @@ export function SessionRoute({
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
-      resolveCapabilityName={resolveCapabilityName}
     />
   );
 
@@ -442,7 +469,7 @@ export function SessionRoute({
 function SessionDock(props: {
   workspaceId: string;
   sessionId: string;
-  session: Session;
+  session: Session | null;
   events: SessionEvent[];
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;
@@ -453,17 +480,23 @@ function SessionDock(props: {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects Debug around it. Agents remain in the one
   // compact composer-adjacent surface.
-  const debugTab: WorkspaceTab = {
-    id: "debug",
-    label: "Debug",
-    content: (
-      <SessionInspector
-        session={props.session}
-        events={props.events}
-        connectionState={props.connectionState}
-      />
-    ),
-  };
+  const trailingTabs: WorkspaceTab[] = props.session
+    ? [
+        {
+          id: "debug",
+          label: "Debug",
+          content: (
+            <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+              <LazySessionInspector
+                session={props.session}
+                events={props.events}
+                connectionState={props.connectionState}
+              />
+            </Suspense>
+          ),
+        },
+      ]
+    : [];
 
   return (
     <SessionWorkspace
@@ -471,7 +504,7 @@ function SessionDock(props: {
       sessionId={props.sessionId}
       events={props.events}
       primary={props.primary}
-      trailingTabs={[debugTab]}
+      trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
       mobileLeadingControl={
@@ -481,7 +514,7 @@ function SessionDock(props: {
           size="icon-sm"
           aria-label="Open navigation"
           onClick={props.onOpenNavigation}
-          className="pointer-coarse:size-10"
+          className="size-11"
         >
           <MenuIcon className="size-4" />
         </Button>
@@ -495,6 +528,9 @@ function SessionChatPane(props: {
   events: SessionEvent[];
   timeline: TimelineItem[];
   initialLoading: boolean;
+  launch?: ComposerLaunchSearch;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  onRealtimeAutostartConsumed: () => void;
   approvals: PendingApproval[];
   humanInput: ReturnType<typeof useHumanInputRequests>;
   failure: ReturnType<typeof summarizeSessionFailure> | null;
@@ -502,27 +538,68 @@ function SessionChatPane(props: {
   creditExhausted: boolean;
   goal: ReturnType<typeof useGoal>;
   queue: ReturnType<typeof useTurnQueue>;
-  /** Spawned-worker lineage children — feeds the composer-anchored agents pill. */
+  /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<boolean>;
+  hasNewer: boolean;
+  loadingNewer: boolean;
+  onLoadNewer: () => Promise<boolean>;
+  loadingOldest: boolean;
+  onJumpToStart: () => Promise<boolean>;
+  onJumpToLatest: () => Promise<void>;
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
-  /** Deep-link a timeline memory step to its record in the Documents memory pane. */
+  /** Deep-link a timeline memory step to its first-class workspace Memory record. */
   onMemoryClick: (memoryId: string) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
-  /** Real capability name for a user-message tool chip, resolved from the catalog. */
-  resolveCapabilityName: (mcpServerId: string) => string | null;
 }) {
   const context = useAppContext();
-  const codexModels = useCodexModels(props.session.workspaceId);
+  const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
+  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
+  const computeLabel =
+    fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
   const terminal = isTerminalSessionStatus(props.session.status);
+  const agentsSignal = useMemo(() => {
+    const agents = props.agentNodes;
+    if (agents.length === 0) return undefined;
+    const runningAgents = agents.filter(
+      (node) =>
+        node.session.status === "running" && node.session.effectiveControl.state === "active",
+    ).length;
+    const pausedAgents = agents.filter(
+      (node) => node.session.effectiveControl.state === "paused",
+    ).length;
+    return {
+      count: agents.length,
+      detail:
+        runningAgents > 0
+          ? `${runningAgents} running`
+          : pausedAgents > 0
+            ? `${pausedAgents} paused`
+            : "Idle",
+      tone: (runningAgents > 0 ? "running" : pausedAgents > 0 ? "waiting" : "neutral") as
+        | "running"
+        | "waiting"
+        | "neutral",
+    };
+  }, [props.agentNodes]);
+  const codexConnected = modelCatalog.models.some(
+    (candidate) =>
+      candidate.provider === "codex-subscription" &&
+      candidate.credentialReadiness.status === "ready",
+  );
+  // Soft-hide dictate while realtime voice owns the mic (model + mutes stay on the bar).
+  const [voiceActive, setVoiceActive] = useState(false);
+  const onVoiceActiveChange = useCallback((active: boolean) => {
+    setVoiceActive(active);
+  }, []);
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -565,32 +642,269 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
-  const { selectedCapabilityToolIds, reasoningEffort } = context;
-  // The model is session-scoped: this session remembers its own pick (falling
-  // back to the deployment default), so a switch here doesn't bleed into others.
-  const model = context.modelForSession(props.session.id);
-  const { setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds } = context;
+  const { effortForSession, latencyMode } = context;
+  const selectableSessionMcpServers = context.toolMcpServers;
+  const selectableToolIds = useMemo(
+    () => selectableSessionMcpServers.map((server) => server.id),
+    [selectableSessionMcpServers],
+  );
+  const policyToolIds = useMemo(
+    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
+    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
+  );
+  const [durableToolSelection, setDurableToolSelection] = useState<SessionToolSelection>(() => ({
+    mcpServerIds: new Set(policyToolIds),
+    firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
+  }));
+  const [durableToolPolicyVersion, setDurableToolPolicyVersion] = useState(
+    () => props.session.toolPolicyVersion,
+  );
+  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
+  const durableToolsSessionId = useRef(props.session.id);
+  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
+  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
+  // Session-scoped pick (seeded from durable session.model). Prefer that
+  // durable id before ensure/draft hydrate — never flash the deployment default
+  // (wrong provider) on an open Codex session. On remote_v2, never keep a stale
+  // non-Codex override over the durable Codex model.
+  const requestedModel = context.modelForSession(props.session.id, props.session.model);
+  const model = resolveSessionComposerModel({
+    requested: requestedModel,
+    durableSessionModel: props.session.model,
+    codexCompactionMode: props.session.codexCompactionMode,
+  });
+  const reasoningEffort = effortForSession(props.session.id);
+  const {
+    setModelForSession,
+    setEffortForSession,
+    ensureModelForSession,
+    ensureEffortForSession,
+    setLatencyMode,
+  } = context;
+  // Once the operator touches the picker, draft reloads must not stomp it.
+  const pickerTouchedRef = useRef(false);
+  useEffect(() => {
+    pickerTouchedRef.current = false;
+  }, [props.session.id]);
+  const navigate = useNavigate();
+  const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
+  const launchModel = launch.model;
+  const launchEffort = launch.effort;
+  const launchLatency = launch.latency;
+  const launchRealtime = launch.realtime;
+  const launchKey = composerLaunchSearchKey(launch);
+  const appliedLaunchKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!launchKey || appliedLaunchKeyRef.current === launchKey) return;
+    const hasPolicy = Boolean(launchModel || launchEffort || launchLatency);
+    if (!hasPolicy) {
+      appliedLaunchKeyRef.current = launchKey;
+      return;
+    }
+    appliedLaunchKeyRef.current = launchKey;
+    pickerTouchedRef.current = true;
+    if (launchModel) setModelForSession(props.session.id, launchModel);
+    if (launchEffort) setEffortForSession(props.session.id, launchEffort);
+    if (launchLatency) setLatencyMode(launchLatency);
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
+      search: composerLaunchSearchAfterPolicyApply({
+        model: launchModel,
+        effort: launchEffort,
+        latency: launchLatency,
+        realtime: launchRealtime,
+      }),
+      replace: true,
+    });
+  }, [
+    launchEffort,
+    launchLatency,
+    launchModel,
+    launchRealtime,
+    launchKey,
+    navigate,
+    props.session.id,
+    props.session.workspaceId,
+    setEffortForSession,
+    setLatencyMode,
+    setModelForSession,
+  ]);
+  // Seed once from durable session facts so open sessions never inherit the
+  // mutable new-session composer picks. Draft apply / picker writes still win.
+  useEffect(() => {
+    if (pickerTouchedRef.current) return;
+    ensureModelForSession(props.session.id, props.session.model);
+    const metaEffort = props.session.metadata.reasoningEffort;
+    if (isIntelligenceEffort(metaEffort)) {
+      ensureEffortForSession(props.session.id, metaEffort);
+    }
+    // Seed latency from durable session metadata until the composer draft
+    // applies (draft wins). Avoids flashing the global leftover/standard mode.
+    const metaLatency = props.session.metadata.latencyMode;
+    if (metaLatency === "fast" || metaLatency === "priority" || metaLatency === "standard") {
+      setLatencyMode(metaLatency);
+    }
+  }, [
+    setLatencyMode,
+    ensureEffortForSession,
+    ensureModelForSession,
+    props.session.id,
+    props.session.metadata.latencyMode,
+    props.session.metadata.reasoningEffort,
+    props.session.model,
+  ]);
+  // Drop a stale non-Codex override so the picker selection matches send.
+  useEffect(() => {
+    if (model === requestedModel) return;
+    setModelForSession(props.session.id, model);
+  }, [model, requestedModel, props.session.id, setModelForSession]);
+  // Catalog-backed effort legality: snap sticky effort when the selected model
+  // cannot run it (e.g. after reconnect or catalog refresh).
+  useEffect(() => {
+    const row = findPickerRow(modelCatalog.rows, model);
+    if (!row?.selectable) {
+      return;
+    }
+    const coerced = coerceReasoningEffortForModel(row.catalog, reasoningEffort);
+    if (coerced !== reasoningEffort) {
+      setEffortForSession(props.session.id, coerced);
+    }
+  }, [model, modelCatalog.rows, props.session.id, reasoningEffort, setEffortForSession]);
+  useEffect(() => {
+    if (durableToolsSessionId.current !== props.session.id) {
+      durableToolsSessionId.current = props.session.id;
+      setDurableToolsHydrated(false);
+      return;
+    }
+    if (!context.workspaceMcpCatalogReady) {
+      if (durableToolsHydrated) {
+        setDurableToolsHydrated(false);
+      }
+      return;
+    }
+    if (durableToolsHydrated) {
+      return;
+    }
+    setDurableToolSelection({
+      mcpServerIds: new Set(policyToolIds),
+      firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
+    });
+    setDurableToolPolicyVersion(props.session.toolPolicyVersion);
+    setDurableToolsHydrated(true);
+  }, [
+    context.workspaceMcpCatalogReady,
+    durableToolsHydrated,
+    policyToolIds,
+    props.session.id,
+    props.session.firstPartyMcpTools,
+    props.session.toolPolicyVersion,
+  ]);
+  const saveDurableToolPolicy = useCallback(
+    async (next: SessionToolSelection) => {
+      setDurableToolSelection({
+        mcpServerIds: new Set(next.mcpServerIds),
+        firstPartyToolIds: new Set(next.firstPartyToolIds),
+      });
+      setDurableToolsSaving(true);
+      setDurableToolsError(null);
+      try {
+        const tools = toolsForPolicySelection({
+          selectedMcpServerIds: next.mcpServerIds,
+          baselineMcpServerIds: [],
+          forceExplicit: true,
+        });
+        const updated = await context.client.updateSessionToolPolicy(
+          props.session.workspaceId,
+          props.session.id,
+          {
+            mode: "explicit",
+            tools: tools ?? [],
+            firstPartyMcpTools: [...next.firstPartyToolIds],
+            expectedVersion: durableToolPolicyVersion,
+          },
+        );
+        setDurableToolSelection({
+          mcpServerIds: sessionPolicyPickerIds(
+            updated,
+            selectableToolIds,
+            context.workspaceDefaultToolIds,
+          ),
+          firstPartyToolIds: new Set(updated.firstPartyMcpTools),
+        });
+        setDurableToolPolicyVersion(updated.toolPolicyVersion);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setDurableToolsError(message);
+        toast.error("Failed to save session tools", { description: message });
+        // Reconcile with the server after both a 409 and a transport failure;
+        // the failed local click must never be presented as durable truth.
+        try {
+          const refreshed = await context.client.getSession(
+            props.session.workspaceId,
+            props.session.id,
+          );
+          setDurableToolSelection({
+            mcpServerIds: sessionPolicyPickerIds(
+              refreshed,
+              selectableToolIds,
+              context.workspaceDefaultToolIds,
+            ),
+            firstPartyToolIds: new Set(refreshed.firstPartyMcpTools),
+          });
+          setDurableToolPolicyVersion(refreshed.toolPolicyVersion);
+        } catch {
+          // Keep the last authoritative selection when reconciliation is also
+          // unavailable; the visible error makes the state non-silent.
+        }
+      } finally {
+        setDurableToolsSaving(false);
+      }
+    },
+    [
+      context.client,
+      context.workspaceDefaultToolIds,
+      durableToolPolicyVersion,
+      props.session.id,
+      props.session.workspaceId,
+      selectableToolIds,
+    ],
+  );
   const applyComposerSettings = useCallback(
     (draft: ComposerDraft) => {
+      // Initial hydrate only. A later draft reload (or a fetch that raced the
+      // picker) must not undo an in-session model/effort change; autosave
+      // persists the picker into the draft.
+      if (pickerTouchedRef.current) {
+        return;
+      }
       setModelForSession(props.session.id, draft.model);
-      setReasoningEffort(draft.reasoningEffort);
-      setSelectedCapabilityToolIds(new Set(draft.tools.map((tool) => tool.id)));
+      setEffortForSession(props.session.id, draft.reasoningEffort);
+      setLatencyMode(draft.latencyMode ?? "standard");
     },
-    [props.session.id, setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds],
+    [setLatencyMode, props.session.id, setEffortForSession, setModelForSession],
   );
   const composer = useComposer(props.session.id, {
     events: props.events,
-    // Evaluated at send time: attachments and tools picked while the draft was
-    // being written ride along with the message.
-    sendExtras: () => ({
-      resources: attachments.readyResources,
-      tools: buildTools(undefined, [...selectedCapabilityToolIds]),
-      model,
-      reasoningEffort,
-    }),
+    sendExtras: () => {
+      return {
+        resources: attachments.readyResources,
+        model,
+        reasoningEffort,
+        latencyMode,
+      };
+    },
+    sendBlocked: () => attachments.hasUnresolved,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
-    onSent: () => attachments.clear(),
+    // Clear only files included in the accepted wire input. A file added while
+    // sendMessage is in flight belongs to the next message and must survive.
+    onSent: (_text, input) =>
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      ),
   });
 
   // Slash-command palette context: the operator controls (/goal, /clear,
@@ -623,13 +937,7 @@ function SessionChatPane(props: {
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
-        return (
-          <UserMessageBody
-            workspaceId={props.session.workspaceId}
-            item={item}
-            resolveCapabilityName={props.resolveCapabilityName}
-          />
-        );
+        return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
       }
       return (
         <div data-testid="assistant-markdown">
@@ -637,7 +945,7 @@ function SessionChatPane(props: {
         </div>
       );
     },
-    [props.session.workspaceId, props.resolveCapabilityName],
+    [props.session.workspaceId],
   );
 
   return (
@@ -668,6 +976,7 @@ function SessionChatPane(props: {
               className="h-full"
               items={props.timeline}
               status={props.session.status}
+              computeLabel={computeLabel}
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
@@ -676,6 +985,12 @@ function SessionChatPane(props: {
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
+              hasNewer={props.hasNewer}
+              loadingNewer={props.loadingNewer}
+              onLoadNewer={() => void props.onLoadNewer()}
+              loadingOldest={props.loadingOldest}
+              onJumpToStart={() => void props.onJumpToStart()}
+              onJumpToLatest={() => void props.onJumpToLatest()}
               emptyState={
                 props.initialLoading ? (
                   // History is still fetching — a quiet shimmer, not the
@@ -749,31 +1064,37 @@ function SessionChatPane(props: {
 
       {/* Structured questions are tool output, not approvals: answer/skip
           resumes the exact frozen call. The authoritative hook reads pending
-          rows and uses this shared event feed only as a refresh trigger. */}
+          rows and uses this shared event feed only as a refresh trigger.
+          Parallel requests step one-at-a-time inside HumanInputSurface. */}
       {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <div className="grid max-h-[28rem] gap-3 overflow-y-auto pb-2">
-            {props.humanInput.requests.map((request) => (
-              <HumanInputForm
-                key={request.id}
-                request={request}
-                submitting={props.humanInput.respondingRequestId !== null}
-                error={props.humanInput.mutationError?.message}
-                onSubmit={(response) =>
-                  props.humanInput.respond(request.id, response).then(() => undefined)
-                }
-              />
-            ))}
-          </div>
+        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6 pb-2">
+          <HumanInputSurface
+            requests={props.humanInput.requests}
+            respondingRequestId={props.humanInput.respondingRequestId}
+            error={props.humanInput.mutationError?.message}
+            onSubmit={(requestId, response) =>
+              props.humanInput.respond(requestId, response).then(() => undefined)
+            }
+          />
         </div>
       ) : null}
 
-      {/* The one compact control stack above the composer. Each surface hides
-          when it has nothing to show, so the stack degrades to
-          whichever one is present — or neither. */}
-      {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
-      <GoalSurface session={props.session} goal={props.goal} />
-      <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+      {/* Compact session chrome above the composer — incoming, queue, goal,
+          and agents as one dock. Hides entirely when there are no signals. */}
+      <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
+        <SessionChrome
+          queue={props.queue}
+          composer={terminal ? undefined : composer}
+          goal={props.goal}
+          readOnly={terminal}
+          agentsSignal={agentsSignal}
+          agentsPanel={
+            props.agentNodes.length > 0 ? (
+              <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+            ) : null
+          }
+        />
+      </div>
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
@@ -793,6 +1114,41 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+            transcriptionSuppressed={voiceActive}
+            controlsLeading={
+              <ComposerMobilePlus
+                disabled={terminal || composer.sending}
+                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                servers={selectableSessionMcpServers}
+                firstPartyTools={firstPartySessionToolOptions}
+                selection={durableToolSelection}
+                toolsDisabled={
+                  composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                }
+                onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+              />
+            }
+            actions={
+              !terminal ? (
+                <Suspense fallback={null}>
+                  <LazyCodexRealtimeControl
+                    client={context.client}
+                    workspaceId={props.session.workspaceId}
+                    sessionId={props.session.id}
+                    sessionStatus={props.session.status}
+                    effectiveControl={
+                      props.queue.effectiveControl ?? props.session.effectiveControl
+                    }
+                    events={props.events}
+                    eventsReady={!props.initialLoading}
+                    codexConnected={codexConnected}
+                    realtimeAutostartModel={props.realtimeAutostartModel}
+                    onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
+                    onVoiceActiveChange={onVoiceActiveChange}
+                  />
+                </Suspense>
+              ) : null
+            }
             placeholder={
               props.session.status === "cancelled"
                 ? "This session was cancelled."
@@ -806,22 +1162,48 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="flex min-w-0 items-center gap-1.5">
+              <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
                 <ModelPicker
-                  config={context.clientConfig}
+                  rows={modelCatalog.rows}
                   model={model}
-                  effort={context.reasoningEffort}
+                  effort={reasoningEffort}
+                  latencyMode={latencyMode}
                   disabled={composer.sending}
-                  extraModels={codexModels}
-                  onModelChange={(value) => context.setModelForSession(props.session.id, value)}
-                  onEffortChange={context.setReasoningEffort}
+                  loading={modelCatalog.loading || composer.draftLoading}
+                  error={modelCatalog.error}
+                  sessionKey={props.session.id}
+                  menuSide="top"
+                  codexOnly={props.session.codexCompactionMode === "remote_v2"}
+                  onModelChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setModelForSession(props.session.id, value);
+                  }}
+                  onEffortChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setEffortForSession(props.session.id, value);
+                  }}
+                  onLatencyModeChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setLatencyMode(value);
+                  }}
                 />
-                <EnabledMcpToolPicker
-                  servers={context.toolMcpServers}
-                  selectedIds={context.selectedCapabilityToolIds}
-                  disabled={composer.sending || terminal}
-                  onChange={context.setSelectedCapabilityToolIds}
+                <SessionToolPicker
+                  menuSide="top"
+                  servers={selectableSessionMcpServers}
+                  firstPartyTools={firstPartySessionToolOptions}
+                  selection={durableToolSelection}
+                  triggerClassName="max-sm:hidden"
+                  disabled={
+                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                  }
+                  saving={durableToolsSaving}
+                  onChange={(next) => void saveDurableToolPolicy(next)}
                 />
+                {durableToolsError ? (
+                  <span className="sr-only" role="alert">
+                    {durableToolsError}
+                  </span>
+                ) : null}
               </div>
             }
           />

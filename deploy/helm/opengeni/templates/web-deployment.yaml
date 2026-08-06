@@ -1,4 +1,5 @@
 {{- if .Values.web.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.web.priorityClassName "tier" "presentation") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,8 +31,8 @@ spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ .Values.web.terminationGracePeriodSeconds }}
-      {{- if .Values.web.priorityClassName }}
-      priorityClassName: {{ .Values.web.priorityClassName | quote }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.web.podSecurityContext | nindent 8 }}
@@ -51,7 +52,23 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
+          {{- if or .Values.web.demoApiBaseUrl .Values.api.enabled }}
+          env:
+            - name: OPENGENI_DEMO_API_URL
+              value: {{ default (printf "http://%s-api:%d" (include "opengeni.fullname" .) (.Values.api.service.port | int)) .Values.web.demoApiBaseUrl | quote }}
+            {{- if .Values.web.demoApiCredentialsSecret }}
+            - name: OPENGENI_DEMO_CREDENTIALS_DIR
+              value: /var/run/secrets/opengeni-demo
+            {{- end }}
+          {{- else }}
           env: []
+          {{- end }}
+          {{- if .Values.web.demoApiCredentialsSecret }}
+          volumeMounts:
+            - name: demo-api-credentials
+              mountPath: /var/run/secrets/opengeni-demo
+              readOnly: true
+          {{- end }}
           {{- if .Values.web.probes.startup.enabled }}
           startupProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.web.probes.startup) | nindent 12 }}
@@ -64,8 +81,16 @@ spec:
           livenessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.web.probes.liveness) | nindent 12 }}
           {{- end }}
+          {{- with .Values.web.resources }}
           resources:
-            {{- toYaml .Values.web.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.web.demoApiCredentialsSecret }}
+      volumes:
+        - name: demo-api-credentials
+          secret:
+            secretName: {{ .Values.web.demoApiCredentialsSecret | quote }}
+      {{- end }}
       {{- if .Values.web.topologySpreadConstraints.enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "web" "values" .Values.web) | nindent 8 }}

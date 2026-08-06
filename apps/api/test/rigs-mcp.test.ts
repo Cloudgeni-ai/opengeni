@@ -98,7 +98,10 @@ describe("rig MCP tools", () => {
       createdBy: "user:mcp",
       initialVersion: { setupScript: "mkdir -p /opt/mcp", changelog: "v1" },
     });
-    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use"], { sessionId }));
+    const server = buildOpenGeniMcpServer(
+      deps(workflow),
+      grant(["rigs:use"], { sessionId, firstPartyMcpTools: ["rig_propose_change"] }),
+    );
     const proposed = await callMcpTool<{
       change: { id: string; status: string };
       verificationStarted: boolean;
@@ -107,16 +110,22 @@ describe("rig MCP tools", () => {
       command: "touch /opt/mcp/tool",
       note: "mcp proposal",
     });
-    expect(proposed.change.status).toBe("verifying");
-    expect(proposed.verificationStarted).toBe(true);
+    expect(proposed).toMatchObject({
+      operation: "rig_propose_change",
+      outcome: "created",
+      resource: { type: "rig_change", state: "verifying" },
+      facts: { verificationStarted: true, verificationAttempt: 1 },
+    });
+    expect(JSON.stringify(proposed)).not.toContain("touch /opt/mcp/tool");
+    expect(JSON.stringify(proposed)).not.toContain("mcp proposal");
     expect(workflow.rigVerifications).toEqual([
       {
         workspaceId,
-        changeId: proposed.change.id,
-        workflowId: `rig-verification-change-${proposed.change.id}-attempt-1`,
+        changeId: proposed.resource.id,
+        workflowId: `rig-verification-change-${proposed.resource.id}-attempt-1`,
       },
     ]);
-    const stored = await getRigChange(client.db, workspaceId, proposed.change.id);
+    const stored = await getRigChange(client.db, workspaceId, proposed.resource.id);
     expect(stored?.kind).toBe("setup_append");
     expect(stored?.proposedBy).toBe(`session:${sessionId}`);
   });

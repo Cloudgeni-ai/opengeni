@@ -35,6 +35,8 @@ export * from "./workflow-wake-contract";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
+export * from "./managed-session";
+export * from "./transcription";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP
@@ -57,8 +59,14 @@ export * from "./domain/environments";
 export * from "./domain/organization-governance";
 export * from "./rigs";
 export * from "./domain/packs";
+export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
+export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
+export * from "./domain/insights";
+export * from "./domain/memory-slack-publication";
+export * from "./domain/slack-bot";
 export * from "./domain/workspace-members";
+export * from "./application/new-session-drafts";
 export * from "./application/session-commands";

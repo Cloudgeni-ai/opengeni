@@ -5,26 +5,25 @@ import {
 } from "@opengeni/config";
 import {
   evaluateWorkspaceModelPolicy,
+  latencyModeForMetadata,
   mergeToolRefs,
   reasoningEffortForMetadata,
   type SessionGoal,
   type ToolRef,
 } from "@opengeni/contracts";
+import { isCodexBilledModel } from "@opengeni/codex";
 import {
-  addSessionSystemUpdate,
   enqueueSessionWorkflowWakeIfRunnable,
-  evaluateGoalContinuation,
   getBillingBalance,
   getLatestStartedSessionTurn,
   getWorkspaceModelPolicy,
   getSessionGoal,
   isCodexBilledTurn,
-  recordUsageEvent,
+  materializeGoalContinuation,
   requireSession,
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
 import type { ActivityServices, MaybeContinueGoalInput, MaybeContinueGoalResult } from "./types";
 
 export function createGoalActivities(services: () => Promise<ActivityServices>) {
@@ -68,6 +67,8 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
     const continuationReasoningEffort =
       latestStartedTurn?.reasoningEffort ??
       reasoningEffortForMetadata(session.metadata, settings.openaiReasoningEffort);
+    const continuationLatencyMode =
+      latestStartedTurn?.latencyMode ?? latencyModeForMetadata(session.metadata, "standard");
     // Workspace model policy: a continuation inherits the last STARTED turn's
     // model, so a single policy-violating turn would otherwise re-arm itself on
     // every continuation (exactly how one bare-model turn kept a goal loop on
@@ -92,6 +93,15 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
         }
       }
     }
+    // remote_v2 sessions may only continue on Codex models — refuse synthesis
+    // that would leave the portable/non-Codex path (and mixed history shapes).
+    if (
+      !modelPolicyBlocked &&
+      session.codexCompactionMode === "remote_v2" &&
+      !isCodexBilledModel(continuationModel)
+    ) {
+      modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
+    }
     // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
     // so it must not be budget-paused for zero OpenGeni credits. This file uses
     // BASE settings (no codex overlay); the predicate does its own credential read.
@@ -111,92 +121,30 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       input.workspaceId,
       isCodexRun,
     );
-    const decision = await evaluateGoalContinuation(db, {
+    const decision = await materializeGoalContinuation(db, {
+      accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      workflowId: input.workflowId,
       defaultMaxAutoContinuations: settings.goalMaxAutoContinuations ?? null,
       noProgressLimit: settings.goalNoProgressLimit,
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
       budgetBlocked: modelPolicyBlocked ?? budgetBlocked,
-    });
-    if (decision.decision === "none" || decision.decision === "queue") {
-      return { action: decision.decision };
-    }
-    if (decision.decision === "paused") {
-      await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-        {
-          type: "goal.paused",
-          payload: {
-            goalId: decision.goal.id,
-            actor: "system",
-            reason: decision.reason,
-            ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
-            autoContinuations: decision.goal.autoContinuations,
-            noProgressStreak: decision.goal.noProgressStreak,
-          },
-        },
-      ]);
-      return { action: "paused" };
-    }
-    // Stop/continue race guard: a concurrent goal_complete/goal_pause/operator
-    // PATCH between the locked decision and this synthesis must win. The
-    // version check also catches a replace. A pause landing after this point
-    // results in at most one already-admitted continuation turn; the next
-    // pass sees the non-active goal and stops, and interrupt-driven pauses
-    // additionally cancel the claimed turn via the workflow interrupt path.
-    const recheck = await getSessionGoal(db, input.workspaceId, input.sessionId);
-    if (!recheck || recheck.status !== "active" || recheck.version !== decision.goal.version) {
-      return { action: "none" };
-    }
-    const prompt = goalContinuationPrompt(decision.goal, decision.autoContinuation, decision.cap);
-    const update = await addSessionSystemUpdate(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      kind: "goal_continuation",
-      classification: "info",
-      sourceId: decision.goal.id,
-      dedupeKey: `goal-continuation:${decision.goal.id}:${decision.goal.version}:${decision.autoContinuation}`,
-      summary: prompt,
-      payload: {
-        type: "goal_continuation",
-        goalId: decision.goal.id,
-        goalVersion: decision.goal.version,
-        autoContinuation: decision.autoContinuation,
-        maxAutoContinuations: decision.cap,
-        prompt,
-        policy: {
-          model: continuationModel,
-          reasoningEffort: continuationReasoningEffort,
-          tools: withFirstPartyTools(settings, session.tools),
-          sandboxBackend: session.sandboxBackend,
-        },
+      policy: {
+        model: continuationModel,
+        reasoningEffort: continuationReasoningEffort,
+        latencyMode: continuationLatencyMode,
+        tools: withFirstPartyTools(settings, session.tools),
+        sandboxBackend: session.sandboxBackend,
       },
-      lineage: { goalId: decision.goal.id },
+      prompt: goalContinuationPrompt,
     });
-    if (update.reason === "session_cancelled") return { action: "none" };
-    if (update.added && update.events.length > 0) {
-      await bus.publish(input.workspaceId, input.sessionId, update.events);
+    if (decision.events.length > 0) {
+      await bus.publish(input.workspaceId, input.sessionId, decision.events);
     }
-    // Continuations count as agent runs for limits/metering parity with
-    // user-initiated and scheduled turns.
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "agent_run.created",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "session_system_update",
-      sourceResourceId: update.update.id,
-      sessionId: input.sessionId,
-      initiator: { kind: "service", subjectId: "goal-continuation" },
-      initiatorContext: { goalId: decision.goal.id },
-      origin: "goal",
-      idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${update.update.id}`,
-    });
-    return { action: "continue" };
+    return { action: decision.action };
   }
 
   return {
@@ -233,20 +181,6 @@ export function withFirstPartyTools(settings: Settings, tools: ToolRef[]): ToolR
     return tools;
   }
   return mergeToolRefs(tools, [{ kind: "mcp", id: "opengeni" }]);
-}
-
-/**
- * Ensures a turn references the synthetic codex_apps connectors MCP server when
- * the codex overlay injected it (active subscription + connector scopes). A
- * registry entry is inert until a ToolRef references its id, so this wires the
- * server into the run. No-op when the server is not configured (every non-codex
- * turn), and idempotent via mergeToolRefs.
- */
-export function withCodexAppsTool(settings: Settings, tools: ToolRef[]): ToolRef[] {
-  if (!settings.mcpServers.some((server) => server.id === "codex_apps")) {
-    return tools;
-  }
-  return mergeToolRefs(tools, [{ kind: "mcp", id: "codex_apps" }]);
 }
 
 /**

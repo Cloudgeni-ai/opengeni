@@ -1,4 +1,5 @@
 {{- if .Values.minio.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.minio.priorityClassName "tier" "durable") }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -19,6 +20,9 @@ spec:
         app.kubernetes.io/component: minio-bucket
     spec:
       restartPolicy: Never
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
       containers:
         - name: mc
           image: {{ printf "%s:%s" .Values.minio.mcImage.repository .Values.minio.mcImage.tag | quote }}

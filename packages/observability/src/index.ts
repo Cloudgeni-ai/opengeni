@@ -1,4 +1,5 @@
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
+import { SandboxBackend } from "@opengeni/contracts";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
@@ -27,10 +28,208 @@ export type Span = {
 
 export type MetricLabels = Record<string, AttributeValue>;
 
+/**
+ * Stable selectors shared by OpenGeni's runtime metrics and optional
+ * Prometheus/Grafana distribution. Operators can use these values for custom
+ * namespaces and dashboard ConfigMaps without duplicating chart internals.
+ */
+export const OPENGENI_OBSERVABILITY_DISTRIBUTION = {
+  monitoringNamespaceLabel: "opengeni.ai/monitoring",
+  monitoringNamespaceLabelValue: "enabled",
+  grafanaDashboardLabel: "grafana_dashboard",
+  grafanaDashboardLabelValue: "1",
+} as const;
+
 const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 const durationHistogramBuckets = [
   0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600,
 ];
+
+const SANDBOX_OPERATION_BACKENDS = new Set<string>([...SandboxBackend.options, "unprovisioned"]);
+
+const SANDBOX_OPERATION_NAMES = new Set([
+  "desktopInput",
+  "screenshot",
+  "exec",
+  "execCommand",
+  "writeStdin",
+  "cancelExecCommand",
+  "readFile",
+  "writeFile",
+  "listDir",
+  "pathExists",
+  "viewImage",
+  "materializeEntry",
+  "editor.createFile",
+  "editor.updateFile",
+  "editor.deleteFile",
+  "resolveExposedPort",
+  "serializeSessionState",
+]);
+
+/**
+ * External logs and OTLP are public/third-party projections, not canonical
+ * OpenGeni storage. Only this reviewed closed set of operational fields may
+ * cross that boundary. Unknown keys are omitted regardless of their value, so
+ * a new diagnostic, identifier, command, response, or provider field cannot
+ * become public by accident. This is schema projection, never value inspection
+ * or rewriting.
+ */
+const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
+  "http.request.method",
+  "http.response.status_code",
+  "opengeni.route",
+  "opengeni.duration_ms",
+  "opengeni.finalization_duration_ms",
+  "opengeni.trigger_kind",
+  "opengeni.status",
+  "error.type",
+  "error.status_code",
+  "method",
+  "route",
+  "status",
+  "durationMs",
+  "attempt",
+  "attempts",
+  "delayMs",
+  "provider",
+  "providerApi",
+  "model",
+  "inputTokens",
+  "outputTokens",
+  "cachedTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+  "accountChangedFromPrevCall",
+  "rejectedFields",
+  "dependency",
+  "activity",
+  "backend",
+  "op",
+  "outcome",
+  "eventType",
+  "surface",
+  "reason",
+  "originalBytes",
+  "deliveredBytes",
+  "estimatedOriginalTokens",
+  "estimatedDeliveredTokens",
+  "fullEvidenceAvailable",
+  "retainedOutputKind",
+]);
+
+/**
+ * Public diagnostic values are protocol constants, never values inferred from
+ * an exception's name, constructor, code, message, or enumerable properties.
+ * Unknown classes collapse to one fixed fallback; unknown codes and origins
+ * are omitted rather than copied through based on syntax.
+ */
+const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
+  "OperationError",
+  "CodexCheckpointOperationError",
+  "CodexFleetShadowOperationError",
+  "ComputerActionTimeoutError",
+  "ComputerUnavailableError",
+  "CredentialRenewalOperationError",
+  "CredentialReadOperationError",
+  "EventPublishOperationError",
+  "GitCredentialRenewalOperationError",
+  "HostExportOperationError",
+  "HttpOperationError",
+  "McpLifecycleError",
+  "McpOperationError",
+  "MemoryEmbeddingOperationError",
+  "MemorySearchOperationError",
+  "NatsAuthCalloutOperationError",
+  "OAuthOperationError",
+  "RunCredentialRenewalOperationError",
+  "RunStateCompatibilityError",
+  "SnapshotOperationError",
+  "StartupDependencyError",
+  "TelemetryExportError",
+  "ToolspaceOperationError",
+  "ToolspaceTokenRenewalOperationError",
+  "WorkerLifecycleOperation",
+  "WorkerLifecycleOperationError",
+  "WorkerOperationError",
+  "WorkflowWakeOperationError",
+]);
+
+const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
+  "agent_command_wake_failed",
+  "cleared_goal_live_publish_failed",
+  "codex_failover_checkpoint_failed",
+  "codex_fleet_shadow_failed",
+  "codex_lease_loss_checkpoint_failed",
+  "codex_active_credential_read_failed",
+  "command_yield_timeout",
+  "conflict",
+  "control_wake_dispatch_failed",
+  "fenced_event_live_publish_failed",
+  "forbidden",
+  "host_export_batch_delivery_failed",
+  "host_export_failure_settlement_stale",
+  "host_export_pump_iteration_failed",
+  "host_export_retention_prune_failed",
+  "idempotency_conflict",
+  "incompatible_exposed_ports",
+  "internal_error",
+  "limit_exceeded",
+  "mcp_close_failed",
+  "mcp_connect_failed",
+  "mcp_tool_call_failed",
+  "mcp_tools_list_failed",
+  "mcp_transport_failed",
+  "memory_edit_embedding_failed",
+  "memory_hybrid_vector_failed",
+  "memory_save_embedding_failed",
+  "nats_auth_callout_start_failed",
+  "nested_agent_depth_exceeded",
+  "nested_agent_depth_override_forbidden",
+  "not_found",
+  "oauth_operation_failed",
+  "otlp_export_failed",
+  "payment_required",
+  "provider_verification_failed",
+  "screenshot_capture_failed",
+  "session_event_live_publish_failed",
+  "session_workflow_wake_failed",
+  "snapshot_operation_failed",
+  "startup_dependency_retry",
+  "tool_list_too_large",
+  "tool_result_too_large",
+  "toolspace_operation_failed",
+  "unauthenticated",
+  "upstream_unavailable",
+  "validation_failed",
+  "worker_draining",
+  "worker_operation_failed",
+  "worker_shutdown_request_failed",
+  "workspace_control_live_publish_failed",
+]);
+
+const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
+  "api",
+  "core",
+  "db",
+  "events",
+  "host-export",
+  "oauth",
+  "observability",
+  "runtime",
+  "sandbox-computer",
+  "sandbox-resume",
+  "toolspace",
+  "worker",
+  "worker-lifecycle",
+]);
+
+export type SandboxOperationMetricObservation = {
+  backend: string;
+  op: string;
+  outcome: "ok" | "not_found" | "failed";
+  durationMs: number;
+};
 
 export function createObservability(
   settings: ObservabilitySettings,
@@ -109,14 +308,14 @@ export class Observability {
     message: string,
     attributes: Attributes = {},
   ): void {
+    const publicAttributes = projectPublicTelemetryAttributes(attributes);
     if (!this.settings.observabilityStructuredLogs) {
-      const line = attributes.error ? `${message}: ${String(attributes.error)}` : message;
       if (level === "warn") {
-        console.warn(line);
+        console.warn(message);
       } else if (level === "error") {
-        console.error(line);
+        console.error(message);
       } else {
-        console.log(line);
+        console.log(message);
       }
       return;
     }
@@ -127,7 +326,7 @@ export class Observability {
       service: this.settings.serviceName,
       environment: this.settings.environment,
       component: this.options.component,
-      ...cleanAttributes(attributes),
+      ...cleanAttributes(publicAttributes),
     };
     const serialized = JSON.stringify(record);
     if (level === "warn") {
@@ -152,7 +351,11 @@ export class Observability {
           return;
         }
         ended = true;
-        const errorAttributes = input.error ? errorToAttributes(input.error) : {};
+        const telemetryError =
+          input.error !== undefined && input.error !== null
+            ? projectSpanErrorForTelemetry(input.error)
+            : undefined;
+        const errorAttributes = telemetryError ? errorToAttributes(telemetryError) : {};
         this.exportSpan({
           traceId,
           spanId,
@@ -160,11 +363,13 @@ export class Observability {
           startMs,
           endMs: this.now(),
           attributes: {
-            ...attributes,
-            ...input.attributes,
-            ...errorAttributes,
+            ...projectPublicTelemetryAttributes({
+              ...attributes,
+              ...input.attributes,
+              ...errorAttributes,
+            }),
           },
-          error: input.error,
+          ...(telemetryError ? { error: telemetryError } : {}),
         });
       },
     };
@@ -362,7 +567,7 @@ export class Observability {
     startMs: number;
     endMs: number;
     attributes: Attributes;
-    error?: unknown;
+    error?: TelemetrySpanError;
   }): void {
     if (!this.settings.observabilityOtlpEndpoint) {
       return;
@@ -389,7 +594,7 @@ export class Observability {
                   startTimeUnixNano: millisToNanos(span.startMs),
                   endTimeUnixNano: millisToNanos(span.endMs),
                   attributes: otlpAttributes(span.attributes),
-                  status: span.error ? { code: 2, message: errorMessage(span.error) } : { code: 1 },
+                  status: span.error ? { code: 2, message: span.error.statusMessage } : { code: 1 },
                 },
               ],
             },
@@ -398,11 +603,61 @@ export class Observability {
       ],
     };
     void this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)).catch(
-      (error) => {
-        this.warn("OTLP span export failed", { error: errorMessage(error), endpoint });
+      () => {
+        this.warn("OTLP span export failed", {
+          errorClass: "TelemetryExportError",
+          errorCode: "otlp_export_failed",
+          origin: "observability",
+        });
       },
     );
   }
+}
+
+/**
+ * Convert routed sandbox-provider observations into one bounded Prometheus
+ * contract shared by API-direct and worker-turn execution. Provider/session
+ * identifiers, commands, paths, and other request data can never become labels:
+ * a future backend or operation is deliberately collapsed to `unknown` until
+ * this allowlist is reviewed.
+ *
+ * The returned callback is fail-safe. Metrics must never change the provider
+ * operation's result; a registration/exporter error is counted best-effort and
+ * then swallowed at this telemetry boundary.
+ */
+export function sandboxOperationMetricObserver(
+  observability: Observability,
+): (observation: SandboxOperationMetricObservation) => void {
+  return (observation) => {
+    const backend = SANDBOX_OPERATION_BACKENDS.has(observation.backend)
+      ? observation.backend
+      : "unknown";
+    const op = SANDBOX_OPERATION_NAMES.has(observation.op) ? observation.op : "unknown";
+    try {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_operations_total",
+        help: "Physical routed sandbox provider operations by backend, operation, and outcome.",
+        labels: { backend, op, outcome: observation.outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_sandbox_operation_duration_seconds",
+        help: "Physical routed sandbox provider-operation duration in seconds.",
+        labels: { backend, op },
+        value: Math.max(0, observation.durationMs) / 1_000,
+      });
+    } catch {
+      try {
+        observability.incrementCounter({
+          name: "opengeni_observability_observer_errors_total",
+          help: "Observability observer failures isolated from product execution.",
+          labels: { observer: "sandbox_operation" },
+        });
+      } catch {
+        // The metrics registry itself is unhealthy. Product execution remains
+        // authoritative and must not inherit an observability failure.
+      }
+    }
+  };
 }
 
 export type StartupDependencyRetryEvent = {
@@ -417,13 +672,14 @@ export function logStartupDependencyRetry(
   observability: Observability,
   event: StartupDependencyRetryEvent,
 ): void {
-  const message = event.error instanceof Error ? event.error.message : String(event.error);
   observability.warn("Startup dependency connection failed; retrying", {
     dependency: event.label,
     attempt: event.attempt,
     attempts: event.attempts,
     delayMs: event.delayMs,
-    error: message,
+    errorClass: "StartupDependencyError",
+    errorCode: "startup_dependency_retry",
+    origin: "observability",
   });
 }
 
@@ -446,15 +702,81 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
   ) as Record<string, string | number | boolean | null>;
 }
 
-function errorToAttributes(error: unknown): Attributes {
+function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
+  if ("errorClass" in attributes || "errorCode" in attributes) {
+    return projectPublicDiagnosticAttributes(attributes);
+  }
+  return Object.fromEntries(
+    Object.entries(attributes).filter(
+      ([key, value]) => value !== undefined && PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key),
+    ),
+  );
+}
+
+function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
+  const errorClass = attributes.errorClass;
+  const errorCode = attributes.errorCode;
+  const status = attributes.status;
+  const origin = attributes.origin;
   return {
-    "error.type": error instanceof Error ? error.name : "Error",
-    "error.message": errorMessage(error),
+    errorClass:
+      typeof errorClass === "string" && PUBLIC_TELEMETRY_ERROR_CLASSES.has(errorClass)
+        ? errorClass
+        : "OperationError",
+    ...(typeof errorCode === "string" && PUBLIC_TELEMETRY_ERROR_CODES.has(errorCode)
+      ? { errorCode }
+      : {}),
+    ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+      ? { status }
+      : {}),
+    ...(typeof origin === "string" && PUBLIC_TELEMETRY_ERROR_ORIGINS.has(origin) ? { origin } : {}),
   };
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+type TelemetrySpanError = {
+  type: string;
+  statusCode?: number;
+  statusMessage: string;
+};
+
+/**
+ * External OTLP projection. It intentionally exports only error class/status
+ * metadata and never mutates canonical OpenGeni errors, events, or history.
+ */
+function projectSpanErrorForTelemetry(error: unknown): TelemetrySpanError {
+  const statusCode = errorStatusCode(error);
+  return {
+    type: "OperationError",
+    ...(statusCode === undefined ? {} : { statusCode }),
+    statusMessage: statusCode === undefined ? "operation failed" : `HTTP ${statusCode}`,
+  };
+}
+
+function errorStatusCode(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  try {
+    const value = (error as { status?: unknown; statusCode?: unknown }).status;
+    const statusCode =
+      Number.isInteger(value) && typeof value === "number"
+        ? value
+        : (error as { statusCode?: unknown }).statusCode;
+    return Number.isInteger(statusCode) &&
+      typeof statusCode === "number" &&
+      statusCode >= 100 &&
+      statusCode <= 599
+      ? statusCode
+      : undefined;
+  } catch {
+    // OTLP projection must never mask the exact internal failure.
+    return undefined;
+  }
+}
+
+function errorToAttributes(error: TelemetrySpanError): Attributes {
+  return {
+    "error.type": error.type,
+    ...(error.statusCode === undefined ? {} : { "error.status_code": error.statusCode }),
+  };
 }
 
 function otlpAttributes(
@@ -475,7 +797,13 @@ function otlpValue(
   if (typeof value === "boolean") {
     return { boolValue: value };
   }
-  return { stringValue: value === null ? "" : value };
+  return { stringValue: value === null ? "" : boundedOtlpString(value) };
+}
+
+function boundedOtlpString(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength <= 512) return value;
+  return `${new TextDecoder().decode(bytes.slice(0, 509))}…`;
 }
 
 function millisToNanos(ms: number): string {

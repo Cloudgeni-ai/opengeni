@@ -19,6 +19,9 @@ spec:
       targetPort: wss
       protocol: TCP
       name: wss
+      {{- with .Values.relay.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
   selector:
     {{- include "opengeni.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: relay

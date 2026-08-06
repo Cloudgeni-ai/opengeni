@@ -23,18 +23,24 @@ export async function resolveOptionalOciManifest(
     "inspect",
     reference,
     "--format",
-    "{{.Manifest.Digest}}",
+    "{{json .Manifest}}",
   ]);
-  const digest = result.stdout.trim();
   if (result.exitCode === 0) {
-    if (!digestPattern.test(digest)) {
+    let digest: unknown;
+    try {
+      digest = (JSON.parse(result.stdout) as { digest?: unknown }).digest;
+    } catch {
+      throw new Error(`OCI registry returned an invalid manifest document for ${reference}`);
+    }
+    if (typeof digest !== "string" || !digestPattern.test(digest)) {
       throw new Error(`OCI registry returned an invalid manifest digest for ${reference}`);
     }
     return digest;
   }
+  const stderrLines = result.stderr.trim().split(/\r?\n/);
   if (
     missingPattern.test(result.stderr) ||
-    result.stderr.trim() === `ERROR: ${reference}: not found`
+    stderrLines.at(-1) === `ERROR: ${reference}: not found`
   ) {
     return null;
   }

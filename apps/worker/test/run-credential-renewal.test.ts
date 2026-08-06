@@ -14,7 +14,6 @@ function material(value: string, expiresAt: Date | null = null): NormalizedRunCr
     fileEnvironment: {},
     expiresAt,
     authNeeded: [],
-    redactions: [{ name: "TOKEN", value }],
   };
 }
 
@@ -133,7 +132,7 @@ describe("host-managed run credential renewal", () => {
 
   test("retries a failed host resolution without writing partial state", async () => {
     const scheduler = fakeScheduler();
-    const failures: number[] = [];
+    const failures: Array<{ retryDelayMs: number; errorClass: string }> = [];
     let writes = 0;
     const controller = startRunCredentialRenewalLoop({
       initialExpiresAt: null,
@@ -145,12 +144,15 @@ describe("host-managed run credential renewal", () => {
       },
       schedule: scheduler.schedule,
       clearSchedule: scheduler.clearSchedule,
-      onFailure: ({ retryDelayMs }) => failures.push(retryDelayMs),
+      onFailure: ({ retryDelayMs, errorClass }) => failures.push({ retryDelayMs, errorClass }),
     });
     await controller.refreshNow();
     await controller.refreshNow();
     expect(writes).toBe(0);
-    expect(failures).toEqual([5_000, 10_000]);
+    expect(failures).toEqual([
+      { retryDelayMs: 5_000, errorClass: "RunCredentialRenewalOperationError" },
+      { retryDelayMs: 10_000, errorClass: "RunCredentialRenewalOperationError" },
+    ]);
     await controller.stop();
   });
 

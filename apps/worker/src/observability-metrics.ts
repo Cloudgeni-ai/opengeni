@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
-import type { SessionEventType } from "@opengeni/contracts";
+import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import {
@@ -37,11 +37,11 @@ function eventAttributes(attributes: Record<string, unknown> | undefined): Attri
   if (!attributes) {
     return undefined;
   }
-  const sanitized: Attributes = {};
+  const projected: Attributes = {};
   for (const [key, value] of Object.entries(attributes)) {
-    sanitized[key] = eventAttributeValue(value);
+    projected[key] = eventAttributeValue(value);
   }
-  return sanitized;
+  return projected;
 }
 
 function eventAttributeValue(value: unknown): AttributeValue {
@@ -344,6 +344,41 @@ export function recordSandboxLeaseGauges(
   }
 }
 
+export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
+  "leases",
+  "checkpoint_artifacts",
+  "rotation_backlog",
+  "retained_processes",
+  "expired_drains",
+] as const;
+
+export type SandboxInventoryProjectionDomain =
+  (typeof SANDBOX_INVENTORY_PROJECTION_DOMAINS)[number];
+
+export function recordSandboxInventoryProjectionSuccess(
+  observability: Observability,
+  domain: SandboxInventoryProjectionDomain,
+  timestampSeconds = Date.now() / 1_000,
+): void {
+  observability.setGauge({
+    name: "opengeni_sandbox_inventory_refresh_timestamp_seconds",
+    help: "Unix timestamp of the last complete successful sandbox inventory projection by domain.",
+    labels: { domain },
+    value: timestampSeconds,
+  });
+}
+
+export function recordSandboxInventoryProjectionFailure(
+  observability: Observability,
+  domain: SandboxInventoryProjectionDomain,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_inventory_refresh_failures_total",
+    help: "Failed sandbox inventory projection refreshes by domain.",
+    labels: { domain },
+  });
+}
+
 export function recordCreditBalanceGauges(
   observability: Observability,
   balances: CreditBalanceGauge[],
@@ -380,6 +415,214 @@ export function recordSandboxOrphansTerminated(observability: Observability, cou
     name: "opengeni_sandbox_orphans_terminated_total",
     help: "Total provider-side orphan sandboxes terminated by defensive sweeps.",
     amount: count,
+  });
+}
+
+export type SandboxCheckpointArtifactMetricState =
+  | "candidate"
+  | "current"
+  | "previous"
+  | "delete_pending"
+  | "deleting"
+  | "delete_failed"
+  | "deleted";
+
+export function recordSandboxCheckpointArtifactGauges(
+  observability: Observability,
+  counts: Record<SandboxCheckpointArtifactMetricState, number>,
+): void {
+  for (const state of [
+    "candidate",
+    "current",
+    "previous",
+    "delete_pending",
+    "deleting",
+    "delete_failed",
+    "deleted",
+  ] as const) {
+    observability.setGauge({
+      name: "opengeni_sandbox_checkpoint_artifacts",
+      help: "Current durable provider checkpoint artifacts by lifecycle state.",
+      labels: { state },
+      value: counts[state],
+    });
+  }
+}
+
+export type SandboxCheckpointArtifactOutcome =
+  | "legacy_adopted"
+  | "claimed"
+  | "deleted"
+  | "delete_failed"
+  | "tombstone_pruned";
+
+export function recordSandboxCheckpointArtifactOutcome(
+  observability: Observability,
+  outcome: SandboxCheckpointArtifactOutcome,
+  count = 1,
+): void {
+  if (count <= 0) return;
+  observability.incrementCounter({
+    name: "opengeni_sandbox_checkpoint_artifact_operations_total",
+    help: "Durable provider checkpoint artifact operations by fixed outcome.",
+    labels: { outcome },
+    amount: count,
+  });
+}
+
+export function recordSandboxDeadlineRotationsRequested(
+  observability: Observability,
+  count: number,
+): void {
+  if (count <= 0) return;
+  observability.incrementCounter({
+    name: "opengeni_sandbox_deadline_rotations_requested_total",
+    help: "Total finite-lifetime sandbox rotations requested before provider deadline.",
+    amount: count,
+  });
+}
+
+export function recordSandboxRotationBacklogGauges(
+  observability: Observability,
+  backlog: {
+    requested: number;
+    overdue: number;
+    turnBlocked: number;
+    directBlocked: number;
+    processBlocked: number;
+  },
+): void {
+  const values = {
+    requested: backlog.requested,
+    overdue: backlog.overdue,
+    turn_blocked: backlog.turnBlocked,
+    direct_blocked: backlog.directBlocked,
+    process_blocked: backlog.processBlocked,
+  } as const;
+  for (const [kind, value] of Object.entries(values)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_rotation_backlog",
+      help: "Current finite-lifetime sandbox rotation backlog by fixed condition.",
+      labels: { kind },
+      value,
+    });
+  }
+}
+
+const RETAINED_PROCESS_OWNER_STATES = [
+  "direct",
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+  "completed",
+  "failed",
+  "cancelled",
+  "superseded",
+  "withdrawn_for_edit",
+  "missing",
+  "unknown",
+] as const;
+
+const RETAINED_PROCESS_OWNER_STATE_SET = new Set<string>(RETAINED_PROCESS_OWNER_STATES);
+
+export function recordRetainedProcessInventoryGauges(
+  observability: Observability,
+  counts: Array<{ ownerState: string; activeCount: number; terminalOwnerCount: number }>,
+): void {
+  const normalized = new Map<string, { active: number; terminal: number }>();
+  for (const ownerState of RETAINED_PROCESS_OWNER_STATES) {
+    normalized.set(ownerState, { active: 0, terminal: 0 });
+  }
+  for (const count of counts) {
+    const ownerState = RETAINED_PROCESS_OWNER_STATE_SET.has(count.ownerState)
+      ? count.ownerState
+      : "unknown";
+    const current = normalized.get(ownerState)!;
+    current.active += Math.max(0, count.activeCount);
+    current.terminal += Math.max(0, count.terminalOwnerCount);
+  }
+
+  for (const [ownerState, count] of normalized) {
+    observability.setGauge({
+      name: "opengeni_retained_processes_active",
+      help: "Current active retained provider processes by durable owner state.",
+      labels: { owner_state: ownerState },
+      value: count.active,
+    });
+    observability.setGauge({
+      name: "opengeni_retained_processes_terminal_owner_backlog",
+      help: "Current active retained processes whose exact owner attempt is terminal.",
+      labels: { owner_state: ownerState },
+      value: count.terminal,
+    });
+  }
+}
+
+export const EXPIRED_DRAINING_BACKENDS = [...SandboxBackend.options, "unknown"] as const;
+const EXPIRED_DRAINING_BACKEND_SET = new Set<string>(EXPIRED_DRAINING_BACKENDS);
+export const EXPIRED_DRAINING_AGE_BUCKETS = ["lt_5m", "5m_1h", "1h_1d", "gte_1d"] as const;
+
+export function recordExpiredDrainingSandboxLeaseGauges(
+  observability: Observability,
+  counts: Array<{ backend: string; ageBucket: string; count: number }>,
+): void {
+  const normalized = new Map<string, number>();
+  for (const backend of EXPIRED_DRAINING_BACKENDS) {
+    for (const ageBucket of EXPIRED_DRAINING_AGE_BUCKETS) {
+      normalized.set(`${backend}:${ageBucket}`, 0);
+    }
+  }
+  for (const count of counts) {
+    const backend = EXPIRED_DRAINING_BACKEND_SET.has(count.backend) ? count.backend : "unknown";
+    if (!EXPIRED_DRAINING_AGE_BUCKETS.includes(count.ageBucket as never)) continue;
+    const key = `${backend}:${count.ageBucket}`;
+    normalized.set(key, (normalized.get(key) ?? 0) + Math.max(0, count.count));
+  }
+  for (const [key, value] of normalized) {
+    const [backend, ageBucket] = key.split(":") as [string, string];
+    observability.setGauge({
+      name: "opengeni_sandbox_leases_expired_draining",
+      help: "Current expired draining sandbox leases by backend and fixed age bucket.",
+      labels: { backend, age_bucket: ageBucket },
+      value,
+    });
+  }
+}
+
+export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
+  "claim_failed",
+  "proof_exited",
+  "proof_lost",
+  "proof_checkpoint_failed",
+  "settled_exited",
+  "settled_lost",
+  "settlement_failed",
+  "identity_mismatch",
+  "resume_state_missing",
+  "backend_unsupported",
+  "provider_running",
+  "provider_unknown",
+  "provider_timeout",
+  "provider_error",
+  "provider_binding_missing",
+  "provider_binding_mismatch",
+  "provider_binding_adopted",
+  "defer_failed",
+] as const;
+
+export type RetainedProcessReconciliationOutcome =
+  (typeof RETAINED_PROCESS_RECONCILIATION_OUTCOMES)[number];
+
+export function recordRetainedProcessReconciliation(
+  observability: Observability,
+  outcome: RetainedProcessReconciliationOutcome,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_retained_process_reconciliation_total",
+    help: "Bounded retained-process reconciliation observations by fixed app outcome.",
+    labels: { outcome },
   });
 }
 

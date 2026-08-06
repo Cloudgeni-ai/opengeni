@@ -1,15 +1,18 @@
 import type {
   ComposerDraft,
   EffectiveSessionControl,
+  McpPersonalConnectionSummary,
   SessionEvent,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
+  SessionPendingInputPreview,
   SessionTurn,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
+  usePageLiveActivity,
   useSessionEventTrigger,
   type SessionEventFeedOptions,
 } from "./internal";
@@ -20,6 +23,7 @@ export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
     event.type.startsWith("turn.") ||
     event.type.startsWith("session.queue.") ||
     event.type.startsWith("session.control.") ||
+    event.type.startsWith("system.update.") ||
     event.type.startsWith("workspace.inference.")
   );
 }
@@ -47,6 +51,12 @@ export type UseTurnQueueResult = {
   snapshot: SessionQueueSnapshot | null;
   /** Human/API prompts exactly in server execution order. Never client-sorted. */
   queue: SessionTurn[];
+  /** Canonical pending machine inputs. Events only trigger an authoritative refresh. */
+  pendingInputs: SessionPendingInputPreview[];
+  /** Exact pending members projected to join an already-waiting prompt. */
+  pendingInputAttachment: SessionQueueSnapshot["pendingInputAttachment"];
+  /** Secret-safe personal MCP summaries frozen on the exact active turn. */
+  activePersonalConnections: McpPersonalConnectionSummary[];
   effectiveControl: EffectiveSessionControl | null;
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
@@ -82,6 +92,7 @@ export function useTurnQueue(
     useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
+  const pageLive = usePageLiveActivity();
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [loading, setLoading] = useState(enabled);
@@ -165,24 +176,34 @@ export function useTurnQueue(
   );
 
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || !pageLive) {
       setLoading(false);
       return;
     }
     setLoading(true);
-    void load();
     const pollIntervalMs = options.pollIntervalMs;
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
+      void load();
       return () => {
         readGeneration.current += 1;
       };
     }
-    const timer = setInterval(() => void load(), pollIntervalMs);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (cancelled) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void load().finally(schedule);
+      }, pollIntervalMs);
+    };
+    void load().finally(schedule);
     return () => {
-      clearInterval(timer);
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
       readGeneration.current += 1;
     };
-  }, [load, enabled, options.pollIntervalMs]);
+  }, [load, enabled, pageLive, options.pollIntervalMs]);
 
   useEffect(() => {
     if (enabled && workspaceControlEvent) void load();
@@ -324,6 +345,9 @@ export function useTurnQueue(
   return {
     snapshot: visibleSnapshot,
     queue: visibleSnapshot?.items ?? [],
+    pendingInputs: visibleSnapshot?.pendingInputs ?? [],
+    pendingInputAttachment: visibleSnapshot?.pendingInputAttachment ?? null,
+    activePersonalConnections: visibleSnapshot?.activePersonalConnections ?? [],
     effectiveControl: visibleSnapshot?.effectiveControl ?? null,
     stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
     loading: identityMatches ? loading : enabled,

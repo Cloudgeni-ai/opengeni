@@ -23,9 +23,14 @@ Resume is optional.
 ```ts
 createSessionForRequest(deps, grant, workspaceId, rawPayload);
 acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
+controlHumanSessionWorkstream(deps, context, {
+  action: "cancel",
+  clientEventId: crypto.randomUUID(),
+  reason: "host record deleted",
+});
 ```
 
-Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
+The create/message helpers live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`; terminal control lives in `packages/core/src/application/session-commands.ts` and uses an explicit authenticated command context. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
 
 **Runtime dependency isolation.** `@opengeni/runtime` bundles its OpenAI Agents
 implementation together with the Zod 4 instance that defines those runtime
@@ -249,6 +254,14 @@ but are workspace-relative, separator-normalized, traversal-free, portable to
 case-insensitive filesystems, and collision-checked before sandbox execution.
 The normalized path is returned on the session resource and is the same value
 used by the manifest, clone hook, agent filesystem, and workbench.
+Repository URI normalization preserves the provider-defined HTTPS clone path;
+OpenGeni never manufactures or removes a trailing `.git` suffix. Credential
+routing and resource identity use an exhaustive provider capability policy:
+GitHub and GitLab explicitly declare `.git` and suffix-free paths equivalent,
+while Azure DevOps and provider-neutral remotes use exact paths. Adding a Git
+provider therefore requires choosing its path semantics rather than silently
+inheriting GitHub behavior. Mount-path and display-name derivation are separate
+from the clone transport URI.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
@@ -301,6 +314,13 @@ fall through to a sibling credential. Provider aliases (including
 binding; they are removed when a second appears. `gh`, `glab`, and `az` select
 an explicit `OPENGENI_GIT_BINDING`, then the current repository's `origin`, then
 a sole direct-provider binding, and fail closed if selection remains ambiguous.
+For a managed sandbox with multiple bindings for one provider, the model is told
+to inspect the secret-free `$HOME/.opengeni/git-bindings.json` inventory. It maps
+each opaque `credentialBindingId` to its provider, transport kind, repository URI,
+and mount path, so an agent running outside a repository can deliberately set
+`OPENGENI_GIT_BINDING` without guessing. The wrapper's ambiguity error points to
+the same file. Connected Machines receive neither platform bindings nor this
+instruction and continue using their own ambient Git authentication.
 Broker bearers are never exported as provider tokens: a provider CLI selected
 for a brokered binding fails with guidance to use the configured provider MCP
 tools. Each binding renews independently, so one failed connection cannot block
@@ -368,12 +388,12 @@ domain (commonly the intersection or root-session policy), decline delivery, or
 place differently trusted sessions in separate sandbox groups. OpenGeni never
 claims that `/tmp` path separation protects one same-user process from another.
 
-Environment values are automatically registered with event-output redaction.
-When a credential file embeds atomic secrets (for example a bearer inside a
-kubeconfig), the host must also return those values through `redactions`; this
-lets OpenGeni redact chunked command output without understanding provider file
-formats. `auth_needed` can coexist with usable material and becomes both bounded
-model context and a structured `credential.auth_needed` reconnect card.
+OpenGeni does not register environment or credential-file values for output
+rewriting. Accepted model, tool, event, history, failure, and diagnostic content
+remains exact even when it contains configured-secret-shaped text. Hosts should
+return only the materialization and renewal facts required by the run;
+`auth_needed` can coexist with usable material and becomes both bounded model
+context and a structured `credential.auth_needed` reconnect card.
 
 The box-global websocket `ttyd` server remains credential-free because one box
 may be shared by several sessions. Session-scoped terminal exec and PTY calls do
@@ -456,13 +476,31 @@ session tree while top-level omissions continue to use the deployment's normal
 standalone worker defaults. The inherited set is frozen on the child at
 creation; later deployment-default changes do not rewrite existing sessions.
 
+Model-visible first-party tool selection is a separate field:
+`CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
+`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
+connector-wide `social_*` and `slack_bot_*` tools, while explicit `[]` remains
+empty. Connector tools require an explicit selection and their independent
+connection permission. A child omission snapshots its parent's exact effective
+selection. Tool selection never grants a permission, and permissions never
+implicitly select a tool. This separation lets a host keep a broad delegated
+authorization envelope while exposing only the tools appropriate to one
+embedded session.
+
+Resources are unaffected by that selection. File/document/repository
+attachments still materialize when `firstPartyMcpTools` is empty or contains
+only `set_session_title`; the dedicated `files` and `docs` MCP servers are
+selected independently through `tools`. Omitted top-level `tools` policy keeps
+Files enabled by default; an explicit list, including `[]`, is exact and can
+disable it for embedded products that require a narrower model-visible surface.
+
 ### Child execution context
 
 An agent-created child normally needs the same working context as its manager,
 even when the two conversations are separate. When the creating grant carries
 the worker-signed parent `sessionId`, `createSessionForRequest` treats omitted
-`resources`, `tools`, and `mcpServers` as inheritance from that trusted immediate
-parent. The snapshot preserves mixed GitHub, GitLab, and Azure DevOps repository
+`resources`, `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
+parent. The snapshot preserves inline session skills, mixed GitHub, GitLab, and Azure DevOps repository
 resources, multiple credential bindings for one provider, selected MCP tool
 refs, full per-session MCP policy, connection refs, and static credential
 headers. Static header values move only as encrypted database ciphertext and
@@ -478,7 +516,7 @@ array—including `[]`—replaces that field instead of inheriting it. If an exp
 MCP-server replacement makes an inherited strict tool ref invalid, the create
 fails validation; replace `tools` in the same request rather than silently
 dropping a strict tool. A top-level create has no parent snapshot: omitted
-resources and MCP servers remain empty, while omitted tools continue to receive
+resources, skills, and MCP servers remain empty, while omitted tools continue to receive
 workspace-default capability MCP refs. Variable sets, rigs, model selection,
 persona instructions, goals, and sandbox placement retain their own existing
 resolution rules and are not part of this context snapshot.
@@ -493,6 +531,27 @@ rotations on parent and child are independent. A `connectionRef` remains the
 preferred host integration because normal model MCP and Toolspace resolve fresh
 transport credentials at request time.
 
+### Credential-bearing outbound transport
+
+Canonical sources: `@opengeni/network`, `@opengeni/runtime/mcp-network`, and
+[`credentials.md`](credentials.md).
+
+Standalone and embedded runtimes use the same fail-closed network boundary for
+MCP and OAuth: one DNS resolution is policy-checked, the actual request is made
+through an Undici Agent pinned to that answer, TLS still verifies the URL
+hostname, response bodies are bounded, and redirects are handled manually so
+each hop is independently validated. `prepareAgentTools` accepts
+`mcpFetchImpl` for tests and embedded transport integration, but the injected
+fetch remains behind `guardedMcpFetch` and must honor the supplied Undici
+`dispatcher`; it is not a bypass for destination policy.
+
+Private integration targets are denied by default. A self-hosted operator may
+explicitly enable `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` for
+trusted internal MCP/OAuth endpoints; local/test already has the narrow
+loopback escape needed by fixtures. Keep credential resolution outside the
+pinned final transport so headers are attached only to the exact request URL
+that the broker audience-checks.
+
 ### Persistence
 
 Canonical sources: `packages/db/src/index.ts`, `packages/db/src/migrate.ts`, `packages/db/src/provision-roles.ts`, and `dbSearchPath` in `packages/config/src/index.ts`.
@@ -503,6 +562,13 @@ Standalone uses `createDb(settings.databaseUrl)` and no search-path override. Em
 - `provisionRoles(adminConnection, { targetSchema, rlsStrategy })` for app/Temporal role setup.
 - `createDb(databaseUrl, { searchPath, rlsStrategy, userLookup, max })` for postgres-js handles.
 - `registerDbBinding(db, { rlsStrategy, userLookup })` for an externally constructed Drizzle handle.
+
+For `rlsStrategy: "force"`, role provisioning rejects every privilege-bearing
+role relationship. PostgreSQL 16+ managed services may retain the automatic
+ADMIN-only reverse grant from `opengeni_app` to the non-superuser `CREATEROLE`
+principal that created it; OpenGeni accepts only the exact non-inheritable,
+non-settable, superuser-granted management edge. PostgreSQL 15 and every
+uncertain or privilege-bearing edge remain fail-closed.
 
 Dedicated-schema deployments use a search path shaped like `<schema>,opengeni_private,public`; `public` stays last so pgcrypto/pgvector symbols resolve. `rlsStrategy: "force"` is the standalone posture: OpenGeni connects as a non-owner role and FORCE RLS applies. `rlsStrategy: "scoped"` is the embedded owner-role posture: the host owns the isolation boundary, but OpenGeni still emits the `opengeni.account_id` / `opengeni.workspace_id` GUCs on scoped queries.
 
@@ -687,6 +753,37 @@ API and worker must share the same broker-backed EventBus binding. The productio
 Do not replace this with an in-memory bus in an embedded deployment. In-memory fanout only reaches subscribers in the same process and would make worker -> API live SSE silently disappear; clients would only recover on replay/gap backfill.
 
 For embedded UIs that page historical timelines, prefer `GET .../events?compact=1` (or SDK `listEvents(..., { compact: true })`) for windowed replay. It coalesces consecutive delta fragments in the page while preserving first-member `sequence`; use `payload.coalescedUntil` as the resume cursor for the live SSE stream. Streaming/gap backfill should keep using raw sequence replay.
+
+## Host-owned product UI
+
+Embedding does not require the host to copy its product model into OpenGeni.
+The host may keep its own session header, repository/integration picker,
+sharing controls, linked entities, billing presentation, and domain-specific
+tabs while composing OpenGeni's session hooks and workbench surfaces below
+them.
+
+`@opengeni/react/session` is the headless composition boundary. Its baseline
+`SessionClientLike` covers session events, composer, queue, control, and
+approvals. Hooks outside that baseline export exact structural refinements:
+`SessionReadClientLike`, `GoalClientLike`, `SessionLineageClientLike`, and
+`FileAttachmentClientLike`. A host proxy therefore implements only the methods
+used by the mounted hooks; it does not stub workspace administration, billing,
+rig, connected-machine, or unrelated workbench APIs.
+
+Repository selection is also host-composable. `CreateSessionRequest.resources`
+accepts the canonical provider-qualified `ResourceRef[]`, including several
+providers, repositories, and credential bindings in one session. The stock web
+picker is currently GitHub-oriented, but that is a stock-client limitation—not
+an engine, API, or embedding restriction. Embedded hosts can retain their own
+provider catalog and picker and submit the canonical resources once at launch.
+OpenGeni then owns their runtime materialization and credential routing; the host
+does not maintain a synchronized repository model.
+
+The styled workbench is independently filterable. Hosts can mount Changes,
+Files, and Terminal while omitting Desktop, or render a completely custom
+timeline/composer from the session-only hooks and pure projection. Product
+metadata should remain in host slots/components rather than being added to
+OpenGeni contracts solely for one embedding.
 
 ## Trust model
 

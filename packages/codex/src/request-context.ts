@@ -30,6 +30,43 @@ export type CodexUsageHeaderSnapshot = {
   checkedAt: Date;
 };
 
+export type CodexResponseTimeoutClass = "connect" | "headers" | "idle_stream" | "whole_request";
+
+export type CodexResponseTimeoutPolicy = {
+  /** Maximum wait for response headers, including DNS/TCP/TLS establishment. */
+  headersTimeoutMs: number;
+  /** Maximum silence between response-body chunks after headers arrive. */
+  streamIdleTimeoutMs: number;
+  /** Maximum wall time for one logical Responses request. */
+  wholeRequestTimeoutMs: number;
+  /**
+   * Reserved compatibility field. It is currently normalized to zero because
+   * an absent response does not prove that the provider never accepted a
+   * request, so automatic replay is not safe without an operation receipt.
+   */
+  noByteRetries: number;
+  retryBackoffMs: number;
+};
+
+export type CodexModelRequestEvent = {
+  requestId: string;
+  transportAttempt: number;
+  phase: "started" | "headers" | "first_byte" | "completed" | "failed" | "timed_out";
+  model?: string;
+  durationMs: number;
+  responseObserved: boolean;
+  timeoutPolicy: CodexResponseTimeoutPolicy;
+  timeoutClass?: CodexResponseTimeoutClass;
+  providerRequestId?: string;
+  status?: number;
+  willRetry?: boolean;
+};
+
+export type CodexRequestOpaqueArtifacts = {
+  requestId: string;
+  fingerprints: readonly string[];
+};
+
 export type CodexRequestContext = {
   clientVersion: string;
   /**
@@ -58,6 +95,34 @@ export type CodexRequestContext = {
    * P2 usage cache once per turn in its `finally` — packages/codex stays db-free.
    */
   onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;
+  /** Optional per-run override, primarily for deterministic transport tests. */
+  responseTimeoutPolicy?: Partial<CodexResponseTimeoutPolicy>;
+  /** Worker-owned durable audit sink; payloads never contain request bodies or auth. */
+  onModelRequestEvent?: (event: CodexModelRequestEvent) => Promise<void> | void;
+  /** Exact opaque artifacts on the normalized wire request, never their ciphertext. */
+  onRequestOpaqueArtifacts?: (artifacts: CodexRequestOpaqueArtifacts) => void;
+  /** Stable request identity supplied by the owning durable execution. */
+  nextRequestId?: () => string;
+  /**
+   * Optional Codex beta feature flags advertised as `x-codex-beta-features`
+   * (comma-separated). Used for remote compaction v2 (`remote_compaction_v2`).
+   */
+  betaFeatures?: readonly string[];
+  /**
+   * Optional turn analytics / routing metadata sent as `x-codex-turn-metadata`
+   * (JSON). Body `metadata` is stripped by normalize — never put request_kind there.
+   */
+  turnMetadata?: Record<string, unknown>;
 };
 
 export const codexRequestStorage = new AsyncLocalStorage<CodexRequestContext>();
+
+/** Nest a Codex ALS scope with header overrides (e.g. remote compaction v2). */
+export function withCodexRequestOverrides<T>(
+  overrides: Pick<CodexRequestContext, "betaFeatures" | "turnMetadata">,
+  fn: () => T,
+): T {
+  const current = codexRequestStorage.getStore();
+  if (!current) return fn();
+  return codexRequestStorage.run({ ...current, ...overrides }, fn);
+}

@@ -8,8 +8,13 @@
 //   @source "../node_modules/@opengeni/react/src";
 
 export type {
+  EmbeddedFileAttachmentClientLike,
+  EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionEventClientLike,
+  EmbeddedSessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike,
+  EmbeddedSessionReadClientLike,
   EmbeddedSessionClientLike,
   SessionClientLike,
 } from "./client";
@@ -17,6 +22,7 @@ export { OpenGeniProvider } from "./provider";
 export type { OpenGeniProviderProps } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
+export { usePageLiveActivity } from "./hooks/internal";
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
@@ -45,6 +51,42 @@ export {
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
 export {
+  VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
+  VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS,
+  VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
+  VOICE_RECORDING_TIMESLICE_MILLISECONDS,
+  useVoiceInput,
+} from "./hooks/use-voice-input";
+export type {
+  UseVoiceInputOptions,
+  UseVoiceInputResult,
+  VoiceInputStatus,
+} from "./hooks/use-voice-input";
+export {
+  IndexedDbVoiceRecordingStore,
+  VoiceRecordingChunkConflictError,
+  VoiceRecordingChunkSequenceError,
+  VoiceRecordingNotFoundError,
+  VoiceRecordingOwnedError,
+  VoiceRecordingStorageUnavailableError,
+  createVoiceRecordingManifest,
+  planVoiceRecordingChunkCommit,
+  prepareVoiceRecordingChunk,
+} from "./voice-recording-store";
+export type {
+  PersistVoiceRecordingChunkInput,
+  PersistVoiceRecordingChunkResult,
+  VoiceRecordingCaptureState,
+  VoiceRecordingChunk,
+  VoiceRecordingChunkUploadState,
+  VoiceRecordingFinalizationState,
+  VoiceRecordingManifest,
+  VoiceRecordingStore,
+  VoiceRecordingTranscriptionState,
+  VoiceRecordingUploadState,
+} from "./voice-recording-store";
+export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
+export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,
   transitionTranscriptionControl,
@@ -69,9 +111,26 @@ export type {
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  useLastStartedTurnPolicy,
+  isLastStartedTurnPolicyEvent,
+} from "./hooks/use-last-started-turn-policy";
+export type {
+  LastStartedTurnPolicy,
+  UseLastStartedTurnPolicyOptions,
+  UseLastStartedTurnPolicyResult,
+} from "./hooks/use-last-started-turn-policy";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
-export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
+export { SessionChrome, sessionChromeGoalPillState } from "./components/session-chrome";
+export type {
+  SessionChromeAgentsSignal,
+  SessionChromeProps,
+  SessionChromeSignalId,
+  SessionChromeSignalTone,
+} from "./components/session-chrome";
+export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/tooltip";
+export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";
@@ -126,10 +185,12 @@ export { useWorkspaces } from "./hooks/use-workspaces";
 export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
-export { useAvailableModels } from "./hooks/use-available-models";
+export { useAvailableModels, useWorkspaceModelCatalog } from "./hooks/use-available-models";
 export type {
   UseAvailableModelsOptions,
   UseAvailableModelsResult,
+  UseWorkspaceModelCatalogOptions,
+  UseWorkspaceModelCatalogResult,
 } from "./hooks/use-available-models";
 
 // Sandbox surfacing (Phase 5): capability negotiation + terminal/files/diff/desktop
@@ -225,6 +286,8 @@ export type {
   HumanInputFormMessages,
   HumanInputFormProps,
 } from "./components/human-input-form";
+export { HumanInputSurface } from "./components/human-input-surface";
+export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 
 // Timeline projection
 export {
@@ -239,7 +302,10 @@ export type {
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
+  ContextCompactionItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   NoticeItem,
   ReasoningItem,
   SandboxItem,
@@ -281,6 +347,7 @@ export {
   TermBlock,
   Thumbnail,
   TurnSummary,
+  BUILT_IN_TURN_SUMMARY_FACET_IDS,
   useLightbox,
   useLightboxOptional,
 } from "./timeline";
@@ -288,21 +355,28 @@ export type {
   ActivityDisclosureProps,
   ActivityRailProps,
   DisclosureChip,
+  BuiltInTurnSummaryFacetId,
   TurnOutcome,
+  TurnSummaryContext,
+  TurnSummaryFacet,
+  TurnSummaryFacetConfiguration,
+  TurnSummaryFacetResult,
+  TurnSummaryOptions,
   TurnSummaryProps,
 } from "./timeline";
 
-// Pure provider-shape parsers (exec banner, V4A diff, secret redaction, …)
+// Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)
 export {
   applyPatchOps,
+  applyPatchOpsFromToolItem,
   controlCaret,
   execTruncated,
   isApplyPatch,
   isExecSessionLostBanner,
   looksBinary,
   parseExecBannerSessionId,
+  parseFreeformApplyPatch,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -352,9 +426,45 @@ export { defaultChatComposerMessages } from "./components/composer";
 export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
+export {
+  BillingClassMark,
+  ModelPolicyPicker,
+  ModelPolicyPickerMenu,
+  PickerAnimatedPage,
+  PickerBackHeader,
+  PickerNavRow,
+  defaultModelPolicyPickerMessages,
+} from "./components/model-policy-picker";
+export type {
+  ModelPolicyPickerMessages,
+  ModelPolicyPickerProps,
+} from "./components/model-policy-picker";
+export {
+  advancedSourceSummary,
+  availabilityReasonLabel,
+  billingClassForModel,
+  billingClassLabel,
+  coerceReasoningEffortForModel,
+  defaultEffortForModel,
+  effortOptionsForModel,
+  findPickerRow,
+  groupPickerRowsByBillingClass,
+  labelLatencyMode,
+  labelReasoningEffort,
+  payerSummaryForModel,
+  projectClientModelRows,
+  projectPickerRows,
+  runnableLatencyModesForModel,
+  sortPickerRows,
+} from "./model-policy";
+export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
+export type { UserMessageBodyProps } from "./components/user-message-body";
 export { Markdown } from "./components/markdown";
+export { CopyButton, CopyHoverFrame } from "./components/copy-button";
+export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export type { MarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
 export type {
@@ -370,6 +480,8 @@ export { SandboxTerminal } from "./components/sandbox-terminal";
 export type { SandboxTerminalProps, XtermTheme } from "./components/sandbox-terminal";
 export { FileBrowser } from "./components/file-browser";
 export type { FileBrowserProps } from "./components/file-browser";
+export { WorkbenchChanges } from "./components/workbench-changes";
+export type { WorkbenchChangesProps } from "./components/workbench-changes";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
 export { PierreDiff } from "./components/pierre-diff";
@@ -426,6 +538,7 @@ export { cn } from "./lib/cn";
 export {
   CREDIT_EXHAUSTION_MESSAGE,
   formatBytes,
+  formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
   isCreditExhaustion,

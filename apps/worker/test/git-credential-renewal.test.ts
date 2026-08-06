@@ -86,9 +86,39 @@ describe("host-managed Git credential renewal", () => {
 
     expect(writes).toBe(0);
     expect(failures).toEqual([
-      { retryDelayMs: 5_000, errorClass: "GitCredentialRenewalError" },
-      { retryDelayMs: 10_000, errorClass: "GitCredentialRenewalError" },
+      { retryDelayMs: 5_000, errorClass: "GitCredentialRenewalOperationError" },
+      { retryDelayMs: 10_000, errorClass: "GitCredentialRenewalOperationError" },
     ]);
+    await controller.stop();
+  });
+
+  test("never projects a custom exception constructor or code into renewal diagnostics", async () => {
+    const sentinel = "SECRET_SENTINEL_123";
+    const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
+    const exactError = Object.assign(new SecretSentinelError(`mint failed ${sentinel}`), {
+      name: sentinel,
+      code: sentinel,
+    });
+    const scheduler = fakeScheduler();
+    const failures: string[] = [];
+    const controller = startGitCredentialRenewalLoop({
+      expectedProviders: ["github"],
+      mint: async () => {
+        throw exactError;
+      },
+      write: async () => undefined,
+      schedule: scheduler.schedule,
+      clearSchedule: scheduler.clearSchedule,
+      onFailure: ({ errorClass }) => failures.push(errorClass),
+    });
+
+    await controller.refreshNow();
+
+    expect(failures).toEqual(["GitCredentialRenewalOperationError"]);
+    expect(JSON.stringify(failures)).not.toContain(sentinel);
+    expect(exactError.message).toBe(`mint failed ${sentinel}`);
+    expect(exactError.constructor.name).toBe(sentinel);
+    expect(exactError.code).toBe(sentinel);
     await controller.stop();
   });
 

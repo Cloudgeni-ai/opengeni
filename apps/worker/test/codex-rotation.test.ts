@@ -45,8 +45,6 @@ function acct(id: string, over: Partial<CodexAccountStatus> = {}): CodexAccountS
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
-    connectorNamespaces: null,
-    connectorsCheckedAt: null,
     ...over,
   };
 }
@@ -466,109 +464,6 @@ describe("chooseRotationActive — legacy strategies normalize to sharded rankin
   });
 });
 
-// P4 — connector-aware rotation (prefer-not-require). The ranker PREFERS a failover
-// target whose connector set COVERS the leaving session's used connectors, but still
-// fails over to a lesser-coverage account when that is the only one with quota. When
-// usedConnectors is empty the ranker is byte-identical to P3.
-describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => {
-  test("empty usedConnectors → byte-identical to P3 (max remaining wins, no dropped note)", () => {
-    const accounts = [
-      acct("a", { primaryUsedPercent: 95 }), // active and still usable
-      acct("b", { primaryUsedPercent: 40, connectorNamespaces: ["github"] }), // 60 remaining
-      acct("c", { primaryUsedPercent: 10, connectorNamespaces: [] }), // 90 remaining ← winner
-    ];
-    expect(
-      chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: [] }),
-    ).toEqual({ kind: "active", credentialId: "c", moved: true });
-  });
-
-  test("PREFERS a covering target even when a non-covering one has MORE remaining quota", () => {
-    const accounts = [
-      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github"] }), // exhausted leaving account
-      acct("b", { primaryUsedPercent: 50, connectorNamespaces: ["github", "gmail"] }), // covers github, 50 remaining ← winner
-      acct("c", { primaryUsedPercent: 5, connectorNamespaces: ["gmail"] }), // 95 remaining BUT lacks github
-    ];
-    // Session used github (the leaving account's set). c has the most quota but can't
-    // cover github → Tier 1 = {b}; b is chosen despite less remaining. No dropped note.
-    expect(
-      chooseRotationActive({
-        ...base,
-        activeCredentialId: "a",
-        accounts,
-        usedConnectors: ["github"],
-      }),
-    ).toEqual({ kind: "active", credentialId: "b", moved: true });
-  });
-
-  test("FAILS OVER to a non-covering account when it is the ONLY one with quota (+ dropped note)", () => {
-    const accounts = [
-      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github"] }), // active, capped (leaving)
-      acct("b", { primaryUsedPercent: 100, connectorNamespaces: ["github", "gmail"] }), // covers BUT also capped
-      acct("c", { primaryUsedPercent: 10, connectorNamespaces: ["gmail"] }), // eligible BUT lacks github
-    ];
-    // Tier 1 (covering) is empty among eligibles → Tier 2 = {c}: failover preserved,
-    // and the dropped-connector note surfaces github so the pill can warn.
-    expect(
-      chooseRotationActive({
-        ...base,
-        activeCredentialId: "a",
-        accounts,
-        usedConnectors: ["github"],
-      }),
-    ).toEqual({ kind: "active", credentialId: "c", moved: true, droppedConnectors: ["github"] });
-  });
-
-  test("null (never-probed) connector set is UNKNOWN: never Tier 1, never excluded, dropped note lists the used set", () => {
-    const accounts = [
-      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github"] }), // active, capped (leaving)
-      acct("b", { primaryUsedPercent: 10, connectorNamespaces: null }), // unprobed → Tier 2 only, but eligible
-    ];
-    // No covering eligible (b is unknown) → Tier 2 picks b (failover), and since we
-    // can't prove b covers github, the note surfaces it.
-    expect(
-      chooseRotationActive({
-        ...base,
-        activeCredentialId: "a",
-        accounts,
-        usedConnectors: ["github"],
-      }),
-    ).toEqual({ kind: "active", credentialId: "b", moved: true, droppedConnectors: ["github"] });
-  });
-
-  test("connector coverage never restores active-pointer stickiness", () => {
-    const accounts = [
-      acct("a", { primaryUsedPercent: 10, connectorNamespaces: [] }), // active, healthy, lacks github
-      acct("b", { primaryUsedPercent: 5, connectorNamespaces: ["github"] }), // covers github, more remaining
-    ];
-    // The pointer is a cursor, not a reservation; the covering, higher-capacity
-    // account wins even while the prior pointer remains healthy.
-    expect(
-      chooseRotationActive({
-        ...base,
-        activeCredentialId: "a",
-        accounts,
-        usedConnectors: ["github"],
-      }),
-    ).toEqual({ kind: "active", credentialId: "b", moved: true });
-  });
-
-  test("a covering target that is a strict SUPERSET covers (multi-connector session)", () => {
-    const accounts = [
-      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github", "linear"] }), // capped (leaving)
-      acct("b", { primaryUsedPercent: 50, connectorNamespaces: ["github", "linear", "gmail"] }), // superset ← covers
-      acct("c", { primaryUsedPercent: 5, connectorNamespaces: ["github"] }), // most quota but missing linear
-    ];
-    expect(
-      chooseRotationActive({
-        ...base,
-        activeCredentialId: "a",
-        accounts,
-        usedConnectors: ["github", "linear"],
-      }),
-    ).toEqual({ kind: "active", credentialId: "b", moved: true });
-  });
-});
-
 // Finding 1 (reactive-rotation boundedness). computeReactiveRotationResume bounds the
 // reactive 429 failover's otherwise-0-delay re-dispatch against two second-order faults
 // so a double-fault (cooldown write not persisted + a header-less cap 429 that re-picks
@@ -947,7 +842,6 @@ describe("credential allocator deterministic fairness properties", () => {
           secondaryUsedPercent: Math.floor(random() * 80),
           selectionCount: Math.floor(random() * 30),
           lastSelectedAt: new Date(NOW.getTime() + Math.floor(random() * 10_000)),
-          connectorNamespaces: [],
         }),
       );
       const expected = [...accounts].sort((a, b) => {
@@ -1289,6 +1183,31 @@ describe("credential allocator pin and rollout policy", () => {
     expect(selected.credentialId).toBe("a");
   });
 
+  test("rotation false waits on a capped active pointer without failing over", () => {
+    const resetAt = new Date(NOW.getTime() + HOUR);
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: {
+        ...context([
+          leasedAcct("a", { primaryUsedPercent: 100, primaryResetAt: resetAt }),
+          leasedAcct("b"),
+        ]),
+        rotationEnabled: false,
+        leaseRotationEnabled: false,
+      },
+      leasingEnabled: true,
+      sessionId: "session-test",
+      sessionPinSource: null,
+      sessionPinnedCredentialId: null,
+      sessionLastCredentialId: "b",
+      now: NOW,
+    });
+    expect(selected).toEqual({
+      credentialId: null,
+      decision: { kind: "allCapped", earliestResetAt: resetAt },
+      advanceActivePointer: false,
+    });
+  });
+
   test("sharded-rotation policy: stored round_robin behaves EXACTLY as sharded in the lease selector (sticky, never advancing)", () => {
     const args = (rotationStrategy: string) => ({
       context: {
@@ -1320,42 +1239,5 @@ describe("credential allocator pin and rollout policy", () => {
     const sharded = selectCodexCredentialLeaseForTurn(args("sharded"));
     expect(legacy).toEqual(sharded);
     expect(selectCodexCredentialLeaseForTurn(args("round_robin"))).toEqual(legacy);
-  });
-
-  test("same-turn frozen continuation keeps a healthy disabled credential without admitting new work", () => {
-    const accounts = [leasedAcct("frozen", { allocatorEnabled: false }), leasedAcct("eligible")];
-    const frozenContext = {
-      accounts,
-      activeCredentialId: "frozen",
-      rotationEnabled: true,
-      leaseRotationEnabled: true,
-      rotationStrategy: "most_remaining",
-      existingCredentialId: null,
-      policyScope: null,
-      unavailableDiagnostics: [],
-    };
-    expect(
-      selectCodexCredentialLeaseForTurn({
-        context: frozenContext,
-        leasingEnabled: true,
-        sessionId: "session-test",
-        sessionPinSource: null,
-        sessionPinnedCredentialId: null,
-        sessionLastCredentialId: "frozen",
-        continuationCredentialId: "frozen",
-        now: NOW,
-      }).credentialId,
-    ).toBe("frozen");
-    expect(
-      selectCodexCredentialLeaseForTurn({
-        context: frozenContext,
-        leasingEnabled: true,
-        sessionId: "session-test",
-        sessionPinSource: null,
-        sessionPinnedCredentialId: null,
-        sessionLastCredentialId: "frozen",
-        now: NOW,
-      }).credentialId,
-    ).toBe("eligible");
   });
 });

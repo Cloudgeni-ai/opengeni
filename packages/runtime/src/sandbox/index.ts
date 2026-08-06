@@ -32,14 +32,30 @@ import type {
 } from "@openai/agents/sandbox";
 import { PROVIDER_REGISTRY } from "./providers";
 import { SandboxConfigError, SandboxResumeStateUnavailableError } from "./errors";
-import { isSelfhostedProviderNotFoundError } from "./selfhosted/session";
+import { isProviderSandboxNotFoundError } from "./provider-errors";
+import {
+  decodeNativeSnapshotRef,
+  readVerifiedWorkspaceArchive,
+  verifyRestoredWorkspace,
+  WorkspaceArchiveIntegrityError,
+  type VerifiedWorkspaceArchive,
+  type WorkspaceArchiveDescriptor,
+} from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
 // a single agent-loop-free entrypoint. They physically live in @opengeni/config
 // (moving them into runtime would create a config→runtime cycle — ledger CR8).
 export { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+export {
+  repairSerializedRunStateExposedPorts,
+  runStateCompatibilityProvider,
+  runStateExposedPortsRecord,
+  type RunStateExposedPortsCompatibilityRepair,
+  type RunStateExposedPortsCompatibilityResult,
+} from "./run-state-compat";
 
 // The provider registry surface — the descriptor table self-test, the per-
 // provider registrations, selection + capability negotiation, and the typed
@@ -63,14 +79,49 @@ export {
   type ProviderConstructionContext,
 } from "./providers";
 export {
+  classifyProviderSandboxFailure,
+  isProviderSandboxGoneDuringRoutedOperation,
+  isProviderSandboxNotFoundError,
+  isProviderSandboxTransientError,
+  type ProviderSandboxFailure,
+  type ProviderSandboxFailureKind,
+} from "./provider-errors";
+export {
+  WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
+  WorkspaceArchiveIntegrityError,
+  captureVerifiedWorkspaceArchive,
+  decodeNativeSnapshotRef,
+  describeLegacyNativeSnapshotArchive,
+  describeNativeSnapshotArchive,
+  fingerprintSandboxWorkspace,
+  parseWorkspaceArchiveDescriptor,
+  readVerifiedWorkspaceArchive,
+  verifyRestoredWorkspace,
+  type NativeSnapshotDescriptor,
+  type NativeSnapshotProvider,
+  type NativeSnapshotRef,
+  type TarWorkspaceArchiveDescriptor,
+  type VerifiedWorkspaceArchive,
+  type WorkspaceArchiveDescriptor,
+  type WorkspaceArchiveIntegrityCode,
+  type WorkspaceTreeFingerprint,
+} from "./workspace-archive";
+export {
   ensureModalRegistryImage,
+  deleteModalCheckpointSnapshot,
+  inspectModalSandboxLifecycle,
+  modalSessionMatchesCheckpointProviderBinding,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
+  resolveModalCheckpointProviderBinding,
+  resolveModalCheckpointProviderBindingForLiveSandbox,
+  resolveModalCheckpointProviderBindingForSession,
   sweepModalOrphanSandboxes,
   tagModalSandbox,
   terminateModalSandboxById,
   type LiveModalSandboxLeaseAttribution,
   type ModalModuleLoader,
+  type ModalCheckpointProviderBinding,
   type ModalOrphanSweepResult,
   type ModalOrphanSweepTermination,
   type ModalSandboxAttribution,
@@ -78,6 +129,8 @@ export {
 } from "./providers/modal";
 export {
   selectBackend,
+  sdkBackendIdForSandboxBackend,
+  sandboxBackendForSdkBackendId,
   backendSupportsOs,
   desktopCapableBackend,
   negotiateCapabilities,
@@ -342,11 +395,21 @@ export {
 // currently-active backend (Modal or selfhosted) — flippable mid-turn, single
 // active at a time, fence-retrying on a swap race.
 export {
+  RoutingBackendRecoveryRequiredError,
+  RoutingMutationOutcomeUnknownError,
+  RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
   type ActivePointer,
+  type DefaultBackendLossResult,
   type RoutableBackendSession,
   type ResolvedActiveBackend,
+  type RoutingMutationSettlementResult,
+  type RoutingSandboxOperationObservation,
+  type RoutingSandboxOperationObserver,
+  type RoutingRetainedProcess,
+  type RoutingRetainedProcessAdoption,
+  type RoutingRetainedProcessTerminalProof,
   type RoutingSandboxSessionDeps,
   type RoutingTransitionEvent,
 } from "./routing/routing-session";
@@ -470,7 +533,9 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
         }
       : {}),
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -500,14 +565,14 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
 }
 
 async function connectDockerNetwork(network: string, containerId: string): Promise<void> {
-  const result = Bun.spawnSync(["docker", "network", "connect", network, containerId], {
-    stdout: "pipe",
-    stderr: "pipe",
+  const { spawnSync } = await import("node:child_process");
+  const result = spawnSync("docker", ["network", "connect", network, containerId], {
+    encoding: "utf8",
   });
-  if (result.exitCode === 0) {
+  if (result.status === 0) {
     return;
   }
-  const stderr = new TextDecoder().decode(result.stderr);
+  const stderr = result.stderr ?? result.error?.message ?? "";
   if (stderr.includes("already exists")) {
     return;
   }
@@ -592,102 +657,14 @@ export function readWorkspaceArchiveFromEnvelopeSessionState(
   }
 }
 
-function readWorkspaceArchivePairFromEnvelopeSessionState(sessionState: unknown): {
-  current?: Uint8Array;
-  previous?: Uint8Array;
-} {
-  if (!sessionState || typeof sessionState !== "object") {
-    return {};
-  }
-  const state = sessionState as { workspaceArchivePrev?: unknown };
-  const current = readWorkspaceArchiveFromEnvelopeSessionState(sessionState);
-  const previous = readWorkspaceArchiveFromEnvelopeSessionState({
-    workspaceArchive: state.workspaceArchivePrev,
-  });
-  return {
-    ...(current ? { current } : {}),
-    ...(previous ? { previous } : {}),
-  };
-}
-
-// The native snapshot-ref prefixes the @openai/agents-extensions modal client
-// encodes (snapshots.mjs `NATIVE_SNAPSHOT_PREFIXES`). The ref is
-// `<PREFIX>\n{"snapshot_id":"...",...}`. We re-implement the decode here because
-// `@openai/agents-extensions/sandbox/shared` is NOT an exported subpath (the
-// package `exports` map only exposes `./sandbox/<provider>`), so decodeNativeSnapshotRef
-// is unreachable — same reasoning as isProviderSandboxNotFoundError below.
-const MODAL_SNAPSHOT_REF_PREFIXES = [
-  "MODAL_SANDBOX_FS_SNAPSHOT_V1\n",
-  "MODAL_SANDBOX_DIR_SNAPSHOT_V1\n",
-];
-
 /** Decode the Modal snapshot id out of a persisted base64 archive ref, or
- *  undefined when the archive is a tar payload (no provider snapshot to GC) or
- *  is unparseable. Used only for keep-latest-per-lease snapshot GC. */
+ *  undefined when the archive is a tar payload or is unparseable. */
 export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
-  let text: string;
-  try {
-    text = new TextDecoder().decode(archive);
-  } catch {
-    return undefined;
-  }
-  for (const prefix of MODAL_SNAPSHOT_REF_PREFIXES) {
-    if (!text.startsWith(prefix)) {
-      continue;
-    }
-    try {
-      const payload = JSON.parse(text.slice(prefix.length)) as { snapshot_id?: unknown };
-      return typeof payload.snapshot_id === "string" && payload.snapshot_id.length > 0
-        ? payload.snapshot_id
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Best-effort GC of a SUPERSEDED Modal filesystem/directory snapshot
- * (sandbox-file-persistence). restoreSnapshotFilesystem terminates the previous
- * SANDBOX but never deletes the prior SNAPSHOT image, so snapshots accumulate
- * unbounded across warm/cold cycles. The reaper keeps only the latest per lease:
- * when it writes a NEW archive it passes the PRIOR archive here to delete its
- * image via the live session's Modal client (`session.modal.images.delete(id)` —
- * the same API the SDK uses for directory images). Never throws (GC is a
- * best-effort backstop; a leaked snapshot is a cost issue, not a correctness one).
- * A tar archive (no snapshot id) is a no-op. Returns the deleted snapshot id (or
- * undefined when nothing was deleted) for observability.
- */
-export async function deletePriorPersistedSnapshot(
-  session: unknown,
-  priorArchiveBase64: string | null | undefined,
-): Promise<string | undefined> {
-  if (!priorArchiveBase64) {
-    return undefined;
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(priorArchiveBase64, "base64"));
-  } catch {
-    return undefined;
-  }
-  const snapshotId = decodeModalSnapshotId(bytes);
-  if (!snapshotId) {
-    return undefined;
-  }
-  const modal = (session as { modal?: { images?: { delete?: (id: string) => Promise<unknown> } } })
-    .modal;
-  const del = modal?.images?.delete;
-  if (typeof del !== "function") {
-    return undefined;
-  }
-  try {
-    await del.call(modal!.images, snapshotId);
-    return snapshotId;
-  } catch {
-    return undefined;
-  }
+  const ref = decodeNativeSnapshotRef(archive);
+  return ref?.provider === "modal_snapshot_filesystem" ||
+    ref?.provider === "modal_snapshot_directory"
+    ? ref.snapshotId
+    : undefined;
 }
 
 export async function deserializeSandboxSessionStateEnvelope(
@@ -711,6 +688,14 @@ export async function deserializeSandboxSessionStateEnvelope(
     workspaceReady?: unknown;
     exposedPorts?: unknown;
   };
+  const exposedPorts = runStateExposedPortsRecord(state.exposedPorts);
+  if (state.exposedPorts !== undefined && exposedPorts === undefined) {
+    console.warn("[sandbox] ignored incompatible RunState exposedPorts", {
+      provider: runStateCompatibilityProvider(client.backendId),
+      sessionClass: "root",
+      path: "sessionState.exposedPorts",
+    });
+  }
   return await client.deserializeSessionState({
     ...(state.providerState ?? {}),
     manifest: state.manifest,
@@ -722,7 +707,7 @@ export async function deserializeSandboxSessionStateEnvelope(
       ? { snapshotFingerprintVersion: state.snapshotFingerprintVersion }
       : {}),
     workspaceReady: state.workspaceReady,
-    ...(state.exposedPorts ? { exposedPorts: structuredClone(state.exposedPorts) } : {}),
+    ...(exposedPorts !== undefined ? { exposedPorts } : {}),
   });
 }
 
@@ -764,7 +749,112 @@ export type EstablishedSandboxSession = {
   /** Set when a create-authorized reattach found the envelope's box GONE
    *  (provider NotFound) and fell through to cold-restore. */
   lostInstanceId?: string;
+  /** Exact durable archive revision verified byte-for-byte after hydration. */
+  restoredArchive?: WorkspaceArchiveDescriptor;
 };
+
+export class SandboxExecReadinessError extends Error {
+  readonly name = "SandboxExecReadinessError";
+
+  constructor(
+    public readonly backend: string,
+    public readonly code: "exec_probe_unavailable" | "exec_probe_timeout" | "exec_probe_failed",
+    public readonly timeoutMs: number,
+    public readonly exitCode: number | null = null,
+  ) {
+    super(
+      code === "exec_probe_timeout"
+        ? `sandbox creation timed out waiting for ${backend} command readiness after ${timeoutMs}ms`
+        : code === "exec_probe_unavailable"
+          ? `${backend} sandbox session does not expose an exec readiness probe`
+          : exitCode === null
+            ? `${backend} sandbox exec readiness probe did not return a command exit code`
+            : `${backend} sandbox exec readiness probe failed with exit code ${exitCode}`,
+    );
+  }
+}
+
+function sandboxExecProbeExitCode(result: unknown): number | null {
+  if (typeof result === "string") {
+    const match = result.match(/Process exited with code (-?\d+)/);
+    return match ? Number(match[1]) : null;
+  }
+  if (!result || typeof result !== "object") return null;
+  const candidate = result as {
+    exitCode?: unknown;
+    exit_code?: unknown;
+    code?: unknown;
+    status?: unknown;
+  };
+  for (const value of [candidate.exitCode, candidate.exit_code, candidate.code, candidate.status]) {
+    if (typeof value === "number") return value;
+  }
+  return null;
+}
+
+function sandboxExecProbeStillRunning(result: unknown): boolean {
+  if (typeof result === "string") return /Process running with session ID \d+/u.test(result);
+  if (!result || typeof result !== "object") return false;
+  const candidate = result as { sessionId?: unknown; session_id?: unknown };
+  return typeof candidate.sessionId === "number" || typeof candidate.session_id === "number";
+}
+
+/** A provider handle is not workspace readiness. Modal can return a handle
+ * before its command router accepts exec, so every create path must pass this
+ * bounded probe before atomically publishing the lease warm/ready. */
+export async function verifySandboxExecReadiness(
+  established: EstablishedSandboxSession,
+  timeoutMs = 15_000,
+): Promise<void> {
+  if (established.backendId !== "modal") return;
+  const session = established.session as {
+    exec?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+    execCommand?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+  };
+  const run = session.exec ?? session.execCommand;
+  if (!run) {
+    throw new SandboxExecReadinessError(established.backendId, "exec_probe_unavailable", timeoutMs);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      run.call(session, {
+        cmd: "true",
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 1_000,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new SandboxExecReadinessError(established.backendId, "exec_probe_timeout", timeoutMs),
+            ),
+          timeoutMs,
+        );
+        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
+    const exitCode = sandboxExecProbeExitCode(result);
+    if (sandboxExecProbeStillRunning(result) || exitCode !== 0) {
+      throw new SandboxExecReadinessError(
+        established.backendId,
+        "exec_probe_failed",
+        timeoutMs,
+        exitCode,
+      );
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export type SandboxCreatedCallback = (established: EstablishedSandboxSession) => Promise<void>;
 
@@ -792,64 +882,6 @@ type ResumeCapableClient = {
  * an unrecognized error is treated as "not NotFound" (propagate), because a
  * false-positive recreate is the dangerous direction (double-spawn).
  */
-export function isProviderSandboxNotFoundError(backendId: string, error: unknown): boolean {
-  // selfhosted: agent-offline is NEVER a provider NotFound (the user's machine is
-  // not recreatable — a false NotFound would cold-create a RIVAL box). The
-  // selfhosted discriminator ALWAYS returns false; short-circuit so no goneMarker
-  // string match below can ever flip a selfhosted agent-offline error to true.
-  if (backendId === "selfhosted") {
-    return isSelfhostedProviderNotFoundError(error);
-  }
-  if (!error) {
-    return false;
-  }
-  const status =
-    (error as { status?: unknown; statusCode?: unknown }).status ??
-    (error as { statusCode?: unknown }).statusCode;
-  if (status === 404) {
-    return true;
-  }
-  const name =
-    typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
-  const code =
-    typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : String((error as { message?: unknown })?.message ?? "");
-  const haystack = `${name} ${code} ${message}`.toLowerCase();
-  // Provider-agnostic "gone" markers (Modal: "sandbox … not found" / terminated;
-  // e2b/daytona/runloop: "not found" / "no longer running" / "terminated" /
-  // "does not exist"). Kept broad-but-conservative: it matches box-gone phrasing
-  // and never matches generic 5xx/transport errors.
-  const goneMarkers = [
-    "not found",
-    "no longer running",
-    "no longer exists",
-    "does not exist",
-    "doesn't exist",
-    "has been terminated",
-    "was terminated",
-    "is terminated",
-    "sandbox terminated",
-    "notfound",
-    "sandbox_not_found",
-    "box no longer running",
-  ];
-  // A "running"/"already exists" resume-conflict is explicitly NOT NotFound — the
-  // box is alive; recreating would double-spawn.
-  if (
-    haystack.includes("already running") ||
-    haystack.includes("still running") ||
-    haystack.includes("already exists")
-  ) {
-    return false;
-  }
-  return goneMarkers.some((marker) => haystack.includes(marker));
-}
-
 function readInstanceId(session: unknown): string {
   const state = (session as { state?: Record<string, unknown> }).state ?? {};
   const candidate =
@@ -867,7 +899,9 @@ async function terminateCreatedSandbox(
   session: unknown,
   sessionState: unknown,
 ): Promise<void> {
-  const clientWithDelete = client as { delete?: (state: unknown) => Promise<unknown> };
+  const clientWithDelete = client as {
+    delete?: (state: unknown) => Promise<unknown>;
+  };
   if (typeof clientWithDelete.delete === "function" && sessionState !== undefined) {
     try {
       await clientWithDelete.delete(sessionState);
@@ -910,7 +944,18 @@ export async function establishSandboxSessionFromEnvelope(
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
+    /** Called after archive hydration but immediately before the exact workspace
+     * fingerprint probe. Lease-aware callers persist `verifying` here so a box
+     * is never observable as ready while verification is in flight. */
+    onWorkspaceRestoreVerifying?: (descriptor: WorkspaceArchiveDescriptor) => Promise<void>;
     metrics?: RuntimeMetricsHooks;
+    /** Isolated conformance-test/embedding seam. Ordinary runtime callers use
+     * the validated provider registry. */
+    clientFactory?: (
+      backend: SandboxBackend,
+      settings: Settings,
+      environment: Record<string, string>,
+    ) => unknown;
   },
 ): Promise<EstablishedSandboxSession> {
   const envelopeBackend =
@@ -918,9 +963,11 @@ export async function establishSandboxSessionFromEnvelope(
   const backend =
     opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend);
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
-  const client = createSandboxClientForBackend(backend, settings, environment) as
-    | ResumeCapableClient
-    | undefined;
+  const client = (opts.clientFactory ?? createSandboxClientForBackend)(
+    backend,
+    settings,
+    environment,
+  ) as ResumeCapableClient | undefined;
   if (!client) {
     throw new SandboxConfigError(
       backend,
@@ -958,19 +1005,35 @@ export async function establishSandboxSessionFromEnvelope(
   //   - COLD lease re-warm (confirmDrainCold preserved a MINIMAL archive-only
   //     envelope `{ sessionState: { workspaceArchive } }` — NO sandboxId, so the
   //     warm-reattach branch must NOT try resume()-by-id; it cold-creates+hydrates).
-  const workspaceArchives = readWorkspaceArchivePairFromEnvelopeSessionState(envelopeSessionState);
-  const workspaceArchive = workspaceArchives.current;
+  const archiveState =
+    envelopeSessionState && typeof envelopeSessionState === "object"
+      ? (envelopeSessionState as {
+          workspaceArchive?: unknown;
+          workspaceArchiveMeta?: unknown;
+        })
+      : undefined;
+  // Exactly one selected revision is restored. A present archive without its
+  // revision/hash/tree descriptor is not recoverable truth and fails before any
+  // provider create. `workspaceArchivePrev` is retained for explicit future
+  // operator selection, never silently substituted in this attempt.
+  const workspaceArchiveBase64 = archiveState?.workspaceArchive;
+  const workspaceArchiveMetadata = archiveState?.workspaceArchiveMeta;
 
   // create() a FRESH box, THEN replay the persisted /workspace snapshot via
   // session.hydrateWorkspace(archive) when one rode the envelope. hydrateWorkspace
   // decodes the snapshot-ref and swaps the box for one booted from the snapshot
-  // image (restoreSnapshotFilesystem); no archive -> a clean empty box. This is the
-  // SOLE archive-replay seam, shared by the NotFound warm-reattach path AND the
-  // cold-restore branch (b) below.
-  const coldRestore = async (
-    resumeFallbackState?: unknown,
-    skipWorkspaceHydrate = false,
-  ): Promise<EstablishedSandboxSession> => {
+  // image (restoreSnapshotFilesystem). No archive is valid only for a genuinely
+  // new workspace; recovery callers select and verify an exact archive before
+  // entering this seam. This is the SOLE archive-replay path, shared by the
+  // NotFound warm-reattach path and the cold-restore branch (b) below.
+  const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
+    // Parse/verify lazily: a warm resume-by-id does not consume its retained
+    // archive, so a legacy live box remains resumable. Creation/restoration is
+    // the boundary that requires complete durable metadata.
+    const workspaceArchive: VerifiedWorkspaceArchive | null = readVerifiedWorkspaceArchive(
+      workspaceArchiveBase64,
+      workspaceArchiveMetadata,
+    );
     const createStarted = Date.now();
     let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
     try {
@@ -996,73 +1059,83 @@ export async function establishSandboxSessionFromEnvelope(
         throw createCallbackError;
       }
     }
-    // Whether an archive was ACTUALLY applied to /workspace — drives `origin`
-    // (and the worker's sandbox.box.created `hydrated` field). A clean-box
-    // fallback, a backend without hydrateWorkspace, or an all-archives-failed
-    // path leaves this false so we never report `hydrated: "archive"` for an
-    // empty workspace.
     let hydrationApplied = false;
-    if (!skipWorkspaceHydrate && (workspaceArchive || workspaceArchives.previous)) {
+    if (workspaceArchive) {
       const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
         .hydrateWorkspace;
-      if (typeof hydrate === "function") {
-        let hydrated = false;
-        for (const candidate of [
-          { archive: workspaceArchive, label: "current" },
-          { archive: workspaceArchives.previous, label: "previous" },
-        ]) {
-          if (!candidate.archive) {
-            continue;
-          }
+      if (typeof hydrate !== "function") {
+        await terminateCreatedSandbox(client, restored, restoredState);
+        throw new WorkspaceArchiveIntegrityError(
+          "archive_hydration_failed",
+          `sandbox backend ${client.backendId} cannot hydrate selected archive revision ${workspaceArchive.descriptor.revision}`,
+        );
+      }
+      try {
+        // hydrateWorkspace may internally replace the underlying box.
+        await hydrate.call(restored, workspaceArchive.bytes);
+      } catch (error) {
+        await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+        if (error instanceof WorkspaceArchiveIntegrityError) throw error;
+        throw new WorkspaceArchiveIntegrityError(
+          "archive_hydration_failed",
+          `failed to hydrate selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
+          { retryable: true },
+        );
+      }
+      // hydrateWorkspace may replace the provider box (Modal's native snapshot
+      // restore does this). Attribute the newly-active identity immediately,
+      // before restore-state marking, fingerprint verification, or any caller
+      // can publish the box warm. The callback is the durable lease/tagging
+      // boundary; if it cannot persist the replacement, the caller fails closed
+      // and this exact replacement is terminated below.
+      const hydratedState = (restored as { state?: unknown }).state;
+      const hydratedInstanceId = readInstanceId(restored);
+      if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
+        established = {
+          client,
+          session: restored,
+          sessionState: hydratedState ?? resumeFallbackState,
+          instanceId: hydratedInstanceId,
+          backendId: client.backendId,
+        };
+        if (opts.onSandboxCreated) {
           try {
-            // hydrateWorkspace may internally REPLACE the underlying box
-            // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
-            // the placeholder), so the instanceId must be re-read AFTER.
-            await hydrate.call(restored, candidate.archive);
-            console.info(
-              `[sandbox] cold-restore hydrated workspace from ${candidate.label} archive`,
-            );
-            hydrated = true;
-            break;
-          } catch (hydrateError) {
-            console.warn(
-              `[sandbox] cold-restore failed to hydrate workspace from ${candidate.label} archive${
-                candidate.label === "current" && workspaceArchives.previous
-                  ? "; trying previous archive"
-                  : ""
-              }`,
-              hydrateError,
-            );
-          }
-        }
-        if (!hydrated) {
-          // If both retained archives are unusable, drop the placeholder and
-          // fall through to the same clean-box behavior as an envelope with no
-          // archive. Restore failure is fail-open; it must not strand a turn.
-          await terminateCreatedSandbox(client, restored, restoredState);
-          return await coldRestore(resumeFallbackState, true);
-        }
-        hydrationApplied = true;
-        const hydratedState = (restored as { state?: unknown }).state;
-        const hydratedInstanceId = readInstanceId(restored);
-        if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
-          established = {
-            client,
-            session: restored,
-            sessionState: hydratedState ?? resumeFallbackState,
-            instanceId: hydratedInstanceId,
-            backendId: client.backendId,
-          };
-          if (opts.onSandboxCreated) {
-            try {
-              await opts.onSandboxCreated(established);
-            } catch (createCallbackError) {
-              await terminateCreatedSandbox(client, restored, hydratedState);
-              throw createCallbackError;
-            }
+            await opts.onSandboxCreated(established);
+          } catch (createCallbackError) {
+            await terminateCreatedSandbox(client, restored, hydratedState);
+            throw createCallbackError;
           }
         }
       }
+      if (opts.onWorkspaceRestoreVerifying) {
+        try {
+          await opts.onWorkspaceRestoreVerifying(workspaceArchive.descriptor);
+        } catch (error) {
+          await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+          throw error;
+        }
+      }
+      // Native provider snapshots are restored by their exact opaque receipt.
+      // OpenGeni verifies receipt identity/hash before hydration, but it must not
+      // impose a tar/inode equivalence contract on the provider's filesystem
+      // image. Tar archives remain content-verified after hydration.
+      if (workspaceArchive.kind === "tar") {
+        try {
+          await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+        } catch (error) {
+          await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+          if (error instanceof WorkspaceArchiveIntegrityError) throw error;
+          throw new WorkspaceArchiveIntegrityError(
+            "workspace_fingerprint_unavailable",
+            `failed to verify selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
+            { retryable: true },
+          );
+        }
+      }
+      hydrationApplied = true;
+      console.info(
+        `[sandbox] cold-restore applied ${workspaceArchive.kind === "provider_snapshot" ? "native snapshot receipt" : "verified tar archive"} revision ${workspaceArchive.descriptor.revision}`,
+      );
     }
     restoredState = (restored as { state?: unknown }).state;
     return {
@@ -1072,6 +1145,7 @@ export async function establishSandboxSessionFromEnvelope(
       instanceId: readInstanceId(restored),
       backendId: client.backendId,
       origin: hydrationApplied ? ("restored" as const) : ("created" as const),
+      ...(workspaceArchive ? { restoredArchive: workspaceArchive.descriptor } : {}),
     };
   };
 
@@ -1228,11 +1302,13 @@ export async function serializeEstablishedSandboxEnvelope(
     // workspaceReady }`. So the FLAT serialized state must be nested under
     // `providerState` (and manifest/ports lifted), or sandboxId is dropped on the
     // round-trip and resume() throws "requires a persisted sandboxId". We pull
-    // manifest/exposedPorts up but leave them in providerState too (harmless; the
-    // deserialize spreads providerState first, then overlays manifest/ports).
+    // manifest/native endpoint records up but leave them in providerState too
+    // (harmless; the deserialize spreads providerState first, then overlays
+    // manifest/ports). configuredExposedPorts is provider configuration/state,
+    // not the SDK's port-keyed endpoint record, so it must never be lifted.
     const flat = serialized as Record<string, unknown>;
     const manifest = flat.manifest;
-    const exposedPorts = flat.configuredExposedPorts ?? flat.exposedPorts;
+    const exposedPorts = runStateExposedPortsRecord(flat.exposedPorts);
     const sessionState: Record<string, unknown> = {
       providerState: flat,
       ...(manifest !== undefined ? { manifest } : {}),
@@ -1245,4 +1321,128 @@ export async function serializeEstablishedSandboxEnvelope(
     // for this box (it stays resumable-by-instance only via the next cold path).
     return null;
   }
+}
+
+const PROVIDER_IDENTITY_FIELDS = [
+  "sandboxId",
+  "instanceId",
+  "id",
+  "hostId",
+  "containerId",
+  "workspaceRootPath",
+  "agentId",
+] as const;
+
+/**
+ * Whether a replacement envelope contains a provider-resumable identity. An
+ * archive-only envelope is intentionally valid recovery metadata, but it is
+ * never proof that the newly-created provider box can be resumed or attached.
+ */
+export function hasPersistableSandboxProviderIdentity(
+  envelope: Record<string, unknown> | null | undefined,
+): envelope is Record<string, unknown> {
+  const sessionState =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  const providerState =
+    sessionState?.providerState && typeof sessionState.providerState === "object"
+      ? (sessionState.providerState as Record<string, unknown>)
+      : null;
+  return Boolean(
+    providerState &&
+    PROVIDER_IDENTITY_FIELDS.some(
+      (field) => typeof providerState[field] === "string" && providerState[field].length > 0,
+    ),
+  );
+}
+
+/** A replacement provider may not be published warm without a resumable
+ * identity. Archive-only state is retained only when the caller rolls back to
+ * cold and needs the verified workspace bytes for the next attempt. */
+export class SandboxReplacementProviderStateError extends Error {
+  readonly code = "replacement_provider_state_unpersistable" as const;
+
+  constructor(public readonly backend: string) {
+    super(
+      `sandbox backend "${backend}" replacement provider state could not be serialized; refusing to publish an attachable lease`,
+    );
+    this.name = "SandboxReplacementProviderStateError";
+  }
+}
+
+export function requirePersistableReplacementSandboxEnvelope(
+  envelope: Record<string, unknown> | null,
+  backend: string,
+): Record<string, unknown> {
+  if (!hasPersistableSandboxProviderIdentity(envelope)) {
+    throw new SandboxReplacementProviderStateError(backend);
+  }
+  return envelope;
+}
+
+const DURABLE_WORKSPACE_ARCHIVE_FIELDS = [
+  "workspaceArchive",
+  "workspaceArchiveMeta",
+  "workspaceArchivePrev",
+  "workspaceArchivePrevMeta",
+  "workspaceArchiveAt",
+] as const;
+
+function durableWorkspaceArchiveFields(
+  envelope: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const sessionState =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (
+    !sessionState ||
+    typeof sessionState.workspaceArchive !== "string" ||
+    sessionState.workspaceArchive.length === 0
+  ) {
+    return null;
+  }
+  const fields: Record<string, unknown> = {};
+  for (const key of DURABLE_WORKSPACE_ARCHIVE_FIELDS) {
+    if (sessionState[key] !== undefined && sessionState[key] !== null) {
+      fields[key] = sessionState[key];
+    }
+  }
+  return fields;
+}
+
+/**
+ * Build the only resume envelope that may be published for a newly-created
+ * replacement sandbox. Historical state contributes durable archive pointers
+ * only; it can never substitute for serialization of the replacement's provider
+ * identity. If replacement serialization is unavailable or fails, publication
+ * keeps an archive-only envelope (when one exists) or null. The new instance id
+ * remains separately fenced on the lease, while later attach/resume fails closed
+ * rather than targeting the dead provider that initiated rematerialization.
+ */
+export async function serializeReplacementSandboxEnvelope(
+  established: EstablishedSandboxSession,
+  archiveSource: Record<string, unknown> | null,
+): Promise<Record<string, unknown> | null> {
+  const serialized = await serializeEstablishedSandboxEnvelope(established);
+  const archiveFields = durableWorkspaceArchiveFields(archiveSource);
+  if (!serialized && !archiveFields) {
+    return null;
+  }
+  const serializedSessionState =
+    serialized?.sessionState && typeof serialized.sessionState === "object"
+      ? (serialized.sessionState as Record<string, unknown>)
+      : {};
+  return {
+    ...(serialized ?? {}),
+    // Never inherit a historical backend marker when the replacement could not
+    // serialize. The separately-persisted resume_backend_id and this envelope
+    // must both describe the replacement.
+    backendId: established.backendId,
+    sessionState: {
+      ...serializedSessionState,
+      ...(archiveFields ?? {}),
+    },
+  };
 }

@@ -65,3 +65,18 @@ export function parseExecBannerExitCode(raw: string): number | null {
   const banner = parseExecResponseBanner(raw);
   return banner.kind === "exited" ? banner.exitCode : null;
 }
+
+// Detect the Modal "the exec-session you're writing to no longer exists" fact.
+// This is process-lifetime authority, so classify only the complete known
+// banner (or its bare provider form) carrying the exact tracked numeric id.
+export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
+  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
+  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
+  // JavaScript's `$` also matches immediately before one final line terminator.
+  // Requiring the regex match to consume the entire string keeps even that
+  // otherwise-special case fail-closed.
+  if (!match || match[0] !== out) return false;
+  // String equality is intentional: parseInt would normalize malformed facts
+  // such as `01` and can round an out-of-range integer into another identity.
+  return match[1] === String(execSessionId);
+}

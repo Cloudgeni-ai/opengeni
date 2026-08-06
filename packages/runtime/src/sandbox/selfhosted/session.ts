@@ -115,6 +115,43 @@ function toMachinePath(p: string | undefined, workingDir: string): string {
   return base ? `${base}/${p}` : p;
 }
 
+/**
+ * Builds the exact argv for an explicitly selected shell.
+ *
+ * The self-hosted wire already supports direct argv (`ExecRequest.shell=false`),
+ * which is the compatibility-safe way to honor the SDK shell tool's `shell` and
+ * `login` arguments: every enrolled agent version understands this shape. Sending
+ * `{ command: [cmd], shell: true }` instead delegates shell selection to the
+ * machine's ambient `$SHELL`/`ComSpec` and silently discards the caller's choice.
+ *
+ * `login` maps to profile/login semantics where the shell family exposes them.
+ * Windows `cmd.exe` has no login-shell mode. PowerShell profile loading is the
+ * closest equivalent, so non-login calls use `-NoProfile` while login calls do
+ * not. Other shells use the common POSIX `-l -c` / `-c` contract.
+ */
+function explicitShellArgv(shell: string, command: string, login: boolean): string[] {
+  const leaf = shell.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? "";
+  if (leaf === "cmd" || leaf === "cmd.exe") {
+    return [shell, "/D", "/S", "/C", command];
+  }
+  if (
+    leaf === "powershell" ||
+    leaf === "powershell.exe" ||
+    leaf === "pwsh" ||
+    leaf === "pwsh.exe"
+  ) {
+    return [
+      shell,
+      "-NoLogo",
+      ...(!login ? ["-NoProfile"] : []),
+      "-NonInteractive",
+      "-Command",
+      command,
+    ];
+  }
+  return [shell, ...(login ? ["-l"] : []), "-c", command];
+}
+
 // ── The agent-turn provided-session contract (@openai/agents-core) ──────────
 // When the routing proxy resolves a selfhosted ACTIVE backend, the @openai/agents
 // agent loop binds its filesystem/shell/skills capabilities to THIS session and
@@ -174,32 +211,6 @@ const SELFHOSTED_EXEC_REPLY_GRACE_MS = 5_000;
 /** nats.js ultimately schedules a JS timer; stay inside the signed 32-bit timer
  *  range while also fitting the reply grace. */
 const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRACE_MS;
-
-/**
- * The ONLY manifest-environment keys exported into a selfhosted machine's exec
- * shell. The manifest env is otherwise NOT consumed by selfhosted exec — the
- * machine owns its own environment, and pushing HOME, GIT_ vars, and the like
- * onto a real computer would clobber it. The toolspace pointers are the exception:
- * `ogtool` (and the token-seed hook) need the non-secret programmatic-calling URL
- * and the token-FILE PATH to reach the tool surface. The token VALUE never rides
- * here — it is seeded to that file off-manifest over the same exec channel.
- */
-const SELFHOSTED_EXEC_ENV_ALLOWLIST = [
-  "OPENGENI_TOOLSPACE_URL",
-  "OPENGENI_TOOLSPACE_TOKEN_FILE",
-  "OPENGENI_OGTOOL_PACKAGE_SPEC",
-] as const;
-
-function selfhostedExecEnv(environment: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const key of SELFHOSTED_EXEC_ENV_ALLOWLIST) {
-    const value = environment[key];
-    if (value) {
-      env[key] = value;
-    }
-  }
-  return env;
-}
 
 /** The relay-URL shape config the session needs to build a stream endpoint. M8b
  *  wires the real relay deployment behind THIS seam so `buildStreamUrl` works
@@ -276,10 +287,9 @@ export interface SelfhostedSessionDeps {
    * session delta; `validateNoEnvironmentDelta` throws "Live sandbox sessions cannot
    * change manifest environment variables" on ANY env mismatch. So `state.manifest`'s
    * `environment` MUST EQUAL the turn's environment for the delta to be empty. The
-   * selfhosted exec routes over NATS and does NOT consume this env wholesale (the
-   * machine owns its own shell), EXCEPT the allowlisted toolspace pointers it
-   * exports per exec so `ogtool` works — see SELFHOSTED_EXEC_ENV_ALLOWLIST. The
-   * manifest carries the full env for parity. Omitted → `{}` (the negotiation-only
+   * selfhosted exec routes over NATS and does NOT consume this env (the machine
+   * owns its own shell and credentials). The manifest carries the full env only
+   * for provided-session parity. Omitted → `{}` (the negotiation-only
    * / test path, which never applies a turn manifest, so there is no delta).
    */
   environment?: Record<string, string>;
@@ -569,10 +579,11 @@ export class SelfhostedSession {
     }
   }
 
-  /** The clamped exec process deadline (ms): the exec-specific budget when threaded,
-   *  else the control timeout. Shared by `exec()` (the wire deadline) and
-   *  `execCommand()` (the timed-out hint's "N-second limit"), so the two never drift. */
-  private execDeadlineMs(): number {
+  /** The effective clamped exec process deadline (ms): the exec-specific budget
+   *  when threaded, else the control timeout. Public so adapters that project a
+   *  structured command receipt can report the exact deadline the agent enforces
+   *  instead of repeating (and potentially drifting from) this normalization. */
+  get effectiveExecDeadlineMs(): number {
     // exec gets its OWN (much larger) deadline distinct from the short control
     // timeout — a real command routinely outlives 30s. Falls back to `timeoutMs`
     // when no exec deadline is threaded (unchanged for those callers).
@@ -587,22 +598,24 @@ export class SelfhostedSession {
     // Keep the process deadline inside the request/reply deadline. Previously the
     // wire carried timeoutMs=0 (unbounded) while the caller stopped waiting after
     // ~30s, leaving accepted work invisible and able to starve control liveness.
-    const executionTimeoutMs = this.execDeadlineMs();
+    const executionTimeoutMs = this.effectiveExecDeadlineMs;
+    const requestedShell = args.shell?.trim();
     const execReq: ExecRequest = {
-      // The agent does NOT shell-interpret unless `shell` — Channel-A passes a
-      // single shell command string, so run it through the platform shell.
-      command: [args.cmd],
-      shell: true,
+      // An explicit shell is encoded as direct argv so every agent version honors
+      // it. With no explicit shell, preserve the existing machine-owned default
+      // shell behavior byte-for-byte.
+      command: requestedShell
+        ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
+        : [args.cmd],
+      shell: !requestedShell,
       // Rewrite a virtual-root cwd ("/workspace[/…]") onto the machine's frame —
       // an absolute "/workspace" would ENOENT on a real machine (see
       // SELFHOSTED_VIRTUAL_ROOT). Empty → the session workingDir (itself "" by
       // default ⇒ the agent runs in its workspace_root).
       cwd: toMachinePath(args.workdir, this.workingDir),
-      // The machine owns its own shell environment; the manifest env is NOT
-      // exported here. The ONE exception is the non-secret toolspace pointers
-      // (URL + token-file path), so a programmatic `ogtool` call and the token-
-      // seed hook can find the tool surface. See SELFHOSTED_EXEC_ENV_ALLOWLIST.
-      env: selfhostedExecEnv(this.state.environment),
+      // The machine owns its own shell environment and credentials. Platform
+      // manifest values never cross this boundary.
+      env: {},
       stdin: new Uint8Array(0),
       timeoutMs: executionTimeoutMs,
     };
@@ -733,10 +746,10 @@ export class SelfhostedSession {
    *  after a newline when there is partial output (a timed-out result is already not
    *  cleanly parseable — silence is worse than an explanatory suffix). The structured
    *  `exec()` result is left untouched for the Channel-A parsers. */
-  async execCommand(args: { cmd: string; workdir?: string; runAs?: string }): Promise<string> {
-    const result = await this.exec({ cmd: args.cmd, workdir: args.workdir, runAs: args.runAs });
+  async execCommand(args: SelfhostedExecArgs): Promise<string> {
+    const result = await this.exec(args);
     if (result.timedOut) {
-      const hint = execDeadlineHint(Math.round(this.execDeadlineMs() / 1000));
+      const hint = execDeadlineHint(Math.round(this.effectiveExecDeadlineMs / 1000));
       return result.output ? `${result.output}\n${hint}` : hint;
     }
     return result.output;
@@ -806,8 +819,9 @@ export class SelfhostedSession {
    *  filesystem and is prepared by the agent itself, so there is nothing to stage.
    *  Present (not absent) so the SDK's provided-session manifest apply path — which
    *  requires `applyManifest()` OR `materializeEntry()` when the agent declares
-   *  entries — is satisfied without error. The selfhosted manifest declares no
-   *  entries, so in practice this is never invoked with a real entry. */
+   *  entries — is satisfied without error. A session swapped from a managed
+   *  sandbox can still present managed-only manifest entries here; they remain
+   *  intentionally unstaged on the user-owned machine. */
   async materializeEntry(_args: { path: string; entry: unknown; runAs?: string }): Promise<void> {
     return;
   }

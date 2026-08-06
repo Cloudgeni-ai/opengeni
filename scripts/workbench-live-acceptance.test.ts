@@ -1,20 +1,507 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
+  axeManualContrastSelector,
   assertFixtureCapture,
+  assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
   assertAcceptancePrincipalScopes,
+  assertChangedFileLabelsContainRepositoryRoots,
+  assertChangesDefaultVisible,
+  assertRepositoryChangesVisible,
+  captureApiRegionalProbeEnvironment,
   controlCancellationDurationMs,
   fixturePrompt,
+  isExpectedBrowserCancellation,
+  maskKnownPublicEvidenceValues,
+  openWorkspaceIfCollapsed,
   parseCookieHeader,
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
-  sanitizeDiagnostic,
+  runCaptureApiRegionalProbe,
+  selectTreeFile,
+  validateCaptureApiRegionalProbeResult,
+  waitForSandboxLiveness,
+  type CaptureApiRegionalProbeRequest,
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("admits only concrete single-selector Axe targets to the manual contrast audit", () => {
+    expect(axeManualContrastSelector(['button[class="bg-primary"]'])).toBe(
+      'button[class="bg-primary"]',
+    );
+    expect(axeManualContrastSelector(["  div[data-description]  "])).toBe("div[data-description]");
+    expect(axeManualContrastSelector([])).toBeNull();
+    expect(axeManualContrastSelector([".host", ".shadow-child"])).toBeNull();
+    expect(axeManualContrastSelector([""])).toBeNull();
+    expect(axeManualContrastSelector(".bg-primary")).toBeNull();
+  });
+
+  test("ignores only expected browser-cancelled background reads", () => {
+    const path = "/v1/workspaces/workspace/sessions/session/workspace/capture/file";
+    expect(isExpectedBrowserCancellation(path, "net::ERR_ABORTED")).toBe(true);
+    expect(
+      isExpectedBrowserCancellation("/assets/analytics-consent-aB_09.js", "net::ERR_ABORTED"),
+    ).toBe(true);
+    expect(isExpectedBrowserCancellation("/v1/auth/get-session", "net::ERR_ABORTED")).toBe(true);
+    expect(isExpectedBrowserCancellation(path, "net::ERR_FAILED")).toBe(false);
+    expect(isExpectedBrowserCancellation("/assets/index-aB_09.js", "net::ERR_ABORTED")).toBe(false);
+    expect(isExpectedBrowserCancellation("/v1/config/client", "net::ERR_ABORTED")).toBe(false);
+  });
+
+  test("keeps an open workspace open when Files hides the Changes panel", async () => {
+    const selectors: string[] = [];
+    let lookedUpCollapseControl = false;
+    const page = {
+      locator(selector: string) {
+        selectors.push(selector);
+        return { isVisible: async () => true };
+      },
+      getByRole() {
+        lookedUpCollapseControl = true;
+        throw new Error("should not look up a reopen control");
+      },
+    } as never;
+
+    await openWorkspaceIfCollapsed(page);
+
+    expect(selectors).toEqual(["[data-workspace-surface]"]);
+    expect(lookedUpCollapseControl).toBe(false);
+  });
+
+  test("observes the Changes default before requiring its layout to be visible", async () => {
+    const calls: string[] = [];
+    const page = {
+      getByRole() {
+        return {
+          waitFor: async () => calls.push("tab.wait"),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[role="tab"][aria-selected="true"]') {
+          return {
+            filter: () => ({
+              waitFor: async () => calls.push("selected-changes.wait"),
+            }),
+          };
+        }
+        expect(selector).toBe("[data-workbench-changes-layout]");
+        return {
+          waitFor: async (options: { state?: string; timeout?: number }) => {
+            expect(options).toEqual({ state: "visible", timeout: 20_000 });
+            calls.push("layout.wait");
+          },
+        };
+      },
+    } as never;
+
+    await assertChangesDefaultVisible(page);
+
+    expect(calls).toEqual(["tab.wait", "selected-changes.wait", "layout.wait"]);
+  });
+
+  test("keeps an expanded file-tree directory open when selecting another file", async () => {
+    const clicks: string[] = [];
+    const directoryButton = { click: async () => clicks.push("directory") };
+    const fileButton = { click: async () => clicks.push("file") };
+    const directoryItem = {
+      isVisible: async () => true,
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-expanded");
+        return "true";
+      },
+      getByRole: () => ({ first: () => directoryButton }),
+    };
+    const fileItem = {
+      isVisible: async () => true,
+      getByRole: () => fileButton,
+    };
+    const page = {
+      getByRole(role: string) {
+        expect(role).toBe("treeitem");
+        return {
+          filter({ hasText }: { hasText: string }) {
+            return { first: () => (hasText === "api" ? directoryItem : fileItem) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "base.txt");
+
+    expect(clicks).toEqual(["file"]);
+  });
+
+  test("selects an off-screen virtualized file through the tree keyboard contract", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    const rows = ["api", "base.txt", "notes.txt", "server.ts"];
+    const directoryItem = {
+      isVisible: async () => true,
+      getAttribute: async () => "true",
+      getByRole: () => ({ first: () => ({ click: async () => {} }) }),
+    };
+    const fileItem = {
+      isVisible: async () => false,
+    };
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter({ hasText }: { hasText: string }) {
+            return { first: () => (hasText === "api" ? directoryItem : fileItem) };
+          },
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows[index] === "api" ? "true" : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(presses).toEqual(["Home", "ArrowDown", "ArrowDown", "ArrowDown", "Enter"]);
+  });
+
+  test("selects a file when its virtualized root directory is initially off-screen", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let expanded = false;
+    const rows = ["README.md", "api", "base.txt"];
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowRight" && rows[active] === "api") expanded = true;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "base.txt" ? "2" : "1";
+            if (name === "aria-expanded") {
+              return rows[index] === "api" && expanded ? "true" : "false";
+            }
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "base.txt");
+
+    expect(presses).toEqual(["Home", "ArrowDown", "ArrowRight", "ArrowDown", "Enter"]);
+  });
+
+  test("waits for a cold virtualized tree to expose an active descendant", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let hydrated = false;
+    let readinessWaits = 0;
+    const rows = ["api", "server.ts"];
+    const tree = {
+      waitFor: async (options: { state?: string; timeout?: number }) => {
+        expect(options).toEqual({ state: "visible", timeout: 20_000 });
+      },
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home" && hydrated) active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return hydrated ? `tree-item-${active}` : null;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[role="tree"][aria-activedescendant]:not([aria-activedescendant=""])') {
+          return {
+            first: () => ({
+              waitFor: async (options: { state?: string; timeout?: number }) => {
+                expect(options).toEqual({ state: "visible", timeout: 20_000 });
+                readinessWaits += 1;
+                hydrated = true;
+              },
+            }),
+          };
+        }
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows[index] === "api" ? "true" : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(readinessWaits).toBe(1);
+    expect(presses).toEqual(["Home", "Home", "ArrowDown", "Enter"]);
+  });
+
+  test("waits for an expanded lazy directory to finish hydrating its children", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    let expanded = false;
+    let busy = false;
+    let loaded = false;
+    let hydrationWaits = 0;
+    const rows = () => (loaded ? ["api", "server.ts"] : ["api"]);
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowRight") {
+          expanded = true;
+          busy = true;
+        }
+        if (key === "ArrowDown") active = Math.min(active + 1, rows().length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        if (selector === '[id="tree-item-0"][aria-expanded="true"]:not([aria-busy="true"])') {
+          return {
+            waitFor: async (options: { state?: string; timeout?: number }) => {
+              expect(options).toEqual({ state: "visible", timeout: 20_000 });
+              expect(expanded).toBe(true);
+              expect(busy).toBe(true);
+              hydrationWaits += 1;
+              busy = false;
+              loaded = true;
+            },
+          };
+        }
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows()[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return rows()[index] === "api" ? "1" : "2";
+            if (name === "aria-expanded") return rows()[index] === "api" ? String(expanded) : null;
+            if (name === "aria-busy") return rows()[index] === "api" ? String(busy) : null;
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows()[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "server.ts");
+
+    expect(hydrationWaits).toBe(1);
+    expect(presses).toEqual(["Home", "ArrowRight", "ArrowDown", "Enter"]);
+  });
+
+  test("reports bounded tree observations when a target directory is absent", async () => {
+    const presses: string[] = [];
+    let active = 0;
+    const rows = Array.from(
+      { length: 10 },
+      (_, index) => `root-${String(index).padStart(2, "0")}-${"x".repeat(120)}`,
+    );
+    const tree = {
+      waitFor: async () => {},
+      focus: async () => {},
+      press: async (key: string) => {
+        presses.push(key);
+        if (key === "Home") active = 0;
+        if (key === "ArrowDown") active = Math.min(active + 1, rows.length - 1);
+      },
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-activedescendant");
+        return `tree-item-${active}`;
+      },
+    };
+    const page = {
+      getByRole(role: string) {
+        if (role === "tree") return { first: () => tree };
+        expect(role).toBe("treeitem");
+        return {
+          filter: () => ({
+            first: () => ({
+              isVisible: async () => false,
+            }),
+          }),
+        };
+      },
+      locator(selector: string) {
+        const index = Number(selector.match(/tree-item-(\d+)/)?.[1]);
+        return {
+          waitFor: async () => {},
+          textContent: async () => rows[index] ?? null,
+          getAttribute: async (name: string) => {
+            if (name === "aria-level") return "1";
+            if (name === "aria-expanded") return "false";
+            throw new Error(`unexpected attribute ${name}`);
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            expect(options).toEqual({ exact: true });
+            return { count: async () => (rows[index] === text ? 1 : 0) };
+          },
+        };
+      },
+    } as never;
+
+    let failure: unknown;
+    try {
+      await selectTreeFile(page, "api", "server.ts");
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(
+      "file tree could not select api/server.ts: navigation stalled at the tree boundary",
+    );
+    expect((failure as Error).message).not.toContain("root-00");
+    expect((failure as Error).message).not.toContain("root-01");
+    expect((failure as Error).message).toContain('"label":"root-02-');
+    expect((failure as Error).message).toContain('"label":"root-09-');
+    expect((failure as Error).message).toContain('"level":1');
+    expect(presses).toEqual(["Home", ...Array.from({ length: 10 }, () => "ArrowDown")]);
+    expect((failure as Error).message.length).toBeLessThan(2_000);
+  });
+
+  test("accepts repository evidence from the compact changed-file picker", async () => {
+    const calls: string[] = [];
+    const page = {
+      locator(selector: string) {
+        if (selector === "[data-workbench-changes-layout]") {
+          return {
+            getAttribute: async () => "compact",
+          };
+        }
+        expect(selector).toBe("[data-compact-file-picker]");
+        return {
+          waitFor: async (options: { state?: string; timeout?: number }) => {
+            expect(options).toEqual({ state: "visible", timeout: 20_000 });
+            calls.push("picker.wait");
+          },
+          locator(optionSelector: string) {
+            expect(optionSelector).toBe("option");
+            return {
+              allTextContents: async () => ["M · server.ts — api/", "M · app.tsx — web/src/"],
+            };
+          },
+        };
+      },
+      getByText() {
+        throw new Error("compact mode must not require hidden repository group labels");
+      },
+    } as never;
+
+    await assertRepositoryChangesVisible(page, ["api", "web"]);
+
+    expect(calls).toEqual(["picker.wait"]);
+  });
+
+  test("fails closed when compact changes omit an expected repository", () => {
+    expect(() =>
+      assertChangedFileLabelsContainRepositoryRoots(["M · server.ts — api/"], ["api", "web"]),
+    ).toThrow("compact workbench changes omitted repository web");
+  });
+
   test("rejects the protected manually used production account", () => {
     const protectedEmails = parseProtectedEmails("manually-used@example.com");
     expect(() =>
@@ -65,27 +552,140 @@ describe("workbench live acceptance preflight", () => {
       "acceptance-001",
       "--model",
       "codex/model",
+      "--capture-api-region-probe-command",
+      "/tmp/capture-api-regional-probe.ts",
+      "--capture-api-region",
+      "northeurope",
+      "--capture-api-image",
+      `registry.example.com/opengeni-api:candidate-${"a".repeat(40)}@sha256:${"b".repeat(64)}`,
     ];
     expect(parseLiveAcceptanceArgs(base).repetitions).toBe(100);
     expect(() => parseLiveAcceptanceArgs([...base, "--repetitions", "99"])).toThrow(">= 100");
     expect(() => parseLiveAcceptanceArgs(base.with(1, "http://api.example.com"))).toThrow("HTTPS");
   });
 
-  test("cookie parser preserves signed values and diagnostics strip URL credentials", () => {
+  test("binds capture API samples to the exact regional deployment identity", () => {
+    const request = captureApiRegionalProbeRequest();
+    const result = captureApiRegionalProbeResult(request);
+    expect(validateCaptureApiRegionalProbeResult(result, request)).toEqual(result);
+    expect(result.captureTurnId).toBe(request.captureTurnId);
+    expect(() =>
+      validateCaptureApiRegionalProbeResult({ ...result, region: "westus" }, request),
+    ).toThrow("region mismatch");
+    expect(() =>
+      validateCaptureApiRegionalProbeResult(
+        { ...result, samplesMs: result.samplesMs.slice(1) },
+        request,
+      ),
+    ).toThrow("sample count mismatch");
+    expect(() =>
+      validateCaptureApiRegionalProbeResult({ ...result, extra: true }, request),
+    ).toThrow("fields are invalid");
+  });
+
+  test("passes the managed cookie only over probe stdin and masks it from public child failures", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "opengeni-regional-probe-"));
+    const success = resolve(directory, "success.ts");
+    const failure = resolve(directory, "failure.ts");
+    const request = captureApiRegionalProbeRequest();
+    try {
+      await writeFile(
+        success,
+        `const request = JSON.parse(await Bun.stdin.text());\n` +
+          `if (process.env.OPENGENI_ACCEPTANCE_SESSION_COOKIE) throw new Error("cookie leaked through environment");\n` +
+          `process.stdout.write(JSON.stringify({\n` +
+          `  schemaVersion: "opengeni/workbench-capture-api-regional-probe/v1",\n` +
+          `  apiOrigin: new URL(request.apiUrl).origin, environment: request.environment,\n` +
+          `  sourceSha: request.sourceSha, runId: request.runId, workspaceId: request.workspaceId,\n` +
+          `  sessionId: request.sessionId, captureRevision: request.captureRevision,\n` +
+          `  captureTurnId: request.captureTurnId, sampleCount: request.repetitions,\n` +
+          `  region: request.region, apiImage: request.apiImage, decodedBytes: 4096,\n` +
+          `  contentEncoding: "gzip", samplesMs: Array(request.repetitions).fill(12.5)\n` +
+          `}));\n`,
+      );
+      await writeFile(
+        failure,
+        `const request = JSON.parse(await Bun.stdin.text());\n` +
+          `console.error(request.cookieHeader);\nprocess.exit(7);\n`,
+      );
+
+      const result = await runCaptureApiRegionalProbe(success, request);
+      expect(result.sampleCount).toBe(request.repetitions);
+      expect(JSON.stringify(result)).not.toContain(request.cookieHeader);
+      const failureMessage = await runCaptureApiRegionalProbe(failure, request).then(
+        () => "unexpected success",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      expect(failureMessage).toContain("exit code 7: [masked]");
+      expect(failureMessage).not.toContain(request.cookieHeader);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("strips every acceptance secret from the regional probe environment", () => {
+    expect(
+      captureApiRegionalProbeEnvironment({
+        PATH: "/usr/bin",
+        KUBECONFIG: "/tmp/kubeconfig",
+        OPENGENI_CAPTURE_API_PROBE_NAMESPACE: "opengeni",
+        OPENGENI_ACCEPTANCE_SESSION_COOKIE: "secret-cookie",
+        OPENGENI_ACCEPTANCE_PRODUCT_TOKEN: "secret-token",
+        UNDEFINED_VALUE: undefined,
+      }),
+    ).toEqual({
+      PATH: "/usr/bin",
+      KUBECONFIG: "/tmp/kubeconfig",
+      OPENGENI_CAPTURE_API_PROBE_NAMESPACE: "opengeni",
+    });
+  });
+
+  test("cookie parsing stays exact and public evidence masks only exact known values", () => {
     expect(parseCookieHeader("better-auth.session_token=a.b%3D; second=x=y")).toEqual([
       { name: "better-auth.session_token", value: "a.b%3D" },
       { name: "second", value: "x=y" },
     ]);
-    const clean = sanitizeDiagnostic(
-      "GET https://blob.example/file?signature=secret&token=also-secret Bearer abc.def",
-    );
-    expect(clean).toBe("GET https://blob.example/file Bearer [redacted]");
+    expect(
+      maskKnownPublicEvidenceValues("cookie=known-value; unrelated=Bearer abc.def", [
+        "known-value",
+      ]),
+    ).toBe("cookie=[masked]; unrelated=Bearer abc.def");
   });
 
   test("control cancellation timing fails closed on invalid or impossible event order", () => {
     expect(controlCancellationDurationMs(1_000, 1_125)).toBe(125);
     expect(() => controlCancellationDurationMs(1_000, 999)).toThrow("before its control commit");
     expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
+  });
+
+  test("liveness polling bounds and retries a transient transport failure", async () => {
+    const signals: AbortSignal[] = [];
+    let calls = 0;
+    const client = {
+      async getStreamCapabilities(
+        _workspaceId: string,
+        _sessionId: string,
+        options: { signal?: AbortSignal } = {},
+      ) {
+        if (options.signal) signals.push(options.signal);
+        calls += 1;
+        if (calls === 1) throw new DOMException("request timed out", "TimeoutError");
+        return { liveness: "cold" } as never;
+      },
+    };
+
+    await waitForSandboxLiveness(
+      client,
+      "10000000-0000-4000-8000-000000000001",
+      "20000000-0000-4000-8000-000000000002",
+      new Set(["cold"]),
+      1_000,
+      0,
+      50,
+    );
+
+    expect(calls).toBe(2);
+    expect(signals).toHaveLength(2);
   });
 
   test("requires interactive scopes only from the dedicated canary principal", () => {
@@ -153,6 +753,21 @@ describe("workbench live acceptance preflight", () => {
       .find((repo) => repo.root === "web")!
       .status.filter((item) => item.path !== "renamed.txt");
     expect(() => assertFixtureCapture(manifest, marker)).toThrow("renamed fixture status drifted");
+  });
+
+  test("requires the exact fixture marker in a tool output", () => {
+    const marker = "OPENGENI_WORKBENCH_ACCEPTANCE_001";
+    const event = {
+      type: "agent.toolCall.output",
+      payload: { output: `setup complete\n${marker}\n` },
+    } as never;
+    expect(() => assertFixtureToolOutput([event], marker)).not.toThrow();
+    expect(() =>
+      assertFixtureToolOutput(
+        [{ type: "agent.message.completed", payload: { text: marker } } as never],
+        marker,
+      ),
+    ).toThrow("acceptance fixture command did not emit its exact marker");
   });
 });
 
@@ -365,4 +980,42 @@ function fixtureManifest(marker: string): WorkspaceCaptureManifest {
 
 function hash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function captureApiRegionalProbeRequest(): CaptureApiRegionalProbeRequest {
+  return {
+    schemaVersion: "opengeni/workbench-capture-api-regional-probe-request/v1",
+    apiUrl: "https://app.example.com",
+    environment: "production",
+    sourceSha: "a".repeat(40),
+    runId: "production-12345-1",
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    sessionId: "22222222-2222-4222-8222-222222222222",
+    captureRevision: 7,
+    captureTurnId: "33333333-3333-4333-8333-333333333333",
+    repetitions: 100,
+    region: "northeurope",
+    apiImage: `registry.example.com/opengeni-api:candidate-${"a".repeat(40)}@sha256:${"b".repeat(64)}`,
+    cookieHeader: "better-auth.session_token=secret-cookie",
+  };
+}
+
+function captureApiRegionalProbeResult(request: CaptureApiRegionalProbeRequest) {
+  return {
+    schemaVersion: "opengeni/workbench-capture-api-regional-probe/v1" as const,
+    apiOrigin: new URL(request.apiUrl).origin,
+    environment: request.environment,
+    sourceSha: request.sourceSha,
+    runId: request.runId,
+    workspaceId: request.workspaceId,
+    sessionId: request.sessionId,
+    captureRevision: request.captureRevision,
+    captureTurnId: request.captureTurnId,
+    sampleCount: request.repetitions,
+    region: request.region,
+    apiImage: request.apiImage,
+    decodedBytes: 4096,
+    contentEncoding: "gzip" as const,
+    samplesMs: Array(request.repetitions).fill(12.5),
+  };
 }

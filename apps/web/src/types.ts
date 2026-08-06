@@ -19,26 +19,48 @@ export type {
   ClientConfig,
   ConnectionKind,
   ConnectionMetadata,
+  ConnectionOwnership,
   ConnectionStatus,
+  ConnectorDocumentDestination,
+  ConnectorDocumentDestinationAuthority,
+  ConnectorDocumentDestinationSelection,
   CreateConnectionRequest,
   CreateFileUploadResponse,
   CreateRigRequest,
   ProposeRigChangeRequest,
   McpServerConnectionRef,
+  McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
   CreateWorkspaceRequest,
   Document as IndexedDocument,
+  DocumentAuthorityKind,
   DocumentBase,
+  DocumentCurationStatus,
   DocumentSearchMode,
   DocumentSearchResult,
+  DocumentVisibility,
   EntitlementValue,
   Entitlements,
   FileAsset,
   FileDownloadUrlResponse,
   GitHubAppInfo,
+  GitHubAppSetupMode,
+  GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
+  GoogleDriveBrowseItem,
+  GoogleDriveBrowseResponse,
+  GoogleDriveConnectionLifecycle,
+  GoogleDriveConnectionLifecycleState,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
+  GoogleDriveLifecycleActionRequest,
+  GoogleDriveOAuthStartResponse,
+  GoogleDriveReadPolicy,
+  GoogleDriveSelectedSource,
+  GoogleDriveSyncCadence,
+  GoogleDriveTargetScope,
   GoalSpec,
   CreateKnowledgeMemoryRequest,
   KnowledgeMemory,
@@ -47,6 +69,7 @@ export type {
   KnowledgeSourceKind,
   PackInstallation,
   Permission as SdkPermission,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   Rig,
@@ -67,6 +90,7 @@ export type {
   SessionGoal,
   SessionStatus,
   SessionTurn,
+  SocialConnection,
   ToolRef,
   UpdateKnowledgeMemoryRequest,
   UpdateWorkspaceMemberRequest,
@@ -75,6 +99,7 @@ export type {
   Workspace,
   WorkspaceEnvironment,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
@@ -84,15 +109,18 @@ export type {
 } from "@opengeni/sdk";
 
 export type WorkspaceVariableSet = VariableSet;
+export type WorkspaceVariableSetSecret = VariableSetSecret;
 export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type {
   GoalSpec,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   SandboxBackend,
   ToolRef,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
 } from "@opengeni/sdk";
 export type { ClientModel } from "@opengeni/sdk";
@@ -103,6 +131,7 @@ export type TurnSubmission = {
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
   sandboxBackend?: SandboxBackend;
   variableSetId?: string;
   /**  use variableSetId */
@@ -111,6 +140,7 @@ export type TurnSubmission = {
   rigId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
+  firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
 };
 
 export type AuthSession = {

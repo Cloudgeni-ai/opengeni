@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
   AcknowledgeStreamRequest as ContractAcknowledgeStreamRequest,
+  ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
   AttachViewerRequest as ContractAttachViewerRequest,
+  BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
+  CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse as ContractCodexRealtimeWebrtcResponse,
+  CodexRealtimeVoice as ContractCodexRealtimeVoice,
+  EndSessionRealtimeRequest as ContractEndSessionRealtimeRequest,
+  WorkspaceModelCatalogResponse as ContractWorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
   CreateSessionResponse as ContractCreateSessionResponse,
@@ -19,6 +26,7 @@ import {
   WorkspaceMemorySearchRequest as ContractWorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse as ContractWorkspaceMemorySearchResponse,
   DESKTOP_STREAM_PORT,
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT as CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   ListWorkspaceMembersResponse as ContractListWorkspaceMembersResponse,
   MachineState as ContractMachineState,
   OPENGENI_API_CONTRACT_HEADER as CONTRACT_API_CONTRACT_HEADER,
@@ -27,6 +35,9 @@ import {
   MachinesResponse as ContractMachinesResponse,
   MetricSample as ContractMetricSample,
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
+  NewSessionDraft as ContractNewSessionDraft,
+  SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
+  OPENGENI_CORRELATION_HEADER as CONTRACT_CORRELATION_HEADER,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
@@ -39,6 +50,11 @@ import {
   SessionEventType as ContractSessionEventType,
   TranscriptionEvent as ContractTranscriptionEvent,
   SessionHumanInputRequest as ContractSessionHumanInputRequest,
+  SessionRealtimeMode as ContractSessionRealtimeMode,
+  SessionRealtimeMutationResponse as ContractSessionRealtimeMutationResponse,
+  SyncSessionRealtimeLedgerRequest as ContractSyncSessionRealtimeLedgerRequest,
+  SyncSessionRealtimeLedgerResponse as ContractSyncSessionRealtimeLedgerResponse,
+  RenewSessionRealtimeRequest as ContractRenewSessionRealtimeRequest,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
   SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
@@ -65,16 +81,21 @@ import {
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
 import {
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_CORRELATION_HEADER,
   SESSION_EVENT_TYPES,
 } from "../src/types";
 import type {
   AcknowledgeStreamRequest,
+  ActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
   AttachViewerRequest,
+  BeginSessionRealtimeRequest,
   CreateKnowledgeMemoryRequest,
+  FirstPartyMcpToolName,
   KnowledgeMemory,
   KnowledgeMemoryStatus,
   UpdateKnowledgeMemoryRequest,
@@ -82,6 +103,11 @@ import type {
   Workspace,
   WorkspaceMemorySearchResponse,
   ClientConfig,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  CodexRealtimeVoice,
+  EndSessionRealtimeRequest,
+  WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -91,7 +117,10 @@ import type {
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
+  NewSessionDraft,
+  NewSessionDraftOptions,
   ReasoningEffort,
+  SaveNewSessionDraftRequest,
   SandboxBackend,
   SandboxOs,
   ScheduledTask,
@@ -112,6 +141,11 @@ import type {
   SessionHumanInputRequest,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
+  SessionRealtimeMode,
+  SessionRealtimeMutationResponse,
+  SyncSessionRealtimeLedgerRequest,
+  SyncSessionRealtimeLedgerResponse,
+  RenewSessionRealtimeRequest,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
@@ -133,9 +167,13 @@ import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/tr
 // contracts move, these checks (value-level and type-level) fail the gate.
 
 describe("SDK / contracts parity", () => {
-  test("pins the exact API revision and header values", () => {
+  test("pins the exact API revision and transport header values", () => {
     expect(OPENGENI_API_CONTRACT_REVISION).toBe(CONTRACT_API_CONTRACT_REVISION);
     expect(OPENGENI_API_CONTRACT_HEADER).toBe(CONTRACT_API_CONTRACT_HEADER);
+    expect(OPENGENI_CORRELATION_HEADER).toBe(CONTRACT_CORRELATION_HEADER);
+  });
+  test("pins the default uploaded-file mount root", () => {
+    expect(DEFAULT_FILE_RESOURCE_MOUNT_ROOT).toBe(CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT);
   });
   test("known session event types match the contracts enum exactly", () => {
     expect([...SESSION_EVENT_TYPES].sort()).toEqual([...ContractSessionEventType.options].sort());
@@ -148,6 +186,67 @@ describe("SDK / contracts parity", () => {
     expect(statuses).toEqual(ContractSessionStatus.options);
     expect(backends).toEqual(ContractSandboxBackend.options);
     expect(efforts).toEqual(ContractReasoningEffort.options);
+  });
+
+  test("first-party MCP tool-name union matches the contracts enum", () => {
+    type ContractFirstPartyMcpToolName = z.infer<
+      typeof import("@opengeni/contracts").FirstPartyMcpToolName
+    >;
+    const sdkAcceptsContract = (value: ContractFirstPartyMcpToolName): FirstPartyMcpToolName =>
+      value;
+    const contractAcceptsSdk = (value: FirstPartyMcpToolName): ContractFirstPartyMcpToolName =>
+      value;
+    expect([sdkAcceptsContract, contractAcceptsSdk].every((fn) => typeof fn === "function")).toBe(
+      true,
+    );
+  });
+
+  test("Codex realtime V3 wire shapes and voices match", () => {
+    const voices: readonly CodexRealtimeVoice[] = ContractCodexRealtimeVoice.options;
+    expect(voices).toEqual(ContractCodexRealtimeVoice.options);
+    const acceptResponse = (
+      value: z.infer<typeof ContractCodexRealtimeWebrtcResponse>,
+    ): CodexRealtimeWebrtcResponse => value;
+    const acceptRequest = (
+      value: CodexRealtimeWebrtcRequest,
+    ): z.input<typeof ContractCodexRealtimeWebrtcRequest> => value;
+    const acceptActivation = (
+      value: ActivateCodexRealtimeConnectionRequest,
+    ): z.input<typeof ContractActivateCodexRealtimeConnectionRequest> => value;
+    const acceptBegin = (
+      value: BeginSessionRealtimeRequest,
+    ): z.input<typeof ContractBeginSessionRealtimeRequest> => value;
+    const acceptRenew = (
+      value: RenewSessionRealtimeRequest,
+    ): z.input<typeof ContractRenewSessionRealtimeRequest> => value;
+    const acceptEnd = (
+      value: EndSessionRealtimeRequest,
+    ): z.input<typeof ContractEndSessionRealtimeRequest> => value;
+    const acceptMode = (value: z.infer<typeof ContractSessionRealtimeMode>): SessionRealtimeMode =>
+      value;
+    const acceptMutation = (
+      value: z.infer<typeof ContractSessionRealtimeMutationResponse>,
+    ): SessionRealtimeMutationResponse => value;
+    const acceptSyncRequest = (
+      value: SyncSessionRealtimeLedgerRequest,
+    ): z.input<typeof ContractSyncSessionRealtimeLedgerRequest> => value;
+    const acceptSyncResponse = (
+      value: z.infer<typeof ContractSyncSessionRealtimeLedgerResponse>,
+    ): SyncSessionRealtimeLedgerResponse => value;
+    expect(
+      [
+        acceptResponse,
+        acceptRequest,
+        acceptActivation,
+        acceptBegin,
+        acceptRenew,
+        acceptEnd,
+        acceptMode,
+        acceptMutation,
+        acceptSyncRequest,
+        acceptSyncResponse,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
   });
 
   test("sandbox backend enum is 3-way parity across contracts / sdk / deployment", () => {
@@ -243,6 +342,35 @@ describe("SDK / contracts parity", () => {
     expect(ContractSessionMcpServerInput.parse(sdkMcpServer)).toEqual(sdkMcpServer);
   });
 
+  test("new-session draft response and save shapes stay in SDK/contracts parity", () => {
+    const acceptDraft = (value: z.infer<typeof ContractNewSessionDraft>): NewSessionDraft => value;
+    // Like CreateSessionRequest, the dependency-free SDK deliberately accepts
+    // forward-compatible permission strings and leaves their runtime check to
+    // the server contract.
+    const acceptSave = (
+      value: Omit<SaveNewSessionDraftRequest, "options"> & {
+        options: Omit<NewSessionDraftOptions, "firstPartyMcpPermissions">;
+      },
+    ): z.input<typeof ContractSaveNewSessionDraftRequest> => value;
+    expect([acceptDraft, acceptSave].every((fn) => typeof fn === "function")).toBe(true);
+
+    const save: SaveNewSessionDraftRequest = {
+      expectedRevision: 4,
+      text: "recover this",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      options: {
+        sandboxBackend: "modal",
+        goal: { text: "finish", maxAutoContinuations: 8 },
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
+      },
+    };
+    expect(ContractSaveNewSessionDraftRequest.safeParse(save).success).toBe(true);
+  });
+
   test("scheduled task literals and shapes match the contracts", () => {
     const statuses: readonly ScheduledTaskStatus[] = ContractScheduledTaskStatus.options;
     const runModes: readonly ScheduledTaskRunMode[] = ContractScheduledTaskRunMode.options;
@@ -281,7 +409,10 @@ describe("SDK / contracts parity", () => {
       credentialHooks: ["azure-cli-login"],
       defaultVariableSetIds: [],
     };
-    const update: UpdateRigRequest = { name: "dev-machine-2", description: null };
+    const update: UpdateRigRequest = {
+      name: "dev-machine-2",
+      description: null,
+    };
     const append: ProposeRigChangeRequest = {
       kind: "setup_append",
       payload: { command: "apt-get install -y jq", note: "needed jq" },
@@ -303,7 +434,10 @@ describe("SDK / contracts parity", () => {
     );
     // setup_append requires a command.
     expect(
-      ContractProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success,
+      ContractProposeRigChangeRequest.safeParse({
+        kind: "setup_append",
+        payload: {},
+      }).success,
     ).toBe(false);
     // Defaults: checks/hooks/ids default to [].
     expect(ContractCreateRigRequest.parse({ name: "bare" }).checks).toEqual([]);
@@ -313,7 +447,7 @@ describe("SDK / contracts parity", () => {
     const message: ClientSessionEventInput = {
       type: "user.message",
       clientEventId: "ce-1",
-      payload: { text: "hello", tools: [{ kind: "mcp", id: "documents" }] },
+      payload: { text: "hello" },
     };
     const approval: ClientSessionEventInput = {
       type: "user.approvalDecision",
@@ -403,11 +537,24 @@ describe("SDK / contracts parity", () => {
       kind: "preference",
       pinned: true,
     };
-    const update: UpdateKnowledgeMemoryRequest = { pinned: false, status: "archived" };
+    const update: UpdateKnowledgeMemoryRequest = {
+      pinned: false,
+      status: "archived",
+    };
     const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    const slackReactionSummon: UpdateWorkspaceSettingsRequest = {
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: ["C123"] },
+      },
+    };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse(slackReactionSummon).success).toBe(
+      true,
+    );
     const transcription: WorkspaceTranscriptionPolicy = {
       enabled: true,
       acceptanceId: "11111111-1111-4111-8111-111111111111",
@@ -427,6 +574,9 @@ describe("SDK / contracts parity", () => {
       cost: { currency: "USD", maxPerHour: 1, maxPerMonth: 10 },
     };
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse({ transcription }).success).toBe(true);
+    expect(
+      ContractUpdateWorkspaceSettingsRequest.safeParse({ voiceInput: { enabled: true } }).success,
+    ).toBe(true);
     const transcriptEvent: TranscriptionEvent = {
       type: "transcript.final",
       localSessionId: "local-session-1",
@@ -459,7 +609,9 @@ describe("SDK / contracts parity", () => {
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
     // Search request requires a query and clamps limit at 20.
     expect(
-      ContractWorkspaceMemorySearchRequest.safeParse({ query: "how do we deploy" }).success,
+      ContractWorkspaceMemorySearchRequest.safeParse({
+        query: "how do we deploy",
+      }).success,
     ).toBe(true);
     expect(ContractWorkspaceMemorySearchRequest.safeParse({ query: "x", limit: 999 }).success).toBe(
       false,
@@ -515,6 +667,9 @@ describe("SDK / contracts parity", () => {
           state: "consent_required",
           active: false,
           isSessionGroup: false,
+          workspaceGeneration: 7,
+          archiveGeneration: 7,
+          archiveComplete: true,
           os: "linux",
           arch: "x86_64",
           hasDisplay: true,
@@ -539,12 +694,19 @@ describe("SDK / contracts parity", () => {
     const request: CreateSessionRequest = {
       requestedSessionId: "00000000-0000-4000-8000-000000000042",
       initialMessage: "Investigate the failing deploy",
-      resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+      resources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/app.git",
+          ref: "main",
+        },
+      ],
       tools: [{ kind: "mcp", id: "documents" }],
       metadata: { origin: "sdk-test" },
       sandboxBackend: "none",
       reasoningEffort: "low",
       goal: { text: "Keep deploys green" },
+      firstPartyMcpTools: ["set_session_title"],
     };
     expect(ContractCreateSessionRequest.safeParse(request).success).toBe(true);
   });
@@ -602,6 +764,9 @@ describe("SDK / contracts parity", () => {
       v: z.infer<typeof ContractSessionCapabilities>,
     ): SessionCapabilities => v;
     const acceptClientConfig = (v: z.infer<typeof ContractClientConfig>): ClientConfig => v;
+    const acceptWorkspaceModelCatalog = (
+      v: z.infer<typeof ContractWorkspaceModelCatalogResponse>,
+    ): WorkspaceModelCatalogResponse => v;
     const acceptViewerHolder = (v: z.infer<typeof ContractViewerHolder>): ViewerHolder => v;
     const acceptHeartbeatResponse = (
       v: z.infer<typeof ContractViewerHeartbeatResponse>,
@@ -619,6 +784,7 @@ describe("SDK / contracts parity", () => {
     const serverToClient = [
       acceptCapabilities,
       acceptClientConfig,
+      acceptWorkspaceModelCatalog,
       acceptViewerHolder,
       acceptHeartbeatResponse,
       acceptAckResponse,
@@ -628,8 +794,13 @@ describe("SDK / contracts parity", () => {
     expect(serverToClient.every((fn) => typeof fn === "function")).toBe(true);
 
     // Client -> server: SDK-sent request bodies parse under the contracts schema.
-    const attach: AttachViewerRequest = { viewerId: "33333333-3333-4333-8333-333333333333" };
-    const ack: AcknowledgeStreamRequest = { acknowledgeUnredacted: true, acknowledgeShared: true };
+    const attach: AttachViewerRequest = {
+      viewerId: "33333333-3333-4333-8333-333333333333",
+    };
+    const ack: AcknowledgeStreamRequest = {
+      acknowledgeUnredacted: true,
+      acknowledgeShared: true,
+    };
     const heartbeat: ViewerHeartbeatRequest = { leaseEpoch: 7 };
     expect(ContractAttachViewerRequest.safeParse(attach).success).toBe(true);
     expect(ContractAcknowledgeStreamRequest.safeParse(ack).success).toBe(true);

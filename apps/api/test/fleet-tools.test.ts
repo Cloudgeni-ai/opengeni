@@ -238,7 +238,14 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(group.id).toBe(session.sandboxGroupId);
     expect(group.kind).toBe("modal");
     expect(group.active).toBe(true);
-    expect(group.liveness).toBe("online");
+    // A session row without a materialized/verified provider is not online.
+    expect(group.liveness).toBe("offline");
+    expect(group.attachable).toBe(false);
+    expect(group.operationAvailability).toBe("wakeable");
+    expect(group.providerStatus).toBe("not_created");
+    expect(group.leaseLiveness).toBeNull();
+    expect(group.routeStatus).toBe("attached");
+    expect(group.workspaceStatus).toBe("unknown");
 
     const machine = result.sandboxes.find((s) => !s.isSessionGroup)!;
     expect(machine.id).toBe(sandbox.id);
@@ -248,9 +255,72 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(machine.consented).toBe(true);
     expect(machine.hasDisplay).toBe(true);
     expect(machine.attachable).toBe(true);
+    expect(machine.operationAvailability).toBe("ready");
 
     // Single-active invariant: exactly ONE active entry.
     expect(result.sandboxes.filter((s) => s.active).length).toBe(1);
+  }, 60_000);
+
+  test("a holderless draining Modal home is explicitly wakeable, not unavailable", async () => {
+    if (!available) return;
+    const { ctx, services, accountId, workspaceId } = await seedFleet();
+    await admin`
+      insert into sandbox_leases (
+        account_id,
+        workspace_id,
+        sandbox_group_id,
+        liveness,
+        instance_id,
+        backend,
+        lease_epoch,
+        workspace_generation,
+        archive_generation,
+        resume_state,
+        expires_at
+      ) values (
+        ${accountId},
+        ${workspaceId},
+        ${ctx.sessionGroupId},
+        'draining',
+        'sb-idle-home',
+        'modal',
+        7,
+        12,
+        12,
+        ${admin.json({
+          opengeniRecovery: {
+            provider: {
+              status: "exists",
+              instanceId: "sb-idle-home",
+              observedAt: "2026-08-05T16:30:00.000Z",
+            },
+            archive: { status: "none", current: null, previous: null },
+            restore: {
+              status: "not_required",
+              rematerializationId: null,
+              selectedRevision: null,
+              startedAt: null,
+              completedAt: null,
+            },
+            workspace: {
+              status: "ready",
+              verifiedRevision: "idle-home-ready",
+              verifiedAt: "2026-08-05T16:30:00.000Z",
+            },
+          },
+        })}::jsonb,
+        now() + interval '15 minutes'
+      )
+    `;
+
+    const result = await listFleet(services, ctx);
+    const group = result.sandboxes.find((sandbox) => sandbox.isSessionGroup)!;
+    expect(group.liveness).toBe("offline");
+    expect(group.leaseLiveness).toBe("draining");
+    expect(group.attachable).toBe(false);
+    expect(group.operationAvailability).toBe("wakeable");
+    expect(group.providerStatus).toBe("exists");
+    expect(group.workspaceStatus).toBe("ready");
   }, 60_000);
 
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {
@@ -276,6 +346,73 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(back.swapped).toBe(true);
     expect(back.activeSandboxId).toBeNull();
     expect(back.activeEpoch).toBe(swap.activeEpoch + 1);
+  }, 60_000);
+
+  test("same-target attach is a readiness repair that advances the route epoch or fails typed", async () => {
+    if (!available) return;
+    const { ctx, services } = await seedFleet();
+    const before = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
+    let readinessChecks = 0;
+    let releases = 0;
+    let pointerObservedAtRelease: Awaited<ReturnType<typeof readActiveSandbox>> = null;
+    const repaired = await swapActiveSandbox(
+      {
+        ...services,
+        ensureSessionGroupReady: async () => {
+          readinessChecks += 1;
+          return {
+            release: async () => {
+              pointerObservedAtRelease = await readActiveSandbox(
+                db,
+                ctx.workspaceId,
+                ctx.sessionId,
+              );
+              releases += 1;
+            },
+          };
+        },
+      },
+      ctx,
+      "session",
+    );
+    expect(repaired.swapped).toBe(true);
+    expect(repaired.activeSandboxId).toBeNull();
+    expect(repaired.activeEpoch).toBe(before.activeEpoch + 1);
+    expect(readinessChecks).toBe(1);
+    expect(releases).toBe(1);
+    expect(pointerObservedAtRelease?.activeEpoch).toBe(repaired.activeEpoch);
+
+    const rejectedBefore = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
+    const rejected = await swapActiveSandbox(
+      {
+        ...services,
+        ensureSessionGroupReady: async () => {
+          throw new Error("restore is still verifying");
+        },
+      },
+      ctx,
+      "session",
+    );
+    expect(rejected.swapped).toBe(false);
+    expect(rejected.code).toBe("recovery_in_progress");
+    expect(rejected.activeEpoch).toBe(rejectedBefore.activeEpoch);
+
+    let failedRelease = 0;
+    const failed = await swapActiveSandbox(
+      {
+        ...services,
+        ensureSessionGroupReady: async () => ({
+          release: async () => {
+            failedRelease += 1;
+          },
+        }),
+      },
+      { ...ctx, accountId: crypto.randomUUID() },
+      "session",
+    );
+    expect(failed.swapped).toBe(false);
+    expect(failed.code).toBe("concurrent_swap");
+    expect(failedRelease).toBe(1);
   }, 60_000);
 
   test("heterogeneous swap (>=2 flips): Modal->machine->Modal->machine, single-active each time", async () => {
@@ -328,6 +465,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
     expect(exec.ok).toBe(true);
     expect(exec.stdout?.trim()).toBe("runon-vm");
+    expect(exec.exitCode).toBe(0);
+    expect(exec.timedOut).toBe(false);
+    expect(exec.deadlineMs).toBe(settings.sandboxSelfhostedExecTimeoutMs);
 
     // The active pointer is UNCHANGED (run_on is a side-channel, not a swap).
     const after = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;

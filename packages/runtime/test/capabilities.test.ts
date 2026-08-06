@@ -142,3 +142,27 @@ describe("main agent request has no inline compaction policy", () => {
     }
   });
 });
+
+describe("model service tier", () => {
+  test("adds the resolved tier beside existing provider data only for Fast mode", () => {
+    const standard = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      latencyMode: "standard",
+    });
+    const fast = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      latencyMode: "fast",
+      serviceTier: "priority",
+      promptCacheKey: "session-1",
+    });
+
+    expect(
+      (standard.modelSettings as { providerData?: Record<string, unknown> }).providerData
+        ?.service_tier,
+    ).toBeUndefined();
+    expect(
+      (fast.modelSettings as { providerData?: Record<string, unknown> }).providerData,
+    ).toMatchObject({
+      service_tier: "priority",
+      prompt_cache_key: "session-1",
+    });
+  });
+});

@@ -19,7 +19,7 @@ import {
   SharedMachineDisclosure,
   type MachinesResponse,
   type MachineView,
-} from "../src/index";
+} from "@opengeni/react";
 import {
   consentHeadlessMachine,
   consentMachine,
