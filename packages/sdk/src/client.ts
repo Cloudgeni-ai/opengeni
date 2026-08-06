@@ -101,6 +101,8 @@ import type {
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
+  RemoveEnrollmentRequest,
+  RemoveEnrollmentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
@@ -979,6 +981,24 @@ export class OpenGeniClient {
       { ...(options.window !== undefined ? { window: options.window } : {}) },
     );
     return response.samples;
+  }
+
+  /**
+   * Remove one connected self-hosted machine enrollment. The control-plane
+   * operation works while the agent is offline, revokes future reconnects,
+   * retains history, and returns a typed blocker when active route/lease or
+   * recovery dependencies make removal unsafe. `idempotencyKey` is replay-safe.
+   */
+  async removeEnrollment(
+    workspaceId: string,
+    enrollmentId: string,
+    request: RemoveEnrollmentRequest = {},
+  ): Promise<RemoveEnrollmentResponse> {
+    return await this.requestJson<RemoveEnrollmentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/enrollments/${enrollmentId}/revoke`,
+      request,
+    );
   }
 
   // --- Self-hosted enrollment UX (design 11) --------------------------------

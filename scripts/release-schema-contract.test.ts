@@ -130,6 +130,7 @@ describe("release schema contract", () => {
     );
     expect(contract.fileCount).toBe(
       108 +
+        (migrations.has("0065_enrollment_credential_generation.sql") ? 1 : 0) +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
@@ -196,12 +197,21 @@ describe("release schema contract", () => {
         (migrations.has("0177_session_events_workspace_turn_type_index.sql") ? 1 : 0) +
         (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0) +
         (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0) +
-        (migrations.has("0180_retained_screenshot_lifecycle_fences.sql") ? 1 : 0),
+        (migrations.has("0180_retained_screenshot_lifecycle_fences.sql") ? 1 : 0) +
+        (migrations.has("0181_connected_machine_removal.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "b9793bcf0c3ec1d79c038725a3ab0080294735b5807dbe5340fbca747e4334de",
+      "bef9b8266df4412e4a35df16521b66285faecfc0451b6898c52d1d4471ce76f9",
     );
-    expect(contract.latestMigration).toBe("0180_retained_screenshot_lifecycle_fences.sql");
+    expect(contract.latestMigration).toBe("0181_connected_machine_removal.sql");
+    expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
+      sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0181_connected_machine_removal.sql")).toMatchObject({
+      sha256: "c933a0781ac3c78272c5049637e3718299382e93272ea04095077f8ce7148f0a",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({
       sha256: "184bd3bb0360d63abc72e09ad5461646679320c61c0a24a5e67cc3af5a7d008a",
       deploymentMode: "rolling",
@@ -253,7 +263,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0172_retire_model_visible_github_token.sql")).toMatchObject({
-      sha256: "6e2123085f5574a046eaea7db7b5168540625d554771ee9e5639787bbde4c713",
+      sha256: "e16ecce0d4e067168590cd54086c85b2bb0d6e0f244976aa4190b942e5f76356",
       deploymentMode: "maintenance",
     });
     expect(

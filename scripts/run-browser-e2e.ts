@@ -6,6 +6,7 @@ const testFiles =
     ? requestedTestFiles
     : [
         "./test/e2e/browser.e2e.ts",
+        "./test/e2e/connected-machine-removal.browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
         "./test/e2e/codex-overview.e2e.ts",
         "./test/e2e/queue-surface.browser.e2e.ts",

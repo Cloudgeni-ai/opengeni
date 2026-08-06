@@ -307,6 +307,11 @@ export async function listFleet(
       continue;
     }
     const enrollment = await getEnrollment(db, ctx.workspaceId, sandbox.enrollmentId);
+    if (!enrollment || enrollment.status !== "active") {
+      // Revoked enrollments remain durable audit/history records, but they are
+      // intentionally absent from the normal attach/run picker.
+      continue;
+    }
     const probe = enrollment
       ? await probeEnrollment(services, ctx.workspaceId, enrollment)
       : { liveness: "offline" as FleetLiveness, consented: false, hasDisplay: false };

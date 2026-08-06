@@ -4907,6 +4907,10 @@ export const enrollments = pgTable(
     desktopUnavailableReason: text("desktop_unavailable_reason"),
     allowScreenControl: boolean("allow_screen_control").notNull().default(false),
     status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
+    // Credential-family fence. Existing rows/migration-era bearers are generation
+    // 1; every successful re-enrollment increments this atomically before a new
+    // bearer is signed. Auth and self-revoke require an exact row/claim match.
+    credentialGeneration: integer("credential_generation").notNull().default(1),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
     // Heartbeat liveness cursor. Null until the first connect.
@@ -4931,6 +4935,68 @@ export const enrollments = pgTable(
     ),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+  }),
+);
+
+// One durable receipt per workspace-authorized connected-machine removal
+// request. The enrollment row remains the lifecycle truth; this table preserves
+// the exact idempotency key, request fingerprint, and terminal result so a lost
+// response can be replayed without re-running dependency checks or mutating a
+// different enrollment that happens to share the same display name.
+export const machineRemovalOperationOutcomeValues = [
+  "removed",
+  "already_removed",
+  "blocked",
+] as const;
+
+export const machineRemovalOperations = pgTable(
+  "machine_removal_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    enrollmentId: uuid("enrollment_id")
+      .notNull()
+      .references(() => enrollments.id, { onDelete: "restrict" }),
+    operationKey: text("operation_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    outcome: text("outcome", { enum: machineRemovalOperationOutcomeValues }).notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "machine_removal_operations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceOperation: uniqueIndex("machine_removal_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationKey,
+    ),
+    workspaceIdentity: uniqueIndex("machine_removal_operations_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    enrollmentTimeline: index("machine_removal_operations_enrollment_created_idx").on(
+      table.workspaceId,
+      table.enrollmentId,
+      table.createdAt,
+    ),
+    requestFingerprintValid: check(
+      "machine_removal_operations_request_fingerprint_chk",
+      sql`${table.requestFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    operationKeyValid: check(
+      "machine_removal_operations_operation_key_chk",
+      sql`length(btrim(${table.operationKey})) between 1 and 200
+        and ${table.operationKey} = btrim(${table.operationKey})`,
+    ),
   }),
 );
 

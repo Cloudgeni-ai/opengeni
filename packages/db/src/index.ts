@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   AccessContext,
   AccessGrant,
@@ -34230,6 +34230,7 @@ export type EnrollmentRecord = {
   desktopUnavailableReason: string | null;
   allowScreenControl: boolean;
   status: EnrollmentStatus;
+  credentialGeneration: number;
   os: EnrollmentOs;
   arch: string;
   lastSeenAt: string | null;
@@ -34256,6 +34257,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     desktopUnavailableReason: row.desktopUnavailableReason ?? null,
     allowScreenControl: row.allowScreenControl,
     status: row.status as EnrollmentStatus,
+    credentialGeneration: Number(row.credentialGeneration),
     os: row.os as EnrollmentOs,
     arch: row.arch,
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
@@ -34296,8 +34298,10 @@ function mapSandbox(row: typeof schema.sandboxes.$inferSelect): SandboxRecord {
 // Register (or idempotently re-register) a machine. A re-enroll of the SAME
 // (workspace, pubkey) is an UPSERT — it refreshes the consent/OS fields and, if
 // the machine was previously revoked, re-activates it (status->active, revoked_at
-// cleared) — never a duplicate machine row. The agent's ed25519 pubkey is the
-// machine identity; the unique (workspace, pubkey) index is the conflict target.
+// cleared) — never a duplicate machine row. Every conflict is a fresh
+// re-enrollment and atomically advances credential_generation, invalidating every
+// older bearer. The agent's ed25519 pubkey is the machine identity; the unique
+// (workspace, pubkey) index is the conflict target.
 export async function createEnrollment(
   db: Database,
   input: {
@@ -34339,6 +34343,7 @@ export async function createEnrollment(
             // A re-enroll re-activates a previously revoked machine.
             status: "active",
             revokedAt: null,
+            credentialGeneration: sql`${schema.enrollments.credentialGeneration} + 1`,
             updatedAt: new Date(),
           },
         })
@@ -34394,8 +34399,476 @@ export async function listEnrollments(
   });
 }
 
-// Revoke a machine (uninstall --purge / dashboard revoke). Idempotent: an already
-// -revoked row is a no-op (revoked:false). status->revoked, revoked_at stamped.
+export type MachineRemovalOutcome = (typeof schema.machineRemovalOperationOutcomeValues)[number];
+export type MachineRemovalBlockCode =
+  | "active_route"
+  | "active_commands"
+  | "active_lease"
+  | "recovery_pending"
+  | "not_selfhosted";
+
+export type MachineRemovalResult = {
+  enrollmentId: string;
+  outcome: MachineRemovalOutcome;
+  removed: boolean;
+  machineName: string | null;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+  code: MachineRemovalBlockCode | null;
+  message: string;
+  action: string;
+};
+
+export class MachineRemovalIdempotencyError extends Error {
+  override readonly name = "MachineRemovalIdempotencyError";
+}
+
+export class MachineRemovalRevisionConflictError extends Error {
+  override readonly name = "MachineRemovalRevisionConflictError";
+
+  constructor(
+    message: string,
+    readonly currentUpdatedAt: string,
+  ) {
+    super(message);
+  }
+}
+
+function machineRemovalFingerprint(enrollmentId: string, expectedUpdatedAt?: string): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        enrollmentId,
+        expectedUpdatedAt: expectedUpdatedAt ?? null,
+      }),
+    )
+    .digest("hex");
+}
+
+function machineRemovalResultFromStored(value: unknown): MachineRemovalResult {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid stored machine removal result");
+  }
+  const result = value as Partial<MachineRemovalResult>;
+  if (
+    typeof result.enrollmentId !== "string" ||
+    (result.outcome !== "removed" &&
+      result.outcome !== "already_removed" &&
+      result.outcome !== "blocked") ||
+    typeof result.removed !== "boolean" ||
+    (result.machineName !== null && typeof result.machineName !== "string") ||
+    (result.lastSeenAt !== null && typeof result.lastSeenAt !== "string") ||
+    (result.revokedAt !== null && typeof result.revokedAt !== "string") ||
+    (result.code !== null &&
+      result.code !== "active_route" &&
+      result.code !== "active_commands" &&
+      result.code !== "active_lease" &&
+      result.code !== "recovery_pending" &&
+      result.code !== "not_selfhosted") ||
+    typeof result.message !== "string" ||
+    typeof result.action !== "string"
+  ) {
+    throw new Error("Invalid stored machine removal result");
+  }
+  return result as MachineRemovalResult;
+}
+
+/**
+ * Remove one connected-machine enrollment without touching the durable identity
+ * or any session/route/archive evidence. The enrollment row is the lifecycle
+ * truth: status -> revoked rejects future auth-callout/heartbeat/reconnect
+ * attempts, while a fresh device-flow re-enrollment can reactivate the same
+ * public-key identity with a new credential family.
+ *
+ * The operation key is scoped to the workspace and is receipt-backed. A retry
+ * with the same key and request fingerprint replays the exact committed result;
+ * a different fingerprint is rejected rather than risking an accidental replay
+ * against a changed control-plane revision.
+ */
+export async function removeEnrollment(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    operationKey: string;
+    expectedUpdatedAt?: string;
+    subjectId?: string | null;
+  },
+): Promise<MachineRemovalResult | null> {
+  const operationKey = input.operationKey.trim();
+  if (operationKey.length === 0 || operationKey.length > 200) {
+    throw new Error("machine removal operation key must be 1-200 characters");
+  }
+  const requestFingerprint = machineRemovalFingerprint(input.enrollmentId, input.expectedUpdatedAt);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      // Serialize retries for one workspace/key before inspecting or inserting
+      // the receipt. The enrollment lock below independently serializes removal
+      // against re-enrollment, heartbeat auth, and route admission.
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`machine-removal:${input.workspaceId}:${operationKey}`}, 0))`,
+      );
+      const [existingOperation] = await scopedDb
+        .select({
+          fingerprint: schema.machineRemovalOperations.requestFingerprint,
+          result: schema.machineRemovalOperations.result,
+        })
+        .from(schema.machineRemovalOperations)
+        .where(
+          and(
+            eq(schema.machineRemovalOperations.workspaceId, input.workspaceId),
+            eq(schema.machineRemovalOperations.operationKey, operationKey),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (existingOperation) {
+        if (existingOperation.fingerprint !== requestFingerprint) {
+          throw new MachineRemovalIdempotencyError(
+            "machine removal idempotency key was already used with a different request",
+          );
+        }
+        return machineRemovalResultFromStored(existingOperation.result);
+      }
+
+      const [enrollment] = await scopedDb
+        .select()
+        .from(schema.enrollments)
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!enrollment) {
+        return null;
+      }
+      if (
+        input.expectedUpdatedAt !== undefined &&
+        !Number.isFinite(Date.parse(input.expectedUpdatedAt))
+      ) {
+        throw new Error("expectedUpdatedAt must be a valid timestamp");
+      }
+      if (
+        input.expectedUpdatedAt !== undefined &&
+        Date.parse(input.expectedUpdatedAt) !== enrollment.updatedAt.getTime()
+      ) {
+        throw new MachineRemovalRevisionConflictError(
+          "machine changed since it was loaded; refresh the machine and retry",
+          enrollment.updatedAt.toISOString(),
+        );
+      }
+
+      const sandboxes = await scopedDb
+        .select({
+          id: schema.sandboxes.id,
+          kind: schema.sandboxes.kind,
+          name: schema.sandboxes.name,
+        })
+        .from(schema.sandboxes)
+        .where(
+          and(
+            eq(schema.sandboxes.workspaceId, input.workspaceId),
+            eq(schema.sandboxes.enrollmentId, input.enrollmentId),
+          ),
+        )
+        .orderBy(asc(schema.sandboxes.createdAt))
+        .for("share");
+      const nonSelfhosted = sandboxes.find((sandbox) => sandbox.kind !== "selfhosted");
+      const machine = sandboxes.find((sandbox) => sandbox.kind === "selfhosted") ?? null;
+      const baseResult = {
+        enrollmentId: enrollment.id,
+        machineName: machine?.name ?? null,
+        lastSeenAt: enrollment.lastSeenAt?.toISOString() ?? null,
+        revokedAt: enrollment.revokedAt?.toISOString() ?? null,
+      };
+
+      if (nonSelfhosted) {
+        const result: MachineRemovalResult = {
+          ...baseResult,
+          outcome: "blocked",
+          removed: false,
+          code: "not_selfhosted",
+          message: "This enrollment is not a self-hosted machine and cannot be removed here.",
+          action: "Use the sandbox's own lifecycle controls instead.",
+        };
+        await scopedDb.insert(schema.machineRemovalOperations).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          enrollmentId: enrollment.id,
+          operationKey,
+          requestFingerprint,
+          outcome: result.outcome,
+          result,
+        });
+        await scopedDb.insert(schema.auditEvents).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
+          action: "connected_machine.removal_blocked",
+          targetType: "enrollment",
+          targetId: enrollment.id,
+          metadata: { code: result.code, message: result.message },
+        });
+        return result;
+      }
+
+      if (enrollment.status === "revoked") {
+        const result: MachineRemovalResult = {
+          ...baseResult,
+          outcome: "already_removed",
+          removed: false,
+          code: null,
+          message: "This machine was already removed. Its history remains available for audit.",
+          action:
+            "Enroll it again through a fresh human-approved device flow if it should reconnect.",
+        };
+        await scopedDb.insert(schema.machineRemovalOperations).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          enrollmentId: enrollment.id,
+          operationKey,
+          requestFingerprint,
+          outcome: result.outcome,
+          result,
+        });
+        await scopedDb.insert(schema.auditEvents).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
+          action: "connected_machine.removal_replayed",
+          targetType: "enrollment",
+          targetId: enrollment.id,
+          metadata: { outcome: result.outcome },
+        });
+        return result;
+      }
+
+      if (machine) {
+        const [activePointer] = await scopedDb.execute<{
+          session_id: string;
+          title: string | null;
+        }>(sql`
+          select id as session_id, title
+          from sessions
+          where workspace_id = ${input.workspaceId}
+            and active_sandbox_id = ${machine.id}
+          order by created_at asc, id asc
+          limit 1
+          for update
+        `);
+        if (activePointer) {
+          const result: MachineRemovalResult = {
+            ...baseResult,
+            outcome: "blocked",
+            removed: false,
+            code: "active_route",
+            message: `Machine is still selected by session ${activePointer.title?.trim() || activePointer.session_id}.`,
+            action: "Move that session back to its managed sandbox, then retry removal.",
+          };
+          await scopedDb.insert(schema.machineRemovalOperations).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            enrollmentId: enrollment.id,
+            operationKey,
+            requestFingerprint,
+            outcome: result.outcome,
+            result,
+          });
+          await scopedDb.insert(schema.auditEvents).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId ?? null,
+            action: "connected_machine.removal_blocked",
+            targetType: "enrollment",
+            targetId: enrollment.id,
+            metadata: {
+              code: result.code,
+              sessionId: activePointer.session_id,
+              message: result.message,
+            },
+          });
+          return result;
+        }
+
+        const [activeGroup] = await scopedDb.execute<{
+          session_id: string;
+          title: string | null;
+        }>(sql`
+          select id as session_id, title
+          from sessions
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${machine.id}
+            and status not in ('completed', 'failed', 'cancelled')
+          order by created_at asc, id asc
+          limit 1
+          for update
+        `);
+        if (activeGroup) {
+          const result: MachineRemovalResult = {
+            ...baseResult,
+            outcome: "blocked",
+            removed: false,
+            code: "active_commands",
+            message: `Machine hosts active session ${activeGroup.title?.trim() || activeGroup.session_id}.`,
+            action: "Stop or move the active session, then retry removal.",
+          };
+          await scopedDb.insert(schema.machineRemovalOperations).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            enrollmentId: enrollment.id,
+            operationKey,
+            requestFingerprint,
+            outcome: result.outcome,
+            result,
+          });
+          await scopedDb.insert(schema.auditEvents).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId ?? null,
+            action: "connected_machine.removal_blocked",
+            targetType: "enrollment",
+            targetId: enrollment.id,
+            metadata: {
+              code: result.code,
+              sessionId: activeGroup.session_id,
+              message: result.message,
+            },
+          });
+          return result;
+        }
+
+        const [lease] = await scopedDb
+          .select({
+            liveness: schema.sandboxLeases.liveness,
+            refcount: schema.sandboxLeases.refcount,
+            turnHolders: schema.sandboxLeases.turnHolders,
+            viewerHolders: schema.sandboxLeases.viewerHolders,
+            archiveCaptureId: schema.sandboxLeases.archiveCaptureId,
+            rotationRequestedAt: schema.sandboxLeases.rotationRequestedAt,
+          })
+          .from(schema.sandboxLeases)
+          .where(
+            and(
+              eq(schema.sandboxLeases.workspaceId, input.workspaceId),
+              eq(schema.sandboxLeases.sandboxGroupId, machine.id),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          lease &&
+          (lease.liveness !== "cold" ||
+            lease.refcount > 0 ||
+            lease.turnHolders > 0 ||
+            lease.viewerHolders > 0 ||
+            lease.archiveCaptureId !== null ||
+            lease.rotationRequestedAt !== null)
+        ) {
+          const code: MachineRemovalBlockCode =
+            lease.turnHolders > 0 || lease.refcount > 0 || lease.viewerHolders > 0
+              ? "active_lease"
+              : lease.liveness === "warming" ||
+                  lease.liveness === "draining" ||
+                  lease.archiveCaptureId !== null ||
+                  lease.rotationRequestedAt !== null
+                ? "recovery_pending"
+                : "active_lease";
+          const result: MachineRemovalResult = {
+            ...baseResult,
+            outcome: "blocked",
+            removed: false,
+            code,
+            message:
+              code === "recovery_pending"
+                ? "Machine has unreconciled recovery or archive work in progress."
+                : "Machine still owns a live lease or active holder.",
+            action:
+              code === "recovery_pending"
+                ? "Wait for recovery to settle, then refresh and retry."
+                : "Stop or detach the active work, then retry removal.",
+          };
+          await scopedDb.insert(schema.machineRemovalOperations).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            enrollmentId: enrollment.id,
+            operationKey,
+            requestFingerprint,
+            outcome: result.outcome,
+            result,
+          });
+          await scopedDb.insert(schema.auditEvents).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId ?? null,
+            action: "connected_machine.removal_blocked",
+            targetType: "enrollment",
+            targetId: enrollment.id,
+            metadata: { code: result.code, message: result.message },
+          });
+          return result;
+        }
+      }
+
+      const now = new Date();
+      const [updated] = await scopedDb
+        .update(schema.enrollments)
+        .set({ status: "revoked", revokedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, enrollment.id),
+            eq(schema.enrollments.status, "active"),
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new Error("machine enrollment changed while removal lock was held");
+      }
+      const result: MachineRemovalResult = {
+        ...baseResult,
+        outcome: "removed",
+        removed: true,
+        revokedAt: now.toISOString(),
+        code: null,
+        message: "Machine access was revoked. History was retained for audit.",
+        action: "A fresh human-approved device-flow enrollment is required to reconnect.",
+      };
+      await scopedDb.insert(schema.machineRemovalOperations).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        enrollmentId: enrollment.id,
+        operationKey,
+        requestFingerprint,
+        outcome: result.outcome,
+        result,
+      });
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId ?? null,
+        action: "connected_machine.removed",
+        targetType: "enrollment",
+        targetId: enrollment.id,
+        metadata: {
+          machineName: result.machineName,
+          lastSeenAt: result.lastSeenAt,
+          credentialGeneration: Number(updated.credentialGeneration),
+        },
+      });
+      return result;
+    },
+  );
+}
+
+// Legacy revoke wrapper retained for uninstall callers and older API clients.
+// The new admin/API surface calls removeEnrollment directly so it can expose
+// blockers, idempotent receipts, and stale-revision diagnostics.
 export async function revokeEnrollment(
   db: Database,
   input: {
@@ -34404,28 +34877,67 @@ export async function revokeEnrollment(
     enrollmentId: string;
   },
 ): Promise<{ revoked: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb
-        .update(schema.enrollments)
-        .set({
-          status: "revoked",
-          revokedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.enrollments.workspaceId, input.workspaceId),
-            eq(schema.enrollments.id, input.enrollmentId),
-            eq(schema.enrollments.status, "active"),
-          ),
-        )
-        .returning({ id: schema.enrollments.id });
-      return { revoked: rows.length > 0 };
-    },
-  );
+  const result = await removeEnrollment(db, {
+    ...input,
+    operationKey: `legacy-revoke:${randomUUID()}`,
+  });
+  return { revoked: result?.removed === true };
+}
+
+// Self-revoke is credential-family scoped, unlike the administrator revoke above.
+// The row is locked before checking generation/status so a concurrent re-enroll
+// cannot slip between validation and mutation. A revoked row is an idempotent
+// success only for the SAME generation (lost-response retry); an old bearer after
+// re-enrollment returns matched:false and cannot revoke the new credential family.
+export async function revokeEnrollmentByGeneration(
+  db: Database,
+  input: {
+    workspaceId: string;
+    enrollmentId: string;
+    credentialGeneration: number;
+  },
+): Promise<{ matched: boolean; revoked: boolean }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        status: schema.enrollments.status,
+        credentialGeneration: schema.enrollments.credentialGeneration,
+      })
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row || Number(row.credentialGeneration) !== input.credentialGeneration) {
+      return { matched: false, revoked: false };
+    }
+    if (row.status === "revoked") {
+      return { matched: true, revoked: false };
+    }
+    if (row.status !== "active") {
+      return { matched: false, revoked: false };
+    }
+    const updated = await scopedDb
+      .update(schema.enrollments)
+      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+        ),
+      )
+      .returning({ id: schema.enrollments.id });
+    if (updated.length !== 1) {
+      throw new Error("Enrollment generation changed while row lock was held");
+    }
+    return { matched: true, revoked: true };
+  });
 }
 
 // Heartbeat liveness cursor: the agent reports it is alive. last_seen_at is read
@@ -34461,6 +34973,7 @@ export async function touchEnrollmentLastSeen(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
           ),
         );
     },
@@ -34498,6 +35011,7 @@ export async function setEnrollmentWentOffline(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
           ),
         );
     },
@@ -34533,6 +35047,7 @@ export async function clearEnrollmentWentOffline(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
             isNotNull(schema.enrollments.wentOfflineAt),
           ),
         )
@@ -34585,6 +35100,7 @@ export async function setEnrollmentDisplayState(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
             // Only write on a CHANGE to EITHER field — an unchanged display state must
             // not churn a write on every reconnect Hello. `IS DISTINCT FROM` is the
             // null-safe inequality (a plain `ne` skips NULL rows).
@@ -34633,6 +35149,7 @@ export async function setEnrollmentOpStreamState(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
             ne(schema.enrollments.opStream, input.opStream),
           ),
         )
@@ -34863,8 +35380,10 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 //     re-read fence + the request stamp stay in ONE txn — semantics unchanged), and
 //   * finalizeEnrollmentByToken calls it inside its OWN txn (no pending row exists
 //     for a stateless token).
-// Idempotent: a re-run for the same (workspace, pubkey) re-activates the existing
-// enrollment (M2 upsert) and REUSES its selfhosted sandbox — never a duplicate.
+// A fresh finalize for the same (workspace, pubkey) re-activates the existing
+// enrollment, atomically increments its credential generation, and REUSES its
+// selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
+// before this helper so replaying one already-approved request does not rotate.
 async function finalizeEnrollmentInScope(
   scopedDb: Database,
   input: {
@@ -34906,6 +35425,7 @@ async function finalizeEnrollmentInScope(
         arch: input.arch,
         status: "active",
         revokedAt: null,
+        credentialGeneration: sql`${schema.enrollments.credentialGeneration} + 1`,
         updatedAt: input.now,
       },
     })
@@ -34998,9 +35518,10 @@ export async function finalizeEnrollmentByToken(
 //   4. stamp the request approved + the consent record (WHO approved WHEN to WHAT)
 //      + the resulting enrollment_id / sandbox_id.
 // IDEMPOTENT: a re-approve of an ALREADY-approved row (same user_code re-submitted)
-// re-runs the enrollment upsert (M2 reactivate semantics) and returns the existing
-// enrollment/sandbox — never a duplicate. An expired / denied / consumed row is a
-// no-op (approved:false). Returns the enrollment + sandbox so the route echoes them.
+// returns the existing enrollment/sandbox WITHOUT re-running the enrollment upsert,
+// so a lost approval response cannot rotate the credential generation. A genuinely
+// fresh request for the same pubkey does run the upsert and rotates. An expired /
+// denied / consumed row is a no-op (approved:false).
 export async function approveDeviceEnrollmentRequest(
   db: Database,
   input: {
@@ -35039,8 +35560,43 @@ export async function approveDeviceEnrollmentRequest(
       if (!pending) {
         return { approved: false, enrollment: null, sandbox: null };
       }
-      // Already terminally approved → idempotent return of the existing rows (re-run
-      // the consent fields in case allow_screen_control changed on re-approve).
+      // Already approved → idempotent return of the exact existing rows. Do not run
+      // the finalize upsert again: that operation is the credential-generation
+      // rotation boundary for a genuinely new enrollment request.
+      if (pending.status === "approved") {
+        if (!pending.enrollmentId || !pending.sandboxId) {
+          throw new Error("Approved enrollment request is missing its finalized row ids");
+        }
+        const [existingEnrollment] = await scopedDb
+          .select()
+          .from(schema.enrollments)
+          .where(
+            and(
+              eq(schema.enrollments.workspaceId, input.workspaceId),
+              eq(schema.enrollments.id, pending.enrollmentId),
+            ),
+          )
+          .limit(1);
+        const [existingSandbox] = await scopedDb
+          .select()
+          .from(schema.sandboxes)
+          .where(
+            and(
+              eq(schema.sandboxes.workspaceId, input.workspaceId),
+              eq(schema.sandboxes.id, pending.sandboxId),
+              eq(schema.sandboxes.enrollmentId, pending.enrollmentId),
+            ),
+          )
+          .limit(1);
+        if (!existingEnrollment || !existingSandbox) {
+          throw new Error("Approved enrollment request references missing finalized rows");
+        }
+        return {
+          approved: true,
+          enrollment: mapEnrollment(existingEnrollment),
+          sandbox: mapSandbox(existingSandbox),
+        };
+      }
       const expired = pending.expiresAt.getTime() <= now.getTime();
       if (pending.status === "denied" || pending.status === "consumed") {
         return { approved: false, enrollment: null, sandbox: null };
@@ -35326,6 +35882,37 @@ export async function setActiveSandbox(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.targetSandboxId !== null) {
+        const [target] = await scopedDb.execute<{
+          kind: string;
+          enrollment_id: string | null;
+        }>(sql`
+          select kind, enrollment_id
+          from sandboxes
+          where workspace_id = ${input.workspaceId} and id = ${input.targetSandboxId}
+          for share
+        `);
+        if (!target) {
+          return { swapped: false, pointer: null };
+        }
+        if (target.kind === "selfhosted") {
+          // SHARE conflicts with removeEnrollment's UPDATE lock. If removal
+          // wins first, this read observes revoked; if attach wins first,
+          // removal observes the committed pointer and blocks safely.
+          if (!target.enrollment_id) {
+            return { swapped: false, pointer: null };
+          }
+          const [enrollment] = await scopedDb.execute<{ status: string }>(sql`
+            select status
+            from enrollments
+            where workspace_id = ${input.workspaceId} and id = ${target.enrollment_id}
+            for share
+          `);
+          if (!enrollment || enrollment.status !== "active") {
+            return { swapped: false, pointer: null };
+          }
+        }
+      }
       const rows = await scopedDb.execute<{
         active_sandbox_id: string | null;
         active_epoch: number | string;
