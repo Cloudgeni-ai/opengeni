@@ -78,6 +78,65 @@ describe("release producer provenance", () => {
     );
   });
 
+  test("binds a package publication source through its canonical retained artifact", async () => {
+    const packageSourceSha = "d".repeat(40);
+    const packageRunHeadSha = "e".repeat(40);
+    const packageArtifact = {
+      ...artifact,
+      name: `package-publication-verified-${packageSourceSha}-123-2`,
+    };
+    const result = await verifyReleaseProvenance({
+      kind: "package",
+      sourceSha: packageSourceSha,
+      runId: 123,
+      api: api({
+        run: {
+          path: ".github/workflows/publish-packages.yml",
+          head_sha: packageRunHeadSha,
+        },
+        artifact: packageArtifact,
+      }),
+      now: Date.parse("2026-01-01T00:00:00Z"),
+    });
+
+    expect(result.producer).toEqual(
+      buildReleaseProducerMetadata({
+        kind: "package",
+        runId: 123,
+        runAttempt: 2,
+        sourceSha: packageSourceSha,
+        sourceTreeSha: treeSha,
+      }),
+    );
+    expect(result.artifact).toEqual(
+      buildTrustedReleaseArtifact({
+        kind: "package",
+        sourceSha: packageSourceSha,
+        runId: 123,
+        runAttempt: 2,
+        artifact: packageArtifact,
+        now: Date.parse("2026-01-01T00:00:00Z"),
+      }),
+    );
+  });
+
+  test("rejects a package artifact that is not bound to the exact run attempt", async () => {
+    const packageSourceSha = "d".repeat(40);
+    await expect(
+      verifyReleaseProvenance({
+        kind: "package",
+        sourceSha: packageSourceSha,
+        runId: 123,
+        api: api({
+          run: { path: ".github/workflows/publish-packages.yml" },
+          artifact: {
+            name: `package-publication-verified-${packageSourceSha}-123-1`,
+          },
+        }),
+      }),
+    ).rejects.toThrow("exactly one");
+  });
+
   test("rejects arbitrary URL/hash substitution and wrong repository/run/source/workflow", async () => {
     await expect(
       verifyReleaseProvenance({

@@ -794,6 +794,17 @@ full-source-SHA tags, and writes one source-bound package/image/chart BOM. It
 deliberately does not create or update `latest`, and its immutable distribution
 receipt makes no hosted Workbench, staging, production, or canary claim.
 
+An application-only embedded release additionally supplies the exact source SHA
+and successful run ID of the canonical `publish-packages.yml` workflow whose
+owned, unexpired `package-publication-verified-*` artifact defines the package
+overlay. OpenGeni verifies that run and provider artifact digest, requires the
+receipt to cover the exact publishable package-name closure, and re-reads every
+recorded version from npm to match its immutable `gitHead` and SHA-512 integrity
+before using the receipt's complete BOM. It publishes zero npm packages in this
+mode. This permits reviewed application/chart/image bytes to pair with a newer
+coherent package publication without floating to registry `latest`, inventing
+source ownership, or attempting to publish superseded package versions.
+
 After staging, production, and the 72-hour canary have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized

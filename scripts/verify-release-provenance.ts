@@ -72,23 +72,26 @@ export async function verifyReleaseProvenance(input: {
   if (headRepository !== RELEASE_REPOSITORY) {
     throw new Error("release producer head repository is not the trusted repository");
   }
-  const sourceSha = string(run.head_sha, "workflow run head SHA");
-  if (!sourceShaPattern.test(sourceSha)) {
+  const runHeadSha = string(run.head_sha, "workflow run head SHA");
+  if (!sourceShaPattern.test(runHeadSha)) {
     throw new Error("workflow run head SHA must be a full lowercase SHA");
   }
+  if (input.kind !== "package" && runHeadSha !== input.sourceSha) {
+    throw new Error(`release producer source SHA ${runHeadSha} does not match ${input.sourceSha}`);
+  }
   const sourceCommit = asRecord<GitHubCommit>(
-    await input.api.get(`/repos/${RELEASE_REPOSITORY}/commits/${sourceSha}`),
+    await input.api.get(`/repos/${RELEASE_REPOSITORY}/commits/${input.sourceSha}`),
   );
   const sourceTreeSha = string(sourceCommit.commit?.tree?.sha, "source tree SHA");
   const commitSha = string(sourceCommit.sha, "source commit SHA");
-  if (commitSha !== sourceSha)
+  if (commitSha !== input.sourceSha)
     throw new Error("source commit response does not match workflow head SHA");
 
   const producer = buildReleaseProducerMetadata({
     kind: input.kind,
     runId,
     runAttempt: run.run_attempt as number,
-    sourceSha,
+    sourceSha: input.sourceSha,
     sourceTreeSha,
     repository: string(
       (run.repository as { full_name?: unknown } | undefined)?.full_name,
@@ -100,17 +103,18 @@ export async function verifyReleaseProvenance(input: {
     runUrl: string(run.html_url, "workflow run URL"),
   });
 
-  if (sourceSha !== input.sourceSha) {
-    throw new Error(`release producer source SHA ${sourceSha} does not match ${input.sourceSha}`);
-  }
-
   const artifactsResponse = asRecord<{ artifacts?: unknown }>(
     await input.api.get(`/repos/${RELEASE_REPOSITORY}/actions/runs/${runId}/artifacts`),
   );
   const artifacts = Array.isArray(artifactsResponse.artifacts)
     ? artifactsResponse.artifacts.map((value) => asRecord<GitHubArtifact>(value))
     : [];
-  const expectedName = expectedArtifactName(input.kind, input.sourceSha);
+  const expectedName = expectedArtifactName(
+    input.kind,
+    input.sourceSha,
+    runId,
+    producer.runAttempt,
+  );
   const matches = artifacts.filter(
     (artifact) => artifact.name === expectedName && artifact.expired === false,
   );
@@ -130,6 +134,7 @@ export async function verifyReleaseProvenance(input: {
       kind: input.kind,
       sourceSha: input.sourceSha,
       runId,
+      runAttempt: producer.runAttempt,
       artifact: {
         id: positiveInteger(artifact.id, "artifact id"),
         name: string(artifact.name, "artifact name"),
@@ -217,7 +222,9 @@ function parseArgs(values: string[]): {
     };
     if (flag === "--kind") {
       const kind = next();
-      if (kind !== "candidate" && kind !== "acceptance") throw new Error("--kind is invalid");
+      if (kind !== "candidate" && kind !== "acceptance" && kind !== "package") {
+        throw new Error("--kind is invalid");
+      }
       output.kind = kind;
     } else if (flag === "--source-sha") output.sourceSha = next();
     else if (flag === "--run-id") output.runId = next();

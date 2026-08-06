@@ -74,7 +74,7 @@ describe("release image workflow contract", () => {
       (command) => command.includes("/actions/artifacts/") && command.includes("/zip"),
     );
 
-    expect(artifactDownloads).toHaveLength(5);
+    expect(artifactDownloads).toHaveLength(6);
     for (const command of artifactDownloads) {
       expect(command).toMatch(/\/zip["']?\s*\\?\s*(?:\n\s*)?>\s*[^\s]+/);
     }
@@ -321,10 +321,20 @@ describe("release image workflow contract", () => {
     const imagePromotion = release.indexOf("Promote exact candidate manifests");
 
     expect(release).toContain("candidate_run_id:");
-    expect(release).toContain("bun scripts/verify-release-provenance.ts");
+    expect(release).toContain("package_source_sha:");
+    expect(release).toContain("package_run_id:");
+    expect(release).toContain("bun .release/controller/scripts/verify-release-provenance.ts");
+    expect(release).toContain("--kind package");
     expect(release).toContain("CANDIDATE_ARTIFACT_ID:");
     expect(release).toContain("CANDIDATE_ARTIFACT_DIGEST:");
     expect(release).toContain("CANDIDATE_SOURCE_TREE_SHA:");
+    expect(release).toContain("PACKAGE_ARTIFACT_ID:");
+    expect(release).toContain("PACKAGE_ARTIFACT_DIGEST:");
+    expect(release).toContain("evidence/package-publication-verified.json");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT:");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA:");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT:");
+    expect(release).toContain("bun .release/controller/scripts/verify-release-packages.ts");
     expect(release).toContain("bun scripts/release-candidate.ts");
     expect(release).toContain('if [ -n "$EXPECTED_PACKAGES" ]; then');
     expect(release).toContain('candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")');
