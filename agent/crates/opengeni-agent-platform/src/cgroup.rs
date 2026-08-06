@@ -21,13 +21,14 @@
 //!    `<service>/cgroup.subtree_control`. Per-op cgroups are then
 //!    `<service>/op-<n>` siblings of `supervisor`, each with its own memory
 //!    accounting.
-//! 2. **Per-exec placement** ([`OpCgroups::place_stopped_group`]). After a child is
-//!    spawned, the caller stops its process group, then every current group member
-//!    plus the #344 process-group anchor is written into a fresh `op-<n>` leaf
-//!    (optionally capped by [`OpCgroupConfig`]) before the group resumes. Stopping
-//!    closes the fork-before-placement race: ordinary descendants cannot remain
-//!    billed to the supervisor leaf. A memory blow-up in the op leaf is contained
-//!    to that leaf; the supervisor in its own leaf survives.
+//! 2. **Per-exec placement** ([`OpCgroups::place_process_group`]). After a child is
+//!    spawned, the caller stops its process group, places the direct child + #344
+//!    process-group anchor, then drains every same-group process still inherited in
+//!    `supervisor` into the same fresh `op-<n>` leaf before resuming the group. The
+//!    drain does not assume that `killpg(SIGSTOP)` is synchronous: once a parent is
+//!    moved, every later child inherits the op leaf, and the scan continues until no
+//!    ordinary descendant remains in `supervisor`. A memory blow-up in the op leaf
+//!    is contained to that leaf; the supervisor in its own leaf survives.
 //! 3. **Teardown** ([`OpCgroupHandle`]). The op leaf is `rmdir`'d after the op's
 //!    process tree is reaped, tolerating a transient `EBUSY` with a bounded retry.
 //!
@@ -131,53 +132,91 @@ pub struct OpCgroups {
 }
 
 impl OpCgroups {
-    /// Expands a stopped exec process group to every member still inherited in the
-    /// supervisor leaf, then places that complete set in one op cgroup.
+    /// Stops an exec process group, places its direct members, then drains every
+    /// same-group process still inherited in the supervisor leaf into the same op
+    /// cgroup before resuming it.
     ///
-    /// The caller MUST stop `pgid` before calling and resume it afterwards. While
-    /// stopped, no ordinary descendant can fork between enumeration and placement.
-    /// `direct_pids` (the command + anchor) remain the fallback if the supervisor
-    /// membership read is unavailable; placement is deliberately best-effort.
+    /// A `killpg(SIGSTOP)` return is not itself a barrier: delivery may still be
+    /// pending on another CPU. Correctness therefore comes from cgroup inheritance,
+    /// not signal timing. Direct roots move first; every later fork inherits their
+    /// op leaf. Any child forked before its parent moved remains visible in the
+    /// supervisor leaf and is moved by a later drain pass. The loop ends only when
+    /// no live ordinary member remains there. A repeated identical set means the
+    /// kernel refused every move, so isolation degrades loudly instead of spinning.
     #[cfg(target_os = "linux")]
-    pub(crate) fn place_stopped_group(
+    pub(crate) fn place_process_group(
         &self,
         pgid: i32,
         direct_pids: &[u32],
-    ) -> Option<OpCgroupHandle> {
-        let mut pids = direct_pids.to_vec();
-        let supervisor_procs = self.service_dir.join(SUPERVISOR_LEAF).join("cgroup.procs");
+    ) -> std::io::Result<Option<OpCgroupHandle>> {
+        signal_process_group(pgid, nix::sys::signal::Signal::SIGSTOP)?;
 
-        match std::fs::read_to_string(&supervisor_procs) {
-            Ok(contents) => {
-                for raw in contents.split_whitespace() {
-                    let Ok(member_pid) = raw.parse::<u32>() else {
-                        continue;
-                    };
-                    let Ok(member_raw_pid) = i32::try_from(member_pid) else {
-                        continue;
-                    };
-                    if nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(member_raw_pid)))
-                        .is_ok_and(|member_pgid| member_pgid.as_raw() == pgid)
-                    {
-                        pids.push(member_pid);
-                    }
+        let Some(handle) = self.place_op(direct_pids) else {
+            signal_process_group(pgid, nix::sys::signal::Signal::SIGCONT)?;
+            return Ok(None);
+        };
+
+        let mut prior_members: Option<Vec<u32>> = None;
+        loop {
+            let members = match self.supervisor_process_group_members(pgid) {
+                Ok(members) => members,
+                Err(error) => {
+                    self.note_fallback(format_args!(
+                        "cannot drain process-group {pgid} from the supervisor cgroup: {error}"
+                    ));
+                    break;
                 }
+            };
+            if members.is_empty() {
+                break;
             }
-            Err(error) => self.note_fallback(format_args!(
-                "cannot enumerate stopped process group {pgid} from {}: {error}",
-                supervisor_procs.display()
-            )),
+            if prior_members.as_ref() == Some(&members) {
+                self.note_fallback(format_args!(
+                    "process-group {pgid} cgroup drain made no progress for pids {members:?}"
+                ));
+                break;
+            }
+            prior_members = Some(members.clone());
+
+            // A descendant may have forked before the direct child received its
+            // OOM bias. Re-stamp every discovered member; later descendants inherit
+            // from their corrected parent after it moves into the op leaf.
+            for pid in &members {
+                raise_exec_oom_score_adj(*pid);
+            }
+            self.place_pids_in(&handle.dir, &members);
         }
 
-        pids.sort_unstable();
-        pids.dedup();
-        // A descendant may have forked before the direct child received its
-        // oom_score_adj bias. Re-stamp every stopped member; future descendants
-        // inherit from these corrected parents after the group resumes.
-        for pid in &pids {
-            raise_exec_oom_score_adj(*pid);
+        if let Err(error) = signal_process_group(pgid, nix::sys::signal::Signal::SIGCONT) {
+            let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
+            handle.teardown_best_effort();
+            return Err(error);
         }
-        self.place_op(&pids)
+        Ok(Some(handle))
+    }
+
+    /// Enumerates live members of `pgid` that still inherit the supervisor leaf.
+    #[cfg(target_os = "linux")]
+    fn supervisor_process_group_members(&self, pgid: i32) -> std::io::Result<Vec<u32>> {
+        let supervisor_procs = self.service_dir.join(SUPERVISOR_LEAF).join("cgroup.procs");
+        let contents = std::fs::read_to_string(supervisor_procs)?;
+        let mut members = Vec::new();
+        for raw in contents.split_whitespace() {
+            let Ok(member_pid) = raw.parse::<u32>() else {
+                continue;
+            };
+            let Ok(member_raw_pid) = i32::try_from(member_pid) else {
+                continue;
+            };
+            if nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(member_raw_pid)))
+                .is_ok_and(|member_pgid| member_pgid.as_raw() == pgid)
+            {
+                members.push(member_pid);
+            }
+        }
+        members.sort_unstable();
+        members.dedup();
+        Ok(members)
     }
 
     /// Places one exec's processes into a fresh `op-<n>` memory leaf and returns a
@@ -220,9 +259,15 @@ impl OpCgroups {
             }
         }
 
-        // Move the exec's processes into the leaf. cgroup.procs takes one PID per
-        // write; the tiny window between spawn and this move is the accepted
-        // post-spawn billing window (no async-signal-unsafe pre_exec tricks).
+        self.place_pids_in(&dir, pids);
+
+        Some(OpCgroupHandle { dir })
+    }
+
+    /// Moves each live PID into an existing operation leaf. `cgroup.procs` moves
+    /// the entire thread group and returns only after the migration is visible.
+    #[cfg(target_os = "linux")]
+    fn place_pids_in(&self, dir: &Path, pids: &[u32]) {
         let procs = dir.join("cgroup.procs");
         for pid in pids {
             if let Err(error) = std::fs::write(&procs, pid.to_string()) {
@@ -232,8 +277,6 @@ impl OpCgroups {
                 ));
             }
         }
-
-        Some(OpCgroupHandle { dir })
     }
 
     /// Non-Linux no-op: no manager is ever constructed off Linux, so this is never
@@ -421,6 +464,20 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
 pub fn establish_oom_isolation(_config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
     tracing::debug!("per-op OOM cgroup isolation is Linux-only; running without it on this OS");
     None
+}
+
+/// Signals an owned process group. ESRCH is success: the group completed before
+/// the placement barrier and has nothing left to isolate or resume.
+#[cfg(target_os = "linux")]
+fn signal_process_group(pgid: i32, signal: nix::sys::signal::Signal) -> std::io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(pgid), signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(std::io::Error::from(error)),
+    }
 }
 
 /// Creates `dir`, treating an already-existing directory as success (a leaked leaf
