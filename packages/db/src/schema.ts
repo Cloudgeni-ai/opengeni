@@ -2167,6 +2167,145 @@ export const fileUploads = pgTable(
   }),
 );
 
+/** Exact pending/ready byte accounting for retained computer screenshots. */
+export const workspaceScreenshotQuotas = pgTable(
+  "workspace_screenshot_quotas",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull().default(0),
+    readyBytes: bigint("ready_bytes", { mode: "number" }).notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "workspace_screenshot_quotas_workspace_account_fk",
+    }).onDelete("cascade"),
+    nonnegative: check(
+      "workspace_screenshot_quotas_nonnegative_chk",
+      sql`${table.reservedBytes} >= 0 and ${table.readyBytes} >= 0`,
+    ),
+  }),
+);
+
+/** Provider-neutral screenshot lifecycle; canonical bytes stay in `files` storage. */
+export const retainedScreenshotArtifacts = pgTable(
+  "retained_screenshot_artifacts",
+  {
+    // The composite file FK is RESTRICT in migration 0176: only the retained
+    // screenshot lifecycle may remove its backing file after provider cleanup.
+    artifactId: uuid("artifact_id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    // Turn/attempt foreign keys are installed by migrations 0140/0176.
+    // Those tables are declared later in this monolithic schema module, so
+    // referencing them here would create an eager initialization cycle.
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    settlementKey: text("settlement_key").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    toolOutputId: text("tool_output_id").notNull(),
+    status: text("status")
+      .$type<
+        | "pending"
+        | "reconciling"
+        | "ready"
+        | "cleanup_queued"
+        | "cleanup_pending"
+        | "failed"
+        | "expired"
+        | "deleted"
+      >()
+      .notNull()
+      .default("pending"),
+    quotaState: text("quota_state")
+      .$type<"reserved" | "ready" | "released">()
+      .notNull()
+      .default("reserved"),
+    mediaType: text("media_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    retentionExpiresAt: timestamp("retention_expires_at", { withTimezone: true }).notNull(),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+    cleanupReason: text("cleanup_reason"),
+    lastError: text("last_error"),
+    maintenanceClaimId: uuid("maintenance_claim_id"),
+    maintenanceClaimedAt: timestamp("maintenance_claimed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    settlementKey: uniqueIndex("retained_screenshot_artifacts_settlement_key_uq").on(
+      table.settlementKey,
+    ),
+    sessionCreated: index("retained_screenshot_artifacts_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.artifactId,
+    ),
+    readyExpiry: index("retained_screenshot_artifacts_ready_expiry_idx")
+      .on(table.retentionExpiresAt, table.artifactId)
+      .where(sql`${table.status} = 'ready'`),
+    pendingReconcile: index("retained_screenshot_artifacts_pending_reconcile_idx")
+      .on(table.updatedAt, table.artifactId)
+      .where(
+        sql`${table.status} in ('pending', 'reconciling', 'cleanup_queued', 'cleanup_pending')`,
+      ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "retained_screenshot_artifacts_workspace_account_fk",
+    }).onDelete("cascade"),
+    workspaceFile: foreignKey({
+      columns: [table.workspaceId, table.artifactId],
+      foreignColumns: [files.workspaceId, files.id],
+      name: "retained_screenshot_artifacts_workspace_file_fk",
+    }).onDelete("restrict"),
+    statusValid: check(
+      "retained_screenshot_artifacts_status_chk",
+      sql`${table.status} in ('pending', 'reconciling', 'ready', 'cleanup_queued', 'cleanup_pending', 'failed', 'expired', 'deleted')`,
+    ),
+    quotaStateValid: check(
+      "retained_screenshot_artifacts_quota_state_chk",
+      sql`${table.quotaState} in ('reserved', 'ready', 'released')`,
+    ),
+    statusQuotaValid: check(
+      "retained_screenshot_artifacts_status_quota_chk",
+      sql`(${table.status} in ('pending', 'reconciling') and ${table.quotaState} = 'reserved')
+        or (${table.status} = 'ready' and ${table.quotaState} = 'ready')
+        or (${table.status} in ('cleanup_queued', 'cleanup_pending') and ${table.quotaState} in ('reserved', 'ready'))
+        or (${table.status} in ('failed', 'expired', 'deleted') and ${table.quotaState} = 'released')`,
+    ),
+    claimShapeValid: check(
+      "retained_screenshot_artifacts_claim_shape_chk",
+      sql`(${table.status} in ('reconciling', 'cleanup_pending')
+          and ${table.maintenanceClaimId} is not null
+          and ${table.maintenanceClaimedAt} is not null)
+        or (${table.status} not in ('reconciling', 'cleanup_pending')
+          and ${table.maintenanceClaimId} is null
+          and ${table.maintenanceClaimedAt} is null)`,
+    ),
+    dimensionsValid: check(
+      "retained_screenshot_artifacts_dimensions_chk",
+      sql`${table.width} between 1 and 16384 and ${table.height} between 1 and 16384 and (${table.width}::bigint * ${table.height}::bigint) <= 67108864`,
+    ),
+  }),
+);
+
 export const documentBases = pgTable(
   "document_bases",
   {

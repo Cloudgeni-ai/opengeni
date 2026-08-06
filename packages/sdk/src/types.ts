@@ -3426,12 +3426,14 @@ export type FileAsset = {
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
+export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
 
 export type RetainedOutputKind =
   | "tool_result"
   | "assistant_completion"
   | "internal_update"
   | "event_media"
+  | "computer_screenshot"
   | "file";
 
 export type RetainedOutputUnavailableReason =
@@ -3442,6 +3444,9 @@ export type RetainedOutputUnavailableReason =
   | "deleted"
   | "missing_storage"
   | "storage_write_failed"
+  | "quota_exceeded"
+  | "invalid_content"
+  | "oversized"
   | "unsupported";
 
 export type RetainedArtifactReference = {
@@ -3452,7 +3457,10 @@ export type RetainedArtifactReference = {
   originalBytes: number;
   sha256: string;
   retainedAt: string;
-  retention: { policy: "workspace_file"; expiresAt: null };
+  dimensions?: { width: number; height: number } | undefined;
+  retention:
+    | { policy: "workspace_file"; expiresAt: null }
+    | { policy: "session_screenshot"; expiresAt: string };
   retrieval: {
     method: "GET";
     path: string;
@@ -3482,6 +3490,18 @@ export type RetainedArtifactContent = {
   contentLength: number;
   contentRange: string | null;
   acceptRanges: "bytes";
+};
+
+export type RetainedScreenshotDownloadOptions = {
+  signal?: AbortSignal | undefined;
+  /** Retry transient range failures; bounded to 0..3, default 2. */
+  maxRetries?: number | undefined;
+};
+
+export type RetainedScreenshotDownload = {
+  metadata: RetainedArtifactMetadata;
+  /** Null when metadata truth says the screenshot is unavailable. */
+  bytes: Uint8Array | null;
 };
 
 export type CreateFileUploadRequest = {

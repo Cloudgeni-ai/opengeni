@@ -66,6 +66,11 @@ export {
 } from "./event-preview";
 
 export {
+  COMPUTER_SCREENSHOT_MAX_BYTES,
+  COMPUTER_SCREENSHOT_MAX_DIMENSION,
+  COMPUTER_SCREENSHOT_MAX_PIXELS,
+  COMPUTER_SCREENSHOT_RETENTION_MS,
+  COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
@@ -76,12 +81,14 @@ export {
   RetainedOutputKind,
   RetainedOutputUnavailableReason,
   retainedArtifactReferenceFromFile,
+  retainedScreenshotReferenceFromFile,
   retainedOutputUnavailable,
   resolveRetainedOutputRange,
   validateRetainedOutputEvidence,
   type RetainedArtifactFileInput,
   type RetainedArtifactMetadata,
   type RetainedArtifactReference,
+  type RetainedScreenshotArtifactInput,
   type RetainedArtifactUnavailable,
   type RetainedOutputAvailableEvidence,
   type RetainedOutputEvidence,
