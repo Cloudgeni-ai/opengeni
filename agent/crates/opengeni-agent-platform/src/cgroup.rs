@@ -150,16 +150,16 @@ impl OpCgroups {
         match std::fs::read_to_string(&supervisor_procs) {
             Ok(contents) => {
                 for raw in contents.split_whitespace() {
-                    let Ok(pid) = raw.parse::<u32>() else {
+                    let Ok(member_pid) = raw.parse::<u32>() else {
                         continue;
                     };
-                    let Ok(raw_pid) = i32::try_from(pid) else {
+                    let Ok(member_raw_pid) = i32::try_from(member_pid) else {
                         continue;
                     };
-                    if nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(raw_pid)))
+                    if nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(member_raw_pid)))
                         .is_ok_and(|member_pgid| member_pgid.as_raw() == pgid)
                     {
-                        pids.push(pid);
+                        pids.push(member_pid);
                     }
                 }
             }
