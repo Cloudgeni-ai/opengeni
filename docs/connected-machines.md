@@ -156,7 +156,10 @@ throttle. At spawn, the agent stops the command's process group, moves its direc
 roots, then repeatedly drains any same-group descendants still inherited in the
 supervisor leaf into the same operation leaf before resuming it. Correctness does
 not depend on synchronous stop-signal delivery: after a parent moves, future
-children inherit its operation leaf. This closes the post-spawn fork race.
+children inherit its operation leaf. This closes the post-spawn fork race. A
+same-group fork storm that keeps creating escaped descendants during this tiny
+pre-containment window is terminated only after crossing a PID breaker derived
+from that machine's process ceiling; it cannot wedge command admission forever.
 Commands therefore have the same machine resources and authority as commands
 launched by an unrestricted local agent; the OS scheduler owns contention,
 while a pathological breaker trip is loud and typed.

@@ -71,6 +71,13 @@ const TEARDOWN_ATTEMPTS: u32 = 5;
 #[cfg(target_os = "linux")]
 const TEARDOWN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// Honest fallback when Linux exposes neither the delegated cgroup PID ceiling,
+/// `RLIMIT_NPROC`, nor the kernel PID namespace ceiling. Production normally
+/// derives the breaker from the first available host limit; this fallback is far
+/// above an ordinary spawn race (one shell + a few immediate children).
+#[cfg(target_os = "linux")]
+const PLACEMENT_PID_BREAKER_FALLBACK: usize = 256;
+
 /// Environment variable naming an optional per-op `memory.max` hard cap, in bytes.
 const OP_MEMORY_MAX_ENV: &str = "OPENGENI_AGENT_OP_MEMORY_MAX";
 
@@ -124,6 +131,9 @@ pub struct OpCgroups {
     service_dir: PathBuf,
     /// The per-op memory limits to stamp on each leaf.
     config: OpCgroupConfig,
+    /// Host-derived ceiling on cumulative supervisor-leaf PIDs drained during one
+    /// spawn. Crossing it means an active fork pathology, not normal concurrency.
+    placement_pid_breaker: usize,
     /// The next op-id; each `place_op` allocates a unique `op-<n>` sibling.
     next_op: AtomicU64,
     /// Guards the "log once" of the per-op placement fallback so a persistent
@@ -157,6 +167,7 @@ impl OpCgroups {
         };
 
         let mut prior_members: Option<Vec<u32>> = None;
+        let mut drained_pids = 0usize;
         loop {
             let members = match self.supervisor_process_group_members(pgid) {
                 Ok(members) => members,
@@ -178,6 +189,25 @@ impl OpCgroups {
             }
             prior_members = Some(members.clone());
 
+            let next_drained = drained_pids.saturating_add(members.len());
+            if next_drained > self.placement_pid_breaker {
+                let error = std::io::Error::other(format!(
+                    "process-group {pgid} cgroup drain exceeded the host-derived PID breaker of {} while containing an active fork storm",
+                    self.placement_pid_breaker
+                ));
+                tracing::warn!(
+                    group_id = pgid,
+                    drained_pids,
+                    pending_pids = members.len(),
+                    breaker = self.placement_pid_breaker,
+                    "terminating exec whose pre-containment fork storm tripped the cgroup placement breaker"
+                );
+                let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
+                handle.teardown_best_effort();
+                return Err(error);
+            }
+            drained_pids = next_drained;
+
             // A descendant may have forked before the direct child received its
             // OOM bias. Re-stamp every discovered member; later descendants inherit
             // from their corrected parent after it moves into the op leaf.
@@ -185,6 +215,11 @@ impl OpCgroups {
                 raise_exec_oom_score_adj(*pid);
             }
             self.place_pids_in(&handle.dir, &members);
+            if let Err(error) = signal_process_group(pgid, nix::sys::signal::Signal::SIGSTOP) {
+                let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
+                handle.teardown_best_effort();
+                return Err(error);
+            }
         }
 
         if let Err(error) = signal_process_group(pgid, nix::sys::signal::Signal::SIGCONT) {
@@ -443,15 +478,18 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         return None;
     }
 
+    let placement_pid_breaker = placement_pid_breaker(&service_dir);
     tracing::info!(
         service_cgroup = %service_dir.display(),
         memory_max = ?config.memory_max,
         memory_high = ?config.memory_high,
+        placement_pid_breaker,
         "established per-op OOM cgroup isolation: host execs run in memory sub-cgroups; the control supervisor is fate-isolated in its own leaf"
     );
     Some(Arc::new(OpCgroups {
         service_dir,
         config,
+        placement_pid_breaker,
         next_op: AtomicU64::new(0),
         fallback_logged: AtomicBool::new(false),
     }))
@@ -478,6 +516,46 @@ fn signal_process_group(pgid: i32, signal: nix::sys::signal::Signal) -> std::io:
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(error) => Err(std::io::Error::from(error)),
     }
+}
+
+/// Derives a one-spawn fork-pathology breaker from the delegated service's PID
+/// ceiling, then the user's process rlimit, then the PID namespace ceiling. Half
+/// the available ceiling leaves the supervisor and unrelated work headroom. This
+/// breaker limits only the synchronous pre-containment drain; it does not limit a
+/// successfully-contained command's lifetime or eventual process count.
+#[cfg(target_os = "linux")]
+fn placement_pid_breaker(service_dir: &Path) -> usize {
+    let cgroup_ceiling = std::fs::read_to_string(service_dir.join("pids.max"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let rlimit_ceiling = std::fs::read_to_string("/proc/self/limits")
+        .ok()
+        .and_then(|limits| parse_soft_process_limit(&limits));
+    let namespace_ceiling = std::fs::read_to_string("/proc/sys/kernel/pid_max")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    derive_placement_pid_breaker(cgroup_ceiling.or(rlimit_ceiling).or(namespace_ceiling))
+}
+
+/// Half a known host PID ceiling (at least one), or a generous fallback when the
+/// Linux host exposes no ceiling at all.
+#[cfg(target_os = "linux")]
+fn derive_placement_pid_breaker(pid_ceiling: Option<u64>) -> usize {
+    pid_ceiling.map_or(PLACEMENT_PID_BREAKER_FALLBACK, |ceiling| {
+        usize::try_from((ceiling / 2).max(1)).unwrap_or(usize::MAX)
+    })
+}
+
+/// Parses the soft `RLIMIT_NPROC` value from `/proc/self/limits`; `unlimited`
+/// deliberately falls through to the kernel PID namespace ceiling.
+#[cfg(target_os = "linux")]
+fn parse_soft_process_limit(limits: &str) -> Option<u64> {
+    let value = limits
+        .lines()
+        .find_map(|line| line.strip_prefix("Max processes"))?
+        .split_whitespace()
+        .next()?;
+    (value != "unlimited").then(|| value.parse().ok()).flatten()
 }
 
 /// Creates `dir`, treating an already-existing directory as success (a leaked leaf
@@ -621,6 +699,29 @@ mod tests {
         assert_eq!(op_cgroup_name(0), "op-0");
         assert_eq!(op_cgroup_name(42), "op-42");
         assert_ne!(op_cgroup_name(1), op_cgroup_name(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn placement_pid_breaker_scales_from_the_host_ceiling() {
+        assert_eq!(derive_placement_pid_breaker(Some(28_708)), 14_354);
+        assert_eq!(derive_placement_pid_breaker(Some(1)), 1);
+        assert_eq!(
+            derive_placement_pid_breaker(None),
+            PLACEMENT_PID_BREAKER_FALLBACK
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_finite_process_rlimit_and_skips_unlimited() {
+        let finite = "Limit                     Soft Limit           Hard Limit           Units\n\
+                      Max processes             95695                95695                processes\n";
+        assert_eq!(parse_soft_process_limit(finite), Some(95_695));
+
+        let unlimited = "Limit                     Soft Limit           Hard Limit           Units\n\
+                         Max processes             unlimited            unlimited            processes\n";
+        assert_eq!(parse_soft_process_limit(unlimited), None);
     }
 
     #[test]
