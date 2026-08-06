@@ -52,10 +52,12 @@ import {
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 import {
+  FIRST_PARTY_MCP_TOOL_NAMES,
   TURN_EXECUTION_POLICY_METADATA_KEY,
   type AccessGrant,
   type SessionStatus,
 } from "@opengeni/contracts";
+import { updateSessionToolPolicy } from "@opengeni/core";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import {
@@ -1552,7 +1554,7 @@ describe("worker activities integration", () => {
     const runtime: OpenGeniRuntime = {
       ...baseRuntime,
       runStream: async () => {
-        throw safeMcpTransportError(routeNotReady, { recoverySafeSetup: true });
+        throw mcpTransportErrorWithRetryMetadata(routeNotReady, { recoverySafeSetup: true });
       },
     };
     const activities = createWorkerActivities({
@@ -1963,7 +1965,7 @@ describe("worker activities integration", () => {
     expect(result.status).toBe("failed");
     expect(sandboxExecCalls).toHaveLength(1);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
-      "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch'",
+      "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
     );
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
@@ -2849,29 +2851,40 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            allowedTools: ["search_documents"],
+            cacheToolsList: false,
+          },
+        ],
+      });
+      const updated = await updateSessionToolPolicy(
+        { db: dbClient.db, bus, settings },
+        grant,
+        session.id,
+        {
+          mode: "explicit",
+          tools: [{ kind: "mcp", id: "docs" }],
+          firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
+          expectedVersion: session.toolPolicyVersion,
+        },
+      );
+      expect(updated.tools).toContainEqual({ kind: "mcp", id: "docs" });
+      expect(updated.toolPolicyVersion).toBe(session.toolPolicyVersion + 1);
       await appendOwnedEvents(dbClient.db, grant, session.id, [
         {
           type: "user.message",
-          payload: {
-            text: "search docs now",
-            tools: [{ kind: "mcp", id: "docs" }],
-          },
+          payload: { text: "search docs now" },
         },
       ]);
       const activities = createWorkerActivities({
-        settings: testSettings({
-          databaseUrl: services.databaseUrl,
-          natsUrl: services.natsUrl,
-          mcpServers: [
-            {
-              id: "docs",
-              name: "Document Search",
-              url: mcp.url,
-              allowedTools: ["search_documents"],
-              cacheToolsList: false,
-            },
-          ],
-        }),
+        settings,
         db: dbClient.db,
         bus,
         runtime: createProductionAgentRuntime({ model }),
@@ -3112,7 +3125,7 @@ describe("worker activities integration", () => {
         taskId: task.id,
         triggerType: "scheduled",
       }),
-    ).rejects.toThrow("monthly model cost limit reached (100 micros)");
+    ).resolves.toEqual({ action: "blocked", reason: "monthly_model_cost_limit" });
     expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
   });
 
@@ -3276,10 +3289,13 @@ describe("worker activities integration", () => {
       triggerType: "scheduled",
     });
     const stored = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    const manualUsageKey = `test:scheduled-reusable-manual:${task.id}`;
     const second = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "manual",
+      agentRunUsageIdempotencyKey: manualUsageKey,
+      initiator: { kind: "subject", subjectId: grant.subjectId },
     });
 
     expect(first.action).toBe("start");
@@ -3385,8 +3401,29 @@ describe("worker activities integration", () => {
         }),
       }),
     ]);
-    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(1);
-    expect(workflowWakes).toHaveLength(1);
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.status).toBe("dispatched");
+    if (first.workflowWakeRevision === null || retry.workflowWakeRevision === null) {
+      throw new Error("existing-session dispatch did not register both workflow wake revisions");
+    }
+    expect(retry.workflowWakeRevision).toBeGreaterThan(first.workflowWakeRevision);
+    expect(workflowWakes).toEqual([
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        workflowId: `session-${target.id}`,
+        wakeRevision: first.workflowWakeRevision,
+      },
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        workflowId: `session-${target.id}`,
+        wakeRevision: retry.workflowWakeRevision,
+      },
+    ]);
   });
 
   test("fails closed when an existing-session target is cancelled or deleted", async () => {
@@ -3417,6 +3454,12 @@ describe("worker activities integration", () => {
         model: new ScriptedModel([{ outputText: "must not run" }]),
       }),
     });
+    const agentRunsBefore = await sumUsageQuantity(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
 
     await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "cancelled");
     await expect(
@@ -3425,7 +3468,25 @@ describe("worker activities integration", () => {
         taskId: task.id,
         triggerType: "scheduled",
       }),
-    ).rejects.toThrow("cannot be revived");
+    ).rejects.toThrow("reusable session is cancelled; refusing to revive on scheduled fire");
+    expect(await getSession(dbClient.db, grant.workspaceId, target.id)).toMatchObject({
+      status: "cancelled",
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, target.id),
+    ).toHaveLength(0);
+    expect(await listSessionTurns(dbClient.db, grant.workspaceId, target.id, 10)).toHaveLength(0);
+    const cancelledRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(cancelledRuns).toHaveLength(1);
+    expect(cancelledRuns[0]?.status).toBe("failed");
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(agentRunsBefore);
 
     await withWorkspaceRls(dbClient.db, grant.workspaceId, async (scopedDb) => {
       await scopedDb.execute(dbSql`delete from sessions where id = ${target.id}`);
@@ -3440,6 +3501,17 @@ describe("worker activities integration", () => {
         triggerType: "scheduled",
       }),
     ).rejects.toThrow("scheduled task target session is unavailable");
+    const deletedRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(deletedRuns).toHaveLength(2);
+    expect(deletedRuns.every((run) => run.status === "failed")).toBe(true);
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(agentRunsBefore);
   });
 
   test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {
