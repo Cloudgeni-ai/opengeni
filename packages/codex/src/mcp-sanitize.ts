@@ -169,8 +169,10 @@ function sanitizeToolsInRpcMessage(
  * leaving the original content untouched.
  *
  * No-op when there is no `structuredContent` — so a tools/list response (or any
- * result without it) passes through unchanged. Runs alongside (after) the empty
- * outputSchema drop, which is what stops the MCP SDK -32602ing this same result.
+ * result without it) passes through unchanged. Valid object payloads stay intact
+ * for protocol-aware consumers. Invalid optional values (such as null) are removed
+ * after any useful value is copied into `content`, because the MCP client validates
+ * this field as an object before the tool can return. Runs after the outputSchema drop.
  */
 function inlineStructuredContentInRpcMessage(message: unknown): void {
   if (!message || typeof message !== "object") {
@@ -185,13 +187,15 @@ function inlineStructuredContentInRpcMessage(message: unknown): void {
     return;
   }
   const structured = record.structuredContent;
-  if (structured === undefined || structured === null) {
-    return;
+  if (structured !== undefined && structured !== null) {
+    const text = typeof structured === "string" ? structured : JSON.stringify(structured);
+    const content = Array.isArray(record.content) ? [...record.content] : [];
+    content.push({ type: "text", text });
+    record.content = content;
   }
-  const text = typeof structured === "string" ? structured : JSON.stringify(structured);
-  const content = Array.isArray(record.content) ? [...record.content] : [];
-  content.push({ type: "text", text });
-  record.content = content;
+  if (typeof structured !== "object" || structured === null || Array.isArray(structured)) {
+    delete record.structuredContent;
+  }
 }
 
 /** Sanitize a single JSON body (application/json MCP response). */

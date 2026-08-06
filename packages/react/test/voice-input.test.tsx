@@ -1754,6 +1754,59 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
+  test("does not postpone automatic recovery when parent renders replace callbacks", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    let transcriptionCalls = 0;
+    const client = {
+      transcribeAudio: async () => {
+        transcriptionCalls += 1;
+        if (transcriptionCalls === 1) throw new TypeError("network unavailable");
+        return { text: "recovered after live renders", languages: [] };
+      },
+    };
+    const hook = await renderHook(
+      (props: { render: number }) =>
+        useVoiceInput({
+          client,
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          // The real composer replaced this callback on every live session render.
+          focusInput: () => void props.render,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-live-renders",
+          automaticRetryDelayMilliseconds: 30,
+        }),
+      { render: 0 },
+    );
+
+    await act(async () => {
+      await hook.result.current.start();
+      hook.result.current.stop();
+      await settle(30);
+    });
+    expect(hook.result.current.status).toBe("retrying");
+    expect(transcriptionCalls).toBe(1);
+
+    for (let render = 1; render <= 8; render += 1) {
+      await hook.rerender({ render });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await settle(10);
+      });
+    }
+
+    expect(transcriptionCalls).toBe(2);
+    expect(hook.result.current.status).toBe("transcript-ready");
+    expect(store.manifests.get("recording-live-renders")?.transcriptText).toBe(
+      "recovered after live renders",
+    );
+    await hook.unmount();
+  });
+
   test("pauses automatic recovery without deleting the saved recording", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();

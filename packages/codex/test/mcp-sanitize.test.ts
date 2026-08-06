@@ -163,6 +163,24 @@ describe("sanitizeMcpJsonBody", () => {
       email: "user@example.com",
       name: "Example User",
     });
+    expect(out.structuredContent).toEqual({
+      email: "user@example.com",
+      name: "Example User",
+    });
+  });
+
+  test("removes null structuredContent without changing the useful content", () => {
+    const call = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 8,
+      result: {
+        content: [{ type: "text", text: "No matching issues." }],
+        structuredContent: null,
+      },
+    });
+    const out = JSON.parse(sanitizeMcpJsonBody(call)).result;
+    expect(out.content).toEqual([{ type: "text", text: "No matching issues." }]);
+    expect("structuredContent" in out).toBe(false);
   });
 
   test("a call result with no structuredContent is untouched", () => {
@@ -215,6 +233,20 @@ describe("sanitizeMcpSseBody", () => {
     const dataLine = out.split("\n").find((l) => l.startsWith("data:"))!;
     const tool = JSON.parse(dataLine.slice("data:".length).trim()).result.tools[0];
     expect("outputSchema" in tool).toBe(false);
+  });
+
+  test("removes null structuredContent from an SSE tool result", () => {
+    const call = {
+      jsonrpc: "2.0",
+      id: 9,
+      result: { content: [{ type: "text", text: "Done." }], structuredContent: null },
+    };
+    const out = sanitizeMcpSseBody(`event: message\ndata: ${JSON.stringify(call)}\n\n`);
+    const dataLine = out.split("\n").find((line) => line.startsWith("data:"));
+    if (!dataLine) throw new Error("missing SSE data line");
+    const result = JSON.parse(dataLine.slice("data:".length).trim()).result;
+    expect(result.content).toEqual([{ type: "text", text: "Done." }]);
+    expect("structuredContent" in result).toBe(false);
   });
 });
 

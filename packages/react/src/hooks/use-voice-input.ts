@@ -546,6 +546,11 @@ export function useVoiceInput({
       workspaceId,
     ],
   );
+  // Live session renders must not postpone a durable retry deadline. Execute the
+  // latest finalizer without making its callback identity part of the timer key.
+  const finalizePersistedRecordingRef = useRef(finalizePersistedRecording);
+  finalizePersistedRecordingRef.current = finalizePersistedRecording;
+  const clientAvailable = client !== null && client !== undefined;
 
   useEffect(() => {
     if (
@@ -553,7 +558,7 @@ export function useVoiceInput({
       !manifestRef.current ||
       manifestRef.current.recoveryMode !== "automatic" ||
       manifestRef.current.workspaceId !== workspaceId ||
-      !client ||
+      !clientAvailable ||
       disabled ||
       !enabled
     ) {
@@ -574,7 +579,7 @@ export function useVoiceInput({
       if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
       automaticRetryTimerRef.current = null;
       automaticRetryAttemptRef.current += 1;
-      void finalizePersistedRecording(generation);
+      void finalizePersistedRecordingRef.current(generation);
     };
     const onOnline = () => run();
     globalThis.addEventListener?.("online", onOnline);
@@ -595,15 +600,7 @@ export function useVoiceInput({
       if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
       automaticRetryTimerRef.current = null;
     };
-  }, [
-    automaticRetryDelayMilliseconds,
-    client,
-    disabled,
-    enabled,
-    finalizePersistedRecording,
-    status,
-    workspaceId,
-  ]);
+  }, [automaticRetryDelayMilliseconds, clientAvailable, disabled, enabled, status, workspaceId]);
 
   const stop = useCallback(() => {
     const recorder = recorderRef.current;
