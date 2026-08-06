@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 0.18.22
+
+### Patch Changes
+
+- 43fa8f4: Expose authorized Codex Apps through the server-authoritative tool catalog and make setup recovery actionable without widening explicit session policies.
+- 2c83ce5: Normalize JavaScript-only undefined object fields from SDK tool receipts, approval snapshots, and durable event projections before lossless JSON persistence.
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+  - @opengeni/config@0.11.5
+
 ## 0.18.21
 
 ### Patch Changes
