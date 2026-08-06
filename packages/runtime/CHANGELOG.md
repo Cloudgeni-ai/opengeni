@@ -1,5 +1,13 @@
 # @opengeni/runtime
 
+## 0.18.20
+
+### Patch Changes
+
+- af24281: Keep Connected Machine outages inside the agent loop and reserve automatic Toolspace setup for managed sandboxes.
+- Updated dependencies [af24281]
+  - @opengeni/config@0.11.3
+
 ## 0.18.19
 
 ### Patch Changes

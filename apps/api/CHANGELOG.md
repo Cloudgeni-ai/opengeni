@@ -1,5 +1,20 @@
 # @opengeni/api-router
 
+## 0.22.5
+
+### Patch Changes
+
+- fb71b89: Anchor interval scheduled-task cadence to an explicit `startAt` instead of the Temporal epoch grid.
+- Updated dependencies [af24281]
+  - @opengeni/config@0.11.3
+  - @opengeni/runtime@0.18.20
+  - @opengeni/core@0.21.5
+  - @opengeni/db@0.28.4
+  - @opengeni/documents@0.5.13
+  - @opengeni/github@0.4.34
+  - @opengeni/storage@0.2.71
+  - @opengeni/events@0.3.83
+
 ## 0.22.4
 
 ### Patch Changes
