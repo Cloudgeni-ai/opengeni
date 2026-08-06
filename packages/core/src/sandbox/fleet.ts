@@ -639,6 +639,11 @@ export async function executeRunOnSelfhostedMachine(
       // so leave `timedOut` absent while still reporting the enforced deadline.
       ...(op.kind === "exec" ? { deadlineMs: session.effectiveExecDeadlineMs } : {}),
     };
+  } finally {
+    // This one-off has no turn journal. Once its result has been accepted by
+    // this call, final-ack any settled stream so the runner can immediately
+    // release replay/output retention instead of waiting for TTL cleanup.
+    await session.finalizeOpStreamOps().catch(() => undefined);
   }
 }
 

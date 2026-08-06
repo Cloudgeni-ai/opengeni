@@ -12,7 +12,7 @@
 //! # What this module does (Linux, cgroup v2 only)
 //!
 //! Given a delegated cgroup v2 service cgroup (the hardened unit renders
-//! `Delegate=yes` + `MemoryHigh=` — see [`crate::service`]), it:
+//! `Delegate=yes` + `MemoryAccounting=yes` — see [`crate::service`]), it:
 //!
 //! 1. **Startup dance** ([`establish_oom_isolation`]). cgroup v2 forbids a cgroup
 //!    from holding member processes AND enabling controllers for its children (the
@@ -43,7 +43,9 @@
 //! honest-degradation posture the metrics reader uses for its `/proc` sources.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 /// The cgroup v2 unified mount on a standard systemd host.
@@ -185,6 +187,7 @@ impl OpCgroups {
     /// Non-Linux no-op: no manager is ever constructed off Linux, so this is never
     /// reached; it exists so the cross-platform exec path type-checks.
     #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::unused_self)]
     pub(crate) fn place_op(&self, _pids: &[u32]) -> Option<OpCgroupHandle> {
         None
     }
@@ -259,9 +262,11 @@ impl OpCgroupHandle {
 #[cfg(not(target_os = "linux"))]
 impl OpCgroupHandle {
     #[allow(dead_code)]
+    #[allow(clippy::unused_async)]
     pub(crate) async fn teardown(self) {}
 
     #[allow(dead_code)]
+    #[allow(clippy::unused_self)]
     pub(crate) fn teardown_best_effort(&self) {}
 }
 

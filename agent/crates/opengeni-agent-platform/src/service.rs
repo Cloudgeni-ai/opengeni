@@ -152,13 +152,14 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          # place each host exec in its own memory sub-cgroup (see cgroup.rs), keeping a\n\
          # runaway command from making the heartbeat/control supervisor the OOM victim.\n\
          # ManagedOOMPreference=avoid biases systemd-oomd away from selecting this unit\n\
-         # for a whole-unit kill; MemoryHigh throttles the unit under sustained\n\
-         # pressure (and turns on the memory accounting the delegated sub-cgroups need)\n\
-         # instead of letting the kernel SIGKILL the supervisor. Linux-only directives;\n\
+         # for a whole-unit kill. MemoryAccounting enables the delegated memory\n\
+         # controller without imposing a unit-wide throttle: commands retain the\n\
+         # machine's full available memory unless an operator explicitly configures\n\
+         # a per-operation limit. Linux-only directives;\n\
          # they are inert on the macOS/Windows service backends.\n\
          Delegate=yes\n\
          ManagedOOMPreference=avoid\n\
-         MemoryHigh=75%\n\
+         MemoryAccounting=yes\n\
          \n\
          [Install]\n\
          WantedBy={wanted_by}\n"
@@ -355,8 +356,8 @@ mod tests {
     #[test]
     fn systemd_unit_carries_oom_fate_isolation_directives_in_both_scopes() {
         // Issue #345: both the user and the system unit must delegate a cgroup
-        // subtree, bias systemd-oomd away from a whole-unit kill, and set a memory
-        // high-watermark (which also enables the accounting the sub-cgroups need).
+        // subtree, bias systemd-oomd away from a whole-unit kill, and enable memory
+        // accounting without installing a unit-wide memory throttle.
         // These live in [Service], never [Unit] or [Install].
         for scope in [ServiceScope::User, ServiceScope::System] {
             let mut s = spec();
@@ -368,13 +369,17 @@ mod tests {
             for directive in [
                 "Delegate=yes",
                 "ManagedOOMPreference=avoid",
-                "MemoryHigh=75%",
+                "MemoryAccounting=yes",
             ] {
                 assert!(
                     service_section.contains(directive),
                     "{scope:?} unit [Service] must contain {directive}; got:\n{unit}"
                 );
             }
+            assert!(
+                !service_section.contains("MemoryHigh="),
+                "{scope:?} unit must not throttle the aggregate agent/command cgroup"
+            );
         }
     }
 

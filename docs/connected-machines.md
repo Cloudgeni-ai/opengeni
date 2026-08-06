@@ -150,10 +150,18 @@ admission has no ordinary fixed concurrency or queue-wait limit: its only
 circuit breakers are derived from host file-descriptor and process headroom and
 sit above normal workloads (including 100 concurrent command requests). Linux
 puts the supervisor and each operation in separate cgroup-v2 leaves for fate
-isolation and accounting, but the default operation leaf has no memory maximum
-or throttle. Commands therefore have the same machine resources and authority
-as commands launched by an unrestricted local agent; the OS scheduler owns
+isolation and accounting. The generated systemd unit enables accounting without
+a parent `MemoryHigh`, and the default operation leaf has no memory maximum or
+throttle. Commands therefore have the same machine resources and authority as
+commands launched by an unrestricted local agent; the OS scheduler owns
 contention, while a pathological breaker trip is loud and typed.
+
+Operators can opt into local per-operation limits with
+`OPENGENI_AGENT_OP_MEMORY_MAX` and `OPENGENI_AGENT_OP_MEMORY_HIGH`; unset is the
+authoritative unlimited default. A future centrally managed per-machine memory
+policy must project onto these operation leaves (or a machine-scoped command
+parent), remain explicitly `unlimited` by default, and never constrain the
+supervisor leaf or install an implicit service-wide `MemoryHigh`.
 
 Exec duration is unbounded by default. `timeout_ms=0` and op-stream
 `deadline_ms=0` schedule no process kill; a positive

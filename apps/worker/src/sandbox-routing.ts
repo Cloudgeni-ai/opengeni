@@ -102,6 +102,13 @@ export type RoutingWiringServices = {
   }) => void;
 };
 
+/** Worker-turn routing may final-ack streamed command output, so it must always
+ * carry the turn's durable frontier journal. Non-turn helpers may still omit it
+ * through the broader service shape above. */
+type TurnRoutingWiringServices = RoutingWiringServices & {
+  opJournal: OpStreamJournal;
+};
+
 export type RoutingWiringIds = {
   workspaceId: string;
   sessionId: string;
@@ -173,8 +180,8 @@ export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConf
 
 /** The selfhosted CONTROL vs EXEC op deadlines for a turn, from settings. Control
  *  ops (ping/fs/desktop/pty) stay on the short timeout so machine liveness is never
- *  masked by a slow op; exec gets its own much larger budget so a real command is not
- *  killed at the control wall. Threaded into every turn-path session build + resolver. */
+ *  masked by a slow op; exec has its own setting and defaults to no duration wall.
+ *  Threaded into every turn-path session build + resolver. */
 export function selfhostedTimeoutsFromSettings(settings: Settings): {
   timeoutMs: number;
   execTimeoutMs: number;
@@ -687,7 +694,7 @@ function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
  * swap's active_epoch.
  */
 export function wrapTurnBoxWithRouting(
-  services: RoutingWiringServices,
+  services: TurnRoutingWiringServices,
   ids: RoutingWiringIds,
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
@@ -852,7 +859,7 @@ export function wrapTurnBoxWithRouting(
 }
 
 export function wrapLazyTurnBoxWithRouting(
-  services: RoutingWiringServices,
+  services: TurnRoutingWiringServices,
   ids: RoutingWiringIds,
   args: {
     client: EstablishedSandboxSession["client"];
@@ -1024,8 +1031,6 @@ export type SelfhostedTurnSessionArgs = {
   workingDir: string | null;
 };
 
-type LegacySelfhostedTurnSessionArgs = Omit<SelfhostedTurnSessionArgs, "opStream">;
-
 /**
  * Stage D machine-primary establish: bind the live SelfhostedSession for a turn
  * whose ACTIVE sandbox is a connected machine — WITHOUT establishing or leasing a
@@ -1045,11 +1050,10 @@ type LegacySelfhostedTurnSessionArgs = Omit<SelfhostedTurnSessionArgs, "opStream
  * The op-stream injection for a machine-primary turn: present iff the machine
  * advertised `Capabilities.op_stream` in its latest Hello AND the server flag
  * is on AND a bus exists to carry frames. The transport rides the SAME managed
- * NATS connection as the control rpc (the bus's op-stream accessor); a bus
- * without the accessor (a test double) simply yields no connection and the
- * session falls back to the legacy exec on first use. Swap TARGETS resolved
- * mid-turn stay legacy for now — their capability row is not at hand in the
- * resolver, and legacy is always correct.
+ * NATS connection as the control rpc (the bus's op-stream accessor). A bus
+ * without the accessor yields no stream; an unbounded exec then fails before
+ * starting instead of silently degrading to request/reply. Swap targets resolve
+ * the same enrollment capability through the injected backend-resolver seam.
  */
 function opStreamDepsFor(
   services: RoutingWiringServices,
@@ -1067,11 +1071,11 @@ function opStreamDepsFor(
 
 export async function establishSelfhostedTurnSession(
   services: RoutingWiringServices,
-  args: SelfhostedTurnSessionArgs | LegacySelfhostedTurnSessionArgs,
+  args: SelfhostedTurnSessionArgs,
 ): Promise<EstablishedSandboxSession> {
   const { settings, bus, onOp } = services;
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
-  const opStream = opStreamDepsFor(services, "opStream" in args && args.opStream === true);
+  const opStream = opStreamDepsFor(services, args.opStream);
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
     agentId: args.agentId,
@@ -1087,8 +1091,8 @@ export async function establishSelfhostedTurnSession(
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the
-    // capability AND the server flag is on (latched per-op at OpStart; the
-    // legacy exec stays the permanent fallback wire form).
+    // capability AND the server flag is on. It is required when execTimeoutMs=0;
+    // legacy request/reply remains available only for explicitly bounded exec.
     ...(opStream !== undefined ? { opStream } : {}),
   });
   return {

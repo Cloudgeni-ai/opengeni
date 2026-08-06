@@ -171,7 +171,12 @@ export async function withChannelA<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    return await fn({ service, lease, routingSession, requestId });
+    const result = await fn({ service, lease, routingSession, requestId });
+    // The direct request has accepted the result in memory. Finalize every
+    // Connected Machine backend the routing proxy reached so a mid-request
+    // route transition cannot leave completed output retained until TTL.
+    await routingSession.finalizeOpStreamOps().catch(() => undefined);
+    return result;
   };
 
   // A machine-targeted top-level session has an honest selfhosted HOME label.
