@@ -1,5 +1,13 @@
 # @opengeni/documents
 
+## 0.5.14
+
+### Patch Changes
+
+- @opengeni/config@0.11.4
+- @opengeni/db@0.28.5
+- @opengeni/storage@0.2.72
+
 ## 0.5.13
 
 ### Patch Changes
