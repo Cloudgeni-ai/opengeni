@@ -1,4 +1,4 @@
-import type { ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniApiError, type ClientVoiceInputConfig, type OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IndexedDbVoiceRecordingStore,
@@ -21,6 +21,7 @@ export type VoiceInputStatus =
   | "recording"
   | "saving"
   | "transcribing"
+  | "retrying"
   | "recovered"
   | "transcript-ready"
   | "error";
@@ -39,6 +40,8 @@ export type UseVoiceInputOptions = {
   createRecordingId?: (() => string) | undefined;
   createOwnerId?: (() => string) | undefined;
   now?: (() => Date) | undefined;
+  /** Test/embed seam. Production uses bounded exponential recovery backoff. */
+  automaticRetryDelayMilliseconds?: number | undefined;
 };
 
 type ResumableVoiceInputClient = Pick<
@@ -86,7 +89,6 @@ export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60
 export const VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS = 2_000;
 export const VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS = 30_000;
 const TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS = 5_000;
-
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const createDefaultVoiceRecordingId = () => crypto.randomUUID();
 const currentDate = () => new Date();
@@ -132,6 +134,7 @@ export function useVoiceInput({
   createRecordingId = createDefaultVoiceRecordingId,
   createOwnerId,
   now = currentDate,
+  automaticRetryDelayMilliseconds,
 }: UseVoiceInputOptions): UseVoiceInputResult {
   const [status, setStatus] = useState<VoiceInputStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -156,6 +159,8 @@ export function useVoiceInput({
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const automaticRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const automaticRetryAttemptRef = useRef(0);
   const ownerHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const valueRef = useRef(value);
@@ -211,6 +216,7 @@ export function useVoiceInput({
     setRecordingId(null);
     setDurationSeconds(0);
     setLocallySaved(false);
+    automaticRetryAttemptRef.current = 0;
   }, [stopOwnerHeartbeat]);
 
   const ensureStore = useCallback(async (): Promise<VoiceRecordingStore> => {
@@ -348,7 +354,9 @@ export function useVoiceInput({
           setStatus(
             claimed.finalizationState === "transcript-ready" && claimed.transcriptText !== null
               ? "transcript-ready"
-              : "recovered",
+              : claimed.recoveryMode === "automatic"
+                ? "retrying"
+                : "recovered",
           );
           setError(null);
           return;
@@ -415,7 +423,12 @@ export function useVoiceInput({
         if (chunks.length === 0) {
           const retained = await store.updateManifest(
             transcribing.recordingId,
-            { uploadState: "retrying", transcriptionState: "retrying" },
+            {
+              uploadState: "retrying",
+              transcriptionState: "retrying",
+              recoveryMode: "manual",
+              handoffMode: "explicit",
+            },
             readNow().toISOString(),
             ownerIdRef.current ?? undefined,
           );
@@ -446,6 +459,14 @@ export function useVoiceInput({
         );
         if (!active()) return;
         rememberManifest(ready);
+
+        automaticRetryAttemptRef.current = 0;
+        if (ready.handoffMode === "explicit") {
+          setStatus("transcript-ready");
+          setError("handoff_uncertain");
+          focusInput();
+          return;
+        }
 
         const next = appendFinalTranscript(valueRef.current, response.text);
         if (next !== valueRef.current) {
@@ -490,16 +511,22 @@ export function useVoiceInput({
         await loadNextRecoverable(generation);
       } catch (reason) {
         if (!active()) return;
+        const code = controller.signal.aborted ? null : errorCode(reason);
+        const retryable = !controller.signal.aborted && isRetryableVoiceInputError(reason);
         const retained = await updateManifestBestEffort(transcribing, {
           uploadState: "retrying",
           transcriptionState: "retrying",
+          recoveryMode: retryable ? "automatic" : "manual",
+          handoffMode: "explicit",
         });
         if (!active()) return;
-        await preserveForRetry(
-          retained,
-          controller.signal.aborted ? null : errorCode(reason),
-          generation,
-        );
+        if (retryable) {
+          rememberManifest(retained);
+          setStatus("retrying");
+          setError(code);
+        } else {
+          await preserveForRetry(retained, code, generation);
+        }
       } finally {
         if (controllerRef.current === controller) controllerRef.current = null;
       }
@@ -519,6 +546,64 @@ export function useVoiceInput({
       workspaceId,
     ],
   );
+
+  useEffect(() => {
+    if (
+      status !== "retrying" ||
+      !manifestRef.current ||
+      manifestRef.current.recoveryMode !== "automatic" ||
+      manifestRef.current.workspaceId !== workspaceId ||
+      !client ||
+      disabled ||
+      !enabled
+    ) {
+      return;
+    }
+    const generation = generationRef.current;
+    let started = false;
+    const run = () => {
+      if (
+        started ||
+        generation !== generationRef.current ||
+        statusRef.current !== "retrying" ||
+        workspaceIdRef.current !== workspaceId
+      ) {
+        return;
+      }
+      started = true;
+      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
+      automaticRetryTimerRef.current = null;
+      automaticRetryAttemptRef.current += 1;
+      void finalizePersistedRecording(generation);
+    };
+    const onOnline = () => run();
+    globalThis.addEventListener?.("online", onOnline);
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      return () => globalThis.removeEventListener?.("online", onOnline);
+    }
+    const delay = Math.max(
+      0,
+      automaticRetryDelayMilliseconds ??
+        transcriptionRecoveryMutationDelayMilliseconds(
+          TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
+          automaticRetryAttemptRef.current,
+        ),
+    );
+    automaticRetryTimerRef.current = setTimeout(run, delay);
+    return () => {
+      globalThis.removeEventListener?.("online", onOnline);
+      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
+      automaticRetryTimerRef.current = null;
+    };
+  }, [
+    automaticRetryDelayMilliseconds,
+    client,
+    disabled,
+    enabled,
+    finalizePersistedRecording,
+    status,
+    workspaceId,
+  ]);
 
   const stop = useCallback(() => {
     const recorder = recorderRef.current;
@@ -540,6 +625,7 @@ export function useVoiceInput({
       status === "recording" ||
       status === "saving" ||
       status === "transcribing" ||
+      status === "retrying" ||
       !navigator.mediaDevices?.getUserMedia ||
       typeof MediaRecorder === "undefined"
     ) {
@@ -716,11 +802,19 @@ export function useVoiceInput({
             }
             rememberManifest(stopped);
             if (attemptPersistenceError) {
-              await preserveForRetry(stopped, "storage_unavailable", generation);
+              const retained = await updateManifestBestEffort(stopped, {
+                recoveryMode: "manual",
+                handoffMode: "explicit",
+              });
+              await preserveForRetry(retained, "storage_unavailable", generation);
               return;
             }
             if (attemptCaptureLimitError) {
-              await preserveForRetry(stopped, attemptCaptureLimitError, generation);
+              const retained = await updateManifestBestEffort(stopped, {
+                recoveryMode: "manual",
+                handoffMode: "explicit",
+              });
+              await preserveForRetry(retained, attemptCaptureLimitError, generation);
               return;
             }
             await finalizePersistedRecording(generation);
@@ -826,9 +920,29 @@ export function useVoiceInput({
     }
     const generation = ++generationRef.current;
     controllerRef.current?.abort();
+    if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
+    automaticRetryTimerRef.current = null;
+    automaticRetryAttemptRef.current = 0;
     setError(null);
-    void finalizePersistedRecording(generation);
-  }, [client, disabled, enabled, finalizePersistedRecording, status, workspaceId]);
+    const manifest = manifestRef.current;
+    void updateManifestBestEffort(manifest, {
+      recoveryMode: "automatic",
+      handoffMode: "append",
+    }).then((retained) => {
+      if (generation !== generationRef.current) return;
+      rememberManifest(retained);
+      void finalizePersistedRecording(generation);
+    });
+  }, [
+    client,
+    disabled,
+    enabled,
+    finalizePersistedRecording,
+    rememberManifest,
+    status,
+    updateManifestBestEffort,
+    workspaceId,
+  ]);
 
   const insertSavedTranscript = useCallback(async (): Promise<void> => {
     const manifest = manifestRef.current;
@@ -951,10 +1065,12 @@ export function useVoiceInput({
       void discard();
       return;
     }
-    if (status === "saving" || status === "transcribing") {
+    if (status === "saving" || status === "transcribing" || status === "retrying") {
       const generation = ++generationRef.current;
       controllerRef.current?.abort();
       controllerRef.current = null;
+      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
+      automaticRetryTimerRef.current = null;
       const captureSettled = status === "saving" ? captureSettledRef.current : Promise.resolve();
       void captureSettled.then(async () => {
         const manifest = manifestRef.current;
@@ -963,6 +1079,8 @@ export function useVoiceInput({
           captureState: "stopped",
           uploadState: "retrying",
           transcriptionState: "retrying",
+          recoveryMode: "manual",
+          handoffMode: "explicit",
         });
         await preserveForRetry(retained, null, generation);
       });
@@ -996,7 +1114,12 @@ export function useVoiceInput({
             {
               ...(current.captureState === "capturing" ? { captureState: "stopped" as const } : {}),
               ...(wasProcessing
-                ? { uploadState: "retrying" as const, transcriptionState: "retrying" as const }
+                ? {
+                    uploadState: "retrying" as const,
+                    transcriptionState: "retrying" as const,
+                    recoveryMode: "automatic" as const,
+                    handoffMode: "explicit" as const,
+                  }
                 : {}),
               ownerId: null,
               ownerHeartbeatAt: null,
@@ -1028,7 +1151,8 @@ export function useVoiceInput({
         (status === "requesting-permission" ||
           status === "recording" ||
           status === "saving" ||
-          status === "transcribing")
+          status === "transcribing" ||
+          status === "retrying")
       ) {
         event.preventDefault();
         cancel();
@@ -1043,6 +1167,8 @@ export function useVoiceInput({
       generationRef.current += 1;
       controllerRef.current?.abort();
       controllerRef.current = null;
+      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
+      automaticRetryTimerRef.current = null;
       const manifest = manifestRef.current;
       const ownerReady = ownerIdPromiseRef.current;
       stopOwnerHeartbeat();
@@ -1061,7 +1187,9 @@ export function useVoiceInput({
           const store = storeRef.current;
           if (store && manifest && ownerId) {
             const wasProcessing =
-              statusRef.current === "saving" || statusRef.current === "transcribing";
+              statusRef.current === "saving" ||
+              statusRef.current === "transcribing" ||
+              statusRef.current === "retrying";
             await store
               .updateManifest(
                 manifest.recordingId,
@@ -1073,6 +1201,8 @@ export function useVoiceInput({
                     ? {
                         uploadState: "retrying" as const,
                         transcriptionState: "retrying" as const,
+                        recoveryMode: "automatic" as const,
+                        handoffMode: "explicit" as const,
                       }
                     : {}),
                   ownerId: null,
@@ -1232,7 +1362,7 @@ async function transcribePersistedRecording(input: {
         break;
       case "failed": {
         if (!remote.recording.retryable) {
-          throw { code: remote.recording.errorCode ?? "unknown" };
+          throw { code: remote.recording.errorCode ?? "unknown", retryable: false };
         }
         const retried =
           remote.recording.segmentCount === 0
@@ -1247,7 +1377,10 @@ async function transcribePersistedRecording(input: {
                 { signal: input.signal },
               );
         if (retried.recording.state === "failed") {
-          throw { code: retried.recording.errorCode ?? "unknown" };
+          throw {
+            code: retried.recording.errorCode ?? "unknown",
+            retryable: retried.recording.retryable,
+          };
         }
         remote = retried;
         scheduleRecoveryMutation(remote);
@@ -1350,10 +1483,24 @@ function chooseMimeType(accepted: string[]): string | undefined {
 }
 
 function errorCode(error: unknown): string {
+  if (error instanceof OpenGeniApiError && typeof error.details?.transcriptionCode === "string") {
+    return error.details.transcriptionCode;
+  }
   if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
     return error.code;
   }
   if (error instanceof DOMException && error.name === "NotAllowedError") return "permission_denied";
   if (error instanceof DOMException && error.name === "NotSupportedError") return "not_supported";
   return "unknown";
+}
+
+function isRetryableVoiceInputError(error: unknown): boolean {
+  if (error instanceof OpenGeniApiError) {
+    return error.retryable && error.status !== 409;
+  }
+  if (error instanceof TypeError) return true;
+  if (error && typeof error === "object" && "retryable" in error) {
+    return error.retryable === true;
+  }
+  return false;
 }

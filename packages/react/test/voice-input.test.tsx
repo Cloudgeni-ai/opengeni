@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import type { TranscribeAudioInput } from "@opengeni/sdk";
+import { OpenGeniApiError, type TranscribeAudioInput } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { ChatComposer } from "../src/components/chat-composer";
 import { appendFinalTranscript } from "../src/hooks/use-transcription";
@@ -248,6 +248,8 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
         | "ownerId"
         | "ownerHeartbeatAt"
         | "transcriptText"
+        | "recoveryMode"
+        | "handoffMode"
       >
     >,
     updatedAt: string,
@@ -351,7 +353,7 @@ async function seedStoppedRecording(
   });
   await store.updateManifest(
     recordingId,
-    { captureState: "stopped" },
+    { captureState: "stopped", recoveryMode: "manual", handoffMode: "explicit" },
     new Date(new Date(createdAt).getTime() + 1_000).toISOString(),
   );
 }
@@ -1623,7 +1625,7 @@ describe("useVoiceInput", () => {
       expect(uploadCalls).toBe(0);
       expect(processNextCalls).toBe(expectedProcessNextCalls);
       expect(draft).toBe("unchanged");
-      expect(hook.result.current.status).toBe("error");
+      expect(hook.result.current.status).toBe(retryable ? "retrying" : "error");
       expect(hook.result.current.error).toBe("provider");
       expect(store.manifests.has(recordingId)).toBe(true);
       await hook.unmount();
@@ -1670,7 +1672,7 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
-  test("retains ordered chunks after a transcription error and retries the same recording", async () => {
+  test("automatically retries the same durable recording and holds delayed text for insertion", async () => {
     const { getUserMedia } = installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
     const submitted: TranscribeAudioInput[] = [];
@@ -1681,7 +1683,7 @@ describe("useVoiceInput", () => {
           client: {
             transcribeAudio: async (_workspaceId, input) => {
               submitted.push(input);
-              if (submitted.length === 1) throw { code: "network" };
+              if (submitted.length === 1) throw new TypeError("network unavailable");
               return { text: "recovered transcript", languages: [] };
             },
           },
@@ -1695,6 +1697,7 @@ describe("useVoiceInput", () => {
           focusInput: () => undefined,
           createRecordingStore: () => store,
           createRecordingId: () => "recording-retry",
+          automaticRetryDelayMilliseconds: 0,
         }),
       undefined,
     );
@@ -1707,21 +1710,24 @@ describe("useVoiceInput", () => {
       recorder?.emit(new Blob(["first"], { type: recorder.mimeType }), 5_000);
       recorder?.emit(new Blob(["second"], { type: recorder.mimeType }), 10_000);
       hook.result.current.stop();
-      await settle(30);
+      await settle(40);
+    });
+    expect(hook.result.current.status).toBe("retrying");
+
+    await act(async () => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await settle(20);
+      }
     });
 
-    expect(hook.result.current.status).toBe("error");
-    expect(hook.result.current.error).toBe("network");
+    expect(hook.result.current.status).toBe("transcript-ready");
+    expect(hook.result.current.error).toBe("handoff_uncertain");
     expect(hook.result.current.recordingId).toBe("recording-retry");
     expect((await store.listChunks("recording-retry")).map((chunk) => chunk.chunkNumber)).toEqual([
       0, 1, 2,
     ]);
     expect(store.manifests.has("recording-retry")).toBe(true);
-
-    await act(async () => {
-      hook.result.current.retry();
-      await settle(30);
-    });
 
     expect(submitted).toHaveLength(2);
     const firstSubmission = submitted[0];
@@ -1731,9 +1737,121 @@ describe("useVoiceInput", () => {
     expect(retrySubmission.audio).toBeInstanceOf(Blob);
     expect((retrySubmission.audio as Blob).size).toBe((firstSubmission.audio as Blob).size);
     expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(draft).toBe("");
+    expect(store.manifests.get("recording-retry")).toMatchObject({
+      recoveryMode: "automatic",
+      handoffMode: "explicit",
+      finalizationState: "transcript-ready",
+    });
+
+    await act(async () => {
+      await hook.result.current.insertSavedTranscript();
+      await settle(20);
+    });
     expect(draft).toBe("recovered transcript");
     expect(hook.result.current.status).toBe("idle");
     expect(store.manifests.has("recording-retry")).toBe(false);
+    await hook.unmount();
+  });
+
+  test("pauses automatic recovery without deleting the saved recording", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    let transcriptionCalls = 0;
+    const hook = await renderHook(
+      () =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              transcriptionCalls += 1;
+              throw new TypeError("network unavailable");
+            },
+          },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-paused-recovery",
+          automaticRetryDelayMilliseconds: 60_000,
+        }),
+      undefined,
+    );
+
+    await act(async () => {
+      await hook.result.current.start();
+      hook.result.current.stop();
+      await settle(30);
+    });
+    expect(hook.result.current.status).toBe("retrying");
+
+    await act(async () => {
+      hook.result.current.cancel();
+      await settle(30);
+    });
+
+    expect(transcriptionCalls).toBe(1);
+    expect(hook.result.current.status).toBe("recovered");
+    expect(store.manifests.get("recording-paused-recovery")).toMatchObject({
+      recoveryMode: "manual",
+      handoffMode: "explicit",
+    });
+    expect(store.manifests.has("recording-paused-recovery")).toBe(true);
+    await hook.unmount();
+  });
+
+  test("does not loop on a deterministic API conflict even when generic HTTP policy marks 409 retryable", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    let transcriptionCalls = 0;
+    const hook = await renderHook(
+      () =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              transcriptionCalls += 1;
+              throw new OpenGeniApiError(
+                409,
+                JSON.stringify({
+                  error: {
+                    status: 409,
+                    code: "conflict",
+                    message: "Recording metadata conflicts.",
+                    retryable: true,
+                  },
+                }),
+              );
+            },
+          },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-conflict",
+          automaticRetryDelayMilliseconds: 0,
+        }),
+      undefined,
+    );
+
+    await act(async () => {
+      await hook.result.current.start();
+      hook.result.current.stop();
+      await settle(30);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await settle(20);
+    });
+
+    expect(transcriptionCalls).toBe(1);
+    expect(hook.result.current.status).toBe("error");
+    expect(hook.result.current.error).toBe("conflict");
+    expect(store.manifests.has("recording-conflict")).toBe(true);
     await hook.unmount();
   });
 
@@ -1829,7 +1947,7 @@ describe("useVoiceInput", () => {
     });
     await store.updateManifest(
       manifest.recordingId,
-      { captureState: "stopped" },
+      { captureState: "stopped", recoveryMode: "manual", handoffMode: "explicit" },
       "2026-08-03T21:00:05.000Z",
     );
     const calls: string[] = [];
@@ -2018,7 +2136,7 @@ describe("useVoiceInput", () => {
     await act(async () => {
       await settle(20);
     });
-    expect(recovered.result.current.status).toBe("recovered");
+    expect(recovered.result.current.status).toBe("retrying");
     expect(recovered.result.current.recordingId).toBe("recording-live-tab");
     await recovered.unmount();
   });
@@ -2273,7 +2391,7 @@ describe("useVoiceInput", () => {
         useVoiceInput({
           client: {
             transcribeAudio: async () => {
-              throw { code: "timeout" };
+              throw new TypeError("network timeout");
             },
           },
           workspaceId: "ws-1",
@@ -2294,7 +2412,7 @@ describe("useVoiceInput", () => {
       first.result.current.stop();
       await settle(24);
     });
-    expect(first.result.current.status).toBe("error");
+    expect(first.result.current.status).toBe("retrying");
     await first.unmount();
 
     let draft = "";
@@ -2314,17 +2432,20 @@ describe("useVoiceInput", () => {
           focusInput: () => undefined,
           createRecordingStore: () => store,
           createOwnerId: () => "reload-owner",
+          automaticRetryDelayMilliseconds: 0,
         }),
       undefined,
     );
     await act(async () => {
-      await settle(20);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await settle(30);
     });
 
-    expect(recovered.result.current.status).toBe("recovered");
+    expect(recovered.result.current.status).toBe("transcript-ready");
     expect(recovered.result.current.recordingId).toBe("recording-reload");
+    expect(draft).toBe("");
     await act(async () => {
-      recovered.result.current.retry();
+      await recovered.result.current.insertSavedTranscript();
       await settle(24);
     });
     expect(getUserMedia).toHaveBeenCalledTimes(1);
