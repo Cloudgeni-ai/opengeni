@@ -331,6 +331,39 @@ describe("turn exact-content boundaries", () => {
     });
   });
 
+  test("persists hosted SDK tool calls as protocol JSON when optional output is undefined", () => {
+    const hostedToolCall = {
+      type: "hosted_tool_call",
+      id: "ws_123",
+      name: "web_search_call",
+      status: "completed",
+      output: undefined,
+      providerData: {
+        type: "web_search_call",
+        id: "ws_123",
+        status: "completed",
+        action: { type: "search", query: "OpenGeni" },
+      },
+    };
+
+    const result = historyRowsToAppend([hostedToolCall], 0);
+
+    expect(hostedToolCall).toHaveProperty("output", undefined);
+    expect(result.rows).toEqual([
+      {
+        position: 0,
+        item: {
+          type: "hosted_tool_call",
+          id: "ws_123",
+          name: "web_search_call",
+          status: "completed",
+          providerData: hostedToolCall.providerData,
+        },
+      },
+    ]);
+    expect(Object.hasOwn(hostedToolCall, "output")).toBe(true);
+  });
+
   test("public diagnostics exclude arbitrary bodies while internal failure events remain exact", () => {
     const error = Object.assign(new Error(`request rejected; detail=${syntheticValue}`), {
       status: 401,

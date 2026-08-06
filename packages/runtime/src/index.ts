@@ -288,6 +288,7 @@ export {
   serializedRunStateHasOpaqueProviderArtifact,
 } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
+export { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "./protocol-json";
 export {
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,

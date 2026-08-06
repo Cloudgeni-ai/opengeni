@@ -92,6 +92,7 @@ import {
   modelTerminalResponseFromSdkEvent,
   normalizeModelCallUsage,
   normalizeSdkEvent,
+  normalizeProtocolJsonValue,
   projectHistoryForProvider,
   sanitizeHistoryItemsForModel,
   projectModelInputForCapabilities,
@@ -1567,13 +1568,19 @@ export function historyRowsToAppend(
   // notes—must not accidentally become conversation memory during reconciliation.
   // Advance the in-memory watermark past them, but only allocate durable
   // positions to actual model/tool output.
-  const rows = modelReady
-    .slice(persistedHistoryCount)
-    .filter((item) => !(item.type === "message" && item.role === "system"))
-    .map((item, offset) => ({
-      position: nextPosition + offset,
-      item: item as Record<string, unknown>,
-    }));
+  const rows: Array<{ position: number; item: Record<string, unknown> }> = [];
+  for (const [offset, item] of modelReady.slice(persistedHistoryCount).entries()) {
+    if (item.type === "message" && item.role === "system") {
+      continue;
+    }
+    rows.push({
+      position: nextPosition + rows.length,
+      item: normalizeProtocolJsonValue(
+        item as Record<string, unknown>,
+        `$[${persistedHistoryCount + offset}]`,
+      ),
+    });
+  }
   return {
     rows,
     nextWatermark: modelReady.length,
