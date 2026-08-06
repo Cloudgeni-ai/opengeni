@@ -1,11 +1,8 @@
--- deployment-mode: maintenance
--- GitHub App installation credentials are host-owned run material. Retire the
--- model-visible github_token MCP tool from every durable session selection and
--- prevent an old writer from reintroducing it after the coordinated cutover.
-
-UPDATE "sessions"
-SET "first_party_mcp_tools" = "first_party_mcp_tools" - 'github_token'
-WHERE "first_party_mcp_tools" ? 'github_token';
+-- deployment-mode: rolling
+-- Migration 0172 is already deployed and immutable. Keep its database-owned
+-- fallback default aligned with the connected-machine removal tool through a
+-- forward migration; application session creation still writes its exact
+-- frozen tool selection explicitly.
 
 ALTER TABLE "sessions"
   ALTER COLUMN "first_party_mcp_tools"
@@ -25,6 +22,7 @@ ALTER TABLE "sessions"
     "sandbox_swap",
     "run_on",
     "sandbox_provision",
+    "connected_machine_remove",
     "rig_list",
     "rig_get",
     "rig_propose_change",
@@ -77,10 +75,3 @@ ALTER TABLE "sessions"
     "artifacts_publish",
     "artifacts_rollback"
   ]'::jsonb;
-
-ALTER TABLE "sessions"
-  DROP CONSTRAINT IF EXISTS "sessions_first_party_mcp_tools_no_model_credentials_chk";
-
-ALTER TABLE "sessions"
-  ADD CONSTRAINT "sessions_first_party_mcp_tools_no_model_credentials_chk"
-  CHECK (NOT ("first_party_mcp_tools" @> '["github_token"]'::jsonb));

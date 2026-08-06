@@ -924,7 +924,11 @@ describe("connections routes", () => {
       const startedAt = performance.now();
       const response = await appWithDeps(
         { environment: "test" },
-        { oauthStartDeadlineMs: 25 },
+        // The deadline covers the real PostgreSQL connection lookup as well as
+        // network discovery. Leave enough room for that prerequisite under a
+        // loaded suite so this test deterministically reaches the stalled
+        // protected-resource response it is intended to classify.
+        { oauthStartDeadlineMs: 3_000 },
       ).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
         method: "POST",
         headers: {
@@ -945,7 +949,7 @@ describe("connections routes", () => {
         };
       };
       expect(response.status).toBe(408);
-      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(performance.now() - startedAt).toBeLessThan(6_000);
       expect(body.error).toMatchObject({
         code: "upstream_unavailable",
         retryable: true,

@@ -9,6 +9,7 @@ import {
   cancellableShellCommand,
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
+import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
@@ -1019,9 +1020,14 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
         (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
           tool.type === "function" && tool.name === "exec_command",
       );
+      const write = tools.find(
+        (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+          tool.type === "function" && tool.name === "write_stdin",
+      );
       expect(exec).toBeDefined();
+      expect(write).toBeDefined();
 
-      const output = await exec!.invoke(
+      let current = await exec!.invoke(
         runContext,
         JSON.stringify({
           tty: false,
@@ -1042,7 +1048,23 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
           ].join("\n"),
         }),
       );
+      let output = current;
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const banner = parseExecResponseBanner(current);
+        if (banner.kind !== "running") break;
+        current = await write!.invoke(
+          runContext,
+          JSON.stringify({
+            session_id: banner.sessionId,
+            chars: "",
+            yield_time_ms: 250,
+            max_output_tokens: 4_096,
+          }),
+        );
+        output += `\n${current}`;
+      }
 
+      expect(parseExecResponseBanner(current)).toEqual({ kind: "exited", exitCode: 0 });
       expect(output).toContain("stdin=pipe stdout=pipe stderr=pipe");
       expect(output).toContain("pager=not-invoked");
       expect(existsSync(pagerMarker)).toBe(false);
