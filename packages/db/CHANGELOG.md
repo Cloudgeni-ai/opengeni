@@ -1,5 +1,16 @@
 # @opengeni/db
 
+## 0.28.4
+
+### Patch Changes
+
+- 5d8bb99: Allow scheduled tasks to target and durably wake one authorized existing session without creating a helper session or replacing its goal.
+- 238fb7e: Keep human-to-human Slack DM shortcuts initiating-user-private and route durable acknowledgements, progress, results, and replies through the invoking user's OpenGeni bot DM.
+- Updated dependencies [5d8bb99]
+- Updated dependencies [af24281]
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+
 ## 0.28.3
 
 ### Patch Changes

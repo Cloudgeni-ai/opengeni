@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.46.4
+
+### Patch Changes
+
+- b783f12: Keep optional MCP setup authentication out of unrelated chat timelines while preserving actionable tool-call reconnect events.
+- Updated dependencies [5d8bb99]
+  - @opengeni/sdk@0.46.4
+
 ## 0.46.3
 
 ### Patch Changes
