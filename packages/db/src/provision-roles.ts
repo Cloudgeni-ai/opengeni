@@ -46,9 +46,8 @@ export type ProvisionRolesOptions = {
    * Optional cross-workspace projection role. It receives schema USAGE and
    * EXECUTE only on the host-export API; it receives no table privileges.
    * Provision it after the first migration run so the schema exists. The
-   * provisioner also registers same-owner default privileges for future
-   * host-export functions; shipped migrations preserve existing exporter ACLs
-   * when a migration-only upgrade adds a function.
+   * shipped migrations preserve existing exporter ACLs when a migration-only
+   * upgrade adds a function.
    */
   hostExportRole?: string;
   hostExportPassword?: string;
@@ -124,6 +123,7 @@ export async function provisionRoles(
           "OPENGENI_APP_DATABASE_PASSWORD (or appPassword) is required for rlsStrategy 'force'",
         );
       }
+      await assertLegacyAuthorityNotCutOver(sql, schema, appRole);
       // Ownership and privilege-bearing role-graph edges cannot be safely
       // guessed away. Refuse to mutate an existing role until an operator has
       // explicitly transferred objects/removed those memberships; role
@@ -144,6 +144,12 @@ export async function provisionRoles(
         organizationGovernancePassword,
       );
       await ensureOrganizationGovernanceOperatorRole(sql);
+      // Enabled new binaries serve all ordinary application traffic through
+      // this v2 principal. Converge the exact runtime table/function contract
+      // before adding the governance-specific authorization surface; the
+      // legacy app role remains a separate old-fleet identity until atomic
+      // activation revokes it and sets it NOLOGIN.
+      await grantAppRoleIfSchemaExists(sql, organizationGovernanceRole, schema);
       await grantOrganizationGovernanceRoleIfSchemaExists(sql, organizationGovernanceRole, schema);
       provisionedOrganizationGovernanceRole = organizationGovernanceRole;
     }
@@ -184,21 +190,88 @@ async function grantOrganizationGovernanceRoleIfSchemaExists(
   role: string,
   schema: string,
 ): Promise<void> {
+  const fullDmlTables = [
+    "managed_accounts",
+    "workspace_memberships",
+    "workspaces",
+    "api_keys",
+    "organization_recovery_custodians",
+    "organization_recovery_operations",
+    "organization_recovery_approvals",
+  ];
+  const readWriteTables = ["organization_governance_commands"];
+  const readInsertTables = [
+    "organization_authorization_invalidations",
+    "organization_recovery_audit",
+  ];
+  const readOnlyTables = ["auth_users", "auth_sessions"];
   await sql.unsafe(`
 DO $$
+DECLARE
+  table_name text;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
+    FOREACH table_name IN ARRAY ARRAY[
+      ${fullDmlTables.map(literal).join(", ")}
+    ] LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
+          ${literal(schema)}, table_name, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH table_name IN ARRAY ARRAY[
+      ${readWriteTables.map(literal).join(", ")}
+    ] LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT, INSERT, UPDATE ON TABLE %I.%I TO %I',
+          ${literal(schema)}, table_name, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH table_name IN ARRAY ARRAY[
+      ${readInsertTables.map(literal).join(", ")}
+    ] LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT, INSERT ON TABLE %I.%I TO %I',
+          ${literal(schema)}, table_name, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH table_name IN ARRAY ARRAY[
+      ${readOnlyTables.map(literal).join(", ")}
+    ] LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, table_name)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT ON TABLE %I.%I TO %I',
+          ${literal(schema)}, table_name, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
-    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
-    IF to_regprocedure('opengeni_private.activate_organization_governance_target(text)') IS NOT NULL THEN
-      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.activate_organization_governance_target(text) TO opengeni_governance_operator');
+    IF to_regprocedure('opengeni_private.account_rls_visible(uuid)') IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.account_rls_visible(uuid) TO %I',
+        ${literal(role)}
+      );
     END IF;
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.managed_accounts TO %I', ${literal(schema)}, ${literal(role)});
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.workspace_memberships, %I.workspaces, %I.api_keys TO %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.organization_recovery_custodians, %I.organization_recovery_operations, %I.organization_recovery_approvals TO %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
-    EXECUTE format('GRANT SELECT, INSERT ON TABLE %I.organization_governance_commands, %I.organization_authorization_invalidations, %I.organization_recovery_audit TO %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
-    EXECUTE format('GRANT SELECT ON TABLE %I.auth_users, %I.auth_sessions TO %I', ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+    IF to_regprocedure('opengeni_private.reject_organization_recovery_history_mutation()') IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.reject_organization_recovery_history_mutation() TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.activate_organization_governance_target(text)') IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.activate_organization_governance_target(text) TO opengeni_governance_operator'
+      );
+    END IF;
   END IF;
 END $$;
 `);
@@ -221,13 +294,42 @@ END $$;
  * available to the tenant-scoped application role.
  */
 async function grantHostExportRoleIfSchemaExists(sql: postgres.Sql, role: string): Promise<void> {
+  const hostExportFunctionSignatures = [
+    "register_host_export_consumer(text, text)",
+    "allocate_host_export_cursors(text, integer)",
+    "claim_host_export_batch(text, text, uuid, text, integer, integer, integer)",
+    "ack_host_export_batch(text, text, uuid)",
+    "fail_host_export_batch(text, text, uuid, text, integer)",
+    "fail_host_export_batch(text, text, uuid, text, integer, integer)",
+    "resume_host_export_consumer(text, text)",
+    "rewind_host_export_consumer(text, text, bigint)",
+    "prune_host_export_outbox(text, integer, integer)",
+    "disable_host_export_consumer(text, text)",
+    "retire_host_export_consumer(text, text)",
+    "dead_letter_host_export_head(text, text, uuid, bigint, text)",
+    "host_export_consumer_status(text, text)",
+    "host_export_cursor_roots(text, text, uuid)",
+    "host_export_claim_sidecars(text, text, uuid)",
+    "host_export_consumer_status_sidecar(text, text)",
+  ];
   await sql.unsafe(`
 DO $$
+DECLARE
+  function_signature text;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_host_export') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_host_export TO %I', ${literal(role)});
-    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_host_export TO %I', ${literal(role)});
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_host_export GRANT EXECUTE ON FUNCTIONS TO %I', ${literal(role)});
+    FOREACH function_signature IN ARRAY ARRAY[
+      ${hostExportFunctionSignatures.map(literal).join(",\n      ")}
+    ] LOOP
+      IF to_regprocedure('opengeni_host_export.' || function_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION opengeni_host_export.%s TO %I',
+          function_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
   END IF;
 END $$;
 `);
@@ -244,6 +346,31 @@ BEGIN
   END IF;
 END $$;
 `);
+}
+
+/** Once the v2 cutover is committed, rerunning provisioning must never reopen
+ * the legacy runtime login or recreate its critical-table authority. */
+async function assertLegacyAuthorityNotCutOver(
+  sql: postgres.Sql,
+  schema: string,
+  legacyRole: string,
+): Promise<void> {
+  const targetAuthorityExists = await sql<{ exists: boolean }[]>`
+    select to_regclass(${`${identifier(schema)}.organization_governance_target_authority`}) is not null
+      as exists`;
+  if (!targetAuthorityExists[0]?.exists) return;
+  const rows = await sql.unsafe<{ activated: boolean }[]>(
+    `select activated_at is not null as activated
+       from ${identifier(schema)}.organization_governance_target_authority
+      where legacy_role = $1
+      limit 1`,
+    [legacyRole],
+  );
+  if (rows[0]?.activated) {
+    throw new Error(
+      `Refusing to reprovision legacy runtime role ${legacyRole}: organization governance authority is already cut over`,
+    );
+  }
 }
 
 async function ensureRestrictedAppLoginRole(
@@ -609,12 +736,9 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
-    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
-    EXECUTE format(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private GRANT EXECUTE ON FUNCTIONS TO %I',
-      owner_role,
-      ${literal(role)}
-    );
+    -- Do not grant a moving schema-wide routine surface to the runtime role.
+    -- Migration-owned routines below are granted by exact signature in their
+    -- owning migration; this provisioner only converges the schema boundary.
   END IF;
 END $$;
 `);

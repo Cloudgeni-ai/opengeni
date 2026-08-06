@@ -253,6 +253,28 @@ personal state before and after both allowed and denied ceremonies.
 
 ### 3.10 Organization governance recovery persistence and privilege
 
+The implementation has two physical PostgreSQL authority handles when enabled:
+the ordinary runtime handle and a distinct v2 governance/auth handle. The URL and
+login must be distinct in every environment. Every postgres-js and Better Auth
+physical checkout is gated on the exact configured login being `LOGIN`,
+non-superuser, non-`BYPASSRLS`, and unable to inherit or `SET ROLE` into a forbidden
+legacy/operator role. Missing or equal topology fails closed.
+
+When the v2 plane is enabled, the new API, worker, Better Auth, activity, and
+testing-runtime consumers all use the v2 URL/login as their primary authority;
+the legacy URL/login remains only for old-fleet compatibility during the one-way
+cutover and is never a fallback for an enabled binary.
+
+Migration `0109` records immutable OIDs for the target schema, governance tables,
+and the exact `auth_users`/`auth_sessions` relations. Operator activation is not a
+timestamp-only feature flag: it locks the registry, proves the v2 principal and
+FORCE-RLS posture, requires all legacy sessions drained, revokes legacy critical
+table DML, and sets the legacy role `NOLOGIN` in the same transaction. A second
+activation is idempotent only if the cutover remains intact. Rerunning migrations,
+role provisioning, rollback, or disaster-recovery reprovisioning cannot clear the
+cutover marker or reopen legacy authority; recovery proceeds with a compatible v2
+binary and forward repair.
+
 Organization recovery operations store exactly one organization id and governance
 revision, requested membership/custody effects, eligible active human recovery
 stewards, approvals/notices/deadline, incident, idempotency key, generation, state, and

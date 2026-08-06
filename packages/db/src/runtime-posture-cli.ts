@@ -1,4 +1,9 @@
-import { dbSearchPath, getSettings } from "@opengeni/config";
+import {
+  dbSearchPath,
+  getSettings,
+  servingDatabaseRole,
+  servingDatabaseUrl,
+} from "@opengeni/config";
 import {
   assertRuntimeDatabasePosture,
   createDb,
@@ -11,16 +16,25 @@ import {
 
 const settings = getSettings();
 const searchPath = dbSearchPath(settings);
-const client = createDb(settings.databaseUrl, {
+const client = createDb(servingDatabaseUrl(settings), {
   ...(searchPath ? { searchPath } : {}),
   rlsStrategy: settings.rlsStrategy,
+  connectionAuthority: {
+    expectedRole: servingDatabaseRole(settings),
+    forbiddenRoles: [
+      settings.organizationGovernanceEnabled
+        ? settings.runtimeDatabaseRole
+        : settings.organizationGovernanceDatabaseRole,
+      "opengeni_governance_operator",
+    ],
+  },
   max: 1,
 });
 
 try {
   const posture = await assertRuntimeDatabasePosture(client.db, {
     rlsStrategy: settings.rlsStrategy,
-    expectedRole: settings.runtimeDatabaseRole,
+    expectedRole: servingDatabaseRole(settings),
     targetSchema: settings.dbSchema.trim() || "public",
   });
   // Structural evidence only: never print a connection string, secret, GUC, or

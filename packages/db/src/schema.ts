@@ -185,6 +185,9 @@ export const organizationRecoveryApprovals = pgTable(
     operationId: uuid("operation_id").notNull(),
     subjectId: text("subject_id").notNull(),
     canonicalUserId: text("canonical_user_id"),
+    // Exact direct-auth session used to create this approval. It is internal
+    // authority evidence only and is never included in projections/audit.
+    authSessionId: text("auth_session_id"),
     evidenceCiphertext: text("evidence_ciphertext").notNull(),
     evidenceKeyVersion: text("evidence_key_version").notNull(),
     evidenceExpiresAt: timestamp("evidence_expires_at", { withTimezone: true }).notNull(),

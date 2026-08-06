@@ -3,11 +3,8 @@ import { signDelegatedAccessToken, type AccessContext } from "@opengeni/contract
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
-import {
-  bindDirectManagedSessionEvidence,
-  requireAccessGrant,
-  type AccessDeps,
-} from "../src/access";
+import { requireAccessGrant, type AccessDeps } from "../src/access";
+import { recordEvidence } from "../src/access/direct-session-evidence";
 import {
   requireOrganizationGovernanceAdmin,
   requireOrganizationGovernanceAdminOrLockedReplay,
@@ -24,8 +21,10 @@ function deps(): AccessDeps {
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret: SECRET,
+      organizationGovernanceEnabled: true,
     }),
     db: {} as opengeniDb.Database,
+    governanceDb: {} as opengeniDb.Database,
   };
 }
 
@@ -135,7 +134,7 @@ describe("organization governance access fence", () => {
         ...delegatedContext,
         accountGrants: [{ ...accountGrant, metadata: { authType: "managed" } }],
       };
-      bindDirectManagedSessionEvidence(directContext, {
+      recordEvidence(directContext, {
         userId: "custodian",
         sessionId: "direct-session",
       });

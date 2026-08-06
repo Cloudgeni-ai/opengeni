@@ -1140,13 +1140,24 @@ The runtime secret must provide values such as:
   it to `true` only after migration `0109_organization_governance_recovery.sql` has
   registered the target schema and the operator has activated the v2 authority plane
 - `OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL` for the separately credentialed v2
-  governance connection (normally the same PostgreSQL database with a distinct role)
+  governance connection. It is mandatory and must not equal `OPENGENI_DATABASE_URL`,
+  including in local/test environments; the URL and role identify the separate
+  authority handle.
 - `OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_ROLE=opengeni_governance_app`; API startup
   verifies this role independently before serving governance routes
-- After role provisioning, activate the registered target explicitly as an operator:
-  `SELECT opengeni_private.activate_organization_governance_target('public');` (use the
-  dedicated target schema name for embedded deployments). Migration replay never
-  activates or rewrites this registration.
+- When governance is enabled, new API, worker, Better Auth, activity, and testing
+  runtime consumers select this v2 URL and role for their primary database
+  connections. `OPENGENI_DATABASE_URL` and `OPENGENI_RUNTIME_DATABASE_ROLE` remain
+  legacy/old-fleet inputs only; enabled binaries must not fall back to them.
+- After role provisioning, drain every legacy `opengeni_app` session, verify the
+  v2 login is non-superuser/non-BYPASSRLS and FORCE-RLS is intact, then activate
+  the registered target explicitly as an operator:
+  `SELECT opengeni_private.activate_organization_governance_target('public');`
+  (use the dedicated target schema name for embedded deployments). Activation is
+  an atomic one-way authority cutover: it revokes legacy critical-table DML and
+  sets the legacy role `NOLOGIN`. Migration replay and role reprovisioning never
+  clear that marker or reopen the legacy role. Reconnect failures are expected
+  after activation; rollback/DR must use a v2-compatible image and forward repair.
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
 - `OPENGENI_TEMPORAL_TLS_ENABLED=true` for server-auth TLS without an API key

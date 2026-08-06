@@ -29,6 +29,10 @@ let workspaceId = "";
 const keyA = new Uint8Array(32).fill(3);
 const keyB = new Uint8Array(32).fill(4);
 const receiptIdentitySecret = new Uint8Array(32).fill(5);
+const directEvidence = (userId: string) => ({
+  userId,
+  sessionId: `session-${userId}`,
+});
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("organization-governance-recovery");
@@ -52,6 +56,7 @@ beforeAll(async () => {
     on conflict (id) do nothing`;
   await shared.admin`
     insert into auth_sessions (id, user_id, token, expires_at) values
+      ('session-owner', 'owner', 'token-owner', now() + interval '1 hour'),
       ('session-a', 'a', 'token-a', now() + interval '1 hour'),
       ('session-b', 'b', 'token-b', now() + interval '1 hour'),
       ('session-c', 'c', 'token-c', now() + interval '1 hour')
@@ -94,6 +99,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       actorSubjectId: "user:owner",
       actorUserId: "owner",
+      directSessionEvidence: directEvidence("owner"),
       expectedGovernanceRevision: 0,
       quorum: 2,
       custodians: [{ subjectId: "user:a" }, { subjectId: "user:b" }, { subjectId: "user:c" }],
@@ -126,6 +132,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       actorSubjectId: "user:owner",
       actorUserId: "owner",
+      directSessionEvidence: directEvidence("owner"),
       expectedGovernanceRevision: 1,
       reason: "owner identity unavailable",
       idempotencyKey: "lock-1",
@@ -139,6 +146,7 @@ describe("organization governance recovery persistence", () => {
         accountId,
         actorSubjectId: "user:owner",
         actorUserId: "owner",
+        directSessionEvidence: directEvidence("owner"),
         expectedGovernanceRevision: 1,
         reason: "owner identity unavailable",
         idempotencyKey: "lock-1",
@@ -149,6 +157,7 @@ describe("organization governance recovery persistence", () => {
       accountId,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       idempotencyKey: "operation-1",
     });
     expect(operation).toMatchObject({
@@ -180,6 +189,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       evidence: "identity-proof-a",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -201,6 +211,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       evidence: "identity-proof-a-lost-response",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -211,6 +222,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       evidence: "identity-proof-a-lost-response",
       encryptionKey: keyB,
       receiptIdentitySecret,
@@ -223,6 +235,7 @@ describe("organization governance recovery persistence", () => {
         operationId: operation.id,
         actorSubjectId: "user:a",
         actorUserId: "a",
+        directSessionEvidence: directEvidence("a"),
         evidence: "identity-proof-a-changed-request",
         encryptionKey: keyB,
         receiptIdentitySecret,
@@ -235,6 +248,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       idempotencyKey: "revoke-a-1",
     });
     expect(revoked.approvalCount).toBe(0);
@@ -243,6 +257,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       evidence: "identity-proof-a-fresh",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -254,6 +269,7 @@ describe("organization governance recovery persistence", () => {
         operationId: operation.id,
         actorSubjectId: "user:a",
         actorUserId: "a",
+        directSessionEvidence: directEvidence("a"),
         encryptionKey: keyA,
         idempotencyKey: "finalize-too-early",
       }),
@@ -264,6 +280,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:b",
       actorUserId: "b",
+      directSessionEvidence: directEvidence("b"),
       evidence: "identity-proof-b",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -275,6 +292,7 @@ describe("organization governance recovery persistence", () => {
         operationId: operation.id,
         actorSubjectId: "user:c",
         actorUserId: "c",
+        directSessionEvidence: directEvidence("c"),
         encryptionKey: keyA,
         idempotencyKey: "finalize-unapproved-custodian",
       }),
@@ -284,6 +302,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:c",
       actorUserId: "c",
+      directSessionEvidence: directEvidence("c"),
       evidence: "identity-proof-c-before-rotation",
       encryptionKey: keyA,
       receiptIdentitySecret,
@@ -295,6 +314,7 @@ describe("organization governance recovery persistence", () => {
         operationId: operation.id,
         actorSubjectId: "user:a",
         actorUserId: "a",
+        directSessionEvidence: directEvidence("a"),
         encryptionKey: keyB,
         idempotencyKey: "finalize-rotated-key",
       }),
@@ -308,6 +328,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       evidence: "identity-proof-a-after-rotation",
       encryptionKey: keyB,
       receiptIdentitySecret,
@@ -318,6 +339,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:b",
       actorUserId: "b",
+      directSessionEvidence: directEvidence("b"),
       evidence: "identity-proof-b-after-rotation",
       encryptionKey: keyB,
       receiptIdentitySecret,
@@ -328,6 +350,7 @@ describe("organization governance recovery persistence", () => {
       operationId: operation.id,
       actorSubjectId: "user:a",
       actorUserId: "a",
+      directSessionEvidence: directEvidence("a"),
       encryptionKey: keyB,
       idempotencyKey: "finalize-success",
     });
@@ -338,6 +361,7 @@ describe("organization governance recovery persistence", () => {
         operationId: operation.id,
         actorSubjectId: "user:a",
         actorUserId: "a",
+        directSessionEvidence: directEvidence("a"),
         encryptionKey: keyB,
         idempotencyKey: "finalize-success",
       }),

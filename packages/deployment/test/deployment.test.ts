@@ -67,6 +67,25 @@ describe("deployment contract", () => {
     expect(deployment).toContain("/otel-collector-configmap.yaml");
   });
 
+  test("wires the enabled v2 governance URL and role into every runtime workload", () => {
+    const values = readFileSync(
+      new URL("../../../deploy/helm/opengeni/values.yaml", import.meta.url),
+      "utf8",
+    );
+    const helpers = readFileSync(
+      new URL("../../../deploy/helm/opengeni/templates/_helpers.tpl", import.meta.url),
+      "utf8",
+    );
+    expect(values).toContain("organizationGovernance:");
+    expect(values).toContain("databaseUrlKey: OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL");
+    expect(helpers).toContain("OPENGENI_ORGANIZATION_GOVERNANCE_ENABLED");
+    expect(helpers).toContain("OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_ROLE");
+    expect(helpers).toContain("OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL");
+    expect(helpers).toContain(
+      'fail "organizationGovernance.existingSecret is required when organizationGovernance.enabled=true"',
+    );
+  });
+
   test("models local Kubernetes as Helm with in-cluster dependencies and port-forward conformance", () => {
     const contract = deploymentProfiles["local-kubernetes"];
     const plan = stackPlanFor(contract);

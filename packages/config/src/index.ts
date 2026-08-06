@@ -3660,9 +3660,55 @@ export function dbSearchPath(settings: Pick<Settings, "dbSchema">): string | und
 
 /** Resolve the separately verified v2 governance connection. */
 export function organizationGovernanceDatabaseUrl(
-  settings: Pick<Settings, "databaseUrl" | "organizationGovernanceDatabaseUrl">,
+  settings: Pick<
+    Settings,
+    "databaseUrl" | "organizationGovernanceDatabaseUrl" | "organizationGovernanceEnabled"
+  >,
 ): string {
-  return settings.organizationGovernanceDatabaseUrl?.trim() || settings.databaseUrl;
+  const governanceUrl = settings.organizationGovernanceDatabaseUrl?.trim();
+  if (settings.organizationGovernanceEnabled) {
+    if (!governanceUrl) {
+      throw new Error(
+        "OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL is required when organization governance is enabled",
+      );
+    }
+    if (governanceUrl === settings.databaseUrl.trim()) {
+      throw new Error(
+        "OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL must be distinct from OPENGENI_DATABASE_URL",
+      );
+    }
+    return governanceUrl;
+  }
+  return governanceUrl || settings.databaseUrl;
+}
+
+/**
+ * Resolve the database authority used by a new serving binary. During the
+ * disabled rollout the historical runtime URL/role remain active. Once the v2
+ * plane is enabled, new API/worker/auth binaries must select the distinct v2
+ * governance URL and role; the legacy runtime URL/role remain only for old
+ * fleet binaries until the operator completes the one-way cutover.
+ */
+export function servingDatabaseUrl(
+  settings: Pick<
+    Settings,
+    "databaseUrl" | "organizationGovernanceDatabaseUrl" | "organizationGovernanceEnabled"
+  >,
+): string {
+  return settings.organizationGovernanceEnabled
+    ? organizationGovernanceDatabaseUrl(settings)
+    : settings.databaseUrl;
+}
+
+export function servingDatabaseRole(
+  settings: Pick<
+    Settings,
+    "runtimeDatabaseRole" | "organizationGovernanceDatabaseRole" | "organizationGovernanceEnabled"
+  >,
+): string {
+  return settings.organizationGovernanceEnabled
+    ? settings.organizationGovernanceDatabaseRole
+    : settings.runtimeDatabaseRole;
 }
 
 export function collectGitIdentityEnvironment(settings: Settings): Record<string, string> {
@@ -4377,12 +4423,14 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_ROLE must differ from OPENGENI_RUNTIME_DATABASE_ROLE",
       );
     }
-    if (
-      !settings.organizationGovernanceDatabaseUrl &&
-      !["local", "test"].includes(settings.environment)
-    ) {
+    if (!settings.organizationGovernanceDatabaseUrl?.trim()) {
       throw new Error(
-        "OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL is required when organization governance is enabled outside local/test",
+        "OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL is required when organization governance is enabled",
+      );
+    }
+    if (settings.organizationGovernanceDatabaseUrl.trim() === settings.databaseUrl.trim()) {
+      throw new Error(
+        "OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL must be distinct from OPENGENI_DATABASE_URL",
       );
     }
   }

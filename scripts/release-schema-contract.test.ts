@@ -106,6 +106,8 @@ describe("release schema contract", () => {
               : []),
           ],
     );
+    const organizationGovernanceMigration = "0109_organization_governance_recovery.sql";
+    expect(migrations.has(organizationGovernanceMigration)).toBe(true);
     const nestedDepthMigrations = [
       "0109_nested_agent_depth_expand.sql",
       "0110_nested_agent_depth_boundary.sql",
@@ -131,6 +133,7 @@ describe("release schema contract", () => {
     expect(contract.fileCount).toBe(
       108 +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
+        (migrations.has(organizationGovernanceMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
         (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0) +
@@ -197,7 +200,7 @@ describe("release schema contract", () => {
         (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "7c309fe6dfc82a2806760e12c9f22d584da8302c6db0094887d2ae33bfb4c1ce",
+      "3fc492ffc071c7661f5e959d18d4dd99dc2f624c65adc8c0b594d18dec80fbf8",
     );
     expect(contract.latestMigration).toBe("0179_slack_private_shortcut_delivery_gate.sql");
     expect(migrations.get("0179_slack_private_shortcut_delivery_gate.sql")).toMatchObject({
@@ -376,7 +379,9 @@ describe("release schema contract", () => {
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
-      ...nestedDepthMigrations,
+      ...nestedDepthMigrations.slice(0, 1),
+      organizationGovernanceMigration,
+      ...nestedDepthMigrations.slice(1),
       "0117_sandbox_recovery_generations.sql",
       "0118_new_session_drafts.sql",
       "0119_pending_tool_output_policy.sql",
@@ -461,6 +466,10 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
+    expect(migrations.get(organizationGovernanceMigration)).toMatchObject({
+      sha256: "c444d383b934a2a2f806074f4a309901767e75f51684769ab1b4c8dba85c1239",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0117_sandbox_recovery_generations.sql")).toMatchObject({
       sha256: "365284a9ab495173780d54c4b1470824891b15a7290735bf09b72c2f5fdbc48b",
       deploymentMode: "maintenance",

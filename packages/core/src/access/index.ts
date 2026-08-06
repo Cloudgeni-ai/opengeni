@@ -19,45 +19,13 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
+import { copyEvidence, recordEvidence } from "./direct-session-evidence";
 
 const bearerPrefix = "Bearer ";
 
-/** Exact Better Auth evidence for the current direct managed request. */
-export interface DirectManagedSessionEvidence {
-  userId: string;
-  sessionId: string;
-}
-
-// Session identifiers are request-local authorization evidence. They must not
-// enter grants, AccessContext metadata, idempotency keys, hashes, audit rows,
-// projections, or logs. A WeakMap keeps the evidence attached only to the
-// in-memory context object produced by the direct Better Auth path.
-const directManagedSessionEvidence = new WeakMap<object, DirectManagedSessionEvidence>();
-
-export function directManagedSessionEvidenceFor(
-  context: AccessContext,
-): DirectManagedSessionEvidence | null {
-  return directManagedSessionEvidence.get(context as unknown as object) ?? null;
-}
-
-/** Test/adapter seam for binding exact evidence to an already-built context. */
-export function bindDirectManagedSessionEvidence(
-  context: AccessContext,
-  evidence: DirectManagedSessionEvidence,
-): void {
-  if (!evidence.userId.trim() || !evidence.sessionId.trim()) {
-    throw new Error("direct managed session evidence requires userId and sessionId");
-  }
-  directManagedSessionEvidence.set(context as unknown as object, { ...evidence });
-}
-
-function copyDirectManagedSessionEvidence(from: AccessContext, to: AccessContext): void {
-  const evidence = directManagedSessionEvidenceFor(from);
-  if (evidence) directManagedSessionEvidence.set(to as unknown as object, evidence);
-}
-
 export type AccessDeps = {
   db: Database;
+  governanceDb?: Database;
   settings: Settings;
   managedAuth?: ManagedAuth | null;
 };
@@ -139,13 +107,19 @@ export async function requireAccessGrantAuthorization(
     if (!workspace) {
       throw new HTTPException(404, { message: "workspace not found" });
     }
-    const governance = await getOrganizationGovernanceStatus(deps.db, workspace.accountId);
+    const governance = await getOrganizationGovernanceStatus(
+      governanceDatabase(deps),
+      workspace.accountId,
+    );
     if (governance?.state === "governance_locked") {
       throw new HTTPException(423, { message: "organization governance is locked" });
     }
     throw new HTTPException(403, { message: "workspace access denied" });
   }
-  const governance = await getOrganizationGovernanceStatus(deps.db, grant.accountId);
+  const governance = await getOrganizationGovernanceStatus(
+    governanceDatabase(deps),
+    grant.accountId,
+  );
   if (!governance) {
     throw new HTTPException(404, { message: "workspace not found" });
   }
@@ -309,7 +283,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         email: session.user.email,
         name: session.user.name,
       });
-      directManagedSessionEvidence.set(context as unknown as object, {
+      recordEvidence(context, {
         userId: session.user.id,
         sessionId,
       });
@@ -339,7 +313,10 @@ async function apiKeyAccessContext(
         (permission) => permission === "billing:read" || permission === "billing:manage",
       )
     : apiKey.permissions;
-  const governance = await getOrganizationGovernanceStatus(deps.db, apiKey.accountId);
+  const governance = await getOrganizationGovernanceStatus(
+    governanceDatabase(deps),
+    apiKey.accountId,
+  );
   if (!governance) return null;
   return {
     mode,
@@ -457,7 +434,10 @@ async function governanceBoundContext(
       await Promise.all(
         [...accountIds].map(
           async (accountId) =>
-            [accountId, await getOrganizationGovernanceStatus(deps.db, accountId)] as const,
+            [
+              accountId,
+              await getOrganizationGovernanceStatus(governanceDatabase(deps), accountId),
+            ] as const,
         ),
       )
     ).filter((entry): entry is readonly [string, NonNullable<(typeof entry)[1]>] => !!entry[1]),
@@ -494,8 +474,16 @@ async function governanceBoundContext(
         ? null
         : context.defaultWorkspaceId,
   };
-  copyDirectManagedSessionEvidence(context, bounded);
+  copyEvidence(context, bounded);
   return bounded;
+}
+
+function governanceDatabase(deps: AccessDeps): Database {
+  if (!deps.settings.organizationGovernanceEnabled) return deps.db;
+  if (!deps.governanceDb) {
+    throw new HTTPException(503, { message: "organization governance is unavailable" });
+  }
+  return deps.governanceDb;
 }
 
 function authorizationWasInvalidated(

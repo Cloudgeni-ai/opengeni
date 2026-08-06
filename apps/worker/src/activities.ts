@@ -1,4 +1,10 @@
-import { dbSearchPath, getSettings, resolveNatsControlPlaneAuth } from "@opengeni/config";
+import {
+  dbSearchPath,
+  getSettings,
+  resolveNatsControlPlaneAuth,
+  servingDatabaseRole,
+  servingDatabaseUrl,
+} from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createDocumentServices } from "@opengeni/documents";
 import { createNatsEventBus } from "@opengeni/events";
@@ -61,11 +67,21 @@ function createActivityServices(
       // host RLS strategy when embedded config is set. An embedded host injects
       // `dependencies.db` directly and this branch is skipped.
       const searchPath = dbSearchPath(settings);
+      const servingRole = servingDatabaseRole(settings);
       const dbClient = dependencies.db
         ? null
-        : createDb(settings.databaseUrl, {
+        : createDb(servingDatabaseUrl(settings), {
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
+            connectionAuthority: {
+              expectedRole: servingRole,
+              forbiddenRoles: [
+                settings.organizationGovernanceEnabled
+                  ? settings.runtimeDatabaseRole
+                  : settings.organizationGovernanceDatabaseRole,
+                "opengeni_governance_operator",
+              ],
+            },
           });
       // The PRIVILEGED control-plane NATS login (M-AUTH): the worker resolves the
       // SAME static account user the API uses to request `agent.*.rpc`. Null in

@@ -6,8 +6,12 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     environment: "test",
     deploymentRevision: "dev",
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
-    organizationGovernanceEnabled: true,
-    organizationGovernanceDatabaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
+    organizationGovernanceEnabled: false,
+    // Keep the topology values distinct even in unit tests. The shared-PG
+    // harness replaces this with its per-database v2 login URL for real-PG
+    // tests; a distinct application_name is not a governance boundary.
+    organizationGovernanceDatabaseUrl:
+      "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni?options=-c%20application_name%3Dopengeni-governance",
     organizationGovernanceDatabaseRole: "opengeni_governance_app",
     dbSchema: "",
     rlsStrategy: "force",

@@ -161,6 +161,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   value: {{ printf "postgres://%s:$(OPENGENI_POSTGRES_PASSWORD)@%s:%d/%s" $root.Values.postgres.auth.username (include "opengeni.postgresHost" $root) ($root.Values.postgres.service.port | int) $root.Values.postgres.auth.database | quote }}
 {{- end }}
 {{- end }}
+{{- if $root.Values.organizationGovernance.enabled }}
+{{- if not $root.Values.organizationGovernance.existingSecret }}
+{{- fail "organizationGovernance.existingSecret is required when organizationGovernance.enabled=true" }}
+{{- end }}
+- name: OPENGENI_ORGANIZATION_GOVERNANCE_ENABLED
+  value: "true"
+- name: OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_ROLE
+  value: {{ $root.Values.organizationGovernance.databaseRole | quote }}
+- name: OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ $root.Values.organizationGovernance.existingSecret }}
+      key: {{ $root.Values.organizationGovernance.databaseUrlKey }}
+{{- else }}
+- name: OPENGENI_ORGANIZATION_GOVERNANCE_ENABLED
+  value: "false"
+{{- end }}
 {{- if $root.Values.temporal.enabled }}
 - name: OPENGENI_TEMPORAL_HOST
   value: {{ printf "%s-temporal:%d" (include "opengeni.fullname" $root) ($root.Values.temporal.service.port | int) | quote }}

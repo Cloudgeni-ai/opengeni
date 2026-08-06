@@ -85,7 +85,7 @@ export type OrganizationGovernanceStatus = {
   authorizationInvalidatedAt: string | null;
 };
 
-export interface DirectManagedSessionEvidence {
+interface DirectManagedSessionEvidence {
   userId: string;
   sessionId: string;
 }
@@ -135,7 +135,7 @@ export async function setOrganizationRecoveryPolicy(
     accountId: string;
     actorSubjectId: string;
     actorUserId: string;
-    directSessionEvidence?: DirectManagedSessionEvidence;
+    directSessionEvidence: DirectManagedSessionEvidence;
     expectedGovernanceRevision: number;
     quorum: number;
     custodians: Array<{ subjectId: string; subjectLabel?: string }>;
@@ -147,6 +147,14 @@ export async function setOrganizationRecoveryPolicy(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        undefined,
+        databaseTargetSchemaFor(db),
+      );
       const request = {
         expectedGovernanceRevision: input.expectedGovernanceRevision,
         quorum: input.quorum,
@@ -228,6 +236,14 @@ export async function acceptOrganizationRecoveryCustodian(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        undefined,
+        databaseTargetSchemaFor(db),
+      );
       const request = { policyRevision: account.recoveryPolicyRevision };
       const replay = await commandReplay<OrganizationGovernance>(
         tx,
@@ -290,7 +306,7 @@ export async function lockOrganizationGovernance(
     accountId: string;
     actorSubjectId: string;
     actorUserId: string;
-    directSessionEvidence?: DirectManagedSessionEvidence;
+    directSessionEvidence: DirectManagedSessionEvidence;
     expectedGovernanceRevision: number;
     reason: string;
     idempotencyKey: string;
@@ -301,6 +317,14 @@ export async function lockOrganizationGovernance(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        undefined,
+        databaseTargetSchemaFor(db),
+      );
       const request = {
         expectedGovernanceRevision: input.expectedGovernanceRevision,
         reason: input.reason,
@@ -366,7 +390,7 @@ export async function createOrganizationRecoveryOperation(
     accountId: string;
     actorSubjectId: string;
     actorUserId: string;
-    directSessionEvidence?: DirectManagedSessionEvidence;
+    directSessionEvidence: DirectManagedSessionEvidence;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
@@ -375,6 +399,14 @@ export async function createOrganizationRecoveryOperation(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        undefined,
+        databaseTargetSchemaFor(db),
+      );
       const request = {};
       const replay = await commandReplay<OrganizationRecoveryOperation>(
         tx,
@@ -451,7 +483,7 @@ export async function approveOrganizationRecovery(
     operationId: string;
     actorSubjectId: string;
     actorUserId: string;
-    directSessionEvidence?: DirectManagedSessionEvidence;
+    directSessionEvidence: DirectManagedSessionEvidence;
     evidence: string;
     encryptionKey: Uint8Array;
     receiptIdentitySecret: Uint8Array;
@@ -463,6 +495,14 @@ export async function approveOrganizationRecovery(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        input.operationId,
+        databaseTargetSchemaFor(db),
+      );
       const request = {
         operationId: input.operationId,
         evidenceReceiptIdentity: identityEvidenceReceiptIdentityHash(
@@ -503,6 +543,7 @@ export async function approveOrganizationRecovery(
           operationId: input.operationId,
           subjectId: input.actorSubjectId,
           canonicalUserId: input.actorUserId,
+          authSessionId: input.directSessionEvidence?.sessionId ?? null,
           evidenceCiphertext: encrypted.ciphertext,
           evidenceKeyVersion: encrypted.keyVersion,
           evidenceExpiresAt,
@@ -516,6 +557,7 @@ export async function approveOrganizationRecovery(
           ],
           set: {
             canonicalUserId: input.actorUserId,
+            authSessionId: input.directSessionEvidence?.sessionId ?? null,
             evidenceCiphertext: encrypted.ciphertext,
             evidenceKeyVersion: encrypted.keyVersion,
             evidenceExpiresAt,
@@ -547,7 +589,7 @@ export async function revokeOrganizationRecoveryApproval(
     operationId: string;
     actorSubjectId: string;
     actorUserId: string;
-    directSessionEvidence?: DirectManagedSessionEvidence;
+    directSessionEvidence: DirectManagedSessionEvidence;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
@@ -556,6 +598,14 @@ export async function revokeOrganizationRecoveryApproval(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        input.operationId,
+        databaseTargetSchemaFor(db),
+      );
       const request = { operationId: input.operationId };
       const replay = await commandReplay<OrganizationRecoveryOperation>(
         tx,
@@ -608,7 +658,7 @@ export async function cancelOrganizationRecoveryOperation(
     operationId: string;
     actorSubjectId: string;
     actorUserId: string;
-    directSessionEvidence?: DirectManagedSessionEvidence;
+    directSessionEvidence: DirectManagedSessionEvidence;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
@@ -617,6 +667,14 @@ export async function cancelOrganizationRecoveryOperation(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        input.operationId,
+        databaseTargetSchemaFor(db),
+      );
       const request = { operationId: input.operationId };
       const replay = await commandReplay<OrganizationRecoveryOperation>(
         tx,
@@ -656,7 +714,7 @@ export async function finalizeOrganizationRecovery(
     operationId: string;
     actorSubjectId: string;
     actorUserId: string;
-    directSessionEvidence?: DirectManagedSessionEvidence;
+    directSessionEvidence: DirectManagedSessionEvidence;
     encryptionKey: Uint8Array;
     idempotencyKey: string;
   },
@@ -666,6 +724,14 @@ export async function finalizeOrganizationRecovery(
     input.accountId,
     async (tx) => {
       const account = await lockAccount(tx, input.accountId);
+      await lockGovernanceBoundary(
+        tx,
+        account,
+        input.actorUserId,
+        input.directSessionEvidence,
+        input.operationId,
+        databaseTargetSchemaFor(db),
+      );
       const request = { operationId: input.operationId };
       const replay = await commandReplay<OrganizationRecoveryOperation>(
         tx,
@@ -690,6 +756,34 @@ export async function finalizeOrganizationRecovery(
           ),
         )
         .orderBy(asc(schema.organizationRecoveryApprovals.createdAt));
+      const currentCustodians = await tx
+        .select({ canonicalUserId: schema.organizationRecoveryCustodians.canonicalUserId })
+        .from(schema.organizationRecoveryCustodians)
+        .where(
+          and(
+            eq(schema.organizationRecoveryCustodians.accountId, account.id),
+            eq(
+              schema.organizationRecoveryCustodians.policyRevision,
+              account.recoveryPolicyRevision,
+            ),
+            eq(schema.organizationRecoveryCustodians.enrollmentState, "accepted"),
+            sql`${schema.organizationRecoveryCustodians.canonicalUserId} is not null`,
+          ),
+        )
+        .orderBy(asc(schema.organizationRecoveryCustodians.id));
+      const currentCustodianUsers = new Set(
+        currentCustodians
+          .map((custodian) => custodian.canonicalUserId)
+          .filter((userId): userId is string => Boolean(userId)),
+      );
+      const approvalSessionIds = approvals
+        .map((approval) => approval.authSessionId)
+        .filter((sessionId): sessionId is string => Boolean(sessionId));
+      const liveApprovalSessions = await liveAuthSessions(
+        tx,
+        databaseTargetSchemaFor(db),
+        approvalSessionIds,
+      );
       const activeKeyVersion = identityEvidenceKeyVersion(input.encryptionKey);
       const authenticatedUsers = new Set<string>();
       let rejectedEvidence = false;
@@ -716,7 +810,12 @@ export async function finalizeOrganizationRecovery(
             rejectedEvidence = true;
             continue;
           }
-          if (!approval.canonicalUserId) {
+          if (
+            !approval.canonicalUserId ||
+            !approval.authSessionId ||
+            !currentCustodianUsers.has(approval.canonicalUserId) ||
+            liveApprovalSessions.get(approval.authSessionId) !== approval.canonicalUserId
+          ) {
             rejectedEvidence = true;
             continue;
           }
@@ -744,7 +843,12 @@ export async function finalizeOrganizationRecovery(
       // let a non-approving finalizer take ownership from an approved quorum.
       if (!authenticatedUsers.has(input.actorUserId)) fail("quorum_not_met");
       if (account.organizationKind === "personal") {
-        const authorityUserId = canonicalUserIdFromSubject(account.governanceAuthoritySubjectId);
+        const authorityUserId = approvals.find(
+          (approval) =>
+            approval.subjectId === account.governanceAuthoritySubjectId &&
+            approval.canonicalUserId !== null &&
+            authenticatedUsers.has(approval.canonicalUserId),
+        )?.canonicalUserId;
         if (!authorityUserId || !authenticatedUsers.has(authorityUserId)) {
           fail("quorum_not_met");
         }
@@ -870,11 +974,102 @@ async function withGovernanceTx<T>(
     if ((rows[0]?.account_id ?? "") !== accountId) {
       throw new Error("organization governance RLS context was not applied");
     }
-    if (directSessionEvidence) {
-      await assertDirectManagedSession(tx, directSessionEvidence, databaseTargetSchemaFor(db));
-    }
+    // Actor/session evidence is deliberately checked only after the account,
+    // active policy/custodian, canonical-user, and live-session locks have
+    // been acquired by lockGovernanceBoundary inside the command callback.
+    void directSessionEvidence;
     return await fn(tx);
   });
+}
+
+/**
+ * One lock order for every governance command:
+ * account -> active policy/custodians -> canonical auth users -> exact live
+ * auth sessions -> operation -> approvals. The reads that discover operation
+ * approval session ids are non-locking; the authoritative locks follow in the
+ * fixed order, and every row is rejoined/validated while those locks are held.
+ */
+async function lockGovernanceBoundary(
+  tx: GovernanceTx,
+  account: AccountRow,
+  actorUserId: string,
+  directSessionEvidence?: DirectManagedSessionEvidence,
+  operationId?: string,
+  targetSchema = "public",
+): Promise<void> {
+  const custodians = await tx
+    .select({
+      id: schema.organizationRecoveryCustodians.id,
+      canonicalUserId: schema.organizationRecoveryCustodians.canonicalUserId,
+    })
+    .from(schema.organizationRecoveryCustodians)
+    .where(
+      and(
+        eq(schema.organizationRecoveryCustodians.accountId, account.id),
+        eq(schema.organizationRecoveryCustodians.policyRevision, account.recoveryPolicyRevision),
+      ),
+    )
+    .orderBy(asc(schema.organizationRecoveryCustodians.id))
+    .for("update");
+
+  const approvalSessionRows = operationId
+    ? await tx
+        .select({ authSessionId: schema.organizationRecoveryApprovals.authSessionId })
+        .from(schema.organizationRecoveryApprovals)
+        .where(
+          and(
+            eq(schema.organizationRecoveryApprovals.accountId, account.id),
+            eq(schema.organizationRecoveryApprovals.operationId, operationId),
+          ),
+        )
+        .orderBy(asc(schema.organizationRecoveryApprovals.id))
+    : [];
+  const userIds = new Set(
+    [actorUserId, ...custodians.map((custodian) => custodian.canonicalUserId)].filter(
+      (userId): userId is string => Boolean(userId?.trim()),
+    ),
+  );
+  const authUsers = qualifiedTable(targetSchema, "auth_users");
+  if (userIds.size > 0) {
+    const rows = await rawRows<{ id: string }>(
+      tx,
+      sql`select u.id
+            from ${authUsers} u
+           where u.id in (${sql.join(
+             [...userIds].map((userId) => sql`${userId}`),
+             sql`,`,
+           )})
+           order by u.id
+           for key share`,
+    );
+    if (rows.length !== userIds.size) fail("forbidden");
+  }
+
+  const sessionIds = new Set(
+    [
+      directSessionEvidence?.sessionId,
+      ...approvalSessionRows.map((row) => row.authSessionId),
+    ].filter((sessionId): sessionId is string => Boolean(sessionId?.trim())),
+  );
+  if (sessionIds.size > 0) {
+    const authSessions = qualifiedTable(targetSchema, "auth_sessions");
+    const rows = await rawRows<{ id: string }>(
+      tx,
+      sql`select s.id
+            from ${authSessions} s
+           where s.id in (${sql.join(
+             [...sessionIds].map((sessionId) => sql`${sessionId}`),
+             sql`,`,
+           )})
+             and s.expires_at > now()
+           order by s.id
+           for key share`,
+    );
+    if (rows.length !== sessionIds.size) fail("forbidden");
+  }
+  if (directSessionEvidence) {
+    await assertDirectManagedSession(tx, directSessionEvidence, targetSchema);
+  }
 }
 
 async function assertDirectManagedSession(
@@ -892,7 +1087,7 @@ async function assertDirectManagedSession(
         where u.id = ${evidence.userId}
           and s.id = ${evidence.sessionId}
           and s.expires_at > now()
-        for update of u, s`,
+        for key share`,
   );
   if (
     rows.length !== 1 ||
@@ -1093,26 +1288,25 @@ async function resolveRequestedCustodians(
   custodians: Array<{ subjectId: string }>,
   targetSchema: string,
 ): Promise<Map<string, { userId: string; label: string }>> {
-  const requested = new Map<string, string>();
-  for (const custodian of custodians) {
-    const userId = canonicalUserIdFromSubject(custodian.subjectId);
-    if (!userId || requested.has(custodian.subjectId)) fail("policy_required");
-    requested.set(custodian.subjectId, userId);
+  const subjects = custodians.map((custodian) => custodian.subjectId);
+  if (new Set(subjects).size !== subjects.length || subjects.some((subject) => !subject.trim())) {
+    fail("policy_required");
   }
-  const predicates = [...requested.values()].map((userId) => sql`u.id = ${userId}`);
+  const predicates = subjects.map((subject) => sql`concat('user:', u.id) = ${subject}`);
   const authUsers = qualifiedTable(targetSchema, "auth_users");
-  const rows = await rawRows<{ id: string; email: string; name: string }>(
+  const rows = await rawRows<{ id: string; email: string; name: string; subject_id: string }>(
     tx,
     sql`select u.id, u.email, u.name
+               , concat('user:', u.id) as subject_id
         from ${authUsers} u
         where ${sql.join(predicates, sql` or `)}
         for share`,
   );
   const byId = new Map(
-    rows.map((row) => [row.id, { userId: row.id, label: row.email || row.name }]),
+    rows.map((row) => [row.subject_id, { userId: row.id, label: row.email || row.name }]),
   );
-  if (byId.size !== requested.size) fail("policy_required");
-  return new Map([...requested].map(([subjectId, userId]) => [subjectId, byId.get(userId)!]));
+  if (byId.size !== subjects.length) fail("policy_required");
+  return new Map(subjects.map((subjectId) => [subjectId, byId.get(subjectId)!]));
 }
 
 function qualifiedTable(targetSchema: string, table: string) {
@@ -1142,10 +1336,26 @@ async function canonicalUsersPresent(
   return new Set(rows.map((row) => row.id));
 }
 
-function canonicalUserIdFromSubject(subjectId: string | null): string | null {
-  if (!subjectId || !subjectId.startsWith("user:")) return null;
-  const userId = subjectId.slice("user:".length).trim();
-  return userId.length > 0 ? userId : null;
+async function liveAuthSessions(
+  tx: GovernanceTx,
+  targetSchema: string,
+  sessionIds: string[],
+): Promise<Map<string, string>> {
+  const uniqueIds = [...new Set(sessionIds.filter((sessionId) => sessionId.trim()))];
+  if (uniqueIds.length === 0) return new Map();
+  const rows = await rawRows<{ id: string; user_id: string }>(
+    tx,
+    sql`select s.id, s.user_id
+          from ${qualifiedTable(targetSchema, "auth_sessions")} s
+         where s.id in (${sql.join(
+           uniqueIds.map((sessionId) => sql`${sessionId}`),
+           sql`,`,
+         )})
+           and s.expires_at > now()
+         order by s.id
+         for key share`,
+  );
+  return new Map(rows.map((row) => [row.id, row.user_id]));
 }
 
 async function lockPendingOperation(tx: GovernanceTx, account: AccountRow, operationId: string) {
@@ -1169,6 +1379,19 @@ async function lockPendingOperation(tx: GovernanceTx, account: AccountRow, opera
   ) {
     fail("revision_conflict");
   }
+  // The operation is the fourth lock class; approvals are always locked only
+  // after it, in deterministic UUID order.
+  await tx
+    .select({ id: schema.organizationRecoveryApprovals.id })
+    .from(schema.organizationRecoveryApprovals)
+    .where(
+      and(
+        eq(schema.organizationRecoveryApprovals.accountId, account.id),
+        eq(schema.organizationRecoveryApprovals.operationId, operation.id),
+      ),
+    )
+    .orderBy(asc(schema.organizationRecoveryApprovals.id))
+    .for("update");
   return operation!;
 }
 

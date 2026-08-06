@@ -328,6 +328,7 @@ import {
 } from "./database";
 export {
   createDb,
+  assertPhysicalConnectionAuthority,
   registerDbBinding,
   rlsContextForWorkspace,
   rlsStrategyFor,
@@ -340,6 +341,7 @@ export {
   withWorkspaceSubjectRls,
   withWorkspaceUsageLock,
   type CreateDbOptions,
+  type PhysicalConnectionAuthority,
   type Database,
   type DbClient,
   type RlsContext,

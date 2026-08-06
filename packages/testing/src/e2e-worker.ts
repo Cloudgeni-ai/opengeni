@@ -1,4 +1,4 @@
-import { getSettings } from "@opengeni/config";
+import { getSettings, servingDatabaseRole, servingDatabaseUrl } from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
@@ -16,7 +16,17 @@ const role = process.env.OPENGENI_WORKER_ROLE;
 if (role !== "control" && role !== "turn") {
   throw new Error("OPENGENI_WORKER_ROLE must be 'control' or 'turn' for the E2E worker");
 }
-const dbClient = createDb(settings.databaseUrl);
+const dbClient = createDb(servingDatabaseUrl(settings), {
+  connectionAuthority: {
+    expectedRole: servingDatabaseRole(settings),
+    forbiddenRoles: [
+      settings.organizationGovernanceEnabled
+        ? settings.runtimeDatabaseRole
+        : settings.organizationGovernanceDatabaseRole,
+      "opengeni_governance_operator",
+    ],
+  },
+});
 const bus = await createNatsEventBus(settings.natsUrl);
 const model = scriptedModelForScenario(process.env.OPENGENI_TEST_SCENARIO ?? "default");
 const runtime = createProductionAgentRuntime({ model });

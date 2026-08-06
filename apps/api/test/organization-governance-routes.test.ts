@@ -24,8 +24,10 @@ function deps(
       environment,
       productAccessMode: "managed",
       publicBaseUrl,
+      organizationGovernanceEnabled: true,
     }),
     db: {},
+    governanceDb: {},
   } as unknown as ApiRouteDeps;
 }
 
@@ -36,6 +38,7 @@ describe("organization governance recovery routes", () => {
     const settings = testSettings({
       productAccessMode: "configured",
       delegationSecret: "organization-route-configured-secret",
+      organizationGovernanceEnabled: true,
     });
     const status = spyOn(opengeniDb, "getOrganizationGovernanceStatus").mockResolvedValue({
       accountId,
@@ -55,7 +58,11 @@ describe("organization governance recovery routes", () => {
       exp: Math.floor(Date.now() / 1_000) + 60,
     });
     const app = new Hono();
-    registerOrganizationRoutes(app, { settings, db: {} } as unknown as ApiRouteDeps);
+    registerOrganizationRoutes(app, {
+      settings,
+      db: {},
+      governanceDb: {},
+    } as unknown as ApiRouteDeps);
     try {
       for (const [method, path, body] of [
         ["PUT", `/v1/accounts/${accountId}/governance/recovery-policy`, "not-json"],

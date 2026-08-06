@@ -3,6 +3,8 @@ import {
   getSettings,
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
+  servingDatabaseRole,
+  servingDatabaseUrl,
   startupRetryOptions,
   temporalConnectionOptions,
   type Settings,
@@ -767,13 +769,23 @@ export async function startWorker() {
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
-  const dbClient = createDb(settings.databaseUrl, {
+  const servingRole = servingDatabaseRole(settings);
+  const dbClient = createDb(servingDatabaseUrl(settings), {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    connectionAuthority: {
+      expectedRole: servingRole,
+      forbiddenRoles: [
+        settings.organizationGovernanceEnabled
+          ? settings.runtimeDatabaseRole
+          : settings.organizationGovernanceDatabaseRole,
+        "opengeni_governance_operator",
+      ],
+    },
   });
   const databasePosture = {
     rlsStrategy: settings.rlsStrategy,
-    expectedRole: settings.runtimeDatabaseRole,
+    expectedRole: servingRole,
     targetSchema: settings.dbSchema.trim() || "public",
   } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);

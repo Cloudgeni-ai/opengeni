@@ -27,13 +27,17 @@ import {
   setOrganizationRecoveryPolicy,
   type Database,
 } from "@opengeni/db";
-import { directManagedSessionEvidenceFor, type DirectManagedSessionEvidence } from "../access";
+import { evidenceFor, type DirectManagedSessionEvidence } from "../access/direct-session-evidence";
 import { HTTPException } from "hono/http-exception";
 
 type GovernanceDeps = { db: Database; governanceDb?: Database; settings: Settings };
 
 function governanceDatabase(deps: GovernanceDeps): Database {
-  return deps.governanceDb ?? deps.db;
+  if (!deps.settings.organizationGovernanceEnabled) return deps.db;
+  if (!deps.governanceDb) {
+    throw new HTTPException(503, { message: "organization governance is unavailable" });
+  }
+  return deps.governanceDb;
 }
 
 export async function requireOrganizationGovernanceAdmin(
@@ -118,7 +122,7 @@ async function requireOrganizationRecoveryCustodianIdentity(
   // held by an agent. Exceptional recovery therefore requires a direct
   // managed-auth session, not merely a user:* subject string.
   requireOrganizationGovernanceEnabled(deps.settings);
-  const evidence = directManagedSessionEvidenceFor(context);
+  const evidence = evidenceFor(context);
   const directlyAuthenticatedHuman =
     context.mode === "managed" &&
     evidence !== null &&
@@ -163,14 +167,13 @@ export async function enrollOrganizationRecoveryPolicy(
   request: SetOrganizationRecoveryPolicyRequest,
 ): Promise<OrganizationGovernance> {
   await requireOrganizationGovernanceAdmin(deps, context, accountId);
+  const evidence = requireDirectManagedEvidence(context);
   return await mapGovernanceError(() =>
     setOrganizationRecoveryPolicy(governanceDatabase(deps), {
       accountId,
       actorSubjectId: context.subjectId,
-      actorUserId: context.subjectId.slice("user:".length),
-      ...(directManagedSessionEvidenceFor(context)
-        ? { directSessionEvidence: directManagedSessionEvidenceFor(context)! }
-        : {}),
+      actorUserId: evidence.userId,
+      directSessionEvidence: evidence,
       expectedGovernanceRevision: request.expectedGovernanceRevision,
       quorum: request.quorum,
       custodians: request.custodians.map((custodian) => ({
@@ -368,7 +371,7 @@ function requireOrganizationGovernanceEnabled(settings: Settings): void {
 }
 
 function requireDirectManagedEvidence(context: AccessContext): DirectManagedSessionEvidence {
-  const evidence = directManagedSessionEvidenceFor(context);
+  const evidence = evidenceFor(context);
   if (!evidence || context.mode !== "managed" || context.subjectId !== `user:${evidence.userId}`) {
     throw new HTTPException(403, { message: "human recovery custodian required" });
   }

@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { servingDatabaseRole, servingDatabaseUrl, type Settings } from "@opengeni/config";
 import { type ManagedAuth } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
@@ -17,7 +17,9 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
   if (settings.productAccessMode !== "managed") {
     return null;
   }
-  const pool = new Pool({ connectionString: settings.databaseUrl });
+  const connectionString = servingDatabaseUrl(settings);
+  const pool = new Pool({ connectionString });
+  installManagedAuthConnectionGate(pool, settings);
   return betterAuth({
     appName: "OpenGeni",
     baseURL: betterAuthBaseUrl(settings),
@@ -149,6 +151,100 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       },
     },
   }) as ManagedAuth;
+}
+
+/** Gate every Better Auth checkout before it can issue an authentication query. */
+function installManagedAuthConnectionGate(pool: Pool, settings: Settings): void {
+  const expectedRole = servingDatabaseRole(settings);
+  const forbiddenRoles = [
+    settings.organizationGovernanceEnabled
+      ? settings.runtimeDatabaseRole
+      : settings.organizationGovernanceDatabaseRole,
+    "opengeni_governance_operator",
+  ];
+  const originalConnect = pool.connect.bind(pool);
+  const gates = new WeakMap<object, Promise<void>>();
+  const verify = async (client: {
+    query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }>;
+    release?: () => void;
+  }) => {
+    const identity = await client.query(
+      `select current_user::text as current_user,
+              session_user::text as session_user,
+              r.rolcanlogin,
+              r.rolsuper,
+              r.rolbypassrls
+         from pg_catalog.pg_roles r
+        where r.rolname = current_user`,
+    );
+    const row = identity.rows[0];
+    if (
+      !row ||
+      row.current_user !== expectedRole ||
+      row.session_user !== expectedRole ||
+      row.rolcanlogin !== true ||
+      row.rolsuper === true ||
+      row.rolbypassrls === true
+    ) {
+      throw new Error(`managed auth database connection authority mismatch for ${expectedRole}`);
+    }
+    const memberships = await client.query(
+      `with recursive reachable(oid) as (
+         select oid from pg_catalog.pg_roles where rolname = current_user
+         union
+         select membership.roleid
+           from pg_catalog.pg_auth_members membership
+           join reachable member on member.oid = membership.member
+       )
+       select role.rolname::text as rolname
+         from pg_catalog.pg_roles role
+        where role.oid in (select oid from reachable)
+          and role.rolname = any($1::text[])`,
+      [forbiddenRoles],
+    );
+    if (memberships.rows.length > 0) {
+      throw new Error("managed auth database connection has forbidden role membership");
+    }
+  };
+  pool.on("connect", (client) => {
+    const gate = verify(client);
+    gates.set(client, gate);
+    void gate.catch(() => client.release());
+  });
+  (pool as Pool & { connect: typeof pool.connect }).connect = ((
+    callback?: (...args: any[]) => void,
+  ) => {
+    const gated = originalConnect().then(async (client) => {
+      await (gates.get(client) ?? verify(client));
+      return client;
+    });
+    if (callback) {
+      void gated.then(
+        (client) => callback(null, client, client.release.bind(client)),
+        (error) => callback(error),
+      );
+      return undefined;
+    }
+    return gated;
+  }) as typeof pool.connect;
+  (pool as Pool & { query: typeof pool.query }).query = ((...args: any[]) => {
+    const callback = typeof args.at(-1) === "function" ? args.pop() : undefined;
+    const query = (pool.connect as any)().then(async (client: any) => {
+      try {
+        return await client.query(...args);
+      } finally {
+        client.release();
+      }
+    });
+    if (callback) {
+      void query.then(
+        (result: unknown) => callback(null, result),
+        (error: unknown) => callback(error),
+      );
+      return undefined;
+    }
+    return query;
+  }) as typeof pool.query;
 }
 
 function betterAuthBaseUrl(settings: Settings) {

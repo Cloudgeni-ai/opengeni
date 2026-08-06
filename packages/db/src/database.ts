@@ -100,7 +100,87 @@ export type CreateDbOptions = {
    * without mutating a shared PostgreSQL role or affecting other connections.
    */
   isolationLevel?: postgres.ConnectionParameters["default_transaction_isolation"];
+  /** Physical connection authority checked before the handle is used. */
+  connectionAuthority?: PhysicalConnectionAuthority;
 };
+
+export type PhysicalConnectionAuthority = {
+  expectedRole: string;
+  /** Roles the connection must not be able to inherit or SET ROLE into. */
+  forbiddenRoles?: readonly string[];
+};
+
+/**
+ * Verify the physical PostgreSQL identity used by a database handle. This is
+ * deliberately catalog-only and is shared by postgres-js and node-postgres
+ * callers. A role that is merely named correctly but can inherit or SET ROLE
+ * into a forbidden legacy/operator role is rejected as well.
+ */
+export async function assertPhysicalConnectionAuthority(
+  executor: Pick<Database, "execute">,
+  authority: PhysicalConnectionAuthority,
+): Promise<void> {
+  if (!authority.expectedRole.trim()) {
+    throw new Error("physical connection authority requires an expected role");
+  }
+  const rows = await rawRows<{
+    current_user: string;
+    session_user: string;
+    rolcanlogin: boolean;
+    rolsuper: boolean;
+    rolbypassrls: boolean;
+  }>(
+    executor,
+    sql`
+      select current_user::text as current_user,
+             session_user::text as session_user,
+             r.rolcanlogin,
+             r.rolsuper,
+             r.rolbypassrls
+        from pg_catalog.pg_roles r
+       where r.rolname = current_user
+    `,
+  );
+  const identity = rows[0];
+  if (
+    !identity ||
+    identity.current_user !== authority.expectedRole ||
+    identity.session_user !== authority.expectedRole ||
+    identity.rolcanlogin !== true ||
+    identity.rolsuper === true ||
+    identity.rolbypassrls === true
+  ) {
+    throw new Error(`database connection authority mismatch for ${authority.expectedRole}`);
+  }
+  const forbidden = authority.forbiddenRoles?.filter((role) => role.trim()) ?? [];
+  if (forbidden.length === 0) return;
+  const reachable = await rawRows<{ rolname: string }>(
+    executor,
+    sql`
+      with recursive reachable(oid) as (
+        select oid from pg_catalog.pg_roles where rolname = current_user
+        union
+        select membership.roleid
+          from pg_catalog.pg_auth_members membership
+          join reachable member on member.oid = membership.member
+      )
+      select role.rolname::text as rolname
+        from pg_catalog.pg_roles role
+       where role.oid in (select oid from reachable)
+         and role.rolname in (${sql.join(
+           forbidden.map((role) => sql`${role}`),
+           sql`,`,
+         )})
+    `,
+  );
+  if (reachable.length > 0) {
+    throw new Error(
+      `database connection ${authority.expectedRole} has forbidden role membership: ${reachable
+        .map((row) => row.rolname)
+        .join(",")}`,
+    );
+  }
+}
 
 /**
  * The active RLS strategy + target schema + userLookup for an injected `Database`, recorded in a
@@ -156,8 +236,9 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   // the failure surfaces as a "worked, then didn't" credential/permission read.
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
   // is never reused indefinitely; application_name aids server-side diagnostics.
+  const connectionCount = options.max ?? 10;
   const client = postgres(databaseUrl, {
-    max: options.max ?? 10,
+    max: connectionCount,
     prepare: false,
     idle_timeout: 30,
     max_lifetime: 1800,
@@ -172,6 +253,94 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
       ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
     },
   });
+  // Queue one authority proof per configured physical slot before the handle is
+  // exposed. postgres-js keeps queued work ordered and assigns the first batch
+  // across the pool, so every physical connection opened for application work
+  // is proven before later application statements can use it. The reconnect
+  // callback repeats the same proof before postgres-js drains that connection's
+  // pending queue. The startup posture check remains a separate defense-in-depth
+  // sample; this gate is the per-connection admission barrier.
+  if (options.connectionAuthority) {
+    const authority = options.connectionAuthority;
+    const forbiddenRoles = authority.forbiddenRoles?.filter((role) => role.trim()) ?? [];
+    const gateQuery = `
+      with recursive reachable(oid) as (
+        select oid from pg_catalog.pg_roles where rolname = current_user
+        union
+        select membership.roleid
+          from pg_catalog.pg_auth_members membership
+          join reachable member on member.oid = membership.member
+      )
+      select current_user::text as current_user,
+             session_user::text as session_user,
+             r.rolcanlogin,
+             r.rolsuper,
+             r.rolbypassrls,
+             array(
+               select role.rolname::text
+                 from pg_catalog.pg_roles role
+                where role.oid in (select oid from reachable)
+                  and role.rolname = any($2::text[])
+             ) as forbidden_roles
+        from pg_catalog.pg_roles r
+       where r.rolname = current_user
+         and current_user = $1
+         and session_user = $1
+         and r.rolcanlogin
+         and not r.rolsuper
+         and not r.rolbypassrls
+         and not exists (
+               select 1
+                 from pg_catalog.pg_roles role
+                where role.oid in (select oid from reachable)
+                  and role.rolname = any($2::text[])
+             )
+    `;
+    let authorityFailed = false;
+    const enqueueAuthorityGate = () => {
+      const pending = client
+        .unsafe(gateQuery, [authority.expectedRole, forbiddenRoles])
+        .then((rows) => {
+          const row = rows[0] as
+            | {
+                current_user: string;
+                session_user: string;
+                rolcanlogin: boolean;
+                rolsuper: boolean;
+                rolbypassrls: boolean;
+                forbidden_roles: string[];
+              }
+            | undefined;
+          if (
+            rows.length !== 1 ||
+            !row ||
+            row.current_user !== authority.expectedRole ||
+            row.session_user !== authority.expectedRole ||
+            row.rolcanlogin !== true ||
+            row.rolsuper === true ||
+            row.rolbypassrls === true ||
+            row.forbidden_roles.length > 0
+          ) {
+            throw new Error(`database connection authority mismatch for ${authority.expectedRole}`);
+          }
+        });
+      void pending.catch(() => {
+        authorityFailed = true;
+        void client.end({ timeout: 0 });
+      });
+    };
+    for (let index = 0; index < connectionCount; index += 1) {
+      enqueueAuthorityGate();
+    }
+    const clientOptions = client.options as unknown as {
+      onclose?: (connectionId: number) => void;
+    };
+    const previousOnClose = clientOptions.onclose;
+    clientOptions.onclose = (connectionId) => {
+      previousOnClose?.(connectionId);
+      if (!authorityFailed) enqueueAuthorityGate();
+    };
+  }
   const db = drizzle(client, { schema });
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",

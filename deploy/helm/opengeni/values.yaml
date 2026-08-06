@@ -559,6 +559,15 @@ migrations:
       cpu: 500m
       memory: 512Mi
 
+# One-way v2 governance rollout. When enabled, new API/worker/auth binaries
+# select the v2 URL and role below; OPENGENI_DATABASE_URL remains the legacy
+# old-fleet URL until activation drains and revokes that authority.
+organizationGovernance:
+  enabled: false
+  existingSecret: ""
+  databaseUrlKey: OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL
+  databaseRole: opengeni_governance_app
+
 # Import the reviewed, committed integrations snapshot into the global
 # capability catalog after installs and upgrades. The importer fingerprints the
 # snapshot and exits without database or object-storage writes when that exact

@@ -5,6 +5,8 @@ import {
   resolveNatsCalloutConfig,
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
+  servingDatabaseRole,
+  servingDatabaseUrl,
   startupRetryOptions,
   temporalConnectionOptions,
 } from "@opengeni/config";
@@ -260,14 +262,29 @@ export async function startApi() {
   // handle (public). Embedded → scoped to the dedicated schema + the host's RLS
   // strategy.
   const searchPath = dbSearchPath(settings);
-  const dbClient = createDb(settings.databaseUrl, {
+  const servingRole = servingDatabaseRole(settings);
+  const servingUrl = servingDatabaseUrl(settings);
+  const dbClient = createDb(servingUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    connectionAuthority: {
+      expectedRole: servingRole,
+      forbiddenRoles: [
+        servingRole === settings.organizationGovernanceDatabaseRole
+          ? settings.runtimeDatabaseRole
+          : settings.organizationGovernanceDatabaseRole,
+        "opengeni_governance_operator",
+      ],
+    },
   });
   const governanceDbClient = settings.organizationGovernanceEnabled
     ? createDb(organizationGovernanceDatabaseUrl(settings), {
         ...(searchPath ? { searchPath } : {}),
         rlsStrategy: settings.rlsStrategy,
+        connectionAuthority: {
+          expectedRole: settings.organizationGovernanceDatabaseRole,
+          forbiddenRoles: [settings.runtimeDatabaseRole, "opengeni_governance_operator"],
+        },
       })
     : null;
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
@@ -277,7 +294,7 @@ export async function startApi() {
     logStartupDependencyRetry(observability, event);
   const databasePosture = {
     rlsStrategy: settings.rlsStrategy,
-    expectedRole: settings.runtimeDatabaseRole,
+    expectedRole: servingRole,
     targetSchema: settings.dbSchema.trim() || "public",
   } as const;
   const governanceDatabasePosture = {

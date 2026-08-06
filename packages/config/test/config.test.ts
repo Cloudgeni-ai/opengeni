@@ -21,6 +21,8 @@ import {
   organizationGovernanceDatabaseUrl,
   resolveStreamTokenSecret,
   retryStartupDependency,
+  servingDatabaseRole,
+  servingDatabaseUrl,
   SANDBOX_REQUIRED_ENV,
   sandboxArchiveCaptureTimeoutMs,
   sandboxEnvironmentVariableNames,
@@ -126,6 +128,35 @@ describe("organization governance rollout configuration", () => {
         () => getSettings(),
       ),
     ).toThrow("must differ from OPENGENI_RUNTIME_DATABASE_ROLE");
+  });
+
+  test("enabled serving topology selects the distinct v2 URL and role", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_ORGANIZATION_GOVERNANCE_ENABLED: "true",
+        OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL:
+          "postgres://opengeni_governance_app:secret@governance-db/opengeni",
+        OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_ROLE: "opengeni_governance_app",
+      },
+      () => getSettings(),
+    );
+    expect(servingDatabaseUrl(settings)).toBe(
+      "postgres://opengeni_governance_app:secret@governance-db/opengeni",
+    );
+    expect(servingDatabaseRole(settings)).toBe("opengeni_governance_app");
+  });
+
+  test("rejects a governance URL equal to the legacy URL in every environment", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ORGANIZATION_GOVERNANCE_ENABLED: "true",
+          OPENGENI_DATABASE_URL: "postgres://same@db/opengeni",
+          OPENGENI_ORGANIZATION_GOVERNANCE_DATABASE_URL: "postgres://same@db/opengeni",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must be distinct from OPENGENI_DATABASE_URL");
   });
 });
 

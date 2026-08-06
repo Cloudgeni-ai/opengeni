@@ -196,9 +196,13 @@ describe("0103/0104 host-export root session lineage (real PostgreSQL)", () => {
         prepare: false,
       });
       try {
-        const [defaultAclProbe] = await exporter<Array<{ value: number }>>`
-          select opengeni_host_export.default_acl_probe() as value`;
-        expect(defaultAclProbe?.value).toBe(1);
+        let defaultAclError: unknown;
+        try {
+          await exporter`select opengeni_host_export.default_acl_probe()`;
+        } catch (error) {
+          defaultAclError = error;
+        }
+        expect(defaultAclError).toBeInstanceOf(Error);
         await exporter`select opengeni_host_export.register_host_export_consumer(
           'session_event', 'migration-0103-upgrade'
         )`;
