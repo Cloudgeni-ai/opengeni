@@ -1,5 +1,27 @@
 # @opengeni/core
 
+## 0.21.5
+
+### Patch Changes
+
+- fc7cc08: Normalize established-session composer resources through the same canonical boundary used by Send and Steer.
+- 5d8bb99: Allow scheduled tasks to target and durably wake one authorized existing session without creating a helper session or replacing its goal.
+- Updated dependencies [b783f12]
+- Updated dependencies [ece124b]
+- Updated dependencies [7a84e1b]
+- Updated dependencies [5d8bb99]
+- Updated dependencies [238fb7e]
+- Updated dependencies [af24281]
+- Updated dependencies [34c5cdb]
+  - @opengeni/runtime@0.18.20
+  - @opengeni/db@0.28.4
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+  - @opengeni/documents@0.5.13
+  - @opengeni/events@0.3.83
+  - @opengeni/observability@0.5.3
+  - @opengeni/storage@0.2.71
+
 ## 0.21.4
 
 ### Patch Changes
