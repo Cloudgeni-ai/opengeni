@@ -6,7 +6,8 @@
    -------------------------------------------------------------------------- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { FileAsset } from "@opengeni/sdk";
-import { act } from "react";
+import { act, startTransition, Suspense } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { useFileAttachments } from "../src/hooks/use-file-attachments";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
@@ -283,6 +284,71 @@ describe("useFileAttachments", () => {
     expect(revoked).not.toContain(laterPreview);
     await hook.unmount();
   });
+
+  for (const operation of ["restoreReadyFiles", "removeReadyFiles"] as const) {
+    test(`${operation} does not revoke a committed preview from an abandoned render`, async () => {
+      const asset = fakeAsset({ id: `${operation}-ready` });
+      const client = fakeClient({ uploadFile: async () => asset });
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const suspended = new Promise<never>(() => {});
+      const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+      globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+      let blockEmpty = false;
+      let renderedRemoval = false;
+      let unmounted = false;
+      let result!: ReturnType<typeof useFileAttachments>;
+
+      function Harness() {
+        result = useFileAttachments({ client, workspaceId: WORKSPACE_ID });
+        if (blockEmpty && result.attachments.length === 0) {
+          renderedRemoval = true;
+          throw suspended;
+        }
+        const previewUrl = result.attachments[0]?.previewUrl;
+        return previewUrl ? <img alt="preview" src={previewUrl} /> : null;
+      }
+
+      try {
+        flushSync(() => {
+          root.render(
+            <Suspense fallback={null}>
+              <Harness />
+            </Suspense>,
+          );
+        });
+        flushSync(() => result.addFiles([imageFile()]));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        const previewUrl = result.attachments[0]!.previewUrl!;
+        expect(result.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
+        expect(container.querySelector("img")?.getAttribute("src")).toBe(previewUrl);
+
+        blockEmpty = true;
+        startTransition(() => {
+          if (operation === "restoreReadyFiles") {
+            result.restoreReadyFiles([]);
+          } else {
+            result.removeReadyFiles([asset.id]);
+          }
+        });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        expect(renderedRemoval).toBe(true);
+        expect(container.querySelector("img")?.getAttribute("src")).toBe(previewUrl);
+        expect(revoked).not.toContain(previewUrl);
+
+        flushSync(() => root.unmount());
+        unmounted = true;
+        expect(revoked.filter((url) => url === previewUrl)).toHaveLength(1);
+      } finally {
+        if (!unmounted) flushSync(() => root.unmount());
+        container.remove();
+        globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+      }
+    });
+  }
 
   test("addFromPaste applies the default image/* filter — only the image is enqueued", async () => {
     const asset = fakeAsset();

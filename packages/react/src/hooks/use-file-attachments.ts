@@ -102,6 +102,18 @@ export function useFileAttachments(
     previewUrls.current.clear();
     for (const previewUrl of urls) URL.revokeObjectURL(previewUrl);
   }, []);
+  // Ready-file reconciliation uses functional state updaters, which React may
+  // evaluate during a concurrent render that later suspends or is abandoned.
+  // Diff only committed attachment sets here so URL revocation cannot run from
+  // render-phase code while the previously committed DOM still uses a preview.
+  const committedAttachmentIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const currentIds = new Set(attachments.map((attachment) => attachment.id));
+    for (const id of committedAttachmentIds.current) {
+      if (!currentIds.has(id)) revokePreview(id);
+    }
+    committedAttachmentIds.current = currentIds;
+  }, [attachments, revokePreview]);
   // Upload promises are not cancellable at this layer. Fence their settlements
   // when the hook changes client/workspace or unmounts so an old tenant/session
   // cannot mutate the next attachment queue (or an already-unmounted component).
@@ -275,18 +287,13 @@ export function useFileAttachments(
                 // only authority restored across page/device boundaries.
               };
         });
-        for (const [fileId, attachment] of existingReady) {
-          if (!incoming.has(fileId) && attachment.previewUrl) {
-            revokePreview(attachment.id);
-          }
-        }
         // A server restoration is authoritative for finalized assets, but an
         // upload that has not finalized still belongs to the local actor. Keep
         // those unresolved entries while replacing the ready set exactly.
         return [...unresolved, ...restored];
       });
     },
-    [revokePreview, workspaceId],
+    [workspaceId],
   );
 
   const remove = useCallback(
@@ -298,26 +305,19 @@ export function useFileAttachments(
     [revokePreview],
   );
 
-  const removeReadyFiles = useCallback(
-    (fileIds: Iterable<string>) => {
-      const accepted = new Set(fileIds);
-      if (accepted.size === 0) return;
-      setAttachments((current) =>
-        current.filter((attachment) => {
-          const removeAccepted =
-            attachment.status === "ready" &&
-            attachment.file !== undefined &&
-            accepted.has(attachment.file.id);
-          if (removeAccepted) {
-            sources.current.delete(attachment.id);
-            revokePreview(attachment.id);
-          }
-          return !removeAccepted;
-        }),
-      );
-    },
-    [revokePreview],
-  );
+  const removeReadyFiles = useCallback((fileIds: Iterable<string>) => {
+    const accepted = new Set(fileIds);
+    if (accepted.size === 0) return;
+    setAttachments((current) =>
+      current.filter((attachment) => {
+        return !(
+          attachment.status === "ready" &&
+          attachment.file !== undefined &&
+          accepted.has(attachment.file.id)
+        );
+      }),
+    );
+  }, []);
 
   const clear = useCallback(() => {
     sources.current.clear();
