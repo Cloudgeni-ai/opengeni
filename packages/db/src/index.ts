@@ -30835,9 +30835,14 @@ export async function retainWorkspaceMutationProcess(
           routeTargetId: input.owner.routeTargetId,
           routeEpoch: input.owner.routeEpoch,
         };
-  const result = await withRlsContext(
+  const result = await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    {
+      stage: "sandbox_retained_process_promotion",
+      maxAttempts: 5,
+      correlationId: input.processId,
+    },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
