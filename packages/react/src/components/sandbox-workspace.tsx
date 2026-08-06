@@ -28,7 +28,7 @@ import {
 import { type ClientOverride, useOpenGeni } from "../provider";
 import { cn } from "../lib/cn";
 import { xtermThemeFromTokens } from "../lib/xterm-theme";
-import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useSessionCapabilities } from "../hooks/use-session-capabilities";
 import { useSandboxFiles } from "../hooks/use-sandbox-files";
 import { useSandboxGit, type UseSandboxGitResult } from "../hooks/use-sandbox-git";
@@ -886,13 +886,13 @@ function MachineStateChip({
   error: Error | null;
   onRetry: () => void;
 }) {
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const portalStyle = usePortalTokenStyle(triggerRef);
+  const trigger = usePortalTokenSource<HTMLButtonElement>();
+  const portalStyle = usePortalTokenStyle(trigger.source);
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
         <button
-          ref={triggerRef}
+          ref={trigger.ref}
           type="button"
           aria-label={`Machine: ${chip.label}`}
           className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"

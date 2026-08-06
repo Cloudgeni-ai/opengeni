@@ -107,6 +107,26 @@ For a narrow product sidebar, opt into the supported compact preset:
 </aside>
 ```
 
+Density and responsive measurement are separate opt-ins. By default,
+`ChatComposer` keeps its existing viewport breakpoints. An embed whose composer
+can be narrow inside a wide page should measure the composer instead:
+
+```tsx
+<aside data-og-theme="light" data-og-density="compact">
+  <ChatComposer {...composerProps} responsiveBasis="container" />
+</aside>
+```
+
+`responsiveBasis="container"` makes the composer root an inline-size query
+container. Input density, footer wrapping, command descriptions, paused labels,
+model controls, transcription status, and nested realtime controls then follow
+that root's actual width. Coarse-pointer target sizing remains a separate media
+feature, so a narrow mouse-driven panel stays compact while touch targets remain
+at least 44px. Composer-owned model and realtime menus keep their portal
+placement but copy the live root width with the existing theme tokens and never
+grow wider than that source container. Compound layouts can pass the same prop
+to `Composer.Root`.
+
 The preset is only a starting point. Override individual runtime tokens on the
 same ancestor without rebuilding Tailwind:
 
@@ -126,7 +146,8 @@ The type ramp is `--og-font-size-{xs,sm,base,md}` with matching
 `--og-line-height-*` tokens. Interactive chrome uses the semantic `control`,
 `menu`, `composer`, and `composer-wide` pairs. Model picker height, width,
 padding, and row-density tokens are grouped under `--og-model-picker-*` in
-`styles/tokens.css`. `ModelPolicyPicker` also exposes `contentClassName` and
+`styles/tokens.css`; realtime menu width uses `--og-realtime-menu-width`.
+`ModelPolicyPicker` also exposes `contentClassName` and
 `contentStyle` for exceptional surface-level customization; tokens are the
 recommended path.
 
@@ -260,6 +281,11 @@ containing only `api-key` and/or `access-key` with
 exposed as container environment variables. Local non-Kubernetes servers may
 instead use `OPENGENI_DEMO_API_KEY` and/or `OPENGENI_DEMO_ACCESS_KEY`.
 
+The container-responsive reference is `demo/composer-responsive.html`. It keeps
+the browser viewport wide while resizing one child composer through 280, 320,
+360, 420, 640, and 768px, with theme, density, paused, voice, model-menu, and
+slash-command states available from the harness controls.
+
 Microphone capture works on `localhost` or a secure HTTPS origin. A remote HTTP
 deployment cannot request microphone access. The live page exercises catalog
 loading, realtime-first creation, Codex Live, Gateway models, mute, recovery,
@@ -303,7 +329,7 @@ function CustomComposer({ sessionComposer, attachments, effectiveControl }) {
   });
 
   return (
-    <Composer.Root controller={controller}>
+    <Composer.Root controller={controller} responsiveBasis="container">
       <Composer.Frame>
         <Composer.CommandPalette />
         <Composer.Surface>

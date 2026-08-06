@@ -24,7 +24,11 @@ import {
 import { AlertDialog } from "radix-ui";
 import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
-import { type PortalTokenStyle, usePortalTokenStyle } from "../lib/use-portal-token-style";
+import {
+  type PortalTokenStyle,
+  usePortalTokenSource,
+  usePortalTokenStyle,
+} from "../lib/use-portal-token-style";
 import { useUnicodeFallbackFonts } from "../lib/use-unicode-fonts";
 import type { FileTreeNode, UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 
@@ -155,10 +159,11 @@ export function FileBrowser({
   const [busy, setBusy] = useState(false);
   const [coarsePointer, setCoarsePointer] = useState(false);
   const treeId = useId();
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const container = usePortalTokenSource<HTMLDivElement>();
+  const containerRef = container.currentRef;
   const deleteReturnFocusRef = useRef<HTMLElement | null>(null);
   const vlistRef = useRef<VListHandle>(null);
-  const portalTokenStyle = usePortalTokenStyle(containerRef);
+  const portalTokenStyle = usePortalTokenStyle(container.source);
   const getTreeElement = useCallback(
     () => (typeof document === "undefined" ? null : document.getElementById(treeId)),
     [treeId],
@@ -569,6 +574,7 @@ export function FileBrowser({
       runDelete,
       supportsMutation,
       coarsePointer,
+      containerRef,
       rowIndexByPath,
       treeId,
     ],
@@ -868,7 +874,7 @@ export function FileBrowser({
       {/* The tree itself. The root is a drop target so a node can be moved to "". */}
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: the tree owns keyboard nav */}
       <div
-        ref={containerRef}
+        ref={container.ref}
         id={usesVirtualTree ? undefined : treeId}
         role={usesVirtualTree ? undefined : "tree"}
         aria-label={usesVirtualTree ? undefined : "Workspace files"}

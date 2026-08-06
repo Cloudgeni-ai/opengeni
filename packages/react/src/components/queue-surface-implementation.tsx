@@ -32,7 +32,6 @@ import {
   useCallback,
   useId,
   useMemo,
-  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -40,7 +39,11 @@ import {
 import { DropdownMenu } from "radix-ui";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
-import { type PortalTokenStyle, usePortalTokenStyle } from "../lib/use-portal-token-style";
+import {
+  type PortalTokenStyle,
+  usePortalTokenSource,
+  usePortalTokenStyle,
+} from "../lib/use-portal-token-style";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 
@@ -80,8 +83,9 @@ export function QueueSurface({
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
-  const surfaceRef = useRef<HTMLDivElement | null>(null);
-  const portalTokenStyle = usePortalTokenStyle(surfaceRef);
+  const surface = usePortalTokenSource<HTMLDivElement>();
+  const surfaceRef = surface.currentRef;
+  const portalTokenStyle = usePortalTokenStyle(surface.source);
   const [keyboardDrag, setKeyboardDrag] = useState<{
     turnId: string;
     projectedIndex: number;
@@ -129,7 +133,7 @@ export function QueueSurface({
       );
       if (moved) focusQueueTurn(surfaceRef.current, turnId);
     },
-    [queue],
+    [queue, surfaceRef],
   );
 
   const onDragEnd = useCallback(
@@ -245,7 +249,7 @@ export function QueueSurface({
 
   return (
     <div
-      ref={surfaceRef}
+      ref={surface.ref}
       className="og-root mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
       data-testid="queue-surface"
     >

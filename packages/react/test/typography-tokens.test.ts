@@ -28,6 +28,7 @@ describe("public typography token contract", () => {
       "--og-model-picker-menu-width: 18rem",
       "--og-model-picker-row-padding-x: 0.625rem",
       "--og-model-picker-row-padding-y: 0.5rem",
+      "--og-realtime-menu-width: 18rem",
     ]) {
       expect(tokens).toContain(declaration);
     }
@@ -63,6 +64,16 @@ describe("public typography token contract", () => {
     expect(compact).toContain("--og-font-size-menu: 12px");
     expect(compact).toContain("--og-font-size-composer-wide: 13px");
     expect(compact).toContain("--og-model-picker-menu-width: 15rem");
+    expect(compact).toContain("--og-realtime-menu-width: 15rem");
     expect(compact).not.toContain("--og-color-accent:");
+  });
+
+  test("ships additive container-query hooks and panel-bounded portal menus", () => {
+    expect(styles).toContain('data-og-responsive-basis="container"');
+    expect(styles).toContain("container: og-composer / inline-size");
+    expect(styles).toContain("@container og-composer (max-width: 39.999rem)");
+    expect(styles).toContain("@media (pointer: coarse)");
+    expect(styles).toContain("var(--og-portal-source-inline-size, 100vw)");
+    expect(styles).toContain("var(--radix-dropdown-menu-content-available-width, 100vw)");
   });
 });

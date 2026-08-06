@@ -45,6 +45,10 @@ import {
   type SlashCommandContext,
 } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
+import {
+  ComposerResponsiveContext,
+  type ResponsiveBasis,
+} from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
 import type { PickerModelRow } from "../model-policy";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
@@ -53,6 +57,7 @@ import { ModelPicker as ModelPickerView } from "./model-picker";
 import { TooltipProvider } from "./tooltip";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
+export type { ResponsiveBasis } from "../lib/composer-responsive-context";
 
 function ComposerTip({
   tip,
@@ -743,29 +748,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export type ComposerRootProps = Omit<ComponentPropsWithoutRef<"div">, "children"> & {
   controller: ChatComposerController;
   children: ReactNode;
+  /**
+   * Measurement surface for responsive composer chrome. `viewport` preserves
+   * the existing breakpoint behavior; `container` responds to this root's
+   * inline size and also bounds composer-owned portalled menus to it.
+   */
+  responsiveBasis?: ResponsiveBasis | undefined;
 };
 
 export const Root = forwardRef<HTMLDivElement, ComposerRootProps>(function ComposerRoot(
-  { controller, children, className, style, ...props },
+  { controller, children, className, style, responsiveBasis = "viewport", ...props },
   forwardedRef,
 ) {
+  const responsiveRootRef = useRef<HTMLDivElement | null>(null);
+  const responsiveContext = useMemo(
+    () => ({ responsiveBasis, rootRef: responsiveRootRef }),
+    [responsiveBasis],
+  );
   // Provider stays on Root so optional Radix tip surfaces (voice input) work.
   // Ordinary composer actions use native `title` via ComposerTip to avoid
   // pulling Popper into every tip hotspot.
   return (
     <ComposerContext.Provider value={controller}>
-      <TooltipProvider delayDuration={300}>
-        <div
-          {...props}
-          ref={mergeRefs(controller.rootRef, forwardedRef)}
-          data-og-composer-id={controller.id}
-          className={cn("og-root", className)}
-          style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
-        >
-          {children}
-          <ComposerAnnouncements />
-        </div>
-      </TooltipProvider>
+      <ComposerResponsiveContext.Provider value={responsiveContext}>
+        <TooltipProvider delayDuration={300}>
+          <div
+            {...props}
+            ref={mergeRefs(controller.rootRef, responsiveRootRef, forwardedRef)}
+            data-og-composer-id={controller.id}
+            data-og-responsive-basis={responsiveBasis}
+            className={cn("og-root og-composer", className)}
+            style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
+          >
+            {children}
+            <ComposerAnnouncements />
+          </div>
+        </TooltipProvider>
+      </ComposerResponsiveContext.Provider>
     </ComposerContext.Provider>
   );
 });
@@ -957,7 +976,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
         paletteOpen ? `${controller.listboxId}-option-${controller.palette.highlight}` : undefined
       }
       className={cn(
-        "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-og-composer md:px-4 md:text-og-composer-wide pointer-coarse:min-h-11",
+        "og-composer-input block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-og-composer md:px-4 md:text-og-composer-wide pointer-coarse:min-h-11",
         "text-og-fg placeholder:text-og-fg-subtle focus:outline-hidden focus-visible:outline-hidden",
         "disabled:cursor-not-allowed disabled:opacity-60",
         className,
@@ -992,7 +1011,7 @@ export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function C
       {...props}
       ref={ref}
       className={cn(
-        "flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5",
+        "og-composer-footer flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5",
         // Mobile: one control row — never wrap into a second toolbar line.
         "max-sm:flex-nowrap max-sm:items-center max-sm:gap-1",
         className,
@@ -1010,7 +1029,7 @@ export const Controls = forwardRef<HTMLSpanElement, ComposerControlsProps>(
         {...props}
         ref={ref}
         className={cn(
-          "flex min-w-0 flex-1 flex-wrap items-center gap-1.5",
+          "og-composer-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5",
           "max-sm:flex-nowrap max-sm:gap-1",
           className,
         )}
@@ -1030,7 +1049,10 @@ export const Hint = forwardRef<HTMLSpanElement, ComposerHintProps>(function Comp
     <span
       {...props}
       ref={ref}
-      className={cn("min-w-0 flex-1 px-1.5 text-og-xs text-og-fg-subtle max-sm:hidden", className)}
+      className={cn(
+        "og-composer-hint min-w-0 flex-1 px-1.5 text-og-xs text-og-fg-subtle max-sm:hidden",
+        className,
+      )}
     >
       {children ?? controller.messages.keyboardHint}
     </span>
@@ -1048,7 +1070,7 @@ export const Actions = forwardRef<HTMLSpanElement, ComposerActionsProps>(functio
       {...props}
       ref={ref}
       className={cn(
-        "ml-auto flex shrink-0 items-center gap-1.5",
+        "og-composer-actions ml-auto flex shrink-0 items-center gap-1.5",
         "max-sm:flex-nowrap max-sm:gap-1",
         className,
       )}
@@ -1386,8 +1408,12 @@ function WorkstreamPausedStrip({
           ) : (
             <PlayIcon className="size-3.5 fill-current" />
           )}
-          <span className="hidden min-[400px]:inline">{messages.resumeThisWorkstream}</span>
-          <span className="min-[400px]:hidden">{messages.resumeShort}</span>
+          <span className="og-composer-resume-label-long hidden min-[400px]:inline">
+            {messages.resumeThisWorkstream}
+          </span>
+          <span className="og-composer-resume-label-short min-[400px]:hidden">
+            {messages.resumeShort}
+          </span>
         </button>
         <button
           type="button"

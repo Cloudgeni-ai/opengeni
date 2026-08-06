@@ -61,8 +61,7 @@ export function LightboxProvider({ children }: { children: ReactNode }) {
 function LightboxRoot({ children }: { children: ReactNode }) {
   const [state, setState] = useState<{ src: string; caption?: string } | null>(null);
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
-  const tokenSourceRef = useMemo(() => ({ current: tokenSource }), [tokenSource]);
-  const portalStyle = usePortalTokenStyle(tokenSourceRef);
+  const portalStyle = usePortalTokenStyle(tokenSource);
 
   const open = useCallback((src: string, caption?: string, source?: HTMLElement | null) => {
     setTokenSource(source ?? null);

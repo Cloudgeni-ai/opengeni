@@ -425,7 +425,7 @@ export type {
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
 export { defaultChatComposerMessages } from "./components/composer";
-export type { ChatComposerMessages } from "./components/composer";
+export type { ChatComposerMessages, ResponsiveBasis } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
 export {

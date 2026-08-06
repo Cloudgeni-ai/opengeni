@@ -138,6 +138,11 @@
   inherits: true;
   initial-value: 2rem;
 }
+@property --og-realtime-menu-width {
+  syntax: "*";
+  inherits: true;
+  initial-value: 18rem;
+}
 @property --og-radius-xs {
   syntax: "*";
   inherits: true;
@@ -4524,6 +4529,7 @@
   --og-model-picker-row-padding-x: 0.5rem;
   --og-model-picker-row-padding-y: 0.375rem;
   --og-model-picker-effort-height: 1.75rem;
+  --og-realtime-menu-width: 15rem;
 }
 :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
   --og-color-bg: oklch(0.978 0.003 260);
@@ -4799,6 +4805,139 @@
 :where(.og-root) :where(*) {
   scrollbar-width: thin;
   scrollbar-color: var(--og-color-border-strong) transparent;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"],:where(.og-root) .og-composer[data-og-responsive-basis="container"] {
+  container: og-composer / inline-size;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-input,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-input {
+  padding-inline: 1rem;
+  font-size: var(--og-font-size-composer-wide);
+  line-height: var(--og-line-height-composer-wide);
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-footer,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-footer {
+  gap: 0.375rem;
+  padding-inline: 0.625rem;
+  padding-bottom: 0.625rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-footer[data-og-stack-actions],:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-footer[data-og-stack-actions] {
+  flex-wrap: wrap;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-controls,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-controls {
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-hint,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-hint {
+  display: inline;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-actions,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-actions {
+  gap: 0.375rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
+  height: var(--og-model-picker-trigger-height);
+  max-width: 16rem;
+  padding-inline: 0.625rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
+  display: inline;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short {
+  display: none;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-picker-native,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-picker-native {
+  max-width: 180px;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label {
+  max-width: 11rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-transcription-error-label,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-transcription-error-label {
+  max-width: 10rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-command-description,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-command-description {
+  display: inline;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
+  height: 2rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-primary {
+  width: 2rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
+  display: inline-flex;
+  width: 1.5rem;
+}
+:where(.og-root).og-composer[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-primary {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+@container og-composer (max-width: 47.999rem) {
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-input,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-input {
+    padding-inline: 0.875rem;
+    font-size: var(--og-font-size-composer);
+    line-height: var(--og-line-height-composer);
+  }
+}
+@container og-composer (max-width: 39.999rem) {
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-footer,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-footer {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.25rem;
+    padding-inline: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-controls,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-controls,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-actions,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-composer-actions {
+    flex-wrap: nowrap;
+    gap: 0.25rem;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-hint,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-hint,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-command-description,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-command-description,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-full,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-policy-effort {
+    display: none;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-label-short {
+    display: inline;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-picker-native,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-model-picker-native {
+    max-width: 7.5rem;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger {
+    padding-inline: 0.5rem;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-transcription-recovered-label {
+    max-width: 7rem;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-transcription-error-label,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-transcription-error-label {
+    max-width: 6rem;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-primary {
+    border-radius: var(--og-radius-md);
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-model-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-model-trigger {
+    display: none;
+  }
+}
+@container og-composer (max-width: 24.999rem) {
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-long,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-long {
+    display: none;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-short,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-short {
+    display: inline;
+  }
+}
+@media (pointer: coarse) {
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-model-policy-trigger,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-primary,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
+    height: 2.75rem;
+  }
+  :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-primary,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger,:where(.og-root)  .og-composer[data-og-responsive-basis="container"] .og-realtime-model-trigger {
+    width: 2.75rem;
+  }
+}
+:where(.og-root).og-model-policy-menu,:where(.og-root) .og-model-policy-menu {
+  box-sizing: border-box;
+  width: min( var(--og-model-picker-menu-width), calc(var(--og-portal-source-inline-size, 100vw) - 1rem), var(--radix-dropdown-menu-content-available-width, 100vw) );
+  max-width: calc(100vw - 1rem);
+}
+:where(.og-root).og-realtime-menu,:where(.og-root) .og-realtime-menu {
+  box-sizing: border-box;
+  width: min( var(--og-realtime-menu-width), calc(var(--og-portal-source-inline-size, 100vw) - 1rem), var(--radix-dropdown-menu-content-available-width, 100vw) );
+  max-width: calc(100vw - 1rem);
 }
 :where(.og-root)[data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ),:where(.og-root) [data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ) {
   visibility: hidden;
