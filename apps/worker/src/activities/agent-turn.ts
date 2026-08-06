@@ -4870,7 +4870,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         undefined,
       );
       const establishPolicy: "eager" | "on-demand" =
-        lazyProvisionEnabled(settings) && !machinePrimary && runSettings.sandboxBackend !== "none"
+        lazyProvisionEnabled(settings) &&
+        !machinePrimary &&
+        runSettings.sandboxBackend !== "none" &&
+        // Resolved run credentials must be written to one exact leased sandbox
+        // before agent execution. A warm active pointer can bypass the lazy
+        // provisioner entirely, which previously skipped materialization.
+        !initialRunCredentialMaterial
           ? "on-demand"
           : "eager";
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
@@ -6510,6 +6516,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // its first-operation provisioner above.
           if (resolvedSandbox && !lazyOwnedSandbox && ownedEstablished) {
             const eagerSetupSession = setupBoxSession ?? ownedEstablished.session;
+            // `deferredSetup: true` below tells the runtime that the worker owns
+            // platform setup, so the runtime intentionally skips its credential
+            // session callback. Materialize host-managed run credentials here
+            // before any setup command (including provider login hooks), then
+            // decorate setup commands so they source the active generation.
+            await attachRunCredentialRenewal(
+              eagerSetupSession as RunCredentialCommandSession,
+              resolvedSandbox,
+            );
+            const eagerCredentialSetupSession = initialRunCredentialMaterial
+              ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
+              : eagerSetupSession;
             await runWorkspaceMutationForSandbox(
               resolvedSandbox,
               "eagerOwnedSandboxSetup",
@@ -6517,7 +6535,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 await runOwnedSandboxSetup(
                   agent,
                   ownedEstablished.session as never,
-                  eagerSetupSession as never,
+                  eagerCredentialSetupSession as never,
                   {
                     settings: runSettings,
                     environment: sandboxEnvironment,
@@ -8353,18 +8371,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const credentialSessionToClear = runCredentialSession;
         runCredentialSession = null;
         if (credentialSessionToClear) {
-          await runWorkspaceMutationForSandbox(
-            requireResolvedSandboxForMutation(
-              "Run credential cleanup has no exact sandbox lease target",
-            ),
-            "runCredentialAttemptClear",
-            async () =>
-              await clearRunCredentialsForAttempt(credentialSessionToClear, {
-                sessionId: input.sessionId,
-                attemptId: input.attemptId,
-                executionGeneration,
-              }),
-          );
+          const clearAttemptCredentials = async (): Promise<void> =>
+            await clearRunCredentialsForAttempt(credentialSessionToClear, {
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              executionGeneration,
+            });
+          const clearAttemptCredentialsWithSettledFence = async (): Promise<void> => {
+            try {
+              await runWorkspaceMutationForSandbox(
+                requireResolvedSandboxForMutation(
+                  "Run credential cleanup has no exact sandbox lease target",
+                ),
+                "runCredentialAttemptClear",
+                clearAttemptCredentials,
+              );
+            } catch (error) {
+              const settledAttemptFence =
+                error instanceof Error &&
+                error.name === "SandboxWorkspaceMutationFencedError" &&
+                (error as Error & { code?: unknown }).code === "attempt_fenced" &&
+                (activityStatus === "idle" || activityStatus === "failed");
+              if (!settledAttemptFence) throw error;
+              // Terminal settlement closes the active attempt before this finally
+              // runs, so the ordinary workspace admission correctly rejects it.
+              // The attempt-qualified delete is nevertheless successor-safe: it
+              // removes only this attempt/generation and clears the pointer only
+              // when it still names that exact generation. Finish that cleanup
+              // directly so a successful turn can continue into workspace capture,
+              // tool teardown, and lease release.
+              observability.info("retrying exact run credential cleanup after turn settlement", {
+                "opengeni.session_id": input.sessionId,
+                "opengeni.turn_id": turnId ?? "",
+                "opengeni.attempt_id": input.attemptId,
+              });
+              await clearAttemptCredentials();
+            }
+          };
+          await clearAttemptCredentialsWithSettledFence();
         }
         await drainAttemptOwnedSandboxWriters({
           // Normal turn completion owns the same process boundary as

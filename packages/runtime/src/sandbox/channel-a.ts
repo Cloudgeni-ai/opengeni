@@ -102,6 +102,9 @@ export type ChannelAEditor = {
 };
 export type ChannelASession = {
   exec?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;
+  /** Internal control-plane read. Routing sessions can bypass mutation
+   * admission without leaking private marker fields into provider arguments. */
+  execReadOnly?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;
   execCommand?(args: ChannelAExecArgs): Promise<string>;
   readFile?(args: {
     path: string;
@@ -218,10 +221,17 @@ const FS_LIST_MAX_OUTPUT_BYTES = 768 * 1024;
 // unified patches therefore travel as bounded base64 chunks. 512 KiB of raw
 // data expands to ~683 KiB, leaving room for confinement/provider framing.
 const GIT_COMMAND_CHUNK_BYTES = 512 * 1024;
+// Fast-path a normal review as one bounded capture per data family. Large
+// workspaces fall back to the per-file reader below, preserving the existing
+// per-file truncation contract without making every small Modal diff pay a
+// second control-plane round trip.
+const GIT_COMBINED_DIFF_MAX_BYTES = 32 * 1024 * 1024;
+const GIT_UNTRACKED_CAPTURE_FRAME = "__OPENGENI_GIT_UNTRACKED_V1__";
 const GIT_METADATA_MAX_BYTES = 2 * 1024 * 1024;
 const GIT_MEASURE_FRAME = "__OPENGENI_GIT_MEASURE_V1__";
 const GIT_CHUNK_FRAME = "__OPENGENI_GIT_CHUNK_V1__";
 const GIT_CHUNK_FRAME_END = "__OPENGENI_GIT_CHUNK_END_V1__";
+const GIT_STATUS_REPO_FRAME = "__OPENGENI_GIT_STATUS_REPO_V1__";
 // Keep Channel-A's remote hashing aligned with the existing git-credential
 // wrapper portability contract: GNU coreutils on managed Linux boxes, stock
 // shasum on macOS/BSD Connected Machines, then OpenSSL as the final common
@@ -236,7 +246,7 @@ const PORTABLE_SHA256_FILE_FUNCTION = [
 ].join("\n");
 // Descriptor confinement has two provider command surfaces. Linux exposes the
 // opened path through procfs and GNU stat; stock macOS exposes descriptor paths
-// through lsof and BSD stat over /dev/fd. Both branches bind two already-open
+// through lsof and BSD stat over /dev/fd. Both branches bind three already-open
 // descriptors to the same current non-symlink inode beneath the physical repo
 // root before any body reads bytes, preserving the symlink/parent-swap defense.
 const PORTABLE_DESCRIPTOR_FUNCTIONS = [
@@ -245,23 +255,32 @@ const PORTABLE_DESCRIPTOR_FUNCTIONS = [
   "  opengeni_fd_path=",
   '  if opengeni_fd_path=$(readlink -f -- "/proc/$$/fd/$fd" 2>/dev/null); then [ -n "$opengeni_fd_path" ]; return; fi',
   "  lsof_bin=",
-  "  if [ -x /usr/sbin/lsof ]; then lsof_bin=/usr/sbin/lsof; elif command -v lsof >/dev/null 2>&1; then lsof_bin=$(command -v lsof); else return 127; fi",
+  "  if command -v lsof >/dev/null 2>&1; then lsof_bin=$(command -v lsof); elif [ -x /usr/sbin/lsof ]; then lsof_bin=/usr/sbin/lsof; else return 127; fi",
   '  while IFS= read -r -d \'\' field; do case "$field" in n*) opengeni_fd_path=${field#n} ;; esac; done < <("$lsof_bin" -a -p "$$" -d "$fd" -Fn0 2>/dev/null)',
   '  [ -n "$opengeni_fd_path" ]',
   "}",
   "opengeni_fd_identity() {",
   '  fd="$1"',
   '  if identity=$(stat -Lc "%d:%i" -- "/proc/$$/fd/$fd" 2>/dev/null); then printf "%s" "$identity"; return; fi',
-  '  stat -f "%d:%i" "/dev/fd/$fd" 2>/dev/null',
+  // BSD exposes /dev/fd through devfs, so its device id differs from the
+  // opened file even though the inode is preserved. The resolved descriptor
+  // path is already root-confined; compare the portable inode on this branch.
+  '  if identity=$(stat -f "%i" "/dev/fd/$fd" 2>/dev/null) && [[ "$identity" =~ ^[0-9]+$ ]]; then printf "%s" "$identity"; return; fi',
+  '  if [ -x /usr/bin/stat ] && identity=$(/usr/bin/stat -f "%i" "/dev/fd/$fd" 2>/dev/null) && [[ "$identity" =~ ^[0-9]+$ ]]; then printf "%s" "$identity"; return; fi',
+  "  return 1",
   "}",
   "opengeni_path_identity() {",
-  '  if identity=$(stat -c "%d:%i" -- "$1" 2>/dev/null); then printf "%s" "$identity"; return; fi',
-  '  stat -f "%d:%i" "$1" 2>/dev/null',
+  '  if [ -e "/proc/$$/fd/3" ] && identity=$(stat -c "%d:%i" -- "$1" 2>/dev/null); then printf "%s" "$identity"; return; fi',
+  '  if identity=$(stat -f "%i" "$1" 2>/dev/null) && [[ "$identity" =~ ^[0-9]+$ ]]; then printf "%s" "$identity"; return; fi',
+  '  if [ -x /usr/bin/stat ] && identity=$(/usr/bin/stat -f "%i" "$1" 2>/dev/null) && [[ "$identity" =~ ^[0-9]+$ ]]; then printf "%s" "$identity"; return; fi',
+  "  return 1",
   "}",
   "opengeni_fd_size() {",
   '  fd="$1"',
   '  if size=$(stat -Lc "%s" -- "/proc/$$/fd/$fd" 2>/dev/null); then printf "%s" "$size"; return; fi',
-  '  stat -f "%z" "/dev/fd/$fd" 2>/dev/null',
+  '  if size=$(stat -f "%z" "/dev/fd/$fd" 2>/dev/null) && [[ "$size" =~ ^[0-9]+$ ]]; then printf "%s" "$size"; return; fi',
+  '  if [ -x /usr/bin/stat ] && size=$(/usr/bin/stat -f "%z" "/dev/fd/$fd" 2>/dev/null) && [[ "$size" =~ ^[0-9]+$ ]]; then printf "%s" "$size"; return; fi',
+  "  return 1",
   "}",
 ].join("\n");
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
@@ -351,6 +370,24 @@ export class SandboxChannelAService {
     throw new ChannelAUnsupportedError("the box does not support command execution");
   }
 
+  /** Run a command that is proven read-only. Routing sessions expose an
+   * explicit internal path that skips durable mutation admission; direct
+   * provider sessions safely use the ordinary exec path. */
+  private async runReadOnly(args: ChannelAExecArgs): ReturnType<SandboxChannelAService["run"]> {
+    if (!this.session.execReadOnly) {
+      return await this.run(args);
+    }
+    const withRunAs = this.runAs ? { ...args, runAs: this.runAs } : args;
+    const result = await this.session.execReadOnly(withRunAs);
+    return {
+      stdout: result.stdout ?? result.output ?? "",
+      stderr: result.stderr ?? "",
+      exitCode: result.exitCode ?? null,
+      ...(typeof result.sessionId === "number" ? { sessionId: result.sessionId } : {}),
+      wallTimeSeconds: result.wallTimeSeconds ?? 0,
+    };
+  }
+
   // ════════════════════════════ FileSystem (A2) ═════════════════════════════
 
   async fsList(req: FsListRequest): Promise<FsListResponse> {
@@ -398,15 +435,27 @@ export class SandboxChannelAService {
     const portablePruneCase = pruneNames.length
       ? `case "$base" in ${pruneNames.map(shellQuote).join("|")}) pruned=1 ;; *) pruned=0 ;; esac;`
       : "pruned=0;";
+    // Whole-workspace capture deliberately omits optional metadata on the
+    // portable branch: stock macOS/BSD would otherwise fork wc/date/stat for
+    // every entry. Interactive depth-1 browsing retains the historical
+    // metadata because its bounded directory fan-out is small.
+    const portableTypeAndMetadata = pruneNames.length
+      ? [
+          `if [ -L "$p" ]; then t=l; elif [ -d "$p" ]; then t=d; elif [ -f "$p" ]; then t=f; else t=o; fi;`,
+          `printf '%s\\t\\t\\t\\t%s\\0' "$t" "$p";`,
+        ]
+      : [
+          `if [ -L "$p" ]; then t=l; size=0; elif [ -d "$p" ]; then t=d; size=0; elif [ -f "$p" ]; then t=f; size=$(wc -c < "$p" | tr -d ' '); else t=o; size=0; fi;`,
+          `mtime=$(date -r "$p" +%s 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0);`,
+          `mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p" 2>/dev/null || echo 0);`,
+          `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
+        ];
     const portableWalk = [
       "shopt -s nullglob dotglob; count=0; stop=0;",
       'walk() { local dir="$1" level="$2" p base t size mtime mode pruned;',
       'for p in "$dir"/*; do [ "$stop" -eq 1 ] && return; base=${p##*/};',
       portableHiddenGuard,
-      `if [ -L "$p" ]; then t=l; size=0; elif [ -d "$p" ]; then t=d; size=0; elif [ -f "$p" ]; then t=f; size=$(wc -c < "$p" | tr -d ' '); else t=o; size=0; fi;`,
-      `mtime=$(date -r "$p" +%s 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0);`,
-      `mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p" 2>/dev/null || echo 0);`,
-      `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
+      ...portableTypeAndMetadata,
       `count=$((count + 1)); if [ "$count" -ge ${maxCommandEntries} ]; then stop=1; return; fi;`,
       portablePruneCase,
       `if [ "$t" = d ] && [ "$pruned" -eq 0 ] && [ "$level" -lt ${depthArg} ]; then walk "$p" $((level + 1)); fi;`,
@@ -554,7 +603,7 @@ export class SandboxChannelAService {
       `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
-    const result = await this.run({ cmd: internalBashCommand(script) });
+    const result = await this.runReadOnly({ cmd: internalBashCommand(script) });
     this.assertConfinementResult(result, path || ".", "directory");
   }
 
@@ -584,7 +633,7 @@ export class SandboxChannelAService {
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
-    const result = await this.run({ cmd: internalBashCommand(script) });
+    const result = await this.runReadOnly({ cmd: internalBashCommand(script) });
     this.assertConfinementResult(result, path, "mutation");
   }
 
@@ -621,9 +670,11 @@ export class SandboxChannelAService {
     const abs = this.joinRoot(path);
     const script = [
       PORTABLE_REALPATH_EXISTING_FUNCTION,
+      PORTABLE_DESCRIPTOR_FUNCTIONS,
       `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `target=$(readlink -f -- "/proc/$$/fd/3") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `opengeni_set_fd_path 3 || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `target="$opengeni_fd_path"`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       `test -f "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_READ_OK__\\n'`,
@@ -631,7 +682,7 @@ export class SandboxChannelAService {
     ].join("; ");
     let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
     try {
-      result = await this.run({
+      result = await this.runReadOnly({
         cmd: internalBashCommand(script),
         maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
       });
@@ -902,6 +953,7 @@ export class SandboxChannelAService {
     command: string,
     measurement: { sizeBytes: number; sha256: string },
     prefixByteLength = measurement.sizeBytes,
+    initialBytes: Buffer = Buffer.alloc(0),
   ): Promise<Buffer> {
     if (
       !Number.isSafeInteger(prefixByteLength) ||
@@ -912,9 +964,22 @@ export class SandboxChannelAService {
         "Workspace Git data is temporarily unavailable. Retry the operation.",
       );
     }
+    if (
+      initialBytes.byteLength > prefixByteLength ||
+      (initialBytes.byteLength > 0 &&
+        initialBytes.byteLength !== Math.min(GIT_COMMAND_CHUNK_BYTES, prefixByteLength))
+    ) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
     if (prefixByteLength === 0) return Buffer.alloc(0);
-    const chunks: Buffer[] = [];
-    for (let offset = 0; offset < prefixByteLength; offset += GIT_COMMAND_CHUNK_BYTES) {
+    const chunks: Buffer[] = initialBytes.byteLength > 0 ? [initialBytes] : [];
+    for (
+      let offset = initialBytes.byteLength;
+      offset < prefixByteLength;
+      offset += GIT_COMMAND_CHUNK_BYTES
+    ) {
       const expected = Math.min(GIT_COMMAND_CHUNK_BYTES, prefixByteLength - offset);
       const chunk = await this.runInConfinedDirectory(repo, {
         cmd: [
@@ -974,21 +1039,85 @@ export class SandboxChannelAService {
     command: string,
     maxBytes: number,
   ): Promise<{ bytes: Buffer; sizeBytes: number; truncated: boolean }> {
-    const measurement = await this.measureConfinedCommandBytes(repo, command);
-    if (measurement.sizeBytes > maxBytes) {
-      return { bytes: Buffer.alloc(0), sizeBytes: measurement.sizeBytes, truncated: true };
+    // Measure and return the first safe chunk in one provider operation. The
+    // previous measure-then-read protocol reran every Git command even when its
+    // complete output fit in one chunk, doubling latency on remote sandboxes.
+    const captured = await this.runInConfinedDirectory(repo, {
+      cmd: [
+        PORTABLE_SHA256_FILE_FUNCTION,
+        "tmp=$(mktemp) || exit 70",
+        "trap 'rm -f \"$tmp\"' EXIT",
+        `/bin/bash --noprofile --norc -c ${shellQuote(command)} >"$tmp" 2>/dev/null`,
+        "producer_status=$?",
+        `bytes=$(wc -c <"$tmp" | tr -d ' \\n')`,
+        `sha256=$(opengeni_sha256_file "$tmp") || exit 71`,
+        `capture_bytes=0; if [ "$producer_status" -eq 0 ] && [ "$bytes" -le ${maxBytes} ]; then capture_bytes="$bytes"; if [ "$capture_bytes" -gt ${GIT_COMMAND_CHUNK_BYTES} ]; then capture_bytes=${GIT_COMMAND_CHUNK_BYTES}; fi; fi`,
+        `printf '${GIT_CHUNK_FRAME}\\t%s\\t%s\\t%s\\t0\\t%s\\n' "$producer_status" "$bytes" "$sha256" "$capture_bytes"`,
+        'if [ "$capture_bytes" -gt 0 ]; then head -c "$capture_bytes" "$tmp" | base64 | tr -d \'\\n\'; fi',
+        `printf '\\n${GIT_CHUNK_FRAME_END}'`,
+      ].join("; "),
+      maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
+    });
+    if (captured.exitCode !== null && captured.exitCode !== 0) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
     }
+    const headerEnd = captured.stdout.indexOf("\n");
+    const trailer = `\n${GIT_CHUNK_FRAME_END}`;
+    if (headerEnd < 0 || !captured.stdout.endsWith(trailer)) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    const header = captured.stdout.slice(0, headerEnd).split("\t");
+    const sizeBytes = Number(header[2]);
+    const capturedBytes = Number(header[5]);
+    if (
+      header.length !== 6 ||
+      header[0] !== GIT_CHUNK_FRAME ||
+      header[1] !== "0" ||
+      !Number.isSafeInteger(sizeBytes) ||
+      sizeBytes < 0 ||
+      !/^[0-9a-f]{64}$/.test(header[3] ?? "") ||
+      header[4] !== "0" ||
+      !Number.isSafeInteger(capturedBytes) ||
+      capturedBytes < 0 ||
+      capturedBytes !== (sizeBytes > maxBytes ? 0 : Math.min(sizeBytes, GIT_COMMAND_CHUNK_BYTES))
+    ) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    const encoded = captured.stdout.slice(headerEnd + 1, -trailer.length);
+    const initialBytes = Buffer.from(encoded, "base64");
+    if (initialBytes.byteLength !== capturedBytes || initialBytes.toString("base64") !== encoded) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    if (sizeBytes > maxBytes) {
+      return { bytes: Buffer.alloc(0), sizeBytes, truncated: true };
+    }
+    const measurement = { sizeBytes, sha256: header[3]! };
     return {
-      bytes: await this.readConfinedCommandPrefix(repo, command, measurement),
-      sizeBytes: measurement.sizeBytes,
+      bytes: await this.readConfinedCommandPrefix(
+        repo,
+        command,
+        measurement,
+        sizeBytes,
+        initialBytes,
+      ),
+      sizeBytes,
       truncated: false,
     };
   }
 
-  /** Bind an untracked regular-file descriptor to its repository root and its
-   * lstat identity before producing bytes. The final producer reads fd 3 rather
-   * than reopening the path, so a check→read symlink swap cannot disclose a
-   * target outside the repository (or substitute another in-repository inode). */
+  /** Bind untracked regular-file descriptors to their repository root and lstat
+   * identity before producing bytes. The final producer reads an already-open
+   * descriptor rather than reopening the path, so a check→read symlink swap
+   * cannot disclose a target outside the repository (or substitute another
+   * in-repository inode). */
   private confinedUntrackedRegularFileCommand(target: string, body: string): string {
     const fileArg = target.startsWith("./") ? target : `./${target}`;
     return [
@@ -996,79 +1125,107 @@ export class SandboxChannelAService {
       `file=${shellQuote(fileArg)}`,
       'exec 3<"$file" || exit 66',
       'exec 4<"$file" || exit 66',
+      'exec 5<"$file" || exit 66',
       "root=$(pwd -P) || exit 66",
       "opengeni_set_fd_path 3 || exit 66",
       'opened3="$opengeni_fd_path"',
       "opengeni_set_fd_path 4 || exit 66",
       'opened4="$opengeni_fd_path"',
+      "opengeni_set_fd_path 5 || exit 66",
+      'opened5="$opengeni_fd_path"',
       'case "$opened3" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
       'case "$opened4" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      'case "$opened5" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
       'test ! -L "$file" && test -f "$file" || exit 66',
       "opened3_identity=$(opengeni_fd_identity 3) || exit 66",
       "opened4_identity=$(opengeni_fd_identity 4) || exit 66",
+      "opened5_identity=$(opengeni_fd_identity 5) || exit 66",
       'path_identity=$(opengeni_path_identity "$file") || exit 66',
       'test "$opened3_identity" = "$opened4_identity" || exit 66',
+      'test "$opened3_identity" = "$opened5_identity" || exit 66',
       'test "$opened3_identity" = "$path_identity" || exit 66',
       body,
     ].join("; ");
   }
 
-  /** Read a regular untracked file without routing its body through one large
-   * execCommand response. Native provider reads are binary-safe; providers
-   * without that surface use the same bounded chunk protocol as Git patches. */
-  private async readUntrackedRegularFile(
-    repo: string,
-    target: string,
-    prefixByteLength: number,
-    sizeBytes: number,
-  ): Promise<Buffer> {
-    const path = repo ? `${repo}/${target}` : target;
-    assertSafeRelPath(path);
-    if (this.session.readFile) {
-      try {
-        const raw = await this.session.readFile({
-          path: this.joinRoot(path),
-          maxBytes: prefixByteLength,
-          ...(this.runAs ? { runAs: this.runAs } : {}),
-        });
-        const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
-        if (bytes.byteLength !== prefixByteLength) {
-          throw new ChannelAUnavailableError(
-            "Workspace Git data changed during capture. Retry the operation.",
-          );
-        }
-        return bytes;
-      } catch (error) {
-        if (error instanceof ChannelAUnavailableError) throw error;
-        if (isWorkspaceEscapeError(error)) {
-          throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
-        }
-        if (isDefinitePathNotFoundError(error)) {
-          throw new ChannelANotFoundError(`file not found: ${path}`);
-        }
-        if (!this.session.exec && !this.session.execCommand) {
-          throw new ChannelAUnavailableError(
-            "Workspace Git data is temporarily unavailable. Retry the operation.",
-          );
-        }
-      }
-    }
-    const command = this.confinedUntrackedRegularFileCommand(target, "cat <&3");
-    const measurement = await this.measureConfinedCommandBytes(repo, command);
-    if (measurement.sizeBytes !== sizeBytes) {
-      throw new ChannelAUnavailableError(
-        "Workspace Git data changed during capture. Retry the operation.",
-      );
-    }
-    return await this.readConfinedCommandPrefix(repo, command, measurement, prefixByteLength);
+  /** Capture every untracked after-image in one provider operation. The frame
+   * is length-delimited, so arbitrary file bytes cannot be mistaken for control
+   * data. Regular files retain the same descriptor/inode confinement as the
+   * per-file fallback; symlinks expose only their link text. */
+  private combinedUntrackedSnapshotCommand(pathspec: string, maxBytesPerFile: number): string {
+    return [
+      PORTABLE_DESCRIPTOR_FUNCTIONS,
+      'list=$(mktemp "${TMPDIR:-/tmp}/opengeni-untracked-list.XXXXXX") || exit 70',
+      'snap=""',
+      'cleanup_untracked() { rm -f "$list"; if [ -n "$snap" ]; then rm -f "$snap"; fi; }',
+      "trap cleanup_untracked EXIT",
+      `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec} >"$list" || exit 66`,
+      `printf '${GIT_UNTRACKED_CAPTURE_FRAME}\\0'`,
+      'while IFS= read -r -d "" target; do',
+      '  file="./$target"',
+      '  snap=$(mktemp "${TMPDIR:-/tmp}/opengeni-untracked-snapshot.XXXXXX") || exit 70',
+      '  if [ -L "$file" ]; then',
+      "    kind=L",
+      '    readlink -n "$file" >"$snap" || exit 66',
+      '    size=$(wc -c <"$snap" | tr -d " \\n")',
+      "    line_count=0",
+      '  elif [ -f "$file" ]; then',
+      "    kind=F",
+      '    exec 3<"$file" || exit 66',
+      '    exec 4<"$file" || exit 66',
+      '    exec 5<"$file" || exit 66',
+      "    root=$(pwd -P) || exit 66",
+      "    opengeni_set_fd_path 3 || exit 66",
+      '    opened3="$opengeni_fd_path"',
+      "    opengeni_set_fd_path 4 || exit 66",
+      '    opened4="$opengeni_fd_path"',
+      "    opengeni_set_fd_path 5 || exit 66",
+      '    opened5="$opengeni_fd_path"',
+      '    case "$opened3" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      '    case "$opened4" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      '    case "$opened5" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      '    test ! -L "$file" && test -f "$file" || exit 66',
+      "    opened3_identity=$(opengeni_fd_identity 3) || exit 66",
+      "    opened4_identity=$(opengeni_fd_identity 4) || exit 66",
+      "    opened5_identity=$(opengeni_fd_identity 5) || exit 66",
+      '    path_identity=$(opengeni_path_identity "$file") || exit 66',
+      '    test "$opened3_identity" = "$opened4_identity" || exit 66',
+      '    test "$opened3_identity" = "$opened5_identity" || exit 66',
+      '    test "$opened3_identity" = "$path_identity" || exit 66',
+      "    size=$(opengeni_fd_size 3) || exit 66",
+      "    line_count=$(wc -l <&3) || exit 66",
+      '    if [ "$size" -gt 0 ]; then last_byte=$(tail -c 1 <&4 | od -An -tu1 | tr -d " \\n") || exit 66; if [ "$last_byte" != "10" ]; then line_count=$((line_count + 1)); fi; fi',
+      `    capture_bytes="$size"; if [ "$size" -gt ${maxBytesPerFile} ]; then capture_bytes=8192; if [ "$size" -lt "$capture_bytes" ]; then capture_bytes="$size"; fi; fi`,
+      '    if [ "$capture_bytes" -gt 0 ]; then head -c "$capture_bytes" <&5 >"$snap" || exit 66; else : >"$snap"; fi',
+      "    exec 3<&- 4<&- 5<&-",
+      "  else",
+      "    exit 66",
+      "  fi",
+      '  body_bytes=$(wc -c <"$snap" | tr -d " \\n")',
+      '  printf "%s\\0%s\\0%s\\0%s\\0%s\\0" "$kind" "$target" "$size" "$line_count" "$body_bytes"',
+      '  cat "$snap"',
+      '  rm -f "$snap"',
+      '  snap=""',
+      'done <"$list"',
+      'printf "E\\0"',
+    ].join("\n");
   }
 
   async gitStatus(req: GitStatusRequest): Promise<GitStatusResponse> {
     const repo = assertSafeRelPathOrRoot(req.path);
-    const inside = await this.runInConfinedDirectory(repo, {
-      cmd: "git rev-parse --is-inside-work-tree 2>/dev/null",
-    });
-    if (inside.stdout.trim() !== "true") {
+    const status = await this.readConfinedCommandBytes(
+      repo,
+      `if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then printf '${GIT_STATUS_REPO_FRAME}\\0'; git status --porcelain=v2 --branch -z; else printf '${GIT_STATUS_REPO_FRAME}not-repo\\0'; fi`,
+      GIT_METADATA_MAX_BYTES,
+    );
+    if (status.truncated) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+      );
+    }
+    const repoFrame = Buffer.from(`${GIT_STATUS_REPO_FRAME}${NUL}`);
+    const notRepoFrame = Buffer.from(`${GIT_STATUS_REPO_FRAME}not-repo${NUL}`);
+    if (status.bytes.equals(notRepoFrame)) {
       return {
         isRepo: false,
         head: null,
@@ -1080,17 +1237,15 @@ export class SandboxChannelAService {
         revision: this.revision,
       };
     }
-    const status = await this.readConfinedCommandBytes(
-      repo,
-      "git status --porcelain=v2 --branch -z",
-      GIT_METADATA_MAX_BYTES,
-    );
-    if (status.truncated) {
+    if (!status.bytes.subarray(0, repoFrame.byteLength).equals(repoFrame)) {
       throw new ChannelAUnavailableError(
-        "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
       );
     }
-    return { ...parsePorcelainV2(decodeGitMetadataUtf8(status.bytes)), revision: this.revision };
+    return {
+      ...parsePorcelainV2(decodeGitMetadataUtf8(status.bytes.subarray(repoFrame.byteLength))),
+      revision: this.revision,
+    };
   }
 
   async gitDiff(req: GitDiffRequest): Promise<GitDiffResponse> {
@@ -1098,29 +1253,50 @@ export class SandboxChannelAService {
     const ctx = req.contextLines;
     // Selector precedence: refs > staged > worktree.
     let range = "";
+    let rangeSetup = "";
     if (req.fromRef && req.toRef) range = `${shellQuote(req.fromRef)} ${shellQuote(req.toRef)}`;
     else if (req.fromRef) {
       if (req.fromRef === "HEAD") {
-        const head = await this.runInConfinedDirectory(repo, {
-          cmd: "if git rev-parse --verify --quiet HEAD >/dev/null; then printf 'present'; else printf 'unborn'; fi",
-        });
         // An unborn repository has no HEAD tree. `--cached` compares its index
-        // to Git's empty tree and preserves staged additions; every other
-        // invalid ref remains a real read failure in the bounded command path.
-        range = head.stdout.trim() === "present" ? shellQuote(req.fromRef) : "--cached";
+        // to Git's empty tree and preserves staged additions. Resolve this in
+        // the same provider operation as the diff instead of paying a dedicated
+        // Modal round trip merely to probe HEAD.
+        rangeSetup =
+          "if git rev-parse --verify --quiet HEAD >/dev/null; then opengeni_git_range=HEAD; else opengeni_git_range=--cached; fi; ";
+        range = '"$opengeni_git_range"';
       } else {
         range = shellQuote(req.fromRef);
       }
     } else if (req.staged) range = "--cached";
     const pathspec = req.pathspec.length ? ` -- ${req.pathspec.map(shellQuote).join(" ")}` : "";
+    const gitCommand = (command: string) => `${rangeSetup}${command}`;
 
-    // Pass 1: numstat (stats + binary detection). -z gives NUL-separated fields;
-    // a rename emits old\0new for that record's path fields.
-    const numstat = await this.readConfinedCommandBytes(
-      repo,
-      `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
-      GIT_METADATA_MAX_BYTES,
-    );
+    // Capture tracked metadata, the complete ordinary patch, and all untracked
+    // after-images concurrently. A normal review now completes in one provider
+    // round; oversized captures retain the exact per-file fallback below.
+    const [numstat, combinedPatch, combinedUntracked] = await Promise.all([
+      this.readConfinedCommandBytes(
+        repo,
+        gitCommand(
+          `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
+        ),
+        GIT_METADATA_MAX_BYTES,
+      ),
+      this.readConfinedCommandBytes(
+        repo,
+        gitCommand(
+          `git -c core.quotePath=false diff --no-color -U${ctx} ${range}${pathspec}`.trim(),
+        ),
+        GIT_COMBINED_DIFF_MAX_BYTES,
+      ),
+      req.includeUntracked
+        ? this.readConfinedCommandBytes(
+            repo,
+            this.combinedUntrackedSnapshotCommand(pathspec, req.maxBytesPerFile),
+            GIT_COMBINED_DIFF_MAX_BYTES,
+          )
+        : Promise.resolve(null),
+    ]);
     if (numstat.truncated) {
       throw new ChannelAUnavailableError(
         "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
@@ -1128,34 +1304,32 @@ export class SandboxChannelAService {
     }
     const stats = parseNumstatZ(decodeGitMetadataUtf8(numstat.bytes));
 
-    const files: GitFileDiff[] = [];
-    for (const stat of stats) {
+    const readTrackedFile = async (stat: NumstatEntry): Promise<GitFileDiff> => {
       const target = stat.newPath;
-      const fileStatus: GitFileStatusCode = stat.binary ? "modified" : "modified";
       if (stat.binary) {
-        files.push({
+        return {
           path: target,
           oldPath: stat.oldPath,
-          status: fileStatus,
+          status: "modified",
           isBinary: true,
           isImage: isImagePath(target),
           additions: 0,
           deletions: 0,
           hunks: [],
           truncated: false,
-        });
-        continue;
+        };
       }
-      // Pass 2: the per-file unified patch -> hunks.
       const patch = await this.readConfinedCommandBytes(
         repo,
-        `git -c core.quotePath=false diff --no-color -U${ctx} ${range} -- ${shellQuote(target)}`.trim(),
+        gitCommand(
+          `git -c core.quotePath=false diff --no-color -U${ctx} ${range} -- ${shellQuote(target)}`.trim(),
+        ),
         req.maxBytesPerFile,
       );
       const parsed = patch.truncated
         ? { hunks: [] as GitDiffHunk[], status: "modified" as GitFileStatusCode }
         : parseUnifiedPatch(patch.bytes.toString("utf8"));
-      files.push({
+      return {
         path: target,
         oldPath: stat.oldPath,
         status: parsed.status,
@@ -1165,129 +1339,189 @@ export class SandboxChannelAService {
         deletions: stat.deletions,
         hunks: parsed.hunks,
         truncated: patch.truncated,
-      });
-    }
+      };
+    };
 
-    if (req.includeUntracked) {
-      // Native `git diff` deliberately omits untracked files, but a workspace
-      // review cannot: an untracked-only turn is still a real change surface.
-      // Ask Git for the exact NUL-delimited set, then synthesize an added-file
-      // hunk from a bounded read. The explicit request flag keeps commit/staged
-      // consumers on native Git semantics.
-      const untracked = await this.readConfinedCommandBytes(
-        repo,
-        `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec}`,
-        GIT_METADATA_MAX_BYTES,
-      );
-      if (untracked.truncated) {
-        throw new ChannelAUnavailableError(
-          "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
-        );
-      }
-      for (const target of decodeGitMetadataUtf8(untracked.bytes).split(NUL).filter(Boolean)) {
-        const fileArg = target.startsWith("./") ? target : `./${target}`;
-        const kind = await this.readConfinedCommandBytes(
-          repo,
-          `file=${shellQuote(fileArg)}; if [ -L "$file" ]; then printf L; elif [ -f "$file" ]; then printf F; else exit 66; fi`,
-          1,
-        );
-        if (kind.truncated || (kind.bytes[0] !== 0x4c && kind.bytes[0] !== 0x46)) {
+    const combinedSections = combinedPatch.truncated
+      ? null
+      : splitUnifiedPatchFiles(combinedPatch.bytes.toString("utf8"));
+    const trackedFilesPromise: Promise<GitFileDiff[]> =
+      combinedSections && combinedSections.length === stats.length
+        ? Promise.resolve(
+            stats.map((stat, index): GitFileDiff => {
+              const target = stat.newPath;
+              if (stat.binary) {
+                return {
+                  path: target,
+                  oldPath: stat.oldPath,
+                  status: "modified",
+                  isBinary: true,
+                  isImage: isImagePath(target),
+                  additions: 0,
+                  deletions: 0,
+                  hunks: [],
+                  truncated: false,
+                };
+              }
+              const section = combinedSections[index] ?? "";
+              const truncated = Buffer.byteLength(section, "utf8") > req.maxBytesPerFile;
+              const parsed = truncated
+                ? { hunks: [] as GitDiffHunk[], status: "modified" as GitFileStatusCode }
+                : parseUnifiedPatch(section);
+              return {
+                path: target,
+                oldPath: stat.oldPath,
+                status: parsed.status,
+                isBinary: false,
+                isImage: isImagePath(target),
+                additions: stat.additions,
+                deletions: stat.deletions,
+                hunks: parsed.hunks,
+                truncated,
+              };
+            }),
+          )
+        : Promise.all(stats.map(readTrackedFile));
+
+    const shapeUntrackedSnapshot = (snapshot: CombinedUntrackedSnapshot): GitFileDiff => {
+      let { sampled, sizeBytes, lineCount } = snapshot;
+      if (snapshot.kind === "L") {
+        if (sizeBytes !== sampled.length) {
           throw new ChannelAUnavailableError(
-            "Workspace Git data is temporarily unavailable. Retry the operation.",
+            "Workspace Git data changed during capture. Retry the operation.",
           );
         }
+        lineCount = addedLines(sampled).length;
+      } else {
+        const expectedSampleSize =
+          sizeBytes > req.maxBytesPerFile ? Math.min(sizeBytes, 8_192) : sizeBytes;
+        if (sampled.length !== expectedSampleSize) {
+          throw new ChannelAUnavailableError(
+            "Workspace Git data changed during capture. Retry the operation.",
+          );
+        }
+      }
+      const truncated = sizeBytes > req.maxBytesPerFile || sampled.length > req.maxBytesPerFile;
+      const bytes = truncated ? sampled.subarray(0, req.maxBytesPerFile) : sampled;
+      const isBinary = sniffBinary(bytes);
+      const hunkLines = !isBinary && !truncated ? addedLines(bytes) : [];
+      return {
+        path: snapshot.target,
+        oldPath: null,
+        status: "untracked",
+        isBinary,
+        isImage: isImagePath(snapshot.target),
+        additions: isBinary ? 0 : lineCount,
+        deletions: 0,
+        hunks:
+          hunkLines.length > 0
+            ? [
+                {
+                  oldStart: 0,
+                  oldLines: 0,
+                  newStart: 1,
+                  newLines: hunkLines.length,
+                  header: `@@ -0,0 +1,${hunkLines.length} @@`,
+                  lines: hunkLines,
+                },
+              ]
+            : [],
+        truncated,
+      };
+    };
 
-        let sampled: Buffer = Buffer.alloc(0);
-        let sizeBytes: number;
-        let lineCount: number;
-        if (kind.bytes[0] === 0x4c) {
-          const link = await this.readConfinedCommandBytes(
+    const readUntrackedFile = async (target: string): Promise<GitFileDiff> => {
+      const fileArg = target.startsWith("./") ? target : `./${target}`;
+      const regularBody = [
+        "size=$(opengeni_fd_size 3) || exit 66",
+        "line_count=$(wc -l <&3) || exit 66",
+        'if [ "$size" -gt 0 ]; then last_byte=$(tail -c 1 <&4 | od -An -tu1 | tr -d " \\n") || exit 66; if [ "$last_byte" != "10" ]; then line_count=$((line_count + 1)); fi; fi',
+        `capture_bytes="$size"; if [ "$size" -gt ${req.maxBytesPerFile} ]; then capture_bytes=8192; if [ "$size" -lt "$capture_bytes" ]; then capture_bytes="$size"; fi; fi`,
+        'printf "F\\0%s\\0%s\\0" "$size" "$line_count"',
+        'head -c "$capture_bytes" <&5',
+      ].join("; ");
+      const captured = await this.readConfinedCommandBytes(
+        repo,
+        [
+          `file=${shellQuote(fileArg)}`,
+          'if [ -L "$file" ]; then printf "L\\0"; readlink -n "$file" || exit 66',
+          `elif [ -f "$file" ]; then ${this.confinedUntrackedRegularFileCommand(target, regularBody)}`,
+          "else exit 66",
+          "fi",
+        ].join("; "),
+        Math.max(req.maxBytesPerFile, 8_192) + 128,
+      );
+      if (captured.truncated || captured.bytes[1] !== 0) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      if (captured.bytes[0] === 0x4c) {
+        const sampled = captured.bytes.subarray(2);
+        return shapeUntrackedSnapshot({
+          target,
+          kind: "L",
+          sizeBytes: sampled.length,
+          lineCount: 0,
+          sampled,
+        });
+      }
+      if (captured.bytes[0] !== 0x46) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      const sizeEnd = captured.bytes.indexOf(0, 2);
+      const lineCountEnd = captured.bytes.indexOf(0, sizeEnd + 1);
+      const sizeBytes = safeInt(
+        sizeEnd > 2 ? captured.bytes.toString("ascii", 2, sizeEnd) : undefined,
+      );
+      const lineCount = safeInt(
+        lineCountEnd > sizeEnd + 1
+          ? captured.bytes.toString("ascii", sizeEnd + 1, lineCountEnd)
+          : undefined,
+      );
+      if (sizeBytes === null || lineCount === null) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      return shapeUntrackedSnapshot({
+        target,
+        kind: "F",
+        sizeBytes,
+        lineCount,
+        sampled: captured.bytes.subarray(lineCountEnd + 1),
+      });
+    };
+
+    let untrackedFilesPromise: Promise<GitFileDiff[]> = Promise.resolve([]);
+    if (combinedUntracked) {
+      if (!combinedUntracked.truncated) {
+        untrackedFilesPromise = Promise.resolve(
+          parseCombinedUntrackedSnapshots(combinedUntracked.bytes).map(shapeUntrackedSnapshot),
+        );
+      } else {
+        untrackedFilesPromise = (async () => {
+          const listing = await this.readConfinedCommandBytes(
             repo,
-            `file=${shellQuote(fileArg)}; test -L "$file" || exit 66; readlink -n "$file" || exit 66; printf '\\0'`,
+            `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec}`,
             GIT_METADATA_MAX_BYTES,
           );
-          if (link.truncated) {
+          if (listing.truncated) {
             throw new ChannelAUnavailableError(
               "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
             );
           }
-          sampled = link.bytes;
-          // GNU and BSD readlink both support -n. Append our own NUL framing byte
-          // so trailing newlines remain data and the diff shows the link target
-          // itself, matching Git's symlink-blob semantics, never target content.
-          if (sampled.at(-1) !== 0) {
-            throw new ChannelAUnavailableError(
-              "Workspace Git data is temporarily unavailable. Retry the operation.",
-            );
-          }
-          sampled = sampled.subarray(0, -1);
-          sizeBytes = sampled.length;
-          lineCount = addedLines(sampled).length;
-        } else {
-          const metadata = await this.readConfinedCommandBytes(
-            repo,
-            this.confinedUntrackedRegularFileCommand(
-              target,
-              [
-                "size=$(opengeni_fd_size 3) || exit 66",
-                "line_count=$(wc -l <&3) || exit 66",
-                'if [ "$size" -gt 0 ]; then last_byte=$(tail -c 1 <&4 | od -An -tu1 | tr -d " \\n") || exit 66; if [ "$last_byte" != "10" ]; then line_count=$((line_count + 1)); fi; fi',
-                'printf "%s\\t%s" "$size" "$line_count"',
-              ].join("; "),
-            ),
-            128,
+          return Promise.all(
+            decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean).map(readUntrackedFile),
           );
-          if (metadata.truncated) {
-            throw new ChannelAUnavailableError(
-              "Workspace Git data is temporarily unavailable. Retry the operation.",
-            );
-          }
-          const frame = metadata.bytes.toString("ascii").match(/^(0|[1-9]\d*)\t(0|[1-9]\d*)$/);
-          const parsedSize = safeInt(frame?.[1]);
-          const parsedLineCount = safeInt(frame?.[2]);
-          if (parsedSize === null || parsedLineCount === null) {
-            throw new ChannelAUnavailableError(
-              "Workspace Git data is temporarily unavailable. Retry the operation.",
-            );
-          }
-          sizeBytes = parsedSize;
-          lineCount = parsedLineCount;
-          const truncated = sizeBytes > req.maxBytesPerFile;
-          const sampleSize = Math.min(sizeBytes, 8_192);
-          sampled = await this.readUntrackedRegularFile(repo, target, sampleSize, sizeBytes);
-          if (!sniffBinary(sampled) && !truncated && sampleSize < sizeBytes) {
-            sampled = await this.readUntrackedRegularFile(repo, target, sizeBytes, sizeBytes);
-          }
-        }
-        const truncated = sizeBytes > req.maxBytesPerFile || sampled.length > req.maxBytesPerFile;
-        const bytes = truncated ? sampled.subarray(0, req.maxBytesPerFile) : sampled;
-        const isBinary = sniffBinary(bytes);
-        const hunkLines = !isBinary && !truncated ? addedLines(bytes) : [];
-        files.push({
-          path: target,
-          oldPath: null,
-          status: "untracked",
-          isBinary,
-          isImage: isImagePath(target),
-          additions: isBinary ? 0 : lineCount,
-          deletions: 0,
-          hunks:
-            hunkLines.length > 0
-              ? [
-                  {
-                    oldStart: 0,
-                    oldLines: 0,
-                    newStart: 1,
-                    newLines: hunkLines.length,
-                    header: `@@ -0,0 +1,${hunkLines.length} @@`,
-                    lines: hunkLines,
-                  },
-                ]
-              : [],
-          truncated,
-        });
+        })();
       }
     }
+
+    const [files, untrackedFiles] = await Promise.all([trackedFilesPromise, untrackedFilesPromise]);
+    files.push(...untrackedFiles);
     return { files, revision: this.revision };
   }
 
@@ -1434,7 +1668,7 @@ export class SandboxChannelAService {
         `printf '\\n${REPOSITORY_DISCOVERY_STATUS_PREFIX}%s\\n' "$status"`,
         'exit "$status"',
       ].join("\n");
-      const { stdout } = await this.run({
+      const { stdout } = await this.runReadOnly({
         cmd: internalBashCommand(command),
         workdir: this.workspaceRoot || undefined,
         yieldTimeMs: 20_000,
@@ -1697,7 +1931,7 @@ export class SandboxChannelAService {
       ].join("; ");
       let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
       try {
-        result = await this.run({
+        result = await this.runReadOnly({
           ...args,
           cmd: internalBashCommand(script),
           workdir: undefined,
@@ -2165,6 +2399,90 @@ export function parseNumstatZ(z: string): NumstatEntry[] {
     }
   }
   return out;
+}
+
+type CombinedUntrackedSnapshot = {
+  target: string;
+  kind: "F" | "L";
+  sizeBytes: number;
+  lineCount: number;
+  sampled: Buffer;
+};
+
+function readNulFrameField(bytes: Buffer, cursor: number): { value: Buffer; cursor: number } {
+  const end = bytes.indexOf(0, cursor);
+  if (end < 0) {
+    throw new ChannelAUnavailableError(
+      "Workspace Git data is temporarily unavailable. Retry the operation.",
+    );
+  }
+  return { value: bytes.subarray(cursor, end), cursor: end + 1 };
+}
+
+function parseCombinedUntrackedSnapshots(bytes: Buffer): CombinedUntrackedSnapshot[] {
+  const prefix = Buffer.from(`${GIT_UNTRACKED_CAPTURE_FRAME}${NUL}`);
+  if (!bytes.subarray(0, prefix.byteLength).equals(prefix)) {
+    throw new ChannelAUnavailableError(
+      "Workspace Git data is temporarily unavailable. Retry the operation.",
+    );
+  }
+  const snapshots: CombinedUntrackedSnapshot[] = [];
+  let cursor = prefix.byteLength;
+  while (cursor < bytes.byteLength) {
+    const kindField = readNulFrameField(bytes, cursor);
+    cursor = kindField.cursor;
+    const kind = kindField.value.toString("ascii");
+    if (kind === "E") {
+      if (cursor !== bytes.byteLength) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      return snapshots;
+    }
+    if (kind !== "F" && kind !== "L") {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    const targetField = readNulFrameField(bytes, cursor);
+    const sizeField = readNulFrameField(bytes, targetField.cursor);
+    const lineCountField = readNulFrameField(bytes, sizeField.cursor);
+    const bodyBytesField = readNulFrameField(bytes, lineCountField.cursor);
+    cursor = bodyBytesField.cursor;
+    const target = decodeGitMetadataUtf8(targetField.value);
+    const sizeBytes = safeInt(sizeField.value.toString("ascii"));
+    const lineCount = safeInt(lineCountField.value.toString("ascii"));
+    const bodyBytes = safeInt(bodyBytesField.value.toString("ascii"));
+    if (
+      !target ||
+      sizeBytes === null ||
+      lineCount === null ||
+      bodyBytes === null ||
+      cursor + bodyBytes > bytes.byteLength
+    ) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    const sampled = bytes.subarray(cursor, cursor + bodyBytes);
+    cursor += bodyBytes;
+    snapshots.push({ target, kind, sizeBytes, lineCount, sampled });
+  }
+  throw new ChannelAUnavailableError(
+    "Workspace Git data is temporarily unavailable. Retry the operation.",
+  );
+}
+
+/** Split Git's ordinary multi-file patch at structural file headers. A hunk
+ * payload cannot collide: content lines always begin with ` `, `+`, or `-`. */
+function splitUnifiedPatchFiles(patch: string): string[] {
+  const starts: number[] = [];
+  const pattern = /^diff --git /gm;
+  for (let match = pattern.exec(patch); match; match = pattern.exec(patch)) {
+    starts.push(match.index);
+  }
+  return starts.map((start, index) => patch.slice(start, starts[index + 1] ?? patch.length));
 }
 
 // ── unified-diff parser -> GitDiffHunk[] (the Pierre-diff shape) ─────────────

@@ -122,6 +122,23 @@ function requireHostExecutable(name: string): string {
   return executable;
 }
 
+function writeInvalidBytePath(path: Buffer, content: string): void {
+  const python = requireHostExecutable("python3");
+  const result = Bun.spawnSync(
+    [
+      python,
+      "-c",
+      "import base64, os, sys; p=base64.b64decode(sys.argv[1]); data=base64.b64decode(sys.argv[2]); fd=os.open(p, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644); os.write(fd, data); os.close(fd)",
+      path.toString("base64"),
+      Buffer.from(content).toString("base64"),
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`invalid-byte fixture write failed: ${Buffer.from(result.stderr).toString()}`);
+  }
+}
+
 function makeModalLikeExecOnlySession(
   root: string,
   options: {
@@ -194,8 +211,9 @@ function makeStockMacCommandSurface(root: string): { bin: string; log: string } 
   const realStat = Bun.which("stat");
   const realReadlink = Bun.which("readlink");
   const realShasum = Bun.which("shasum");
-  if (!realStat || !realReadlink || !realShasum) {
-    throw new Error("stock-macOS simulation requires host stat, readlink, and shasum");
+  const realLsof = Bun.which("lsof") ?? (existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : null);
+  if (!realStat || !realReadlink || !realShasum || !realLsof) {
+    throw new Error("stock-macOS simulation requires host stat, readlink, shasum, and lsof");
   }
   const writeCommand = (name: string, body: string): void => {
     const path = join(bin, name);
@@ -228,7 +246,7 @@ function makeStockMacCommandSurface(root: string): { bin: string; log: string } 
       'if [ "${1:-}" = "-Lc" ] || [ "${1:-}" = "-c" ]; then exit 1; fi',
       'if [ "${1:-}" != "-f" ] || [ "$#" -ne 3 ]; then exit 64; fi',
       'case "$2" in',
-      `  %d:%i) exec ${JSON.stringify(realStat)} -L -c '%d:%i' "$3" ;;`,
+      `  %i) exec ${JSON.stringify(realStat)} -L -c '%i' "$3" ;;`,
       `  %z) exec ${JSON.stringify(realStat)} -L -c '%s' "$3" ;;`,
       `  %Lp) exec ${JSON.stringify(realStat)} -L -c '%a' "$3" ;;`,
       "  *) exit 64 ;;",
@@ -242,8 +260,7 @@ function makeStockMacCommandSurface(root: string): { bin: string; log: string } 
       "pid= fd=",
       'while [ "$#" -gt 0 ]; do case "$1" in -p) pid="$2"; shift 2 ;; -d) fd="$2"; shift 2 ;; *) shift ;; esac; done',
       '[ -n "$pid" ] && [ -n "$fd" ] || exit 64',
-      `opened=$(${JSON.stringify(realReadlink)} -f "/proc/$pid/fd/$fd") || exit 1`,
-      'printf \'p%s\\0f%s\\0n%s\\0\\n\' "$pid" "$fd" "$opened"',
+      `exec ${JSON.stringify(realLsof)} -a -p "$pid" -d "$fd" -Fn0`,
     ].join("\n"),
   );
   return { bin, log };
@@ -1489,7 +1506,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(commands).toContain("sha256sum");
     expect(commands).toContain("shasum");
     expect(commands).toContain("lsof");
-    expect(commands).toContain("stat -f %d:%i");
+    expect(commands).toContain("stat -f %i");
     expect((await Bun.file(swaps).text()).length).toBeGreaterThan(0);
     expect(diff.files[0]?.hunks[0]?.lines.map((line) => line.text)).toEqual(["safe payload"]);
     expect(JSON.stringify(diff)).not.toContain(secretContent.trim());
@@ -1566,62 +1583,68 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(corrupted).toBe(true);
   });
 
-  test("tracked invalid-byte Git paths fail unavailable before pathspec replay", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-invalid-tracked-"));
-    temporaryRoots.push(root);
-    const invalidPath = Buffer.concat([Buffer.from(`${root}/tracked-`), Buffer.from([0xff])]);
-    runFixtureCommand(
-      root,
-      "git init -q && git config user.email test@opengeni.local && git config user.name OpenGeni && git config commit.gpgsign false",
-    );
-    writeFileSync(invalidPath, "base\n");
-    runFixtureCommand(root, "git add -A && git commit -q -m baseline");
-    writeFileSync(invalidPath, "changed\n");
-    const modalLike = makeModalLikeExecOnlySession(root);
-    const svc = new SandboxChannelAService({
-      session: modalLike.session,
-      workspaceRoot: root,
-    });
+  test.skipIf(process.platform === "darwin")(
+    "tracked invalid-byte Git paths fail unavailable before pathspec replay",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-invalid-tracked-"));
+      temporaryRoots.push(root);
+      const invalidPath = Buffer.concat([Buffer.from(`${root}/tracked-`), Buffer.from([0xff])]);
+      runFixtureCommand(
+        root,
+        "git init -q && git config user.email test@opengeni.local && git config user.name OpenGeni && git config commit.gpgsign false",
+      );
+      writeInvalidBytePath(invalidPath, "base\n");
+      runFixtureCommand(root, "git add -A && git commit -q -m baseline");
+      writeFileSync(invalidPath, "changed\n");
+      const modalLike = makeModalLikeExecOnlySession(root);
+      const svc = new SandboxChannelAService({
+        session: modalLike.session,
+        workspaceRoot: root,
+      });
 
-    await expect(
-      svc.gitDiff({
-        path: "",
-        staged: false,
-        includeUntracked: false,
-        fromRef: "HEAD",
-        pathspec: [],
-        contextLines: 3,
-        maxBytesPerFile: 1024,
-      }),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
-  });
+      await expect(
+        svc.gitDiff({
+          path: "",
+          staged: false,
+          includeUntracked: false,
+          fromRef: "HEAD",
+          pathspec: [],
+          contextLines: 3,
+          maxBytesPerFile: 1024,
+        }),
+      ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    },
+  );
 
-  test("untracked invalid-byte Git paths fail unavailable before file reads", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-invalid-untracked-"));
-    temporaryRoots.push(root);
-    const invalidPath = Buffer.concat([Buffer.from(`${root}/untracked-`), Buffer.from([0xfe])]);
-    runFixtureCommand(root, "git init -q");
-    writeFileSync(invalidPath, "untracked\n");
-    const modalLike = makeModalLikeExecOnlySession(root);
-    const svc = new SandboxChannelAService({
-      session: modalLike.session,
-      workspaceRoot: root,
-    });
+  test.skipIf(process.platform === "darwin")(
+    "untracked invalid-byte Git paths fail unavailable before file reads",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-invalid-untracked-"));
+      temporaryRoots.push(root);
+      const invalidPath = Buffer.concat([Buffer.from(`${root}/untracked-`), Buffer.from([0xfe])]);
+      runFixtureCommand(root, "git init -q");
+      writeInvalidBytePath(invalidPath, "untracked\n");
+      const modalLike = makeModalLikeExecOnlySession(root);
+      const svc = new SandboxChannelAService({
+        session: modalLike.session,
+        workspaceRoot: root,
+      });
 
-    await expect(
-      svc.gitDiff({
-        path: "",
-        staged: false,
-        includeUntracked: true,
-        fromRef: "HEAD",
-        pathspec: [],
-        contextLines: 3,
-        maxBytesPerFile: 1024,
-      }),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
-  });
+      await expect(
+        svc.gitDiff({
+          path: "",
+          staged: false,
+          includeUntracked: true,
+          fromRef: "HEAD",
+          pathspec: [],
+          contextLines: 3,
+          maxBytesPerFile: 1024,
+        }),
+      ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    },
+  );
 
-  test("a per-chunk producer that emits bytes then exits 42 is rejected", async () => {
+  test("a complete bounded producer is captured once without a second replay", async () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-exit-42-"));
     temporaryRoots.push(root);
     runFixtureCommand(root, "git init -q && printf 'notes\\n' > notes.txt");
@@ -1655,21 +1678,20 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       workspaceRoot: root,
     });
 
-    await expect(
-      svc.gitDiff({
-        path: "",
-        staged: false,
-        includeUntracked: true,
-        fromRef: "HEAD",
-        pathspec: [],
-        contextLines: 3,
-        maxBytesPerFile: 1024,
-      }),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
-    expect(Number(await Bun.file(count).text())).toBeGreaterThanOrEqual(2);
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 1024,
+    });
+    expect(diff.files.some((file) => file.path === "notes.txt")).toBe(true);
+    expect(Number(await Bun.file(count).text())).toBe(1);
   });
 
-  test("same-length producer drift between measurement and chunk is rejected", async () => {
+  test("a complete bounded producer has no measure-to-read drift window", async () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-producer-drift-"));
     temporaryRoots.push(root);
     runFixtureCommand(root, "git init -q && printf 'alpha\\n' > alpha.txt");
@@ -1701,18 +1723,17 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       workspaceRoot: root,
     });
 
-    await expect(
-      svc.gitDiff({
-        path: "",
-        staged: false,
-        includeUntracked: true,
-        fromRef: "HEAD",
-        pathspec: [],
-        contextLines: 3,
-        maxBytesPerFile: 1024,
-      }),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
-    expect(Number(await Bun.file(count).text())).toBeGreaterThanOrEqual(2);
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 1024,
+    });
+    expect(diff.files.some((file) => file.path === "alpha.txt")).toBe(true);
+    expect(Number(await Bun.file(count).text())).toBe(1);
   });
 
   test("bounded Git capture preserves staged and untracked files before the first commit", async () => {
@@ -2229,19 +2250,23 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       exec: async ({ cmd, workdir }) => {
         commands.push(cmd);
         paths.push(workdir ?? "");
-        if (cmd.includes("git rev-parse")) {
+        if (cmd.includes("__OPENGENI_GIT_CHUNK_V1__")) {
+          const payload = Buffer.from("__OPENGENI_GIT_STATUS_REPO_V1__\0");
+          const digest = new Bun.CryptoHasher("sha256").update(payload).digest("hex");
+          const capture = [
+            `__OPENGENI_GIT_CHUNK_V1__\t0\t${payload.byteLength}\t${digest}\t0\t${payload.byteLength}`,
+            payload.toString("base64"),
+            "__OPENGENI_GIT_CHUNK_END_V1__",
+          ].join("\n");
           return {
-            stdout: framedConfinedOutput(cmd, "true\n"),
+            stdout: framedConfinedOutput(cmd, capture),
             stderr: "",
             exitCode: 0,
           };
         }
-        if (cmd.includes("wc -c")) {
+        if (cmd.includes("git rev-parse")) {
           return {
-            stdout: framedConfinedOutput(
-              cmd,
-              "__OPENGENI_GIT_MEASURE_V1__\t0\t0\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            ),
+            stdout: framedConfinedOutput(cmd, "true\n"),
             stderr: "",
             exitCode: 0,
           };

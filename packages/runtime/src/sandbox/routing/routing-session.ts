@@ -35,6 +35,7 @@ import {
   isExecSessionLostBanner,
   stripExecBanner,
 } from "../channel-a";
+import type { ChannelAExecArgs, ChannelAExecResult } from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -1235,6 +1236,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // verdict) instead of letting the SDK mislabel it "Please try again".
       return this.renderSelfhostedFaultOrThrow(error);
     }
+  }
+
+  /** Channel-A control-plane reads must not contend with durable workspace
+   * capture admission, but provider sessions must receive only provider args. */
+  async execReadOnly(args: ChannelAExecArgs): Promise<ChannelAExecResult> {
+    return await this.dispatch("execReadOnly", false, async (s) => {
+      if (s.exec) {
+        return (await s.exec(args)) as ChannelAExecResult;
+      }
+      if (s.execCommand) {
+        return structuredExecResultFromBanner(await s.execCommand(args));
+      }
+      throw new RoutingUnsupportedError("execReadOnly", this.cached?.kind ?? "unknown");
+    });
   }
 
   async writeStdin(args: unknown): Promise<string> {

@@ -489,7 +489,7 @@ export function createSandboxClientForBackend(
   // Same condition as the 6080 merge (a desktop-capable image bakes ttyd too).
   if (
     desktop.available &&
-    settings.sandboxDesktopEnabled &&
+    settings.sandboxTerminalEnabled &&
     !registration.descriptor.portExposure.supportsOnDemandPorts &&
     !exposedPorts.includes(TERMINAL_STREAM_PORT)
   ) {

@@ -7,9 +7,10 @@ import { basename, dirname, resolve } from "node:path";
 import { packageReleaseChart } from "./package-release-chart";
 
 const root = resolve(import.meta.dir, "..");
+const hasGnuTar = Bun.spawnSync(["tar", "--version"]).stdout.toString().includes("GNU tar");
 
 describe("package release chart", () => {
-  test("normalizes Helm's time-bearing archive into stable bytes", async () => {
+  test.skipIf(!hasGnuTar)("normalizes Helm's time-bearing archive into stable bytes", async () => {
     const scratch = await mkdtemp(resolve(tmpdir(), "opengeni-chart-test-"));
     try {
       const first = resolve(scratch, "first.tgz");

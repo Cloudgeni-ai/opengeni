@@ -827,7 +827,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     });
   }, 60_000);
 
-  test("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {
     if (!available) return;
     const settings = settingsFor(true);
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -910,7 +911,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     }
   }, 60_000);
 
-  test("(F3-c) a verified session fallback outranks an archive-less lease without importing its stale provider", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("(F3-c) a verified session fallback outranks an archive-less lease without importing its stale provider", async () => {
     if (!available) return;
     const settings = settingsFor(true);
     const { accountId, workspaceId } = await freshWorkspace();

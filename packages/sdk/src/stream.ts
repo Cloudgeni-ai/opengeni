@@ -36,6 +36,12 @@ export type StreamSessionEventsOptions = {
    * reconnects = N+1 total open-stream calls). Defaults to unlimited.
    */
   maxReconnectAttempts?: number;
+  /**
+   * Notify the consumer as soon as the SSE response body is open. This callback
+   * is deliberately synchronous and non-blocking: use it to start projection
+   * reconciliation without delaying consumption of live event bytes.
+   */
+  onOpen?: (() => void) | undefined;
   /** Await authoritative client reconciliation before exposing `live`. */
   beforeLive?: (() => void | Promise<void>) | undefined;
   /** Maximum reconciliation time before reconnecting. Defaults to 15s. */
@@ -86,6 +92,11 @@ export async function* streamSessionEvents(
       everConnected = true;
       failedAttempts = 0;
       delayMs = baseDelayMs;
+      try {
+        options.onOpen?.();
+      } catch {
+        // A notification observer cannot own or interrupt the event transport.
+      }
       await runBeforeLive(options.beforeLive, beforeLiveTimeoutMs, signal);
       options.onStateChange?.("live");
       for await (const message of parseSseStream(

@@ -123,7 +123,10 @@ export function buildTerminalServerScript(options: EnsureTerminalServerOptions =
   // this works even against an older image that predates the wrapper.
   return (
     `mkdir -p /tmp/opengeni-terminal && ` +
-    `flock -w 30 /tmp/opengeni-terminal/up.outer.lock ` +
+    // --close prevents the detached ttyd child from inheriting the lock fd and
+    // pinning this lock for its entire lifetime. The flock parent still holds
+    // the lock until opengeni-terminal-up exits.
+    `flock -w 30 --close /tmp/opengeni-terminal/up.outer.lock ` +
     `env TERMINAL_PORT=${port} OPENGENI_TOOLSPACE_TOKEN_FILE=/dev/null opengeni-terminal-up`
   );
 }

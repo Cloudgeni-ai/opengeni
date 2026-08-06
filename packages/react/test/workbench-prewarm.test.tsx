@@ -130,6 +130,7 @@ function fakeManifest(fileCount: number): WorkspaceCaptureManifest {
         behind: 0,
         status: [],
         diff,
+        branchDiff: diff,
       },
     ],
     files: Array.from({ length: fileCount }, (_, index) => {
@@ -511,7 +512,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     expect(rendered.container.textContent).not.toContain("Workspace is resting");
     expect(rendered.container.textContent).not.toContain("Open live workspace");
     expect(
-      rendered.container.querySelector('button[aria-label="Machine: Waking…"]'),
+      rendered.container.querySelector('[role="status"][aria-label="Machine: Waking…"]'),
     ).not.toBeNull();
     await rendered.unmount();
   });

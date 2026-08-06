@@ -221,6 +221,7 @@ type CaptureRepositoryReadResult =
       complete: true;
       status: Awaited<ReturnType<SandboxChannelAService["gitStatus"]>>;
       diff: Awaited<ReturnType<SandboxChannelAService["gitDiff"]>>;
+      branchDiff?: Awaited<ReturnType<SandboxChannelAService["gitDiff"]>> | undefined;
     }
   | { complete: false; degradedReason: "repository_read_unavailable" };
 
@@ -304,7 +305,7 @@ export async function readCaptureRepository(
     return { complete: false, degradedReason: "repository_read_unavailable" };
   }
   try {
-    const diff = await svc.gitDiff({
+    const workingRequest = svc.gitDiff({
       path: root,
       staged: false,
       includeUntracked: true,
@@ -313,7 +314,29 @@ export async function readCaptureRepository(
       contextLines: 3,
       maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
     });
-    return { complete: true, status, diff };
+    // Branch capture is additive. A repository without origin/HEAD must not
+    // degrade the authoritative working-tree capture.
+    const branchRequest = Promise.resolve()
+      .then(() =>
+        svc.gitDiff({
+          path: root,
+          staged: false,
+          includeUntracked: true,
+          fromRef: "origin/HEAD",
+          pathspec: [],
+          contextLines: 3,
+          maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
+        }),
+      )
+      .then((value) => value)
+      .catch(() => null);
+    const [diff, branchDiff] = await Promise.all([workingRequest, branchRequest]);
+    return {
+      complete: true,
+      status,
+      diff,
+      ...(branchDiff ? { branchDiff } : {}),
+    };
   } catch (error) {
     const boxExiting = classifyCaptureEntryError(error);
     if (boxExiting) throw boxExiting;
@@ -503,7 +526,7 @@ async function runCapture(
       );
       return;
     }
-    const { status, diff } = repository;
+    const { status, diff, branchDiff } = repository;
     // Drop residue churn from the review diff too. On a desktop box the seed's
     // `git add -A` in $HOME commits ~/.config/xfce4/* into HEAD, so `git diff HEAD`
     // lists the continuously-rewritten desktop dotfiles as changed — noise the
@@ -523,6 +546,13 @@ async function runCapture(
       behind: status.behind,
       status: statusFiles,
       diff: diffFiles,
+      ...(branchDiff
+        ? {
+            branchDiff: branchDiff.files.filter(
+              (f) => !isUnderResidueDir(joinRepoPath(root, f.path)),
+            ),
+          }
+        : {}),
     });
     for (const f of diffFiles) {
       additions += f.additions;

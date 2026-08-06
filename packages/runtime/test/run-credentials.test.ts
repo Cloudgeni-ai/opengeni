@@ -14,6 +14,8 @@ import { createSandboxClientForBackend } from "../src/index";
 
 setDefaultTimeout(30_000);
 
+const linuxDescribe = describe.skipIf(process.platform !== "linux");
+
 const expected = {
   accountId: "account-a",
   workspaceId: "workspace-a",
@@ -251,7 +253,7 @@ afterEach(async () => {
   }
 });
 
-describe("run credential sandbox lifecycle — real local box", () => {
+linuxDescribe("run credential sandbox lifecycle — real local box", () => {
   test("rejects a decoder that exits successfully without writing all bytes", async () => {
     const session = await makeBox();
     const sessionId = crypto.randomUUID();

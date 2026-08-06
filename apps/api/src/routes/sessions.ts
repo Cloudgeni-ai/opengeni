@@ -12,6 +12,7 @@ import {
   EditSessionQueueItemRequest,
   EndSessionRealtimeRequest,
   FsDeleteRequest,
+  FsListBatchRequest,
   FsListRequest,
   FsMkdirRequest,
   FsMoveRequest,
@@ -19,6 +20,7 @@ import {
   FsWriteRequest,
   HumanInputRequestStatus,
   GitDiffRequest,
+  GitReadBatchRequest,
   GitLogRequest,
   GitShowRequest,
   GitStatusRequest,
@@ -148,6 +150,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   requireAccessGrant,
+  requirePermission,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
@@ -333,6 +336,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const authorizeSessionHttp: MiddlewareHandler = async (c, next) => {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const sessionId = c.req.param("sessionId") ?? "";
+    // Reject malformed route identifiers before the authorization resolver
+    // reaches UUID-typed persistence queries. Besides avoiding a needless DB
+    // round trip, this preserves the session surface's non-enumerating 404
+    // contract instead of leaking a driver-level 500.
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
     const operation = sessionAuthorizationOperationForHttp(
       c.req.method,
       new URL(c.req.url).pathname,
@@ -2191,6 +2201,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         : {}),
     });
 
+    const repositoryRoots = [
+      ...new Set(
+        session.resources.flatMap((resource) =>
+          resource.kind === "repository" && typeof resource.mountPath === "string"
+            ? [resource.mountPath.replace(/^\/+|\/+$/g, "")]
+            : [],
+        ),
+      ),
+    ].filter(Boolean);
+
     // SWAP-CASE desktop transport (BOTH directions): negotiateCapabilities keyed on
     // the HOME backend, but the pixel plane actually runs on the ACTIVE sandbox — and
     // the two backends use DIFFERENT wire transports. The advertised transport MUST
@@ -2210,7 +2230,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // active sandbox kind is "selfhosted") — EXACTLY mintDesktopStream's routing. When
     // the desktop is available we set the transport from the ACTIVE sandbox in one
     // place (resolveActiveDesktopTransport), covering BOTH swap directions.
-    let responseCapabilities = capabilities;
+    let responseCapabilities = {
+      ...capabilities,
+      Git: {
+        ...capabilities.Git,
+        repos: capabilities.Git.available ? repositoryRoots : [],
+      },
+    };
     if (capabilities.DesktopStream.transport !== null) {
       const activeSandbox = session.activeSandboxId
         ? await getSandbox(db, workspaceId, session.activeSandboxId)
@@ -2220,7 +2246,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         settings.sandboxDesktopInteractive !== false,
       );
       responseCapabilities = {
-        ...capabilities,
+        ...responseCapabilities,
         DesktopStream: { ...capabilities.DesktopStream, ...wire },
       };
     }
@@ -2274,7 +2300,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // when cold).
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
+    // Authenticate and bind the workspace before parsing. The requested plane
+    // determines the narrower permission below: terminal-only holders must not
+    // require the strictly broader un-redacted Desktop permission.
+    const grant = await requireAccessGrant(c, deps, workspaceId);
     assertOwnershipEnabled();
     const sessionId = c.req.param("sessionId");
     const session = await getSession(db, workspaceId, sessionId);
@@ -2298,6 +2327,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // read-only sse-events firehose forever ("read only"), and with the desktop tier
     // off by default there was no consent flow to ever clear the gate.
     const wantDesktop = parsed.data.desktop ?? false;
+    requirePermission(grant, wantDesktop ? "stream:view" : "terminal:attach");
     const { shared } = await resolveSharedExposure(workspaceId, session);
     if (wantDesktop) {
       const ack = await getStreamAcknowledgment(db, {
@@ -2444,12 +2474,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL (epoch-fenced).
-  // The desktop-stream lifecycle is gated on stream:view (the un-redacted plane).
+  // A holder can represent the terminal-only plane, so lifecycle control uses
+  // terminal:attach. Desktop callers continue to pass via workspace:admin.
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "terminal:attach");
       assertOwnershipEnabled();
       const sessionId = c.req.param("sessionId");
       const session = await getSession(db, workspaceId, sessionId);
@@ -2479,7 +2510,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // DELETE .../viewers/:viewerId — release the holder (idempotent).
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "terminal:attach");
     assertOwnershipEnabled();
     const sessionId = c.req.param("sessionId");
     const session = await getSession(db, workspaceId, sessionId);
@@ -2597,6 +2628,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(out);
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list-batch", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, FsListBatchRequest);
+    const out = await withChannelA(channelAServices, ctx, async ({ service }) => ({
+      results: await Promise.all(
+        req.requests.map((request) =>
+          Promise.resolve().then(async () => await service.fsList(request)),
+        ),
+      ),
+    }));
+    return c.json(out);
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsReadRequest);
@@ -2644,6 +2688,26 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitDiffRequest);
     const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitDiff(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/read-batch", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, GitReadBatchRequest);
+    const out = await withChannelA(channelAServices, ctx, async ({ service }) => ({
+      results: await Promise.all(
+        req.requests.map(async (request) => {
+          const diffRequest = request.diff;
+          const [status, diff] = await Promise.all([
+            Promise.resolve().then(async () => await service.gitStatus(request.status)),
+            diffRequest
+              ? Promise.resolve().then(async () => await service.gitDiff(diffRequest))
+              : Promise.resolve(undefined),
+          ]);
+          return { status, ...(diff ? { diff } : {}) };
+        }),
+      ),
+    }));
     return c.json(out);
   });
 
@@ -3102,7 +3166,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix.startsWith("/viewers/") && ["POST", "DELETE"].includes(verb)) {
     return "session.viewer.control";
   }
-  if (suffix === "/fs/list" || suffix === "/fs/read") {
+  if (suffix === "/fs/list" || suffix === "/fs/list-batch" || suffix === "/fs/read") {
     return verb === "POST" ? "session.files.read" : null;
   }
   if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {

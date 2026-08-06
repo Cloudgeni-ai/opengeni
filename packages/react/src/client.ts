@@ -100,6 +100,7 @@ export type SessionClientLike = Pick<
   | "detachViewer"
   // Channel-A structured services (terminal-as-events feed via fs/git/terminal)
   | "fsList"
+  | "fsListBatch"
   | "fsRead"
   | "fsWrite"
   | "fsDelete"
@@ -107,6 +108,7 @@ export type SessionClientLike = Pick<
   | "fsMkdir"
   | "gitStatus"
   | "gitDiff"
+  | "gitReadBatch"
   // Workbench v2 turn-end capture reads (the cold-paint source; M3 consumes these)
   | "getWorkspaceCapture"
   | "getWorkspaceCaptureFile"

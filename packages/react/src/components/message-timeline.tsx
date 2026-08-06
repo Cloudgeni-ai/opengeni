@@ -125,6 +125,12 @@ export type MessageTimelineProps = {
    */
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   /**
+   * Decide which durable authentication notices this timeline presents.
+   * Defaults to showing every notice. Embedded hosts can suppress notices for
+   * credentials they manage elsewhere without discarding the underlying event.
+   */
+  shouldRenderAuthNeeded?: ((item: AuthNeededItem) => boolean) | undefined;
+  /**
    * Resolve a provider domain (from a reconnect card) to a logo URL the host
    * serves itself — the app maps it through its catalog + `catalogAssetUrl`.
    * Return null/undefined to fall back to a calm monogram. The library never
@@ -170,6 +176,8 @@ export type MessageTimelineProps = {
    * scrolls the in-memory window.
    */
   onJumpToLatest?: (() => void | Promise<void>) | undefined;
+  /** Host-owned content appended after timeline groups, such as startup progress. */
+  trailingState?: ReactNode | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
 };
@@ -280,6 +288,7 @@ export function MessageTimeline({
   onOpenSession,
   onMemoryClick,
   onReconnect,
+  shouldRenderAuthNeeded,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
   loadRetainedScreenshot,
@@ -295,10 +304,17 @@ export function MessageTimeline({
   loadingNewer = false,
   onLoadNewer,
   onJumpToLatest,
+  trailingState,
   emptyState,
   className,
 }: MessageTimelineProps) {
-  const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
+  const resolvedItems = useMemo(() => {
+    const projected = items ?? buildTimeline(events ?? []);
+    if (!shouldRenderAuthNeeded) {
+      return projected;
+    }
+    return projected.filter((item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item));
+  }, [items, events, shouldRenderAuthNeeded]);
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
   const groups = useStableTimelineGroupKeys(allGroups);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -1355,6 +1371,9 @@ export function MessageTimeline({
                           </div>
                         );
                       })}
+                      {groups.length > 0 && trailingState ? (
+                        <div data-og-timeline-trailing-state="">{trailingState}</div>
+                      ) : null}
                       {hasNewer ? (
                         <div
                           ref={bottomSentinelRef}
@@ -1508,7 +1527,7 @@ export function MessageTimeline({
                           }
                         }}
                         className={cn(
-                          "absolute bottom-4 left-1/2 -translate-x-1/2",
+                          "absolute inset-x-0 bottom-4 mx-auto w-fit",
                           "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
                           "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                           "hover:border-og-border-strong",

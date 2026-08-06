@@ -215,7 +215,16 @@ export function SandboxTerminal({
   // PTY mode = a live ttyd socket drives the screen. Firehose mode = the
   // read-only projection (or the legacy HTTP-write fallback).
   const ptyMode = ptyWs && ptyStatus !== "closed";
-  const interactive = !readOnly && (ptyMode || result.write !== null);
+  const interactive = !readOnly && (ptyMode ? ptyConnected : result.write !== null);
+  const terminalModeLabel = interactive
+    ? null
+    : readOnly
+      ? "read-only"
+      : ptyMode && ptyStatus === "connecting"
+        ? "connecting"
+        : ptyMode && ptyStatus === "error"
+          ? "connection error"
+          : "output only";
 
   // Boot-in-terminal: after the user focuses a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
@@ -496,9 +505,12 @@ export function SandboxTerminal({
             <span className="truncate font-og-mono">pty: {shell ?? "shell"}</span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
-            {!interactive && (
-              <span className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-xs uppercase tracking-wide">
-                read-only
+            {terminalModeLabel && (
+              <span
+                className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-xs uppercase tracking-wide"
+                role="status"
+              >
+                {terminalModeLabel}
               </span>
             )}
             <button

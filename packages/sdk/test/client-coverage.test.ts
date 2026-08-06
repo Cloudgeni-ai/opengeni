@@ -110,6 +110,81 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
   };
 }
 
+describe("OpenGeniClient Channel-A batches", () => {
+  test("uses one typed request for file frontiers and one for repository status+diff", async () => {
+    const listResult = {
+      root: {
+        name: "",
+        path: "",
+        type: "dir",
+        sizeBytes: null,
+        mtimeMs: null,
+        mode: null,
+        children: [],
+        truncated: false,
+      },
+      revision: 1,
+      truncated: false,
+    };
+    const status = {
+      isRepo: true,
+      head: "main",
+      detached: false,
+      upstream: "origin/main",
+      ahead: 0,
+      behind: 0,
+      files: [],
+      revision: 1,
+    };
+    const diff = { files: [], revision: 1 };
+    const { client, requests } = makeClient((request) =>
+      request.url.endsWith("/fs/list-batch")
+        ? jsonResponse({ results: [listResult, listResult] })
+        : jsonResponse({ results: [{ status, diff }] }),
+    );
+
+    await client.fsListBatch(WORKSPACE_ID, SESSION_ID, {
+      requests: [
+        { path: "", depth: 1 },
+        { path: "repositories", depth: 1 },
+      ],
+    });
+    await client.gitReadBatch(WORKSPACE_ID, SESSION_ID, {
+      requests: [
+        {
+          status: { path: "repositories/demo" },
+          diff: { path: "repositories/demo", fromRef: "origin/HEAD", includeUntracked: true },
+        },
+      ],
+    });
+
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/list-batch`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/git/read-batch`,
+    ]);
+    expect(requests.map((request) => JSON.parse(request.body ?? "null"))).toEqual([
+      {
+        requests: [
+          { path: "", depth: 1 },
+          { path: "repositories", depth: 1 },
+        ],
+      },
+      {
+        requests: [
+          {
+            status: { path: "repositories/demo" },
+            diff: {
+              path: "repositories/demo",
+              fromRef: "origin/HEAD",
+              includeUntracked: true,
+            },
+          },
+        ],
+      },
+    ]);
+  });
+});
+
 describe("OpenGeniClient turn queue", () => {
   test("steerMessage performs one atomic server request", async () => {
     const accepted = makeEvent(7, "user.message", { text: "do this now" });
